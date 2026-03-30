@@ -1,0 +1,1935 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ProductFactory — System Design v1.1</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --blue:    #2563eb; --blue-lt: #eff6ff;   --blue-bd: #bfdbfe;
+      --green:   #059669; --green-lt:#ecfdf5;   --green-bd:#6ee7b7;
+      --amber:   #d97706; --amber-lt:#fffbeb;   --amber-bd:#fcd34d;
+      --purple:  #7c3aed; --purple-lt:#f5f3ff;  --purple-bd:#c4b5fd;
+      --red:     #dc2626; --red-lt:  #fef2f2;   --red-bd:  #fca5a5;
+      --teal:    #0d9488; --teal-lt: #f0fdfa;   --teal-bd: #99f6e4;
+      --slate:   #64748b; --dark: #0f172a; --mid: #334155;
+      --light:   #f8fafc; --border: #e2e8f0; --white: #ffffff;
+    }
+
+    html { scroll-behavior: smooth; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--light); color: var(--mid); line-height: 1.6; }
+
+    /* NAV */
+    nav { position: sticky; top: 0; z-index: 100; background: var(--dark); padding: 0 32px; display: flex; align-items: center; overflow-x: auto; }
+    nav .logo { font-weight: 700; font-size: 15px; color: white; white-space: nowrap; margin-right: 20px; padding: 14px 0; letter-spacing: -0.3px; }
+    nav .logo span { color: #60a5fa; }
+    nav .ver { font-size: 10px; color: #475569; margin-right: 16px; background: #1e293b; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+    nav a { color: #94a3b8; text-decoration: none; font-size: 12px; padding: 16px 11px; white-space: nowrap; transition: color 0.15s; }
+    nav a:hover { color: white; }
+    nav a.nav-fix   { color: #f87171; }
+    nav a.nav-fix:hover   { color: #fca5a5; }
+    nav a.nav-brown { color: #fb923c; }
+    nav a.nav-brown:hover { color: #fdba74; }
+
+    /* BROWNFIELD */
+    --orange:    #ea580c; --orange-lt: #fff7ed; --orange-bd: #fed7aa;
+    .card-orange { background: var(--orange-lt); border-color: var(--orange-bd); }
+    .bf-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .bf-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border-radius: 10px; overflow: hidden; border: 1px solid var(--border); }
+    .bf-col { padding: 0; }
+    .bf-col-header { padding: 12px 16px; font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+    .bf-green .bf-col-header { background: #064e3b; color: #6ee7b7; }
+    .bf-orange .bf-col-header { background: #7c2d12; color: #fed7aa; }
+    .bf-row { padding: 10px 16px; border-top: 1px solid var(--border); font-size: 13px; }
+    .bf-row:first-child { border-top: none; }
+    .bf-row-label { font-weight: 600; color: var(--dark); font-size: 12px; margin-bottom: 3px; }
+    .bf-row-val   { color: var(--mid); font-size: 12px; }
+    .bf-row-val.diff { color: #c2410c; font-weight: 500; }
+    .phase-steps { display: flex; flex-direction: column; gap: 0; margin-top: 8px; }
+    .phase-step { display: flex; gap: 14px; }
+    .phase-left { display: flex; flex-direction: column; align-items: center; width: 36px; flex-shrink: 0; }
+    .phase-dot { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; border: 2px solid var(--border); background: white; z-index: 1; flex-shrink: 0; }
+    .phase-dot.orange { border-color: var(--orange-bd); background: var(--orange-lt); }
+    .phase-dot.blue   { border-color: var(--blue-bd);   background: var(--blue-lt); }
+    .phase-dot.green  { border-color: var(--green-bd);  background: var(--green-lt); }
+    .phase-line { width: 2px; flex: 1; background: var(--border); margin: 3px 0; min-height: 12px; }
+    .phase-content { flex: 1; padding-bottom: 20px; }
+    .phase-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    .phase-title { font-weight: 700; font-size: 14px; color: var(--dark); }
+    .phase-tag { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; text-transform: uppercase; }
+    .ptag-once    { background: var(--orange-lt); color: var(--orange); border: 1px solid var(--orange-bd); }
+    .ptag-always  { background: var(--green-lt);  color: var(--green); }
+    .ptag-new     { background: var(--red-lt);    color: var(--red);   border: 1px solid var(--red-bd); }
+    .phase-body { font-size: 13px; color: var(--mid); }
+    .phase-body ul { margin: 6px 0 0 16px; }
+    .phase-body li { margin-bottom: 4px; }
+    .phase-note { margin-top: 7px; padding: 6px 10px; background: var(--orange-lt); border: 1px solid var(--orange-bd); border-radius: 6px; font-size: 12px; color: #7c2d12; }
+    .config-block { background: #1e293b; border-radius: 10px; padding: 18px 20px; font-family: 'Courier New', monospace; font-size: 12px; color: #e2e8f0; line-height: 1.8; overflow-x: auto; }
+    .config-block .ck  { color: #93c5fd; }
+    .config-block .cv  { color: #6ee7b7; }
+    .config-block .cm  { color: #64748b; }
+
+    /* LAYOUT */
+    .page { max-width: 1100px; margin: 0 auto; padding: 0 24px 80px; }
+    section { padding: 60px 0 0; }
+    h1 { font-size: 36px; font-weight: 800; color: var(--dark); letter-spacing: -0.5px; }
+    h2 { font-size: 22px; font-weight: 700; color: var(--dark); margin-bottom: 6px; }
+    h3 { font-size: 15px; font-weight: 600; color: var(--dark); margin-bottom: 8px; }
+    .section-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--slate); margin-bottom: 8px; }
+    .section-sub { font-size: 15px; color: var(--slate); margin-bottom: 32px; max-width: 700px; }
+
+    /* HERO */
+    .hero { background: linear-gradient(135deg, var(--dark) 0%, #1e3a5f 100%); margin: 0 -24px; padding: 56px 24px 48px; }
+    .hero-inner { max-width: 1100px; margin: 0 auto; }
+    .hero h1 { color: white; font-size: 40px; margin-bottom: 10px; }
+    .hero h1 span { color: #60a5fa; }
+    .hero p { color: #94a3b8; font-size: 16px; max-width: 620px; margin-bottom: 28px; }
+    .hero-pills { display: flex; flex-wrap: wrap; gap: 10px; }
+    .pill { display: inline-flex; align-items: center; gap: 6px; padding: 5px 13px; border-radius: 20px; font-size: 12px; font-weight: 500; }
+    .pill-blue   { background: rgba(37,99,235,.25);  color: #93c5fd; border: 1px solid rgba(37,99,235,.4); }
+    .pill-green  { background: rgba(5,150,105,.25);  color: #6ee7b7; border: 1px solid rgba(5,150,105,.4); }
+    .pill-amber  { background: rgba(217,119,6,.25);  color: #fcd34d; border: 1px solid rgba(217,119,6,.4); }
+    .pill-purple { background: rgba(124,58,237,.25); color: #c4b5fd; border: 1px solid rgba(124,58,237,.4); }
+    .pill-red    { background: rgba(220,38,38,.25);  color: #fca5a5; border: 1px solid rgba(220,38,38,.4); }
+
+    /* CARDS */
+    .card { background: white; border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px; }
+    .card-blue   { background: var(--blue-lt);   border-color: var(--blue-bd); }
+    .card-green  { background: var(--green-lt);  border-color: var(--green-bd); }
+    .card-amber  { background: var(--amber-lt);  border-color: var(--amber-bd); }
+    .card-purple { background: var(--purple-lt); border-color: var(--purple-bd); }
+    .card-red    { background: var(--red-lt);    border-color: var(--red-bd); }
+    .card-teal   { background: var(--teal-lt);   border-color: var(--teal-bd); }
+
+    /* ARCHITECTURE */
+    .arch-grid { display: grid; grid-template-columns: 1fr 36px 1fr 36px 1fr; gap: 0; align-items: start; }
+    .arch-tier { border-radius: 12px; overflow: hidden; border: 2px solid var(--border); }
+    .arch-tier-header { padding: 11px 16px; font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+    .tier-windows { border-color: #60a5fa; }
+    .tier-windows .arch-tier-header { background: #1e3a5f; color: #93c5fd; }
+    .tier-vm      { border-color: var(--green-bd); }
+    .tier-vm .arch-tier-header      { background: #064e3b; color: #6ee7b7; }
+    .tier-github  { border-color: var(--purple-bd); }
+    .tier-github .arch-tier-header  { background: #3b0764; color: #c4b5fd; }
+    .arch-tier-body { padding: 14px; background: white; }
+    .arch-item { display: flex; align-items: flex-start; gap: 10px; padding: 9px 11px; border-radius: 8px; margin-bottom: 7px; border: 1px solid var(--border); background: var(--light); font-size: 13px; }
+    .arch-item:last-child { margin-bottom: 0; }
+    .arch-item-icon { font-size: 17px; flex-shrink: 0; margin-top: 1px; }
+    .arch-item-name { font-weight: 600; color: var(--dark); }
+    .arch-item-desc { color: var(--slate); font-size: 12px; margin-top: 2px; }
+    .arch-item-fix  { font-size: 10px; font-weight: 700; background: var(--red-lt); color: var(--red); border: 1px solid var(--red-bd); padding: 1px 6px; border-radius: 4px; display: inline-block; margin-top: 3px; }
+    .arch-arrow-wrap { display: flex; flex-direction: column; align-items: center; justify-content: flex-start; padding-top: 68px; }
+    .arch-arrow { font-size: 20px; color: var(--slate); }
+    .arch-arrow-label { font-size: 10px; color: var(--slate); text-align: center; margin-top: 3px; line-height: 1.3; }
+
+    /* DOCKER CALLOUT */
+    .docker-box { border: 2px dashed #f87171; border-radius: 10px; padding: 10px; margin: 8px 0; position: relative; }
+    .docker-label { position: absolute; top: -10px; left: 12px; background: #fef2f2; color: var(--red); font-size: 10px; font-weight: 700; padding: 1px 8px; border-radius: 4px; border: 1px solid var(--red-bd); text-transform: uppercase; }
+
+    /* WORKFLOW LANES */
+    .flow-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+    .flow-actor { text-align: center; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; padding: 6px 12px; border-radius: 6px; margin-bottom: 12px; }
+    .actor-pm     { background: var(--amber-lt); color: var(--amber); border: 1px solid var(--amber-bd); }
+    .actor-system { background: var(--blue-lt);  color: var(--blue);  border: 1px solid var(--blue-bd); }
+    .actor-claude { background: var(--green-lt); color: var(--green); border: 1px solid var(--green-bd); }
+    .flow-steps { display: flex; flex-direction: column; gap: 8px; }
+    .flow-step { display: flex; align-items: flex-start; gap: 10px; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--border); background: white; font-size: 13px; }
+    .step-num { width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; flex-shrink: 0; margin-top: 1px; }
+    .num-amber  { background: var(--amber-lt);  color: var(--amber);  border: 1px solid var(--amber-bd); }
+    .num-blue   { background: var(--blue-lt);   color: var(--blue);   border: 1px solid var(--blue-bd); }
+    .num-green  { background: var(--green-lt);  color: var(--green);  border: 1px solid var(--green-bd); }
+    .flow-step-title { font-weight: 600; color: var(--dark); }
+    .flow-step-desc  { color: var(--slate); font-size: 12px; margin-top: 2px; }
+
+    /* STATUS BADGES */
+    .status-flow { display: flex; align-items: center; flex-wrap: wrap; gap: 0; margin: 16px 0; }
+    .status-badge { padding: 5px 13px; border-radius: 20px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+    .s-pending      { background: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; }
+    .s-approved     { background: var(--blue-lt);   color: var(--blue);   border: 1px solid var(--blue-bd); }
+    .s-implementing { background: #fff7ed; color: #c2410c; border: 1px solid #fed7aa; }
+    .s-implemented  { background: #fefce8; color: #854d0e; border: 1px solid #fef08a; }
+    .s-testing      { background: var(--purple-lt); color: var(--purple); border: 1px solid var(--purple-bd); }
+    .s-committed    { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
+    .s-pushed       { background: var(--green-lt);  color: var(--green);  border: 1px solid var(--green-bd); }
+    .s-blocked      { background: var(--red-lt);    color: var(--red);    border: 1px solid var(--red-bd); }
+    .status-arrow   { font-size: 18px; color: #94a3b8; padding: 0 4px; }
+
+    /* AGENT WORKFLOW TIMELINE */
+    .agent-steps { display: flex; flex-direction: column; gap: 0; }
+    .agent-step { display: flex; gap: 16px; }
+    .agent-step-left { display: flex; flex-direction: column; align-items: center; width: 40px; flex-shrink: 0; }
+    .agent-step-dot { width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; border: 2px solid var(--border); background: white; z-index: 1; }
+    .agent-step-dot.fixed { border-color: var(--red-bd); background: var(--red-lt); }
+    .agent-step-line { width: 2px; flex: 1; background: var(--border); margin: 4px 0; min-height: 16px; }
+    .agent-step-content { flex: 1; padding-bottom: 22px; }
+    .agent-step-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .agent-step-title { font-weight: 700; font-size: 15px; color: var(--dark); }
+    .agent-step-tag { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.3px; }
+    .tag-startup  { background: var(--purple-lt); color: var(--purple); }
+    .tag-impl     { background: var(--blue-lt);   color: var(--blue); }
+    .tag-test     { background: var(--amber-lt);  color: var(--amber); }
+    .tag-git      { background: var(--green-lt);  color: var(--green); }
+    .tag-research { background: #fdf4ff; color: #86198f; border: 1px solid #e879f9; }
+    .tag-fix      { background: var(--red-lt);    color: var(--red); border: 1px solid var(--red-bd); }
+    .agent-step-body { font-size: 13px; color: var(--mid); }
+    .agent-step-body ul { margin: 8px 0 0 16px; }
+    .agent-step-body li { margin-bottom: 4px; }
+    .agent-step-body .fix-note { margin-top: 8px; padding: 7px 10px; background: var(--red-lt); border: 1px solid var(--red-bd); border-radius: 6px; font-size: 12px; color: #7f1d1d; }
+    .agent-step-body .fix-note strong { color: var(--red); }
+
+    /* HARDENING SECTION */
+    .fix-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 8px; }
+    .fix-card { border-radius: 10px; border: 1px solid var(--red-bd); overflow: hidden; }
+    .fix-card-header { background: #7f1d1d; color: white; padding: 10px 16px; display: flex; align-items: center; gap: 10px; }
+    .fix-num { width: 24px; height: 24px; border-radius: 50%; background: var(--red); color: white; font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .fix-title { font-weight: 700; font-size: 14px; }
+    .fix-priority { font-size: 10px; padding: 2px 7px; border-radius: 10px; font-weight: 700; margin-left: auto; }
+    .pri-critical { background: #fca5a5; color: #7f1d1d; }
+    .pri-high     { background: #fed7aa; color: #7c2d12; }
+    .pri-medium   { background: #fef08a; color: #713f12; }
+    .pri-low      { background: #bbf7d0; color: #14532d; }
+    .fix-card-body { background: white; padding: 14px 16px; font-size: 13px; }
+    .fix-before { background: #fef2f2; border: 1px solid #fca5a5; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+    .fix-before-label { font-size: 10px; font-weight: 700; color: var(--red); text-transform: uppercase; margin-bottom: 4px; }
+    .fix-after  { background: var(--green-lt); border: 1px solid var(--green-bd); border-radius: 6px; padding: 8px 10px; }
+    .fix-after-label  { font-size: 10px; font-weight: 700; color: var(--green); text-transform: uppercase; margin-bottom: 4px; }
+    .fix-desc { color: var(--mid); font-size: 12px; }
+
+    /* RECOVERY FILES */
+    .recovery-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .file-block { border-radius: 10px; overflow: hidden; border: 1px solid var(--border); }
+    .file-block-header { padding: 10px 16px; font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+    .file-features .file-block-header { background: #1e3a5f; color: #93c5fd; }
+    .file-progress .file-block-header { background: #064e3b; color: #6ee7b7; }
+    .file-block-body { background: #1e293b; padding: 16px; font-family: 'Courier New', monospace; font-size: 12px; color: #e2e8f0; line-height: 1.7; overflow-x: auto; }
+    .c-comment { color: #64748b; }
+    .c-green   { color: #6ee7b7; }
+    .c-amber   { color: #fcd34d; }
+    .c-blue    { color: #93c5fd; }
+    .c-red     { color: #fca5a5; }
+    .c-new     { color: #f0abfc; }
+
+    /* RECOVERY FLOW */
+    .recovery-flow { display: flex; align-items: center; flex-wrap: wrap; gap: 0; margin: 16px 0; padding: 18px 20px; background: white; border: 1px solid var(--border); border-radius: 10px; }
+    .rf-box    { padding: 7px 13px; border-radius: 8px; font-size: 13px; font-weight: 500; text-align: center; }
+    .rf-arrow  { font-size: 20px; color: #94a3b8; padding: 0 8px; }
+    .rf-crash  { background: var(--red-lt);   color: var(--red);   border: 1px solid var(--red-bd); }
+    .rf-check  { background: var(--amber-lt); color: var(--amber); border: 1px solid var(--amber-bd); }
+    .rf-resume { background: var(--green-lt); color: var(--green); border: 1px solid var(--green-bd); }
+    .rf-fresh  { background: var(--blue-lt);  color: var(--blue);  border: 1px solid var(--blue-bd); }
+
+    /* PM SETUP STEPS */
+    .setup-steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; position: relative; margin: 24px 0; }
+    .setup-step { position: relative; text-align: center; padding: 0 8px; }
+    .setup-step::after { content: '→'; position: absolute; right: -8px; top: 26px; font-size: 20px; color: #94a3b8; }
+    .setup-step:last-child::after { display: none; }
+    .setup-step-icon { width: 52px; height: 52px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 22px; margin: 0 auto 10px; border: 2px solid var(--border); background: white; }
+    .setup-step-num { position: absolute; top: -4px; right: 16px; width: 20px; height: 20px; border-radius: 50%; background: var(--amber); color: white; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+    .setup-step-title { font-weight: 600; font-size: 13px; color: var(--dark); margin-bottom: 4px; }
+    .setup-step-desc  { font-size: 11px; color: var(--slate); line-height: 1.4; }
+
+    /* DIRECTORY TREE */
+    .dir-tree { background: #1e293b; border-radius: 10px; padding: 20px 24px; font-family: 'Courier New', monospace; font-size: 13px; line-height: 2; color: #e2e8f0; }
+    .dir-tree .t-dir    { color: #93c5fd; font-weight: 600; }
+    .dir-tree .t-commit { color: #6ee7b7; font-size: 11px; }
+    .dir-tree .t-ignore { color: #64748b; font-size: 11px; }
+    .dir-tree .t-key    { color: #fcd34d; }
+    .dir-tree .t-new    { color: #f0abfc; }
+
+    /* KEY FILES */
+    .files-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+    .file-card { border-radius: 10px; overflow: hidden; border: 1px solid var(--border); }
+    .file-card-header { padding: 11px 16px; display: flex; align-items: flex-start; gap: 10px; }
+    .fc-readme   .file-card-header { background: #1e3a5f; color: #93c5fd; }
+    .fc-workflow .file-card-header { background: #064e3b; color: #6ee7b7; }
+    .fc-claude   .file-card-header { background: #3b0764; color: #c4b5fd; }
+    .fc-arch     .file-card-header { background: #431407; color: #fdba74; }
+    .fc-lock     .file-card-header { background: #1c1917; color: #a8a29e; }
+    .fc-progress .file-card-header { background: #0c4a6e; color: #7dd3fc; }
+    .file-card-header .fname { font-weight: 700; font-size: 13px; font-family: monospace; }
+    .file-card-header .frole { font-size: 11px; margin-top: 2px; opacity: 0.8; }
+    .file-card-body { padding: 12px 16px; font-size: 13px; color: var(--mid); background: white; }
+    .file-card-body ul { margin-left: 16px; }
+    .file-card-body li { margin-bottom: 5px; }
+    .file-new-badge { font-size: 10px; font-weight: 700; background: var(--red-lt); color: var(--red); border: 1px solid var(--red-bd); padding: 1px 6px; border-radius: 4px; margin-left: auto; flex-shrink: 0; }
+
+    /* DEPLOYMENT */
+    .deploy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .deploy-card { border-radius: 10px; border: 1px solid var(--border); overflow: hidden; }
+    .deploy-card-header { padding: 12px 16px; font-weight: 700; font-size: 13px; }
+    .dc-win    .deploy-card-header { background: #1e3a5f; color: #93c5fd; }
+    .dc-vm     .deploy-card-header { background: #064e3b; color: #6ee7b7; }
+    .dc-docker .deploy-card-header { background: #7f1d1d; color: #fca5a5; }
+    .deploy-card-body { background: white; }
+    .deploy-item { padding: 9px 16px; border-top: 1px solid var(--border); font-size: 13px; display: flex; align-items: flex-start; gap: 8px; }
+    .deploy-item:first-child { border-top: none; }
+    .di-name { font-weight: 600; color: var(--dark); }
+    .di-cmd  { font-family: monospace; font-size: 11px; color: var(--slate); background: var(--light); padding: 2px 6px; border-radius: 4px; margin-top: 3px; display: inline-block; }
+
+    /* TABLES */
+    table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
+    thead th { text-align: left; padding: 9px 12px; background: var(--dark); color: white; font-size: 12px; font-weight: 600; }
+    thead th:first-child { border-radius: 8px 0 0 0; }
+    thead th:last-child  { border-radius: 0 8px 0 0; }
+    tbody tr:nth-child(even) { background: var(--light); }
+    tbody td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    .td-bold { font-weight: 600; color: var(--dark); }
+    .td-code { font-family: monospace; font-size: 12px; color: var(--blue); }
+
+    /* CODE INLINE */
+    code { font-family: monospace; font-size: 12px; background: var(--light); padding: 1px 5px; border-radius: 4px; border: 1px solid var(--border); color: var(--blue); }
+
+    /* MISC */
+    .two-col   { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+    .divider   { height: 1px; background: var(--border); margin: 48px 0 0; }
+
+    @media (max-width: 800px) {
+      .arch-grid, .flow-grid, .recovery-grid, .files-grid, .deploy-grid,
+      .two-col, .three-col, .fix-grid { grid-template-columns: 1fr; }
+      .arch-arrow-wrap { display: none; }
+      .setup-steps { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="logo">Product<span>Factory</span></div>
+  <span class="ver">v1.1 — Hardened</span>
+  <a href="#architecture">Architecture</a>
+  <a href="#workflow">Workflow</a>
+  <a href="#pm-setup">PM Setup</a>
+  <a href="#sequential">Queue</a>
+  <a href="#feature-lifecycle">Lifecycle</a>
+  <a href="#agent-workflow">Agent</a>
+  <a href="#recovery">Recovery</a>
+  <a href="#hardening" class="nav-fix">⚑ Hardening</a>
+  <a href="#brownfield" class="nav-brown">🏗️ Brownfield</a>
+  <a href="#files">Files</a>
+  <a href="#directory">Directory</a>
+  <a href="#deployment">Deploy</a>
+  <a href="#risk-register" style="color:#f87171">⚠ Risks</a>
+</nav>
+
+<!-- HERO -->
+<div class="hero">
+  <div class="hero-inner">
+    <div class="section-label" style="color:#60a5fa">System Design — v1.1 Hardened</div>
+    <h1>Product<span>Factory</span></h1>
+    <p>24/7 autonomous product development. PM defines vision and approves features. Claude implements, tests, commits, and recommends what to build next. Eight failure modes identified and fixed in this version.</p>
+    <div class="hero-pills">
+      <span class="pill pill-amber">👤 PM Website — Ubuntu VM</span>
+      <span class="pill pill-blue">⚙️ Poller — Windows Localhost</span>
+      <span class="pill pill-red">🐳 Docker Sandbox — Claude runs isolated</span>
+      <span class="pill pill-green">🗄️ ProductDB — PostgreSQL</span>
+      <span class="pill pill-purple">🐙 GitHub — Source of Truth + Crash Recovery</span>
+    </div>
+  </div>
+</div>
+
+<div class="page">
+
+<!-- ══ ARCHITECTURE ══════════════════════════════════════════ -->
+<section id="architecture">
+  <div class="section-label">Infrastructure</div>
+  <h2>System Architecture</h2>
+  <p class="section-sub">Three tiers. Ubuntu VM hosts DB and PM website (always-on). Windows machine runs the poller. Claude runs inside a <strong>Docker container</strong> — sandboxed with only the product directory mounted. GitHub is crash-recovery store and shared truth.</p>
+
+  <div class="arch-grid">
+
+    <!-- Windows -->
+    <div class="arch-tier tier-windows">
+      <div class="arch-tier-header">💻 Windows Localhost</div>
+      <div class="arch-tier-body">
+        <div class="arch-item">
+          <div class="arch-item-icon">⚙️</div>
+          <div>
+            <div class="arch-item-name">Poller (Windows Service)</div>
+            <div class="arch-item-desc">Polls PM API, manages Docker sessions, monitors heartbeat, sends alerts, resets stuck features on startup</div>
+            <span class="arch-item-fix">FIX #6 #7 #8</span>
+          </div>
+        </div>
+        <div class="docker-box">
+          <div class="docker-label">Docker Container (per session)</div>
+          <div class="arch-item" style="margin-bottom:0;background:white">
+            <div class="arch-item-icon">🤖</div>
+            <div>
+              <div class="arch-item-name">Claude Code CLI</div>
+              <div class="arch-item-desc">Runs isolated. Only /workspace volume mounted. No host filesystem access. Destroyed after session.</div>
+              <span class="arch-item-fix">FIX #1 — SANDBOXED</span>
+            </div>
+          </div>
+        </div>
+        <div class="arch-item">
+          <div class="arch-item-icon">📁</div>
+          <div>
+            <div class="arch-item-name">Product Working Dirs</div>
+            <div class="arch-item-desc">C:/Users/.../Products/MyApp/ — git repos. Mounted read-write into container. Host sees changes; container can't escape.</div>
+          </div>
+        </div>
+        <div class="arch-item">
+          <div class="arch-item-icon">🔑</div>
+          <div>
+            <div class="arch-item-name">Git Credentials (SSH)</div>
+            <div class="arch-item-desc">PM pushes initial commit — credentials established. Poller mounts ~/.ssh read-only into container.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Arrow 1 -->
+    <div class="arch-arrow-wrap">
+      <div class="arch-arrow">⇄</div>
+      <div class="arch-arrow-label">polls API<br>HTTP</div>
+    </div>
+
+    <!-- Ubuntu VM -->
+    <div class="arch-tier tier-vm">
+      <div class="arch-tier-header">🖥️ Ubuntu VM (always-on)</div>
+      <div class="arch-tier-body">
+        <div class="arch-item">
+          <div class="arch-item-icon">🗄️</div>
+          <div>
+            <div class="arch-item-name">PostgreSQL — ProductDB</div>
+            <div class="arch-item-desc">Products, features, batches, runs, test results, env secrets (encrypted at rest)</div>
+          </div>
+        </div>
+        <div class="arch-item">
+          <div class="arch-item-icon">🌐</div>
+          <div>
+            <div class="arch-item-name">PM Website (FastAPI :8080)</div>
+            <div class="arch-item-desc">Kanban board, feature approval, product onboarding, live progress.md viewer from GitHub raw URL</div>
+          </div>
+        </div>
+        <div class="arch-item">
+          <div class="arch-item-icon">🔌</div>
+          <div>
+            <div class="arch-item-name">REST API</div>
+            <div class="arch-item-desc">GET /features/pending · PATCH /features/{id} · POST /features (AI recs) · GET /products · POST /alerts</div>
+          </div>
+        </div>
+        <div class="arch-item">
+          <div class="arch-item-icon">🔔</div>
+          <div>
+            <div class="arch-item-name">Alert Webhook</div>
+            <div class="arch-item-desc">PM notified when: session stale &gt;2h, feature Blocked, AI features added, poller offline</div>
+            <span class="arch-item-fix">FIX #8</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Arrow 2 -->
+    <div class="arch-arrow-wrap">
+      <div class="arch-arrow">⇄</div>
+      <div class="arch-arrow-label">git push/pull<br>SSH</div>
+    </div>
+
+    <!-- GitHub -->
+    <div class="arch-tier tier-github">
+      <div class="arch-tier-header">🐙 GitHub</div>
+      <div class="arch-tier-body">
+        <div class="arch-item">
+          <div class="arch-item-icon">📄</div>
+          <div>
+            <div class="arch-item-name">README.md</div>
+            <div class="arch-item-desc">Product vision, goals, competitors, out-of-scope. Claude reads first every session.</div>
+          </div>
+        </div>
+        <div class="arch-item">
+          <div class="arch-item-icon">🏛️</div>
+          <div>
+            <div class="arch-item-name">ARCHITECTURE.md</div>
+            <div class="arch-item-desc">Existing patterns, data access style, error handling conventions. Claude reads every session — prevents drift.</div>
+            <span class="arch-item-fix">FIX #3</span>
+          </div>
+        </div>
+        <div class="arch-item">
+          <div class="arch-item-icon">🔄</div>
+          <div>
+            <div class="arch-item-name">progress.md</div>
+            <div class="arch-item-desc">Checkpoint log + session state summary. Committed after every step. Poller heartbeat signal.</div>
+            <span class="arch-item-fix">FIX #4 #6</span>
+          </div>
+        </div>
+        <div class="arch-item">
+          <div class="arch-item-icon">🌿</div>
+          <div>
+            <div class="arch-item-name">Feature Branches + PRs</div>
+            <div class="arch-item-desc">Claude pushes each feature to feature/{name}. Opens PR. Never commits feature code to main.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ══ WORKFLOW ══════════════════════════════════════════════ -->
+<section id="workflow">
+  <div class="section-label">End-to-End</div>
+  <h2>Main System Workflow</h2>
+  <p class="section-sub">Three actors: Product Manager, the automated system (poller + DB), and Claude. Each has a clear lane.</p>
+
+  <div class="flow-grid">
+    <div>
+      <div class="flow-actor actor-pm">👤 Product Manager</div>
+      <div class="flow-steps">
+        <div class="flow-step"><div class="step-num num-amber">1</div><div><div class="flow-step-title">Create GitHub repo + write README.md</div><div class="flow-step-desc">Vision, goals, competitors, out-of-scope, tech stack. Push — credentials established here.</div></div></div>
+        <div class="flow-step"><div class="step-num num-amber">2</div><div><div class="flow-step-title">Write README.md only</div><div class="flow-step-desc">Vision, goals, competitors, out-of-scope, tech stack. This is the only document PM authors. ARCHITECTURE.md is generated by Claude — not the PM's job.</div></div></div>
+        <div class="flow-step"><div class="step-num num-amber">3</div><div><div class="flow-step-title">Onboard product on PM website</div><div class="flow-step-desc">Name, working dir path, tech stack, optional env secrets. Poller scaffolds CLAUDE.md + AGENT_WORKFLOW.md.</div></div></div>
+        <div class="flow-step"><div class="step-num num-amber">4</div><div><div class="flow-step-title">Add + approve features</div><div class="flow-step-desc">Enter features with description, priority, dependencies. Approve to release to Claude.</div></div></div>
+        <div class="flow-step"><div class="step-num num-amber">5</div><div><div class="flow-step-title">Review PRs + Blocked features</div><div class="flow-step-desc">Merge Claude's PRs. For Blocked features: read reasoning in progress.md, adjust description, re-approve.</div></div></div>
+        <div class="flow-step"><div class="step-num num-amber">6</div><div><div class="flow-step-title">Approve AI-recommended features</div><div class="flow-step-desc">Claude adds competitor-sourced features as Pending. PM reviews — approve to build, reject to discard.</div></div></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="flow-actor actor-system">⚙️ Poller / System</div>
+      <div class="flow-steps">
+        <div class="flow-step"><div class="step-num num-blue">1</div><div><div class="flow-step-title">On startup: reset stuck features</div><div class="flow-step-desc">Any feature in <span class="status-badge s-implementing" style="font-size:11px">Implementing</span> for &gt;2h → reset to <span class="status-badge s-approved" style="font-size:11px">Approved</span>. Prevents infinite skip loop.</div></div></div>
+        <div class="flow-step"><div class="step-num num-blue">2</div><div><div class="flow-step-title">Poll PM API every 60s</div><div class="flow-step-desc">GET /api/features/pending per product. Skip products with no approved features or active session.</div></div></div>
+        <div class="flow-step"><div class="step-num num-blue">3</div><div><div class="flow-step-title">Check session.lock + git pull</div><div class="flow-step-desc">If stale PID in lock → delete and proceed. Pull latest progress.md before launching.</div></div></div>
+        <div class="flow-step"><div class="step-num num-blue">4</div><div><div class="flow-step-title">Launch Claude in Docker container</div><div class="flow-step-desc">Mount product dir + ~/.ssh read-only. Inject product env vars. Pass prompt to read AGENT_WORKFLOW.md.</div></div></div>
+        <div class="flow-step"><div class="step-num num-blue">5</div><div><div class="flow-step-title">Monitor heartbeat every 5 min</div><div class="flow-step-desc">Check progress.md last-push time. Stale &gt;45min → kill container + relaunch. Alert PM if &gt;2h.</div></div></div>
+        <div class="flow-step"><div class="step-num num-blue">6</div><div><div class="flow-step-title">On exit → pick next product (sequential queue)</div><div class="flow-step-desc">Delete session.lock. Query: products with approved features, ordered by <code>last_run_at ASC</code>. Least-recently-run goes next. One session at a time — always.</div></div></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="flow-actor actor-claude">🤖 Claude Agent</div>
+      <div class="flow-steps">
+        <div class="flow-step"><div class="step-num num-green">1</div><div><div class="flow-step-title">Read README.md + ARCHITECTURE.md (if exists)</div><div class="flow-step-desc">Vision, goals, competitors from README. Patterns to follow from ARCHITECTURE.md — generated by Claude after first batch, not written by PM.</div></div></div>
+        <div class="flow-step"><div class="step-num num-green">2</div><div><div class="flow-step-title">Read progress.md → resume or start fresh</div><div class="flow-step-desc">In-progress step + "Last file written" → resume exactly. Clean file → fetch features, start new session.</div></div></div>
+        <div class="flow-step"><div class="step-num num-green">3</div><div><div class="flow-step-title">Implement + heartbeat commit after each step</div><div class="flow-step-desc">Write SRC file. Commit progress.md after every sub-step — poller uses this as liveness signal.</div></div></div>
+        <div class="flow-step"><div class="step-num num-green">4</div><div><div class="flow-step-title">Test + audit dependencies + verify spec</div><div class="flow-step-desc">Run tests. Run pip-audit/npm audit. Write verification note confirming feature matches spec. Max 3 fix attempts.</div></div></div>
+        <div class="flow-step"><div class="step-num num-green">5</div><div><div class="flow-step-title">Commit to feature branch + open PR</div><div class="flow-step-desc">SRC/ + TestCases/ + Results/ only. Write session state summary to progress.md. Push + open PR.</div></div></div>
+        <div class="flow-step"><div class="step-num num-green">6</div><div><div class="flow-step-title">Research competitors → recommend → exit</div><div class="flow-step-desc">Use competitors from README.md. POST AI features as Pending. Update features.md. Exit cleanly.</div></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ══ PM SETUP ══════════════════════════════════════════════ -->
+<section id="pm-setup">
+  <div class="section-label">Product Manager</div>
+  <h2>PM Onboarding a New Product</h2>
+  <p class="section-sub">PM does three things. The poller handles everything else — reads the folder, populates the DB, scaffolds config files, detects greenfield vs brownfield automatically.</p>
+
+  <!-- 3-STEP PM FLOW -->
+  <div style="display:grid;grid-template-columns:1fr 40px 1fr 40px 1fr;gap:0;align-items:center;margin:24px 0">
+
+    <div class="card" style="border-left:4px solid var(--amber);text-align:center;padding:24px 16px">
+      <div style="font-size:36px;margin-bottom:10px">✍️</div>
+      <div style="font-weight:700;font-size:15px;color:var(--dark);margin-bottom:6px">1 — Write the files</div>
+      <div style="font-size:12px;color:var(--slate)">
+        Create the local folder.<br>
+        Write <code>README.md</code> with vision, goals, tech stack, competitors, out-of-scope.<br><br>
+        <em>Brownfield only:</em> existing code is already there. Analysis Run will generate <code>ARCHITECTURE.md</code> automatically.
+      </div>
+    </div>
+
+    <div style="text-align:center;font-size:24px;color:#94a3b8">→</div>
+
+    <div class="card" style="border-left:4px solid var(--amber);text-align:center;padding:24px 16px">
+      <div style="font-size:36px;margin-bottom:10px">🚀</div>
+      <div style="font-weight:700;font-size:15px;color:var(--dark);margin-bottom:6px">2 — Push to GitHub</div>
+      <div style="font-size:12px;color:var(--slate)">
+        <code>git init</code><br>
+        <code>git remote add origin git@github.com:…</code><br>
+        <code>git add README.md</code><br>
+        <code>git commit -m "vision"</code><br>
+        <code>git push -u origin main</code><br><br>
+        Git credentials are set here — nothing else needed.
+      </div>
+    </div>
+
+    <div style="text-align:center;font-size:24px;color:#94a3b8">→</div>
+
+    <div class="card" style="border-left:4px solid var(--amber);text-align:center;padding:24px 16px">
+      <div style="font-size:36px;margin-bottom:10px">📁</div>
+      <div style="font-weight:700;font-size:15px;color:var(--dark);margin-bottom:6px">3 — Add folder path to website</div>
+      <div style="font-size:12px;color:var(--slate)">
+        Open PM website → "Add Product"<br>
+        Enter: <code>C:/Users/digvi/Products/MyApp</code><br>
+        Click Register.<br><br>
+        <strong>Poller reads the folder and does the rest automatically.</strong>
+      </div>
+    </div>
+  </div>
+
+  <!-- AUTO-DISCOVERY CALLOUT -->
+  <div style="background:linear-gradient(135deg,#0f172a,#1e3a5f);border-radius:12px;padding:28px 32px;margin-bottom:24px;color:white">
+    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#60a5fa;margin-bottom:8px">Auto-Discovery — Poller reads the folder</div>
+    <div style="font-size:15px;font-weight:600;margin-bottom:20px">PM adds folder path → poller discovers and populates everything</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px;font-size:13px">
+      <div>
+        <div style="color:#6ee7b7;font-weight:600;margin-bottom:8px">What poller reads</div>
+        <div style="color:#94a3b8;line-height:1.9">
+          <code style="background:#1e293b;border-color:#334155;color:#93c5fd">git remote get-url origin</code> → GitHub repo URL<br>
+          <code style="background:#1e293b;border-color:#334155;color:#93c5fd">README.md</code> → name, description, competitors<br>
+          <code style="background:#1e293b;border-color:#334155;color:#93c5fd">package.json</code> → Node / React / Next<br>
+          <code style="background:#1e293b;border-color:#334155;color:#93c5fd">requirements.txt</code> → Python / FastAPI / Django<br>
+          <code style="background:#1e293b;border-color:#334155;color:#93c5fd">pyproject.toml</code> → Python + test runner<br>
+          Source file count → greenfield vs brownfield
+        </div>
+      </div>
+      <div>
+        <div style="color:#6ee7b7;font-weight:600;margin-bottom:8px">What poller writes to DB</div>
+        <div style="color:#94a3b8;line-height:1.9">
+          <span style="color:#fcd34d">name</span> — from README.md first heading<br>
+          <span style="color:#fcd34d">github_repo</span> — from git remote<br>
+          <span style="color:#fcd34d">description</span> — from Vision section<br>
+          <span style="color:#fcd34d">tech_stack[]</span> — detected from files<br>
+          <span style="color:#fcd34d">type</span> — greenfield / brownfield<br>
+          <span style="color:#fcd34d">test_command</span> — inferred from stack<br>
+          <span style="color:#fcd34d">status</span> — discovered (PM reviews)
+        </div>
+      </div>
+      <div>
+        <div style="color:#6ee7b7;font-weight:600;margin-bottom:8px">What poller scaffolds</div>
+        <div style="color:#94a3b8;line-height:1.9">
+          <span style="color:#c4b5fd">CLAUDE.md</span> — generated from tech stack<br>
+          <span style="color:#c4b5fd">AGENT_WORKFLOW.md</span> — from template<br>
+          <span style="color:#c4b5fd">product_config.json</span> — path mapping<br>
+          <span style="color:#c4b5fd">features.md</span> — empty board<br>
+          <span style="color:#c4b5fd">.gitignore</span> — adds Temp/, session.lock<br>
+          <em style="color:#64748b">Brownfield: queues Analysis Run instead</em>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PM REVIEW STEP -->
+  <div class="two-col" style="margin-bottom:24px">
+    <div class="card card-blue">
+      <h3>PM reviews discovered details on website</h3>
+      <p style="font-size:13px;color:var(--mid);margin-top:8px">After auto-discovery, the PM website shows everything the poller found. PM can correct anything before approving features:</p>
+      <table style="margin-top:10px">
+        <thead><tr><th>Field</th><th>Source</th><th>PM can edit?</th></tr></thead>
+        <tbody>
+          <tr><td>Name</td><td>README.md heading</td><td>✅ Yes</td></tr>
+          <tr><td>GitHub repo</td><td>git remote</td><td>✅ Yes</td></tr>
+          <tr><td>Tech stack</td><td>File detection</td><td>✅ Yes</td></tr>
+          <tr><td>Type (green/brown)</td><td>Source file count</td><td>✅ Yes</td></tr>
+          <tr><td>Description</td><td>README Vision section</td><td>✅ Yes</td></tr>
+          <tr><td>Test command</td><td>Inferred from stack</td><td>✅ Yes</td></tr>
+        </tbody>
+      </table>
+      <p style="font-size:12px;color:var(--slate);margin-top:8px">PM clicks "Confirm Details" → product status moves from <em>Discovered</em> to <em>Ready</em>. Only then can features be approved.</p>
+    </div>
+
+    <div class="card card-amber">
+      <h3>README.md — what the poller extracts</h3>
+      <p style="font-size:13px;color:#78350f;margin-top:8px">Poller parses these sections by heading name. Use these exact headings:</p>
+      <table style="margin-top:10px">
+        <thead><tr><th>Heading</th><th>What poller extracts</th></tr></thead>
+        <tbody>
+          <tr><td class="td-code"># ProductName</td><td>Product name → DB</td></tr>
+          <tr><td class="td-code">## Vision</td><td>Description → DB</td></tr>
+          <tr><td class="td-code">## Tech Stack</td><td>Hint for stack detection</td></tr>
+          <tr><td class="td-code">## Competitors</td><td>Stored for Claude research step</td></tr>
+          <tr><td class="td-code">## Out of Scope</td><td>Passed to Claude in prompt</td></tr>
+          <tr><td class="td-code">## Core Goals</td><td>Passed to Claude in prompt</td></tr>
+        </tbody>
+      </table>
+      <p style="font-size:12px;color:#78350f;margin-top:8px">Sections don't need to be complete — poller extracts what's there and leaves the rest blank for PM to fill on the website.</p>
+    </div>
+  </div>
+
+  <!-- TECH STACK DETECTION -->
+  <div class="card" style="margin-bottom:0">
+    <h3>Tech Stack Auto-Detection Logic</h3>
+    <p style="font-size:13px;color:var(--slate);margin-top:6px">Poller checks files in this order — first match wins for primary language, multiple stacks can be combined:</p>
+    <table style="margin-top:10px">
+      <thead><tr><th>File found</th><th>Detected stack</th><th>Test command inferred</th><th>Audit command</th></tr></thead>
+      <tbody>
+        <tr><td class="td-code">requirements.txt / pyproject.toml</td><td>Python</td><td><code>pytest TestCases/ -v --json-report</code></td><td><code>pip-audit</code></td></tr>
+        <tr><td class="td-code">package.json + react dep</td><td>React / Node</td><td><code>jest --json</code></td><td><code>npm audit --audit-level=high</code></td></tr>
+        <tr><td class="td-code">package.json + next dep</td><td>Next.js</td><td><code>jest --json</code></td><td><code>npm audit --audit-level=high</code></td></tr>
+        <tr><td class="td-code">package.json only</td><td>Node / Express</td><td><code>npm test -- --json</code></td><td><code>npm audit --audit-level=high</code></td></tr>
+        <tr><td class="td-code">*.go files</td><td>Go</td><td><code>go test ./... -json</code></td><td><code>govulncheck ./...</code></td></tr>
+        <tr><td class="td-code">Gemfile</td><td>Ruby</td><td><code>rspec --format json</code></td><td><code>bundle audit</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ══ SEQUENTIAL QUEUE ══════════════════════════════════════ -->
+<section id="sequential">
+  <div class="section-label">Processing Order</div>
+  <h2>Sequential Product Queue</h2>
+  <p class="section-sub">One Claude session at a time. Products rotate fairly using <em>least-recently-run first</em> so no product starves waiting behind a busy one.</p>
+
+  <div class="two-col" style="margin-bottom:20px">
+
+    <div class="card" style="border-left:4px solid var(--blue)">
+      <h3>Queue Algorithm</h3>
+      <div class="config-block" style="margin-top:10px;font-size:12px">
+<span class="cm">-- Who goes next?</span>
+SELECT p.* FROM products p
+WHERE p.status = <span class="cv">'ready'</span>
+AND EXISTS (
+  SELECT 1 FROM features f
+  WHERE f.product_id = p.id
+  AND f.status = <span class="cv">'approved'</span>
+)
+AND NOT EXISTS (
+  SELECT 1 FROM runs r
+  WHERE r.product_id = p.id
+  AND r.ended_at IS NULL  <span class="cm">-- no active session</span>
+)
+ORDER BY p.last_run_at ASC NULLS FIRST
+LIMIT 1;
+      </div>
+      <p style="font-size:12px;color:var(--slate);margin-top:8px"><code>NULLS FIRST</code> — products never run yet go before products that ran recently. Fair round-robin across all products.</p>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div class="card card-blue">
+        <h3>Example: 3 products in rotation</h3>
+        <table style="margin-top:8px">
+          <thead><tr><th>Time</th><th>Product running</th><th>Queue</th></tr></thead>
+          <tbody>
+            <tr><td>10:00</td><td>MyApp (never run)</td><td>AppB, AppC waiting</td></tr>
+            <tr><td>10:45</td><td>AppB (never run)</td><td>AppC, MyApp waiting</td></tr>
+            <tr><td>11:10</td><td>AppC (never run)</td><td>MyApp, AppB waiting</td></tr>
+            <tr><td>11:50</td><td>MyApp (oldest run_at)</td><td>AppB, AppC waiting</td></tr>
+            <tr><td>12:30</td><td>AppB (next oldest)</td><td>AppC, MyApp waiting</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h3>Products with no approved features are skipped</h3>
+        <p style="font-size:13px;color:var(--mid);margin-top:6px">If a product has no approved features it is never selected, even if it has the oldest <code>last_run_at</code>. It rejoins the queue automatically as soon as the PM approves a feature.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- POLLER LOOP VISUAL -->
+  <div style="background:var(--dark);border-radius:12px;padding:24px 28px;color:white">
+    <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:#60a5fa;margin-bottom:16px">Poller Main Loop (simplified)</div>
+    <div class="config-block" style="background:transparent;padding:0;font-size:13px;border:none">
+<span class="cm">loop forever:</span>
+
+  <span class="cm">① Check auth</span>
+  if not claude_auth_healthy():
+      alert_pm("Re-login needed"); sleep(60); continue
+
+  <span class="cm">② Discover any new folders PM registered</span>
+  for product in db.get_undiscovered():
+      discover_and_populate(product)        <span class="c-green">← reads folder, updates DB</span>
+
+  <span class="cm">③ Reset stuck features</span>
+  db.reset_implementing_over_2h()           <span class="c-green">← Fix #7</span>
+
+  <span class="cm">④ Pick next product (sequential, fair)</span>
+  product = db.get_next_product()           <span class="c-green">← ORDER BY last_run_at ASC</span>
+  if not product:
+      sleep(60); continue                   <span class="c-green">← nothing to do</span>
+
+  <span class="cm">⑤ PR count gate</span>
+  if github.count_open_prs(product) >= 3:
+      log("≥3 open PRs — waiting for PM to merge"); sleep(300); continue
+
+  <span class="cm">⑥ GitHub PR reconciliation (fix stale DB state)</span>
+  for pr in github.get_merged_prs(product, since_last_run):
+      db.update_feature(pr.feature_id, status="Pushed")   <span class="c-green">← sync DB to GitHub truth</span>
+
+  <span class="cm">⑦ Run one Claude session</span>
+  exit_code = run_claude_in_docker(product)    <span class="c-green">← blocks until session ends</span>
+  if exit_code == 0:
+      db.update(product, last_run_at=now())    <span class="c-green">← only update on CLEAN exit (R-S2)</span>
+
+  <span class="cm">⑧ Back to top → pick next product</span>
+  sleep(5)
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ══ FEATURE LIFECYCLE ══════════════════════════════════════ -->
+<section id="feature-lifecycle">
+  <div class="section-label">State Machine</div>
+  <h2>Feature Lifecycle</h2>
+  <p class="section-sub">PM controls <span class="status-badge s-pending">Pending</span> → <span class="status-badge s-approved">Approved</span> and reviews <span class="status-badge s-blocked">Blocked</span>. Claude controls everything in between.</p>
+
+  <div class="status-flow">
+    <span class="status-badge s-pending">Pending</span>
+    <span class="status-arrow">→</span>
+    <span class="status-badge s-approved">Approved</span>
+    <span class="status-arrow">→</span>
+    <span class="status-badge s-implementing">Implementing</span>
+    <span class="status-arrow">→</span>
+    <span class="status-badge s-implemented">Implemented</span>
+    <span class="status-arrow">→</span>
+    <span class="status-badge s-testing">Testing</span>
+    <span class="status-arrow">→</span>
+    <span class="status-badge s-committed">Committed</span>
+    <span class="status-arrow">→</span>
+    <span class="status-badge s-pushed">Pushed ✓</span>
+  </div>
+
+  <table>
+    <thead><tr><th>Status</th><th>Set by</th><th>What it means</th><th>Next action</th></tr></thead>
+    <tbody>
+      <tr><td><span class="status-badge s-pending">Pending</span></td><td>PM (manual) or Claude (AI research)</td><td>Awaiting PM review</td><td>PM approves or rejects</td></tr>
+      <tr><td><span class="status-badge s-approved">Approved</span></td><td>PM</td><td>Ready for Claude</td><td>Poller picks up within 60s</td></tr>
+      <tr><td><span class="status-badge s-implementing">Implementing</span></td><td>Claude</td><td>Claude has claimed it</td><td>Auto-reset to Approved if stuck &gt;2h</td></tr>
+      <tr><td><span class="status-badge s-implemented">Implemented</span></td><td>Claude</td><td>Code written, not yet tested</td><td>Claude runs test suite + audit</td></tr>
+      <tr><td><span class="status-badge s-testing">Testing</span></td><td>Claude</td><td>Tests running / fixing bugs</td><td>Pass → Committed · 3 fails → Blocked</td></tr>
+      <tr><td><span class="status-badge s-committed">Committed</span></td><td>Claude</td><td>All tests + audit pass</td><td>Claude pushes + opens PR</td></tr>
+      <tr><td><span class="status-badge s-pushed">Pushed</span></td><td>Claude</td><td>PR open on GitHub</td><td>PM reviews and merges to main</td></tr>
+      <tr><td><span class="status-badge s-blocked">Blocked</span></td><td>Claude</td><td>Failed 3 fix attempts or push failure</td><td>PM reads reasoning in progress.md, adjusts, re-approves</td></tr>
+      <tr><td><span class="status-badge" style="background:#fef2f2;color:#991b1b;border:1px solid #fca5a5">Reverted</span></td><td>PM (manual)</td><td>PR merged then reverted on main</td><td>PM re-approves to retry with new guidance</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<div class="divider"></div>
+
+<!-- ══ AGENT WORKFLOW ════════════════════════════════════════ -->
+<section id="agent-workflow">
+  <div class="section-label">Claude Agent</div>
+  <h2>Agent Workflow — Per Session</h2>
+  <p class="section-sub">Defined in <code>AGENT_WORKFLOW.md</code> in each product repo. Claude reads this on every startup. Edit this file to change Claude's behaviour without touching the poller.</p>
+
+  <div class="agent-steps">
+
+    <div class="agent-step">
+      <div class="agent-step-left"><div class="agent-step-dot fixed">📖</div><div class="agent-step-line"></div></div>
+      <div class="agent-step-content">
+        <div class="agent-step-header">
+          <span class="agent-step-title">Read All Context Files First</span>
+          <span class="agent-step-tag tag-startup">Startup</span>
+          <span class="agent-step-tag tag-fix">Fixes #3 #4</span>
+        </div>
+        <div class="agent-step-body">
+          Read these in order, every session — no exceptions:
+          <ul>
+            <li><code>README.md</code> — vision, goals, competitors, out-of-scope</li>
+            <li><code>ARCHITECTURE.md</code> — existing patterns to follow. Never introduce a new pattern without PM approval.</li>
+            <li><code>CLAUDE.md</code> — platform details, test command, folder rules</li>
+            <li><code>progress.md</code> — read YAML front matter: <code>resume_step</code> + <code>resume_feature_id</code> → <strong>RESUME mode</strong>; absent → <strong>FRESH mode</strong></li>
+            <li>Regenerate <code>features.md</code> from API on <strong>main branch only</strong> (not feature branches — prevents merge conflicts)</li>
+            <li>Fetch + rebase current feature branch on <code>main</code> before writing any code</li>
+          </ul>
+          <div class="fix-note"><strong>Fix #3 — Architectural Drift:</strong> Reading ARCHITECTURE.md before writing any code forces Claude to follow existing patterns rather than inventing new ones each session.<br><br><strong>progress.md YAML front matter</strong> (written by Claude at every session start):<br><code>---<br>workflow_version: 2<br>resume_step: 3<br>resume_feature_id: 42<br>---</code><br>Poller reads this to resume precisely after crash — no ambiguity.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="agent-step">
+      <div class="agent-step-left"><div class="agent-step-dot">📋</div><div class="agent-step-line"></div></div>
+      <div class="agent-step-content">
+        <div class="agent-step-header">
+          <span class="agent-step-title">Plan Batch (FRESH mode only)</span>
+          <span class="agent-step-tag tag-startup">Startup</span>
+        </div>
+        <div class="agent-step-body">
+          <ul>
+            <li>GET <code>/api/features/pending?product_id={id}</code> — fetch approved features sorted by priority + depends_on</li>
+            <li>Group into batches of max 3 features</li>
+            <li>Write plan → <code>Temp/batch_{date}_plan.md</code></li>
+            <li>Initialise <code>progress.md</code>: new session ID, all features listed, all steps as ☐</li>
+            <li>Update <code>features.md</code> with batch info</li>
+            <li>Commit + push <code>progress.md</code>, <code>features.md</code> → heartbeat #0</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="agent-step">
+      <div class="agent-step-left"><div class="agent-step-dot">⚡</div><div class="agent-step-line"></div></div>
+      <div class="agent-step-content">
+        <div class="agent-step-header">
+          <span class="agent-step-title">Implement Feature</span>
+          <span class="agent-step-tag tag-impl">Implement</span>
+          <span style="font-size:12px;color:var(--slate)">(repeat per feature)</span>
+        </div>
+        <div class="agent-step-body">
+          <ul>
+            <li>PATCH <code>/api/features/{id}</code> → <code>Implementing</code> · Update <code>features.md</code> → 🔄</li>
+            <li>Checkout branch: <code>feature/{feature}-{subfeature}</code></li>
+            <li>Write <code>SRC/{feature}_{subfeature}.{ext}</code> — follow patterns from ARCHITECTURE.md</li>
+            <li>Update <code>progress.md</code>: "Last file written: SRC/..." → commit + push (heartbeat)</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="agent-step">
+      <div class="agent-step-left"><div class="agent-step-dot fixed">🧪</div><div class="agent-step-line"></div></div>
+      <div class="agent-step-content">
+        <div class="agent-step-header">
+          <span class="agent-step-title">Write Tests + Run + Audit + Verify</span>
+          <span class="agent-step-tag tag-test">Test</span>
+          <span class="agent-step-tag tag-fix">Fixes #2 #5</span>
+        </div>
+        <div class="agent-step-body">
+          <ul>
+            <li>Write <code>TestCases/test_{feature}_{subfeature}.{ext}</code></li>
+            <li>Required: <code>test_{f}_{s}_positive()</code> · <code>_negative()</code> · <code>_edge()</code></li>
+            <li>Run full test suite with coverage: <code>--cov --cov-fail-under=70</code>. Save → <code>Results/{feature}_{sub}_results.json</code></li>
+            <li><strong>Fix loop:</strong> on failure, fix SRC and re-run. Max 3 attempts total.</li>
+            <li>After 3 failures → PATCH → <code>Blocked</code>. Write "Blocked reason" to <code>progress.md</code>. Push. Move on.</li>
+          </ul>
+          <div class="fix-note">
+            <strong>Fix #5 — Dependency Safety:</strong> After any package install, run <code>pip-audit</code> (Python) or <code>npm audit --audit-level=high</code> (Node). If vulnerabilities found → fix before committing.<br><br>
+            <strong>Fix #2 — Test Coverage Illusion:</strong> After tests pass, write a "Verification Note" to <code>progress.md</code>: re-read the original feature description and confirm in 2–3 sentences that the implementation matches the spec, not just that the tests pass.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="agent-step">
+      <div class="agent-step-left"><div class="agent-step-dot fixed">🌿</div><div class="agent-step-line"></div></div>
+      <div class="agent-step-content">
+        <div class="agent-step-header">
+          <span class="agent-step-title">Commit, Push, Open PR + Write Session Summary</span>
+          <span class="agent-step-tag tag-git">Git</span>
+          <span class="agent-step-tag tag-fix">Fix #4</span>
+        </div>
+        <div class="agent-step-body">
+          <ul>
+            <li>Stage: <code>SRC/{f}_{s}.*</code> · <code>TestCases/test_{f}_{s}.*</code> · <code>Results/{f}_{s}_*</code></li>
+            <li>Also stage: <code>features.md</code> · <code>progress.md</code></li>
+            <li><strong>Never stage:</strong> <code>Temp/</code> · <code>*.log</code> · <code>__pycache__</code> · <code>session.lock</code></li>
+            <li>Commit: <code>feat({feature}): {description} [ProductFactory]</code></li>
+            <li>Fetch + rebase on <code>main</code> to resolve any upstream changes before push</li>
+            <li>Push to <code>feature/{feature}-{subfeature}</code> · open PR against <code>main</code></li>
+            <li><strong>Push failure</strong> → status → <code>Blocked</code> (write reason to progress.md) — never silently exit 0</li>
+            <li>PATCH status → <code>Pushed</code> · <code>features.md</code> → ✅ (on main branch only)</li>
+          </ul>
+          <div class="fix-note"><strong>Fix #4 — Context Condensation:</strong> After each feature committed, append a "Session State Summary" to <code>progress.md</code>: key architectural decisions made, patterns used, and anything the next feature implementation should be aware of. This replaces fading context with an explicit note Claude re-reads if it resumes.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="agent-step">
+      <div class="agent-step-left"><div class="agent-step-dot fixed">🏛️</div><div class="agent-step-line"></div></div>
+      <div class="agent-step-content">
+        <div class="agent-step-header">
+          <span class="agent-step-title">Generate or Update ARCHITECTURE.md</span>
+          <span class="agent-step-tag tag-fix">Auto-generated</span>
+          <span style="font-size:12px;color:var(--slate)">(not written by PM)</span>
+        </div>
+        <div class="agent-step-body">
+          <ul>
+            <li><strong>If ARCHITECTURE.md does not exist</strong> (first batch ever): generate it now by reviewing the code just written — document data access pattern, error format, naming conventions, module structure</li>
+            <li><strong>If ARCHITECTURE.md exists:</strong> check if any new patterns were introduced this session. If yes, append them. If no, leave unchanged.</li>
+            <li>Cite concrete file+line examples: <em>"Error format: {code, message} — see SRC/auth_login.py:14"</em></li>
+            <li>Commit + push <code>ARCHITECTURE.md</code> with message: <code>docs: update architecture patterns [ProductFactory]</code></li>
+          </ul>
+          <div class="fix-note"><strong>Why Claude generates it, not PM:</strong> For greenfield, no architecture exists until Claude builds it. For brownfield, the architecture is in the code — Claude reads it more accurately than a PM can describe it from memory. PM's role is review and correction only.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="agent-step">
+      <div class="agent-step-left"><div class="agent-step-dot">🔍</div></div>
+      <div class="agent-step-content">
+        <div class="agent-step-header">
+          <span class="agent-step-title">Research Competitors → Recommend → Exit</span>
+          <span class="agent-step-tag tag-research">Research</span>
+        </div>
+        <div class="agent-step-body">
+          <ul>
+            <li>Search top 3 competitors listed in <code>README.md</code></li>
+            <li>Identify 5–10 features they have that this product lacks and are within scope</li>
+            <li>POST <code>/api/features</code> — <code>source: "ai-research"</code>, <code>status: "Pending"</code></li>
+            <li>Append "AI-Recommended" table to <code>features.md</code> with source and rationale</li>
+            <li>Update <code>progress.md</code>: "✅ Session complete" → commit + push</li>
+            <li>Exit 0</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ══ CRASH RECOVERY ════════════════════════════════════════ -->
+<section id="recovery">
+  <div class="section-label">Resilience</div>
+  <h2>Crash Recovery</h2>
+  <p class="section-sub">Claude commits <code>progress.md</code> after every atomic step. On any crash — rate limit, container kill, power cut — the poller relaunches and Claude resumes exactly where it left off.</p>
+
+  <div class="recovery-flow">
+    <div class="rf-box rf-crash">💥 Crash / Rate Limit / Stale Heartbeat</div>
+    <div class="rf-arrow">→</div>
+    <div class="rf-box rf-check">Poller kills container + relaunches</div>
+    <div class="rf-arrow">→</div>
+    <div class="rf-box rf-check">Claude reads progress.md</div>
+    <div class="rf-arrow">→</div>
+    <div class="rf-box rf-resume">🔄 "In Progress" found → read "Last file written" → continue from that sub-step</div>
+    <span style="padding:0 8px;color:#94a3b8">or</span>
+    <div class="rf-box rf-fresh">✨ Clean file → start fresh session</div>
+  </div>
+
+  <div class="recovery-grid" style="margin-top:20px">
+    <div class="file-block file-features">
+      <div class="file-block-header">📋 features.md — Live Feature Board</div>
+      <div class="file-block-body"><span class="c-comment"># Features — MyApp</span>
+<span class="c-blue">Last updated:</span> 2026-03-29 11:42 UTC | <span class="c-blue">Session:</span> abc123
+
+<span class="c-comment">## Batch 3 — 2026-03-29</span>
+
+| # | Feature | Sub | Status | Tests | Audit | Branch |
+|---|---------|-----|--------|-------|-------|--------|
+| 1 | auth | login | <span class="c-green">✅ Pushed</span> | 3/3 | ✅ clean | auth-login |
+| 2 | auth | signup | <span class="c-amber">🔄 Implementing</span> | - | - | - |
+| 3 | dashboard | analytics | <span class="c-blue">⏳ Pending</span> | - | - | - |
+
+<span class="c-comment">## AI-Recommended (Pending PM Approval)</span>
+| Feature | Rationale | Competitor |
+|---------|-----------|------------|
+| payments | Stripe integration lacking | ProductB |
+| mobile | React Native shell | ProductC |</div>
+    </div>
+
+    <div class="file-block file-progress">
+      <div class="file-block-header">🔄 progress.md — Checkpoint + Context</div>
+      <div class="file-block-body"><span class="c-comment"># Progress — MyApp | Session abc123</span>
+<span class="c-blue">Started:</span>        2026-03-29 10:00 UTC
+<span class="c-blue">Last heartbeat:</span> 2026-03-29 11:42 UTC
+<span class="c-blue">Resume count:</span>   1
+
+<span class="c-comment">## ✅ Completed</span>
+- [x] Read README + ARCHITECTURE + CLAUDE
+- [x] Implemented SRC/auth_login.py
+- [x] Tests: positive ✅ negative ✅ edge ✅
+- [x] pip-audit: 0 vulnerabilities
+- [x] Verification: matches spec ✅
+- [x] Pushed → feature/auth-login (a1b2c3d)
+
+<span class="c-new">## 📝 Session State Summary (auth_login)</span>
+<span class="c-new">Used UserRepository pattern for DB access.</span>
+<span class="c-new">JWT tokens stored in Redis, not session.</span>
+<span class="c-new">Error format: {code, message, details}.</span>
+<span class="c-new">auth_signup must follow same patterns.</span>
+
+<span class="c-comment">## 🔄 In Progress</span>
+Feature: auth_signup
+<span class="c-amber">Last file written: SRC/auth_signup.py</span>
+
+<span class="c-comment">## ⏳ Remaining</span>
+- auth_signup (in progress)
+- dashboard_analytics
+
+<span class="c-comment">## 🔁 Resume: read SRC/auth_signup.py first</span></div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h3>Heartbeat Monitoring</h3>
+    <p style="font-size:13px;color:var(--slate);margin-top:6px">Poller runs <code>git log --since="45 minutes ago" -- progress.md</code> every 5 minutes. Empty result = Claude is stuck (hung loop, frozen container). Action: kill container, relaunch. Claude reads progress.md and resumes from "Last file written." If stale exceeds 2 hours → alert PM via webhook.</p>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ══ HARDENING ══════════════════════════════════════════════ -->
+<section id="hardening">
+  <div class="section-label" style="color:var(--red)">Failure Modes Fixed</div>
+  <h2>System Hardening — 8 Fixes Applied</h2>
+  <p class="section-sub">These gaps were identified by comparing ProductFactory against production systems (Devin, OpenHands, Cursor, Copilot Workspace) and industry research. All 8 are incorporated into this design.</p>
+
+  <div class="fix-grid">
+
+    <div class="fix-card">
+      <div class="fix-card-header">
+        <div class="fix-num">1</div>
+        <div class="fix-title">Docker Sandboxing</div>
+        <span class="fix-priority pri-critical">Critical</span>
+      </div>
+      <div class="fix-card-body">
+        <div class="fix-before"><div class="fix-before-label">Before</div><div class="fix-desc">Claude ran <code>--dangerously-skip-permissions</code> directly on Windows localhost with full filesystem access. One bad session = data loss.</div></div>
+        <div class="fix-after"><div class="fix-after-label">After</div><div class="fix-desc">Claude runs inside a Docker container. Only the product directory is volume-mounted. Host SSH keys mounted read-only. Container destroyed after session. Blast radius contained to /workspace.</div></div>
+      </div>
+    </div>
+
+    <div class="fix-card">
+      <div class="fix-card-header">
+        <div class="fix-num">2</div>
+        <div class="fix-title">Test Coverage Illusion</div>
+        <span class="fix-priority pri-critical">Critical</span>
+      </div>
+      <div class="fix-card-body">
+        <div class="fix-before"><div class="fix-before-label">Before</div><div class="fix-desc">Claude wrote and graded its own tests. Tests verified what Claude thought it built, not what the spec required. Features could ship wrong.</div></div>
+        <div class="fix-after"><div class="fix-after-label">After</div><div class="fix-desc">After tests pass, Claude writes a mandatory "Verification Note" in <code>progress.md</code>: re-reads the original feature description and explicitly confirms the implementation matches the spec in 2–3 sentences. PM can audit this on GitHub.</div></div>
+      </div>
+    </div>
+
+    <div class="fix-card">
+      <div class="fix-card-header">
+        <div class="fix-num">3</div>
+        <div class="fix-title">Architectural Drift</div>
+        <span class="fix-priority pri-high">High</span>
+      </div>
+      <div class="fix-card-body">
+        <div class="fix-before"><div class="fix-before-label">Before</div><div class="fix-desc">Over weeks, Claude introduced multiple data access patterns, different error formats, inconsistent naming. Each PR looked fine; the codebase slowly became incoherent.</div></div>
+        <div class="fix-after"><div class="fix-after-label">After</div><div class="fix-desc"><code>ARCHITECTURE.md</code> is generated by Claude — after the first batch (greenfield) or during Analysis Run (brownfield). PM reviews and corrects. Claude reads it before writing any code every session. Claude updates it when new patterns are introduced. PM is never asked to write it.</div></div>
+      </div>
+    </div>
+
+    <div class="fix-card">
+      <div class="fix-card-header">
+        <div class="fix-num">4</div>
+        <div class="fix-title">Context Window Amnesia</div>
+        <span class="fix-priority pri-high">High</span>
+      </div>
+      <div class="fix-card-body">
+        <div class="fix-before"><div class="fix-before-label">Before</div><div class="fix-desc">Decisions made at session start (while reading README) faded as the session grew. Feature 3 could contradict decisions made for Feature 1.</div></div>
+        <div class="fix-after"><div class="fix-after-label">After</div><div class="fix-desc">After each feature, Claude writes a "Session State Summary" to <code>progress.md</code>: key decisions made, patterns chosen, what next features must know. On resume, Claude re-reads this summary — explicit context replaces fading memory.</div></div>
+      </div>
+    </div>
+
+    <div class="fix-card">
+      <div class="fix-card-header">
+        <div class="fix-num">5</div>
+        <div class="fix-title">Dependency Hallucination</div>
+        <span class="fix-priority pri-high">High</span>
+      </div>
+      <div class="fix-card-body">
+        <div class="fix-before"><div class="fix-before-label">Before</div><div class="fix-desc">Claude could install any package. Non-existent packages cause Blocked status (detectable). Existing-but-wrong packages silently corrupt the product.</div></div>
+        <div class="fix-after"><div class="fix-after-label">After</div><div class="fix-desc">After any package install, AGENT_WORKFLOW.md mandates running <code>pip-audit</code> (Python) or <code>npm audit --audit-level=high</code> (Node) before committing. Vulnerabilities must be resolved first. Results logged in features.md audit column.</div></div>
+      </div>
+    </div>
+
+    <div class="fix-card">
+      <div class="fix-card-header">
+        <div class="fix-num">6</div>
+        <div class="fix-title">Silent System Death</div>
+        <span class="fix-priority pri-high">High</span>
+      </div>
+      <div class="fix-card-body">
+        <div class="fix-before"><div class="fix-before-label">Before</div><div class="fix-desc">If the Windows service crashed, the PM had no notification. Progress stopped silently. Last-known DB status looked fine.</div></div>
+        <div class="fix-after"><div class="fix-after-label">After</div><div class="fix-desc">Dead-man's switch: if <code>progress.md</code> last push &gt;2 hours during business hours → poller sends webhook alert to PM (email / Slack). Poller itself registers heartbeat with VM every 5 minutes. VM alerts PM if poller goes offline.</div></div>
+      </div>
+    </div>
+
+    <div class="fix-card">
+      <div class="fix-card-header">
+        <div class="fix-num">7</div>
+        <div class="fix-title">Implementing Status Crash Trap</div>
+        <span class="fix-priority pri-medium">Medium</span>
+      </div>
+      <div class="fix-card-body">
+        <div class="fix-before"><div class="fix-before-label">Before</div><div class="fix-desc">If Claude crashed mid-feature, that feature stayed <span class="status-badge s-implementing" style="font-size:11px">Implementing</span> forever. Poller skipped it on every poll. PM saw no error.</div></div>
+        <div class="fix-after"><div class="fix-after-label">After</div><div class="fix-desc">On every poller startup: <code>UPDATE features SET status='Approved' WHERE status='Implementing' AND updated_at &lt; NOW() - INTERVAL '2 hours'</code>. Two lines of SQL. Feature automatically re-queued for Claude on next poll.</div></div>
+      </div>
+    </div>
+
+    <div class="fix-card">
+      <div class="fix-card-header">
+        <div class="fix-num">8</div>
+        <div class="fix-title">CLAUDE.md Scope Creep</div>
+        <span class="fix-priority pri-low">Low</span>
+      </div>
+      <div class="fix-card-body">
+        <div class="fix-before"><div class="fix-before-label">Before</div><div class="fix-desc">No token budget on CLAUDE.md. Industry research shows Claude silently ignores rules beyond ~2,000 tokens. File grows over time without warning.</div></div>
+        <div class="fix-after"><div class="fix-after-label">After</div><div class="fix-desc">CLAUDE.md hard cap: 1,500 tokens (platform facts only). Poller checks token count on scaffold and warns PM if exceeded. Detailed conventions belong in <code>AGENT_WORKFLOW.md</code> (explicitly read by Claude) not CLAUDE.md (auto-loaded, size-limited).</div></div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="card card-green" style="margin-top:20px">
+    <h3>Comparison: ProductFactory vs. Leading Tools</h3>
+    <table style="margin-top:10px">
+      <thead><tr><th>Capability</th><th>Devin / OpenHands</th><th>ProductFactory v1.1</th></tr></thead>
+      <tbody>
+        <tr><td class="td-bold">Sandboxing</td><td>Cloud VM per session</td><td>Docker container per session ✅</td></tr>
+        <tr><td class="td-bold">Crash recovery</td><td>Session checkpoints</td><td>progress.md committed every step ✅</td></tr>
+        <tr><td class="td-bold">Fix loop limit</td><td>3–5 attempts</td><td>3 attempts → Blocked + reasoning ✅</td></tr>
+        <tr><td class="td-bold">Architectural governance</td><td>Prompt rules only</td><td>ARCHITECTURE.md read every session ✅</td></tr>
+        <tr><td class="td-bold">Context management</td><td>LLM summarizing condenser</td><td>Session State Summary in progress.md ✅</td></tr>
+        <tr><td class="td-bold">Dependency safety</td><td>Varies</td><td>pip-audit / npm audit mandated ✅</td></tr>
+        <tr><td class="td-bold">PM approval gate</td><td>Not standard</td><td>Pending → Approved required ✅</td></tr>
+        <tr><td class="td-bold">Competitor research</td><td>Not available</td><td>Built-in exit step ✅ (unique)</td></tr>
+        <tr><td class="td-bold">Multi-product rotation</td><td>Not standard</td><td>Poller rotates products 24/7 ✅ (unique)</td></tr>
+        <tr><td class="td-bold">Multi-agent parallelism</td><td>Up to 8 parallel agents</td><td>Single agent (v1 — intentional)</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ══ KEY FILES ══════════════════════════════════════════════ -->
+<section id="files">
+  <div class="section-label">Configuration</div>
+  <h2>Key Files in Every Product Repo</h2>
+  <p class="section-sub">Created once by PM or scaffolded by the poller. They are the contract between PM, poller, and Claude. All are committed to GitHub.</p>
+
+  <div class="files-grid">
+
+    <div class="file-card fc-readme">
+      <div class="file-card-header"><div><div class="fname">README.md</div><div class="frole">Written by PM · Read by Claude every session</div></div></div>
+      <div class="file-card-body"><ul>
+        <li>Product vision + target users</li>
+        <li>Core goals (non-negotiable)</li>
+        <li>Tech stack + test runner command</li>
+        <li>Named competitors + differentiators</li>
+        <li>Out-of-scope guardrails</li>
+      </ul></div>
+    </div>
+
+    <div class="file-card fc-arch">
+      <div class="file-card-header"><div><div class="fname">ARCHITECTURE.md</div><div class="frole">Generated by Claude · Reviewed by PM · Fix #3</div></div><span class="file-new-badge">AUTO</span></div>
+      <div class="file-card-body"><ul>
+        <li><strong>Greenfield:</strong> Claude generates after first feature batch is committed — documents patterns it just established</li>
+        <li><strong>Brownfield:</strong> Claude generates during Analysis Run — reads existing code, extracts patterns</li>
+        <li>PM reviews + corrects — never authors from scratch</li>
+        <li>PM adds a line when a new pattern is intentionally approved</li>
+      </ul><p style="font-size:12px;color:var(--slate);margin-top:8px">Always reflects actual code — not speculation. PM's only job here is review.</p></div>
+    </div>
+
+    <div class="file-card fc-workflow">
+      <div class="file-card-header"><div><div class="fname">AGENT_WORKFLOW.md</div><div class="frole">Scaffolded by poller · Claude's operating script</div></div></div>
+      <div class="file-card-body"><ul>
+        <li>All workflow steps in order</li>
+        <li>Naming conventions</li>
+        <li>Fix loop rules (max 3)</li>
+        <li>pip-audit / npm audit steps</li>
+        <li>Verification note requirement</li>
+      </ul><p style="font-size:12px;color:var(--slate);margin-top:8px">Edit this to change Claude's behaviour without touching the poller.</p></div>
+    </div>
+
+    <div class="file-card fc-claude">
+      <div class="file-card-header"><div><div class="fname">CLAUDE.md</div><div class="frole">Scaffolded by poller · Auto-loaded · Max 1,500 tokens · Fix #8</div></div></div>
+      <div class="file-card-body"><ul>
+        <li>Platform: Windows localhost, bash</li>
+        <li>Python version + venv path</li>
+        <li>Test command + audit command</li>
+        <li>Folder rules (SRC/ TestCases/ etc.)</li>
+        <li>No Windows paths rule</li>
+      </ul><p style="font-size:12px;color:var(--red);margin-top:8px">Hard cap: 1,500 tokens. Poller warns PM if exceeded.</p></div>
+    </div>
+
+    <div class="file-card fc-progress">
+      <div class="file-card-header"><div><div class="fname">progress.md</div><div class="frole">Written by Claude · Committed every step · Fix #4 #6</div></div><span class="file-new-badge">UPDATED</span></div>
+      <div class="file-card-body"><ul>
+        <li>Session ID + heartbeat timestamp</li>
+        <li>Completed / In Progress / Remaining steps</li>
+        <li>"Last file written" for resume</li>
+        <li>Session State Summary per feature</li>
+        <li>Verification notes after tests pass</li>
+        <li>Blocked reasons when escalated</li>
+      </ul></div>
+    </div>
+
+    <div class="file-card fc-lock">
+      <div class="file-card-header"><div><div class="fname">session.lock</div><div class="frole">Created by poller · Gitignored · Prevents duplicates</div></div></div>
+      <div class="file-card-body"><ul>
+        <li>Contains PID + started timestamp</li>
+        <li>Prevents two Claude containers on same product</li>
+        <li>Deleted when Claude exits cleanly</li>
+        <li>Stale PID check on poller restart</li>
+      </ul><p style="font-size:12px;color:var(--slate);margin-top:8px">If PID is not running → stale lock → delete and relaunch.</p></div>
+    </div>
+
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ══ DIRECTORY ══════════════════════════════════════════════ -->
+<section id="directory">
+  <div class="section-label">Structure</div>
+  <h2>Directory Structure (Per Product)</h2>
+  <p class="section-sub">Consistent across all products. SRC/, TestCases/, Results/ committed. Temp/ gitignored.</p>
+
+  <div class="two-col">
+    <div class="dir-tree">
+<span class="t-dir">MyApp/</span>                         <span class="t-commit">← git root (PM's initial push)</span>
+├── <span class="t-key">README.md</span>                  <span class="t-commit">← vision, goals, competitors</span>
+├── <span class="t-new">ARCHITECTURE.md</span>            <span class="t-commit">← generated by Claude · reviewed by PM</span>
+├── <span class="t-key">AGENT_WORKFLOW.md</span>          <span class="t-commit">← Claude's operating script</span>
+├── <span class="t-key">CLAUDE.md</span>                  <span class="t-commit">← platform context (&lt;1500 tokens)</span>
+├── <span class="t-key">features.md</span>                <span class="t-commit">← live feature status + audit col</span>
+├── <span class="t-key">progress.md</span>                <span class="t-commit">← checkpoint + session summaries</span>
+├── .gitignore                 <span class="t-ignore">← excludes Temp/, session.lock</span>
+│
+├── <span class="t-dir">SRC/</span>                       <span class="t-commit">✅ committed</span>
+│   ├── <span class="t-file">auth_login.py</span>
+│   ├── <span class="t-file">auth_signup.py</span>
+│   └── <span class="t-file">dashboard_analytics.py</span>
+│
+├── <span class="t-dir">TestCases/</span>                 <span class="t-commit">✅ committed</span>
+│   ├── <span class="t-file">test_auth_login.py</span>
+│   ├── <span class="t-file">test_auth_signup.py</span>
+│   └── <span class="t-file">test_dashboard_analytics.py</span>
+│
+├── <span class="t-dir">Results/</span>                   <span class="t-commit">✅ committed</span>
+│   ├── <span class="t-file">auth_login_results.json</span>
+│   ├── <span class="t-file">auth_login_demo.mp4</span>
+│   └── <span class="t-file">summary_report.json</span>
+│
+└── <span class="t-dir">Temp/</span>                      <span class="t-ignore">🚫 gitignored — never committed</span>
+    ├── <span class="t-file">batch_20260329_plan.md</span>
+    └── <span class="t-file">debug_output.txt</span>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div class="card card-green">
+        <h3>File Naming Convention</h3>
+        <table style="margin-top:8px">
+          <thead><tr><th>Type</th><th>Pattern</th></tr></thead>
+          <tbody>
+            <tr><td>Source</td><td class="td-code">{feature}_{subfeature}.py</td></tr>
+            <tr><td>Test file</td><td class="td-code">test_{feature}_{subfeature}.py</td></tr>
+            <tr><td>Positive test fn</td><td class="td-code">test_{f}_{s}_positive()</td></tr>
+            <tr><td>Negative test fn</td><td class="td-code">test_{f}_{s}_negative()</td></tr>
+            <tr><td>Edge test fn</td><td class="td-code">test_{f}_{s}_edge()</td></tr>
+            <tr><td>Results</td><td class="td-code">{feature}_{sub}_results.json</td></tr>
+            <tr><td>Video</td><td class="td-code">{feature}_{sub}_demo.mp4</td></tr>
+            <tr><td>Branch</td><td class="td-code">feature/{feature}-{subfeature}</td></tr>
+            <tr><td>Commit</td><td class="td-code">feat({feature}): desc [PF]</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card card-red">
+        <h3>What NEVER Gets Committed</h3>
+        <p style="font-size:13px;margin-top:6px">
+          <code>Temp/</code> · <code>*.log</code> · <code>__pycache__</code> · <code>session.lock</code> · <code>.env</code> · <code>node_modules/</code> · <code>.venv/</code>
+        </p>
+        <p style="font-size:12px;color:#7f1d1d;margin-top:8px">AGENT_WORKFLOW.md explicitly forbids staging these. Docker sandboxing ensures even a rogue command can't affect the host beyond /workspace.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ══ DEPLOYMENT ════════════════════════════════════════════ -->
+<section id="deployment">
+  <div class="section-label">Ops</div>
+  <h2>Deployment</h2>
+  <p class="section-sub">Three things to set up. All are set-and-forget after initial configuration.</p>
+
+  <div class="deploy-grid">
+    <div class="deploy-card dc-win">
+      <div class="deploy-card-header">💻 Windows Localhost</div>
+      <div class="deploy-card-body">
+        <div class="deploy-item"><div>
+          <div class="di-name">Prevent Sleep</div>
+          <div class="di-cmd">powercfg /change standby-timeout-ac 0</div>
+        </div></div>
+        <div class="deploy-item"><div>
+          <div class="di-name">SSH Key for GitHub</div>
+          <div class="di-cmd">ssh-keygen -t ed25519 -C "productfactory"<br>→ add pub key to GitHub SSH settings</div>
+        </div></div>
+        <div class="deploy-item"><div>
+          <div class="di-name">Install Poller as Windows Service (NSSM)</div>
+          <div class="di-cmd">nssm install ProductFactoryPoller python poller.py<br>nssm set ProductFactoryPoller AppRestartDelay 10000<br>Windows Active Hours: set to 24h window to prevent reboot mid-session<br>Settings → Windows Update → Active Hours → 12:00 AM – 11:59 PM</div>
+        </div></div>
+        <div class="deploy-item"><div>
+          <div class="di-name">Environment Variables</div>
+          <div class="di-cmd">PM_API_URL · ALERT_WEBHOOK_URL<br><span style="color:#6ee7b7">No ANTHROPIC_API_KEY needed — MAX plan uses OAuth</span></div>
+        </div></div>
+      </div>
+    </div>
+
+    <div class="deploy-card dc-vm">
+      <div class="deploy-card-header">🖥️ Ubuntu VM (always-on)</div>
+      <div class="deploy-card-body">
+        <div class="deploy-item"><div>
+          <div class="di-name">PostgreSQL 16</div>
+          <div class="di-cmd">apt install postgresql-16 &amp;&amp; createdb productfactory</div>
+        </div></div>
+        <div class="deploy-item"><div>
+          <div class="di-name">PM Website (systemd, port 8080)</div>
+          <div class="di-cmd">productfactory-web.service → uvicorn main:app<br>HTTPS required (self-signed cert + HTTP Basic Auth) · never expose on HTTP<br>Nginx reverse proxy in front: TLS termination + rate limiting</div>
+        </div></div>
+        <div class="deploy-item"><div>
+          <div class="di-name">Firewall — allow poller IP only</div>
+          <div class="di-cmd">ufw allow from {windows_ip} to any port 8080</div>
+        </div></div>
+        <div class="deploy-item"><div>
+          <div class="di-name">Alert Webhook + Poller Heartbeat Monitor</div>
+          <div class="di-cmd">Sends Slack/email if poller offline or session stale &gt;2h</div>
+        </div></div>
+        <div class="deploy-item"><div>
+          <div class="di-name">DB Backups</div>
+          <div class="di-cmd">pg_dump daily via cron → off-VM storage (S3 bucket or Windows machine via scp)<br>Never store backup only on the same VM — VM loss = data loss</div>
+        </div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="deploy-card dc-docker" style="margin-top:16px">
+    <div class="deploy-card-header">🐳 Docker — Claude Sandbox (Fix #1)</div>
+    <div class="deploy-card-body">
+      <div class="deploy-item"><div>
+        <div class="di-name">Install Docker Desktop on Windows</div>
+        <div class="di-cmd">Download from docker.com → enable WSL2 backend</div>
+      </div></div>
+      <div class="deploy-item"><div>
+        <div class="di-name">Build agent image (once)</div>
+        <div class="di-cmd">docker build -t productfactory-agent ./deploy/docker/</div>
+      </div></div>
+      <div class="deploy-item"><div>
+        <div class="di-name">Poller launches Claude per session (MAX plan)</div>
+        <div class="di-cmd">docker run --rm \<br>&nbsp;&nbsp;--network productfactory-net \<br>&nbsp;&nbsp;--add-host pm-api:{ubuntu_vm_ip} \<br>&nbsp;&nbsp;--memory 4g --cpus 2 \<br>&nbsp;&nbsp;-v {working_dir}:/workspace \<br>&nbsp;&nbsp;-v C:/Users/digvi/.ssh:/root/.ssh:ro \<br>&nbsp;&nbsp;-v C:/Users/digvi/.claude:/root/.claude:ro \<br>&nbsp;&nbsp;-e PM_API_URL \<br>&nbsp;&nbsp;productfactory-agent \<br>&nbsp;&nbsp;claude --dangerously-skip-permissions -p "{prompt}"<br><br><span style="color:#6ee7b7">MAX plan: mount ~/.claude read-only (OAuth session — no write needed)<br>API plan: replace ~/.claude mount with -e ANTHROPIC_API_KEY=sk-...<br>Network: isolated bridge — only PM API host + GitHub egress allowed<br>docker network create --driver bridge --internal productfactory-net</span></div>
+      </div></div>
+      <div class="deploy-item"><div>
+        <div class="di-name">Container security</div>
+        <div class="di-cmd">--network productfactory-net (isolated bridge — NOT --network host) · --memory 4g · --cpus 2<br>No --privileged · no host process access · ~/.claude mounted :ro · per-repo deploy keys<br>WSL2 .wslconfig: memory=6GB · swap=2GB (24/7 Docker — prevents memory pressure)</div>
+      </div></div>
+      <div class="deploy-item" style="background:#ecfdf5">
+        <div style="width:100%">
+          <div class="di-name" style="color:#065f46">⚠️ MAX Plan — OAuth Token Expiry</div>
+          <p style="font-size:12px;color:#047857;margin:4px 0">OAuth sessions expire. Poller must check auth before every Docker launch:</p>
+          <div class="di-cmd" style="display:block;white-space:pre">subprocess.run(['claude','-p','ping','--max-tokens','1'], timeout=30)
+# Makes an ACTUAL API call — catches expired OAuth (--version always passes even when logged out)
+# returncode != 0 → alert PM: "Run 'claude' in terminal to re-login"
+# Poller skips cycle and retries next poll — no hang in container</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:20px">
+    <h3>ProductFactory Repo Structure (the factory itself)</h3>
+    <div style="margin-top:12px;display:grid;grid-template-columns:repeat(5,1fr);gap:12px;font-size:13px">
+      <div><div style="font-weight:600;color:var(--dark);margin-bottom:5px">📁 db/</div><div style="color:var(--slate)">migrations/, schema.sql</div></div>
+      <div><div style="font-weight:600;color:var(--dark);margin-bottom:5px">📁 website/</div><div style="color:var(--slate)">FastAPI, templates, REST API</div></div>
+      <div><div style="font-weight:600;color:var(--dark);margin-bottom:5px">📁 orchestrator/</div><div style="color:var(--slate)">poller.py, setup_product.py, prompts/</div></div>
+      <div><div style="font-weight:600;color:var(--dark);margin-bottom:5px">📁 deploy/</div><div style="color:var(--slate)">docker/, systemd/, install scripts</div></div>
+      <div><div style="font-weight:600;color:var(--dark);margin-bottom:5px">📁 templates/</div><div style="color:var(--slate)">AGENT_WORKFLOW.md, CLAUDE.md, ARCHITECTURE.md starters</div></div>
+    </div>
+  </div>
+
+  <div class="card card-blue" style="margin-top:16px">
+    <h3>Build Sequence</h3>
+    <table style="margin-top:10px">
+      <thead><tr><th>#</th><th>Phase</th><th>Key deliverable</th></tr></thead>
+      <tbody>
+        <tr><td class="td-bold">1</td><td>ProductDB schema + migrations</td><td><code>db/schema.sql</code> with all 6 tables including depends_on, fix_attempts, tokens · Alembic for all schema changes (never hand-edit live schema)</td></tr>
+        <tr><td class="td-bold">2</td><td>PM Website + REST API</td><td>FastAPI app, kanban UI, feature CRUD, progress.md viewer</td></tr>
+        <tr><td class="td-bold">3</td><td>Template files</td><td>AGENT_WORKFLOW.md, CLAUDE.md, ARCHITECTURE.md starters per tech stack</td></tr>
+        <tr><td class="td-bold">4</td><td>Docker agent image</td><td>Dockerfile with Claude Code CLI, Python, Node, git, pip-audit, npm</td></tr>
+        <tr><td class="td-bold">5</td><td>Poller + heartbeat + alerts</td><td>poller.py: poll, lock, launch Docker, monitor, reset stuck, alert</td></tr>
+        <tr><td class="td-bold">6</td><td>Deploy scripts</td><td>NSSM config (Windows), systemd services (Ubuntu), install.sh</td></tr>
+        <tr><td class="td-bold">7</td><td>First product onboarding + test run</td><td>One real product, one feature, end-to-end validation</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ══ BROWNFIELD ════════════════════════════════════════════ -->
+<section id="brownfield">
+  <div class="section-label" style="color:#ea580c">Existing Codebases</div>
+  <h2>Brownfield Support</h2>
+  <p class="section-sub">Brownfield = existing codebase with history, tests, architecture, and conventions already in place. ProductFactory needs to <em>extend</em> it — not overwrite it. Five things are fundamentally different from greenfield.</p>
+
+  <!-- COMPARE TABLE -->
+  <div class="bf-compare" style="margin-bottom:24px">
+    <div class="bf-col bf-green">
+      <div class="bf-col-header">🌱 Greenfield</div>
+      <div class="bf-row"><div class="bf-row-label">Starting state</div><div class="bf-row-val">Empty repo, PM writes README.md</div></div>
+      <div class="bf-row"><div class="bf-row-label">ARCHITECTURE.md</div><div class="bf-row-val">Claude generates after first batch · PM reviews</div></div>
+      <div class="bf-row"><div class="bf-row-label">Directory structure</div><div class="bf-row-val">ProductFactory standard (SRC/ TestCases/ Results/)</div></div>
+      <div class="bf-row"><div class="bf-row-label">Test baseline</div><div class="bf-row-val">No existing tests — start fresh</div></div>
+      <div class="bf-row"><div class="bf-row-label">First Claude session</div><div class="bf-row-val">Implement features immediately</div></div>
+      <div class="bf-row"><div class="bf-row-label">Dependency constraint</div><div class="bf-row-val">Claude chooses freely</div></div>
+      <div class="bf-row"><div class="bf-row-label">Scope of changes</div><div class="bf-row-val">All new files — nothing to break</div></div>
+      <div class="bf-row"><div class="bf-row-label">PM onboarding</div><div class="bf-row-val">Push README → register → approve features</div></div>
+    </div>
+    <div class="bf-col bf-orange">
+      <div class="bf-col-header">🏗️ Brownfield</div>
+      <div class="bf-row"><div class="bf-row-label">Starting state</div><div class="bf-row-val diff">Existing repo with code, tests, history</div></div>
+      <div class="bf-row"><div class="bf-row-label">ARCHITECTURE.md</div><div class="bf-row-val diff">Claude generates from codebase — PM reviews before work begins</div></div>
+      <div class="bf-row"><div class="bf-row-label">Directory structure</div><div class="bf-row-val diff">Existing structure preserved — mapped in product_config.json</div></div>
+      <div class="bf-row"><div class="bf-row-label">Test baseline</div><div class="bf-row-val diff">All existing tests must still pass after every feature</div></div>
+      <div class="bf-row"><div class="bf-row-label">First Claude session</div><div class="bf-row-val diff">Analysis Run first — then features</div></div>
+      <div class="bf-row"><div class="bf-row-label">Dependency constraint</div><div class="bf-row-val diff">Must be compatible with existing lock file</div></div>
+      <div class="bf-row"><div class="bf-row-label">Scope of changes</div><div class="bf-row-val diff">Feature files only — no unrequested changes to existing code</div></div>
+      <div class="bf-row"><div class="bf-row-label">PM onboarding</div><div class="bf-row-val diff">Push repo → register → trigger Analysis Run → review → approve features</div></div>
+    </div>
+  </div>
+
+  <!-- THE 5 ADDITIONS -->
+  <h3 style="margin-bottom:16px;font-size:18px">Five Additions for Brownfield</h3>
+
+  <!-- 1: ANALYSIS RUN -->
+  <div class="card" style="margin-bottom:16px;border-left:4px solid #ea580c">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+      <span style="font-size:22px">🔬</span>
+      <div>
+        <h3 style="margin:0">1 — Analysis Run (one-time)</h3>
+        <p style="font-size:12px;color:var(--slate);margin:2px 0 0">Runs once before any feature work. Special Claude session that learns the codebase.</p>
+      </div>
+      <span style="margin-left:auto;font-size:11px;font-weight:700;background:var(--orange-lt);color:var(--orange);border:1px solid var(--orange-bd);padding:3px 10px;border-radius:10px;white-space:nowrap">PM triggers from website</span>
+    </div>
+
+    <div class="phase-steps">
+      <div class="phase-step">
+        <div class="phase-left"><div class="phase-dot orange">📂</div><div class="phase-line"></div></div>
+        <div class="phase-content">
+          <div class="phase-header"><span class="phase-title">Explore Codebase Structure</span><span class="phase-tag ptag-once">Once</span></div>
+          <div class="phase-body">
+            <ul>
+              <li>Walk directory tree — identify source, test, config, build file locations</li>
+              <li>Read <code>package.json</code> / <code>requirements.txt</code> / <code>pyproject.toml</code> — record all existing deps</li>
+              <li>Read <code>git log --oneline -20</code> — understand recent activity</li>
+              <li>Identify test runner, test naming convention, existing test count</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="phase-step">
+        <div class="phase-left"><div class="phase-dot orange">🧪</div><div class="phase-line"></div></div>
+        <div class="phase-content">
+          <div class="phase-header"><span class="phase-title">Run Existing Test Suite — Record Baseline</span><span class="phase-tag ptag-once">Once</span></div>
+          <div class="phase-body">
+            <ul>
+              <li>Run full test suite. Record: passed, failed, skipped counts</li>
+              <li>Write baseline to <code>product_config.json</code> → <code>baseline_tests</code></li>
+              <li>If baseline has failures: flag them in ARCHITECTURE.md as "Pre-existing failures — do not fix unless asked"</li>
+            </ul>
+            <div class="phase-note">This baseline becomes the pass bar for all future features. A new feature is only Committed if: new tests pass AND existing test count does not decrease.</div>
+          </div>
+        </div>
+      </div>
+      <div class="phase-step">
+        <div class="phase-left"><div class="phase-dot orange">🏛️</div><div class="phase-line"></div></div>
+        <div class="phase-content">
+          <div class="phase-header"><span class="phase-title">Generate ARCHITECTURE.md from Code</span><span class="phase-tag ptag-once">Once</span></div>
+          <div class="phase-body">
+            <ul>
+              <li>Read 10–15 representative source files across the codebase</li>
+              <li>Document: data access pattern, error handling format, naming conventions, module structure, auth approach, logging style</li>
+              <li>Cite concrete examples: <code>"Auth uses JWT via middleware/auth.py:32"</code></li>
+              <li>Mark any inconsistencies: <code>"Two error formats found — use {code, message} (majority pattern)"</code></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="phase-step">
+        <div class="phase-left"><div class="phase-dot orange">⚙️</div><div class="phase-line"></div></div>
+        <div class="phase-content">
+          <div class="phase-header"><span class="phase-title">Write product_config.json</span><span class="phase-tag ptag-once">Once</span></div>
+          <div class="phase-body">
+            <ul>
+              <li>Map source dirs, test dirs, new feature paths, test command, audit command</li>
+              <li>Record baseline test counts</li>
+              <li>Commit <code>ARCHITECTURE.md</code> + <code>product_config.json</code> + <code>features.md</code> (existing features catalogued as ✅ Pushed)</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="phase-step">
+        <div class="phase-left"><div class="phase-dot orange">👤</div></div>
+        <div class="phase-content">
+          <div class="phase-header"><span class="phase-title">PM Reviews ARCHITECTURE.md</span><span class="phase-tag ptag-once">PM Action</span></div>
+          <div class="phase-body">
+            <ul>
+              <li>PM reads the generated ARCHITECTURE.md — correct any misunderstandings</li>
+              <li>PM marks Analysis as "Reviewed" on website → unlocks feature approval</li>
+              <li>No features can be approved until Analysis is reviewed</li>
+            </ul>
+            <div class="phase-note">If PM skips this review, Claude may base all future work on misunderstood patterns. This gate is enforced by the PM website — Approve button is disabled until Analysis = Reviewed.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2: PATH MAPPING -->
+  <div class="card" style="margin-bottom:16px;border-left:4px solid #ea580c">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+      <span style="font-size:22px">🗺️</span>
+      <div>
+        <h3 style="margin:0">2 — Path Mapping via product_config.json</h3>
+        <p style="font-size:12px;color:var(--slate);margin:2px 0 0">Existing apps don't follow ProductFactory's SRC/TestCases/Results layout. product_config.json tells Claude where everything is.</p>
+      </div>
+    </div>
+    <div class="bf-grid">
+      <div class="config-block">
+<span class="cm">// product_config.json — brownfield example</span>
+{
+  <span class="ck">"type"</span>: <span class="cv">"brownfield"</span>,
+
+  <span class="cm">// where existing source code lives</span>
+  <span class="ck">"source_paths"</span>: [<span class="cv">"app/"</span>, <span class="cv">"lib/"</span>],
+
+  <span class="cm">// where existing tests live</span>
+  <span class="ck">"test_paths"</span>: [<span class="cv">"tests/"</span>, <span class="cv">"spec/"</span>],
+
+  <span class="cm">// where Claude adds NEW feature source files</span>
+  <span class="ck">"new_feature_source"</span>: <span class="cv">"app/features/"</span>,
+
+  <span class="cm">// where Claude adds NEW feature test files</span>
+  <span class="ck">"new_feature_tests"</span>: <span class="cv">"tests/features/"</span>,
+
+  <span class="cm">// results always go here (can be anywhere)</span>
+  <span class="ck">"results_path"</span>: <span class="cv">"Results/"</span>,
+
+  <span class="cm">// commands to run</span>
+  <span class="ck">"test_command"</span>:  <span class="cv">"pytest tests/ -v --json-report"</span>,
+  <span class="ck">"audit_command"</span>: <span class="cv">"pip-audit"</span>,
+
+  <span class="cm">// baseline recorded during Analysis Run</span>
+  <span class="ck">"baseline_tests"</span>: {
+    <span class="ck">"passed"</span>:   <span class="cv">127</span>,
+    <span class="ck">"failed"</span>:   <span class="cv">0</span>,
+    <span class="ck">"skipped"</span>:  <span class="cv">3</span>,
+    <span class="ck">"recorded"</span>: <span class="cv">"2026-03-29"</span>
+  }
+}
+      </div>
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <div class="card card-orange">
+          <h3>Greenfield product_config.json</h3>
+          <div class="config-block" style="margin-top:10px;font-size:11px">
+{
+  <span class="ck">"type"</span>: <span class="cv">"greenfield"</span>,
+  <span class="ck">"new_feature_source"</span>: <span class="cv">"SRC/"</span>,
+  <span class="ck">"new_feature_tests"</span>:  <span class="cv">"TestCases/"</span>,
+  <span class="ck">"results_path"</span>:        <span class="cv">"Results/"</span>,
+  <span class="ck">"test_command"</span>:  <span class="cv">"pytest TestCases/ -v"</span>,
+  <span class="ck">"audit_command"</span>: <span class="cv">"pip-audit"</span>
+}
+          </div>
+          <p style="font-size:12px;color:var(--slate);margin-top:8px">Greenfield uses ProductFactory defaults. Scaffolded automatically by poller on first run.</p>
+        </div>
+        <div class="card">
+          <h3>Rule: Claude reads product_config.json before writing any file</h3>
+          <p style="font-size:13px;color:var(--mid);margin-top:6px">New source files go to <code>new_feature_source</code>. New test files go to <code>new_feature_tests</code>. Claude never writes to existing source_paths directly unless the feature explicitly requires modifying an existing file.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3: BASELINE TEST GATE -->
+  <div class="card" style="margin-bottom:16px;border-left:4px solid #ea580c">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+      <span style="font-size:22px">🛡️</span>
+      <div>
+        <h3 style="margin:0">3 — Baseline Test Gate</h3>
+        <p style="font-size:12px;color:var(--slate);margin:2px 0 0">A feature is only Committed if it passes its own tests AND does not break any existing tests.</p>
+      </div>
+    </div>
+    <div class="bf-grid">
+      <div>
+        <p style="font-size:13px;margin-bottom:12px">Claude runs the <strong>full test suite</strong> (not just new tests) after implementing each feature. The pass condition is:</p>
+        <div class="config-block">
+<span class="cm"># Pass condition for brownfield</span>
+new_tests_passed == True
+AND
+current_passing &gt;= baseline_tests.passed
+        </div>
+        <p style="font-size:13px;margin-top:12px">If a new feature causes any existing test to fail:</p>
+        <ul style="font-size:13px;margin:8px 0 0 20px">
+          <li>Claude attempts to fix the regression (counts as one of the 3 fix attempts)</li>
+          <li>If unfixable → status → <span class="status-badge s-blocked">Blocked</span></li>
+          <li>Blocked reason in <code>progress.md</code>: "Caused regression in test_X — see Results/regression_report.json"</li>
+        </ul>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div class="card card-green">
+          <h3>✅ Greenfield test rule</h3>
+          <p style="font-size:13px;color:var(--mid);margin-top:6px">Run <code>TestCases/test_{feature}_{sub}.py</code> only. No existing tests to break.</p>
+        </div>
+        <div class="card card-orange">
+          <h3>🏗️ Brownfield test rule</h3>
+          <p style="font-size:13px;color:var(--mid);margin-top:6px">Run <strong>full suite</strong> every time. New tests + all existing tests must pass. Baseline count must not decrease.</p>
+        </div>
+        <div class="card" style="background:#fefce8;border-color:#fef08a">
+          <h3>Pre-existing failures</h3>
+          <p style="font-size:13px;color:var(--mid);margin-top:6px">If baseline has failures (recorded during Analysis), those are excluded from the gate. Claude must not make them worse but is not responsible for fixing them unless asked.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4: SCOPE BOUNDARY -->
+  <div class="card" style="margin-bottom:16px;border-left:4px solid #ea580c">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+      <span style="font-size:22px">🔒</span>
+      <div>
+        <h3 style="margin:0">4 — Scope Boundary</h3>
+        <p style="font-size:12px;color:var(--slate);margin:2px 0 0">Claude must not touch files outside the feature's scope — no unrequested refactoring, no "while I'm here" fixes.</p>
+      </div>
+    </div>
+    <div class="bf-grid">
+      <div>
+        <p style="font-size:13px;margin-bottom:10px">Before committing, Claude checks its own diff:</p>
+        <div class="config-block">
+<span class="cm"># Allowed changes in brownfield</span>
+app/features/{feature}_{sub}.py   <span class="cv">← new file ✅</span>
+tests/features/test_{f}_{s}.py    <span class="cv">← new file ✅</span>
+features.md                        <span class="cv">← always ✅</span>
+progress.md                        <span class="cv">← always ✅</span>
+Results/{f}_{s}_results.json       <span class="cv">← always ✅</span>
+
+<span class="cm"># Requires justification in progress.md</span>
+app/existing_module.py             <span class="cv">← modified ⚠️</span>
+requirements.txt                   <span class="cv">← modified ⚠️</span>
+
+<span class="cm"># Never touch</span>
+*.lock · migration files           <span class="cv">← blocked 🚫</span>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div class="card card-orange">
+          <h3>If modification of existing file is unavoidable</h3>
+          <p style="font-size:13px;color:var(--mid);margin-top:6px">Claude writes to <code>progress.md</code> before touching the file:</p>
+          <p style="font-family:monospace;font-size:12px;background:#1e293b;color:#6ee7b7;padding:8px;border-radius:6px;margin-top:6px">
+            ⚠️ Must modify app/auth.py<br>
+            Reason: feature requires new OAuth scope<br>
+            Change: add scope param to validate_token()
+          </p>
+        </div>
+        <div class="card card-orange">
+          <h3>New dependencies</h3>
+          <p style="font-size:13px;color:var(--mid);margin-top:6px">Claude checks existing <code>requirements.txt</code> / <code>package.json</code> first. If the needed package is not already present, Claude notes it in <code>progress.md</code> and flags to PM before installing. New deps must not conflict with existing lock file versions.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5: BROWNFIELD AGENT WORKFLOW -->
+  <div class="card" style="margin-bottom:16px;border-left:4px solid #ea580c">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+      <span style="font-size:22px">🔄</span>
+      <div>
+        <h3 style="margin:0">5 — Updated Agent Workflow for Brownfield</h3>
+        <p style="font-size:12px;color:var(--slate);margin:2px 0 0">Two additional steps inserted before implementation. Everything else is the same as greenfield.</p>
+      </div>
+    </div>
+
+    <div class="bf-compare" style="border-radius:8px">
+      <div class="bf-col bf-green">
+        <div class="bf-col-header">🌱 Greenfield startup</div>
+        <div class="bf-row"><div class="bf-row-label">Step 1</div><div class="bf-row-val">Read README + ARCHITECTURE + CLAUDE + progress</div></div>
+        <div class="bf-row"><div class="bf-row-label">Step 2</div><div class="bf-row-val">Plan batch → implement</div></div>
+        <div class="bf-row" style="background:var(--light)"><div class="bf-row-label">Step 3</div><div class="bf-row-val">Write tests → run new tests only</div></div>
+        <div class="bf-row"><div class="bf-row-label">Step 4</div><div class="bf-row-val">pip-audit → verify spec → commit</div></div>
+      </div>
+      <div class="bf-col bf-orange">
+        <div class="bf-col-header">🏗️ Brownfield startup</div>
+        <div class="bf-row"><div class="bf-row-label">Step 1</div><div class="bf-row-val">Read README + ARCHITECTURE + CLAUDE + <strong>product_config.json</strong> + progress</div></div>
+        <div class="bf-row" style="background:#fff7ed"><div class="bf-row-label diff">Step 1b (NEW)</div><div class="bf-row-val diff">Read git log — understand recent changes. Identify files touched in last 10 commits.</div></div>
+        <div class="bf-row" style="background:#fff7ed"><div class="bf-row-label diff">Step 1c (NEW)</div><div class="bf-row-val diff">Run full test suite → verify baseline still holds before touching anything.</div></div>
+        <div class="bf-row"><div class="bf-row-label">Step 2</div><div class="bf-row-val">Plan batch → implement into <strong>new_feature_source</strong> path</div></div>
+        <div class="bf-row" style="background:#fff7ed"><div class="bf-row-label diff">Step 3</div><div class="bf-row-val diff">Write tests → run <strong>full suite</strong> (new + existing). Both must pass.</div></div>
+        <div class="bf-row"><div class="bf-row-label">Step 4</div><div class="bf-row-val">pip-audit → scope check → verify spec → commit</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- DB + WEBSITE ADDITIONS -->
+  <h3 style="margin:24px 0 12px;font-size:17px">DB Schema Additions for Brownfield</h3>
+  <div class="config-block" style="margin-bottom:20px">
+<span class="cm">-- Full products table (greenfield + brownfield + auto-discovery)</span>
+CREATE TABLE products (
+  id               SERIAL PRIMARY KEY,
+  working_dir      TEXT NOT NULL UNIQUE,   <span class="cm">-- only field PM enters</span>
+  name             TEXT,                   <span class="cm">-- discovered from README.md heading</span>
+  github_repo      TEXT,                   <span class="cm">-- discovered from git remote</span>
+  description      TEXT,                   <span class="cm">-- discovered from ## Vision</span>
+  tech_stack       TEXT[],                 <span class="cm">-- discovered from files</span>
+  test_command     TEXT,                   <span class="cm">-- inferred from tech stack</span>
+  audit_command    TEXT,                   <span class="cm">-- inferred from tech stack</span>
+  type             TEXT DEFAULT <span class="cv">'greenfield'</span>
+                   CHECK (type IN (<span class="cv">'greenfield'</span>, <span class="cv">'brownfield'</span>)),
+  status           TEXT DEFAULT <span class="cv">'registered'</span>
+                   CHECK (status IN (
+                     <span class="cv">'registered'</span>,   <span class="cm">-- PM just added folder path</span>
+                     <span class="cv">'discovering'</span>,  <span class="cm">-- poller reading folder now</span>
+                     <span class="cv">'discovered'</span>,   <span class="cm">-- PM reviewing auto-populated details</span>
+                     <span class="cv">'ready'</span>,        <span class="cm">-- PM confirmed → eligible for queue</span>
+                     <span class="cv">'paused'</span>        <span class="cm">-- PM manually paused</span>
+                   )),
+  analysis_status  TEXT DEFAULT <span class="cv">'pending'</span>
+                   CHECK (analysis_status IN (<span class="cv">'pending'</span>,<span class="cv">'running'</span>,<span class="cv">'done'</span>,<span class="cv">'reviewed'</span>)),
+  config           JSONB,                  <span class="cm">-- stores product_config.json content</span>
+  last_run_at      TIMESTAMPTZ,            <span class="cm">-- used for fair round-robin queue</span>
+  created_at       TIMESTAMPTZ DEFAULT NOW()
+);
+
+<span class="cm">-- Features: track if feature touched existing files</span>
+ALTER TABLE features
+  ADD COLUMN touched_existing BOOLEAN DEFAULT FALSE,
+  ADD COLUMN regression_risk  TEXT;   <span class="cm">-- Claude notes any risk found</span>
+  </div>
+
+  <h3 style="margin-bottom:12px;font-size:17px">PM Website Additions for Brownfield</h3>
+  <div class="three-col">
+    <div class="card">
+      <h3>Product Onboarding Form</h3>
+      <ul style="font-size:13px;margin-top:8px;margin-left:16px">
+        <li><strong>Type toggle:</strong> Greenfield / Brownfield</li>
+        <li><strong>Analysis Run button</strong> (brownfield only) — triggers poller to launch analysis session</li>
+        <li><strong>Analysis status badge:</strong> Pending / Running / Done / Reviewed</li>
+        <li>Feature Approve button <strong>disabled</strong> until analysis = Reviewed</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Product Detail Page</h3>
+      <ul style="font-size:13px;margin-top:8px;margin-left:16px">
+        <li><strong>Baseline test count</strong> displayed: "127 passing as of 2026-03-29"</li>
+        <li><strong>View ARCHITECTURE.md</strong> link (GitHub raw)</li>
+        <li><strong>View product_config.json</strong> link</li>
+        <li>Scope boundary violations shown per feature</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Feature Board</h3>
+      <ul style="font-size:13px;margin-top:8px;margin-left:16px">
+        <li><strong>Existing features</strong> imported from Analysis as ✅ Pushed — PM has full inventory</li>
+        <li><strong>Regression risk badge</strong> on features that touched existing files</li>
+        <li><strong>Touched existing files</strong> indicator shown in PR description</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- SUMMARY -->
+  <div class="card card-orange" style="margin-top:20px">
+    <h3>Brownfield at a Glance</h3>
+    <table style="margin-top:10px">
+      <thead><tr><th>What's new</th><th>Where it lives</th><th>Who controls it</th></tr></thead>
+      <tbody>
+        <tr><td class="td-bold">Analysis Run</td><td>Special Claude session, one-time per product</td><td>PM triggers from website</td></tr>
+        <tr><td class="td-bold">product_config.json</td><td>Repo root, committed</td><td>Generated by Analysis Claude, editable by PM</td></tr>
+        <tr><td class="td-bold">ARCHITECTURE.md</td><td>Repo root, committed</td><td>Generated by Analysis Claude, reviewed + edited by PM</td></tr>
+        <tr><td class="td-bold">Baseline test gate</td><td>product_config.json + AGENT_WORKFLOW.md rule</td><td>Enforced automatically — no PM action needed</td></tr>
+        <tr><td class="td-bold">Scope boundary</td><td>AGENT_WORKFLOW.md rule + progress.md log</td><td>Claude self-enforces; violations visible in progress.md</td></tr>
+        <tr><td class="td-bold">Path mapping</td><td>product_config.json</td><td>Generated by Analysis, PM can override</td></tr>
+        <tr><td class="td-bold">Pre-existing failures</td><td>Noted in ARCHITECTURE.md, excluded from gate</td><td>PM decides if/when to fix them separately</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ══ RISK REGISTER ═══════════════════════════════════════════ -->
+<section id="risk-register">
+  <div class="section-label" style="color:#dc2626">Risk Register</div>
+  <h2>System Risk Register</h2>
+  <p class="section-sub">50 identified risks across 8 categories. Each risk has a severity rating (🔴 Critical · 🟠 High · 🟡 Medium · 🟢 Low) and a mitigation mapped to a design decision.</p>
+
+  <style>
+    .risk-table { width:100%; border-collapse:collapse; font-size:12px; margin-top:16px; }
+    .risk-table th { background:var(--dark); color:white; padding:8px 10px; text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; }
+    .risk-table td { padding:7px 10px; border-bottom:1px solid var(--border); vertical-align:top; }
+    .risk-table tr:hover td { background:#f8fafc; }
+    .risk-cat { font-weight:700; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; color:white; padding:3px 8px; border-radius:4px; white-space:nowrap; }
+    .rc-sec   { background:#7c3aed; }
+    .rc-auth  { background:#dc2626; }
+    .rc-data  { background:#d97706; }
+    .rc-agent { background:#0d9488; }
+    .rc-git   { background:#2563eb; }
+    .rc-sys   { background:#475569; }
+    .rc-ops   { background:#059669; }
+    .rc-state { background:#db2777; }
+  </style>
+
+  <table class="risk-table">
+    <thead>
+      <tr><th style="width:50px">ID</th><th style="width:60px">Sev</th><th style="width:90px">Category</th><th style="width:200px">Risk</th><th>Mitigation</th></tr>
+    </thead>
+    <tbody>
+      <!-- SECURITY -->
+      <tr><td>R-SEC1</td><td>🔴</td><td><span class="risk-cat rc-sec">Security</span></td><td>Container with --network host exposes all host ports to Claude</td><td>Use isolated Docker bridge network (productfactory-net). Only --add-host for PM API. No --network host.</td></tr>
+      <tr><td>R-SEC2</td><td>🔴</td><td><span class="risk-cat rc-sec">Security</span></td><td>Claude writes to ~/.claude (OAuth tokens, session state)</td><td>Mount ~/.claude as :ro (read-only). OAuth tokens never modified by container.</td></tr>
+      <tr><td>R-SEC3</td><td>🟠</td><td><span class="risk-cat rc-sec">Security</span></td><td>Primary SSH key exposed to all product containers</td><td>Generate per-repo GitHub deploy keys. Mount only the relevant key per container.</td></tr>
+      <tr><td>R-SEC4</td><td>🟠</td><td><span class="risk-cat rc-sec">Security</span></td><td>PM website exposed on HTTP with no auth</td><td>HTTPS required (nginx TLS termination). HTTP Basic Auth on all routes. Firewall: allow poller IP only on port 8080.</td></tr>
+      <tr><td>R-SEC5</td><td>🟠</td><td><span class="risk-cat rc-sec">Security</span></td><td>Secrets (API keys, webhook URLs) stored in plaintext DB or env files</td><td>Encryption key lives on Windows machine (poller side), not VM. Secrets encrypted at rest in DB.</td></tr>
+      <tr><td>R-SEC6</td><td>🟡</td><td><span class="risk-cat rc-sec">Security</span></td><td>Malicious dependency injected via npm/pip install</td><td>pip-audit / npm audit --audit-level=high after every package install. Block commit if vulnerabilities found.</td></tr>
+      <tr><td>R-SEC7</td><td>🟡</td><td><span class="risk-cat rc-sec">Security</span></td><td>Claude writes a file outside /workspace (path traversal)</td><td>Docker volume mount constrains writes to /workspace. No host bind mounts outside product dir.</td></tr>
+      <!-- AUTH -->
+      <tr><td>R-A1</td><td>🔴</td><td><span class="risk-cat rc-auth">Auth</span></td><td>claude --version passes even when OAuth session is expired</td><td>Auth check uses <code>claude -p "ping" --max-tokens 1</code> — actual API call. returncode != 0 → alert PM + skip cycle.</td></tr>
+      <tr><td>R-A2</td><td>🟠</td><td><span class="risk-cat rc-auth">Auth</span></td><td>OAuth token expires mid-session inside container</td><td>Token expiry inside container → Docker exits non-zero. Poller detects, alerts PM, does not update last_run_at.</td></tr>
+      <tr><td>R-A3</td><td>🟡</td><td><span class="risk-cat rc-auth">Auth</span></td><td>PM forgets to re-login; poller alert goes unnoticed</td><td>Alert webhook (Slack/email) + poller audit log. Auth failure increments a counter displayed on PM website.</td></tr>
+      <!-- DATA INTEGRITY -->
+      <tr><td>R-D1</td><td>🔴</td><td><span class="risk-cat rc-data">Data</span></td><td>DB is single point of failure; VM crash loses all state</td><td>features.md + progress.md committed to GitHub after every atomic step. DB can be fully rebuilt from GitHub history.</td></tr>
+      <tr><td>R-D2</td><td>🟠</td><td><span class="risk-cat rc-data">Data</span></td><td>DB backups stored on same VM — disk failure loses both</td><td>pg_dump via cron to off-VM storage: S3 or Windows machine via scp. Never local-only.</td></tr>
+      <tr><td>R-D3</td><td>🟠</td><td><span class="risk-cat rc-data">Data</span></td><td>Schema migration applied incorrectly corrupts production DB</td><td>All schema changes via Alembic migrations. Never hand-edit live schema. Test migration on dev DB first.</td></tr>
+      <tr><td>R-D4</td><td>🟡</td><td><span class="risk-cat rc-data">Data</span></td><td>product_config.json drift: file on disk differs from DB config JSONB</td><td>Poller reads product_config.json from repo at session start and syncs to DB. GitHub is the source of truth.</td></tr>
+      <tr><td>R-D5</td><td>🟡</td><td><span class="risk-cat rc-data">Data</span></td><td>features.md corrupted mid-write (crash during commit)</td><td>Git atomicity: commit is transactional. Partial write = uncommitted = ignored by next session.</td></tr>
+      <!-- AGENT BEHAVIOUR -->
+      <tr><td>R-AG1</td><td>🔴</td><td><span class="risk-cat rc-agent">Agent</span></td><td>Claude misunderstands feature spec and implements wrong thing</td><td>Verification Note required in progress.md: Claude re-reads feature description and confirms match in 2–3 sentences after tests pass.</td></tr>
+      <tr><td>R-AG2</td><td>🔴</td><td><span class="risk-cat rc-agent">Agent</span></td><td>Claude's context window fills mid-session; it hallucinates or loops</td><td>Batch cap (3 features). File token budgets. Graceful exit after 15+ source files read. progress.md as external memory.</td></tr>
+      <tr><td>R-AG3</td><td>🟠</td><td><span class="risk-cat rc-agent">Agent</span></td><td>Claude drifts architecturally between sessions (new patterns each time)</td><td>ARCHITECTURE.md read at every session start. 800-token cap with self-trimming. Never introduce new patterns without PM approval (in CLAUDE.md).</td></tr>
+      <tr><td>R-AG4</td><td>🟠</td><td><span class="risk-cat rc-agent">Agent</span></td><td>Claude modifies existing code outside assigned feature scope (brownfield)</td><td>Scope boundary rule in AGENT_WORKFLOW.md. Violations logged to progress.md. PM sees regression risk badge in UI.</td></tr>
+      <tr><td>R-AG5</td><td>🟠</td><td><span class="risk-cat rc-agent">Agent</span></td><td>Claude writes tests that only pass because they test the wrong thing</td><td>Required test types: positive + negative + edge. Verification Note confirms spec match. Coverage gate ≥70%.</td></tr>
+      <tr><td>R-AG6</td><td>🟡</td><td><span class="risk-cat rc-agent">Agent</span></td><td>Claude recommends AI-generated features that are low-quality or off-vision</td><td>AI-recommended features land as Pending — require explicit PM approval before any implementation begins.</td></tr>
+      <tr><td>R-AG7</td><td>🟡</td><td><span class="risk-cat rc-agent">Agent</span></td><td>ARCHITECTURE.md grows too large → overloads context on read</td><td>ARCHITECTURE.md hard cap ~800 tokens with self-trimming instruction. Claude condenses when it updates.</td></tr>
+      <tr><td>R-AG8</td><td>🟡</td><td><span class="risk-cat rc-agent">Agent</span></td><td>CLAUDE.md grows too large → overloads context on read</td><td>CLAUDE.md hard cap 1,500 tokens. PM edits must stay within cap.</td></tr>
+      <!-- GIT / GITHUB -->
+      <tr><td>R-G1</td><td>🔴</td><td><span class="risk-cat rc-git">Git</span></td><td>DB shows feature as Implementing but PR is already merged on GitHub</td><td>Poller runs GitHub PR reconciliation at session start: syncs merged PRs → DB status Pushed.</td></tr>
+      <tr><td>R-G2</td><td>🟠</td><td><span class="risk-cat rc-git">Git</span></td><td>PR backlog grows unbounded; main branch never gets updates</td><td>PR count gate: pause product if ≥3 open PRs unmerged. Alert PM to review.</td></tr>
+      <tr><td>R-G3</td><td>🟠</td><td><span class="risk-cat rc-git">Git</span></td><td>features.md committed on feature branch causes merge conflicts when PM merges</td><td>features.md updated on main branch ONLY. Feature branches never touch features.md.</td></tr>
+      <tr><td>R-G4</td><td>🟠</td><td><span class="risk-cat rc-git">Git</span></td><td>Push fails silently; Claude exits 0 and feature shows Pushed but isn't</td><td>Push failure → status Blocked with reason written to progress.md. Never silently exit 0 on push failure.</td></tr>
+      <tr><td>R-G5</td><td>🟠</td><td><span class="risk-cat rc-git">Git</span></td><td>Feature branch is stale; conflicts with main before PR opens</td><td>Claude fetches + rebases feature branch on main at session start and before push.</td></tr>
+      <tr><td>R-G6</td><td>🟡</td><td><span class="risk-cat rc-git">Git</span></td><td>PM reverts a merged feature; DB still shows Pushed</td><td>Reverted status added to feature lifecycle. PM sets manually. Re-approve to retry.</td></tr>
+      <tr><td>R-G7</td><td>🟡</td><td><span class="risk-cat rc-git">Git</span></td><td>git commit credentials missing in container (no user.email/user.name)</td><td>Docker image sets GIT_AUTHOR_NAME and GIT_COMMITTER_EMAIL via ENV in Dockerfile.</td></tr>
+      <!-- SYSTEM / INFRASTRUCTURE -->
+      <tr><td>R-SYS1</td><td>🟠</td><td><span class="risk-cat rc-sys">System</span></td><td>Windows machine reboots mid-session for Windows Update</td><td>Windows Active Hours set to 12 AM – 11:59 PM. NSSM auto-restarts poller after reboot. Heartbeat alert fires if poller offline.</td></tr>
+      <tr><td>R-SYS2</td><td>🟠</td><td><span class="risk-cat rc-sys">System</span></td><td>WSL2 OOM kill terminates Docker container mid-session</td><td>WSL2 .wslconfig: memory=6GB, swap=2GB. Docker --memory 4g cap per container. OOM = non-zero exit → poller detects.</td></tr>
+      <tr><td>R-SYS3</td><td>🟡</td><td><span class="risk-cat rc-sys">System</span></td><td>Multiple Claude containers launch for same product (race condition)</td><td>session.lock file with PID + container ID. Poller checks lock before launch. Stale lock (process dead) auto-removed.</td></tr>
+      <tr><td>R-SYS4</td><td>🟡</td><td><span class="risk-cat rc-sys">System</span></td><td>Ubuntu VM disk full (logs, pg_dump, backups)</td><td>Log rotation (logrotate). Backup retention policy: keep 7 days. Disk usage alert at 80%.</td></tr>
+      <tr><td>R-SYS5</td><td>🟡</td><td><span class="risk-cat rc-sys">System</span></td><td>PM website goes down; Claude cannot POST feature status updates</td><td>Claude retries 3× with exponential backoff. If API unavailable, writes pending updates to progress.md for poller to apply on next cycle.</td></tr>
+      <!-- SESSION STATE -->
+      <tr><td>R-S1</td><td>🔴</td><td><span class="risk-cat rc-state">State</span></td><td>Poller cannot determine which step to resume after crash</td><td>progress.md YAML front matter: resume_step + resume_feature_id + workflow_version. Written at every atomic step.</td></tr>
+      <tr><td>R-S2</td><td>🟠</td><td><span class="risk-cat rc-state">State</span></td><td>last_run_at updated before session starts → fair queue broken on crash</td><td>last_run_at updated ONLY on clean Docker exit (exit code 0). Crash = not updated = product re-queued at front.</td></tr>
+      <tr><td>R-S3</td><td>🟠</td><td><span class="risk-cat rc-state">State</span></td><td>Feature stuck in Implementing forever if Claude crashes without resetting</td><td>Poller auto-resets features in Implementing for >2h back to Approved. Configurable threshold.</td></tr>
+      <tr><td>R-S4</td><td>🟡</td><td><span class="risk-cat rc-state">State</span></td><td>Session State Summary in progress.md grows unbounded across sessions</td><td>Each new session rewrites the Summary section (not appends). Max 3 previous features summarised; older ones dropped.</td></tr>
+      <tr><td>R-S5</td><td>🟡</td><td><span class="risk-cat rc-state">State</span></td><td>progress.md has no schema version; old resume logic breaks after AGENT_WORKFLOW.md update</td><td>workflow_version field in YAML front matter. Poller checks version before resume; mismatch → fresh session.</td></tr>
+      <!-- OPERATIONS -->
+      <tr><td>R-OPS1</td><td>🟠</td><td><span class="risk-cat rc-ops">Ops</span></td><td>No audit trail of what poller did and when</td><td>Poller writes structured audit log (JSON lines): timestamp, product, action, exit_code, duration.</td></tr>
+      <tr><td>R-OPS2</td><td>🟠</td><td><span class="risk-cat rc-ops">Ops</span></td><td>PM has no visibility into what Claude is doing right now</td><td>PM website shows: current session feature, heartbeat timestamp, last progress.md push time, open PR count.</td></tr>
+      <tr><td>R-OPS3</td><td>🟡</td><td><span class="risk-cat rc-ops">Ops</span></td><td>Poller alert webhook fails silently (bad URL, rate limit)</td><td>Alert failures logged to audit log. Fallback to email if webhook returns non-2xx 3× in a row.</td></tr>
+      <tr><td>R-OPS4</td><td>🟡</td><td><span class="risk-cat rc-ops">Ops</span></td><td>Docker image becomes stale; Claude Code CLI version out of date</td><td>Weekly cron rebuilds agent image. New image tested with dry-run before replacing current.</td></tr>
+      <tr><td>R-OPS5</td><td>🟡</td><td><span class="risk-cat rc-ops">Ops</span></td><td>Encryption key (secrets) not backed up; lost on Windows reinstall</td><td>Encryption key backed up to secure off-machine location (password manager or encrypted USB). Rotation procedure documented.</td></tr>
+      <tr><td>R-OPS6</td><td>🟢</td><td><span class="risk-cat rc-ops">Ops</span></td><td>Runtime version mismatch: Claude installs Python 3.12 but product requires 3.11</td><td>runtime_version field in product_config.json. Docker image respects this via pyenv / nvm version selection.</td></tr>
+      <!-- BROWNFIELD SPECIFIC -->
+      <tr><td>R-BF1</td><td>🟠</td><td><span class="risk-cat rc-agent">Brownfield</span></td><td>Analysis Run misidentifies existing test count; baseline gate set wrong</td><td>Baseline recorded as JSON in product_config.json with date. PM must review and approve before Analysis Run marks status ready.</td></tr>
+      <tr><td>R-BF2</td><td>🟠</td><td><span class="risk-cat rc-agent">Brownfield</span></td><td>Claude modifies existing files to make new tests pass (regression risk)</td><td>Touched existing files tracked and shown in PR description + PM website badge. Scope boundary rule in AGENT_WORKFLOW.md.</td></tr>
+      <tr><td>R-BF3</td><td>🟡</td><td><span class="risk-cat rc-agent">Brownfield</span></td><td>Existing tests have pre-existing failures; baseline gate blocks all new features</td><td>Pre-existing failures documented in ARCHITECTURE.md and excluded from baseline count. PM decides separately.</td></tr>
+      <tr><td>R-BF4</td><td>🟡</td><td><span class="risk-cat rc-agent">Brownfield</span></td><td>product_config.json path mapping stale after PM restructures repo</td><td>PM must update product_config.json after any folder restructure. Website shows config last-updated date.</td></tr>
+      <tr><td>R-BF5</td><td>🟡</td><td><span class="risk-cat rc-agent">Brownfield</span></td><td>New dependency conflicts with existing lock file (requirements.txt or package-lock.json)</td><td>Claude must add to existing lock file, not regenerate it. pip-audit / npm audit run after install.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="card" style="margin-top:20px;border-left:4px solid var(--red)">
+    <h3>Risk Summary</h3>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:12px;text-align:center">
+      <div style="background:#fef2f2;border-radius:8px;padding:16px"><div style="font-size:28px;font-weight:800;color:#dc2626">8</div><div style="font-size:12px;color:#991b1b;font-weight:600">🔴 Critical</div></div>
+      <div style="background:#fff7ed;border-radius:8px;padding:16px"><div style="font-size:28px;font-weight:800;color:#d97706">20</div><div style="font-size:12px;color:#92400e;font-weight:600">🟠 High</div></div>
+      <div style="background:#fffbeb;border-radius:8px;padding:16px"><div style="font-size:28px;font-weight:800;color:#ca8a04">19</div><div style="font-size:12px;color:#713f12;font-weight:600">🟡 Medium</div></div>
+      <div style="background:#f0fdf4;border-radius:8px;padding:16px"><div style="font-size:28px;font-weight:800;color:#16a34a">3</div><div style="font-size:12px;color:#14532d;font-weight:600">🟢 Low</div></div>
+    </div>
+    <p style="font-size:12px;color:var(--slate);margin-top:12px">All Critical and High risks are mitigated by a specific design decision above. Medium and Low risks have operational procedures. No known unmitigated Critical risks remain.</p>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<div style="margin-top:60px;border-top:1px solid var(--border);padding:24px 0;text-align:center">
+  <p style="font-size:13px;color:var(--slate)">ProductFactory System Design · v1.2 Hardened · 2026-03-29</p>
+  <p style="font-size:12px;color:#94a3b8;margin-top:4px">8 failure modes fixed · Brownfield support added · 50 risks identified and mitigated · Validated against Devin, OpenHands, Cursor, Copilot Workspace · Ready to build</p>
+</div>
+
+</div><!-- /page -->
+</body>
+</html>

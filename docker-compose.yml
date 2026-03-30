@@ -1,0 +1,64 @@
+# ProductFactory — Infrastructure services
+# Runs: PostgreSQL + PM website
+# The poller runs natively on Windows (see deploy/windows/start_poller.ps1)
+#
+# Start:  docker compose up -d
+# Logs:   docker compose logs -f
+# Stop:   docker compose down
+# Reset:  docker compose down -v   (WARNING: deletes DB data)
+
+services:
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: ProductsFactoryDB
+    environment:
+      POSTGRES_USER: productfactory
+      POSTGRES_PASSWORD: ProductDBPassword
+      POSTGRES_DB: productfactory
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - pf-internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U productfactory -d productfactory"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ── PM Website (FastAPI) ─────────────────────────────────────────────────────
+  web:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.web
+    container_name: pm-api
+    environment:
+      # db resolves via pf-internal compose network
+      DATABASE_URL: postgresql+asyncpg://productfactory:ProductDBPassword@db:5432/productfactory
+      PM_USERNAME: admin
+      PM_PASSWORD: ProductDBPassword
+    ports:
+      - "8080:8080"     # exposed to Windows host: poller uses http://localhost:8080
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - pf-internal
+      - productfactory-net   # agent containers reach pm-api via host-gateway:8080
+    restart: unless-stopped
+
+networks:
+  # Internal compose network — db ↔ web only
+  pf-internal:
+    driver: bridge
+
+  # Agent isolation network — pre-created by deploy/docker/build.sh
+  productfactory-net:
+    external: true
+
+volumes:
+  postgres_data:
+    name: productfactory-postgres-data

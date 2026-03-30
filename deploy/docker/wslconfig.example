@@ -1,0 +1,21 @@
+# WSL2 memory configuration for 24/7 Docker use on Windows.
+# Copy to: C:\Users\digvi\.wslconfig  (your Windows user home)
+# Apply:   wsl --shutdown  (then restart Docker Desktop)
+#
+# Without this, WSL2 can consume all available RAM over time,
+# causing OOM kills of running Docker containers mid-session.
+
+[wsl2]
+# Cap WSL2 at 6 GB — leaves headroom for Windows + Docker overhead.
+# Increase if you have 32 GB RAM and run multiple containers.
+memory=6GB
+
+# Swap prevents OOM when a container spikes briefly above 4 GB.
+swap=2GB
+
+# Limits CPU cores WSL2 can use (optional — comment out to use all cores).
+# processors=4
+
+# Reclaims cached memory back to Windows when WSL2 is idle.
+# Requires Windows 11 22H2+ or WSB with kernel 5.15.93+.
+pageReporting=true

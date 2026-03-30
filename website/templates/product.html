@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block title %}{{ product.name or product.working_dir }} — ProductFactory{% endblock %}
+{% block content %}
+
+<!-- Header -->
+<div class="page-header">
+  <div>
+    <h1>{{ product.name or product.working_dir }}</h1>
+    <div class="product-meta" style="margin-top:6px">
+      <span class="badge badge-{{ product.type }}">{{ product.type }}</span>
+      <span class="badge badge-status-{{ product.status }}">{{ product.status }}</span>
+      {% if product.github_repo %}
+      <a href="{{ product.github_repo }}" target="_blank" class="gh-link">GitHub ↗</a>
+      {% endif %}
+      {% if open_prs > 0 %}
+      <span class="badge badge-prs {% if open_prs >= 3 %}badge-prs-warn{% endif %}">
+        {{ open_prs }} open PR{{ 's' if open_prs != 1 }}{% if open_prs >= 3 %} ⚠{% endif %}
+      </span>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="actions">
+    <a href="/product/{{ product.id }}/progress" class="btn btn-outline">📄 progress.md</a>
+
+    {% if product.status == 'ready' %}
+    <form method="post" action="/product/{{ product.id }}/pause" style="display:inline">
+      <button class="btn btn-outline">⏸ Pause</button>
+    </form>
+    {% elif product.status == 'paused' %}
+    <form method="post" action="/product/{{ product.id }}/resume" style="display:inline">
+      <button class="btn btn-green">▶ Resume</button>
+    </form>
+    {% endif %}
+
+    {% if product.type == 'brownfield' and product.analysis_status != 'running' and product.analysis_status != 'done' %}
+    <form method="post" action="/product/{{ product.id }}/trigger_analysis" style="display:inline">
+      <button class="btn btn-orange">🔬 Run Analysis</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Baseline test badge (brownfield) -->
+{% if product.config and product.config.baseline_tests %}
+<div class="baseline-bar">
+  Baseline: <strong>{{ product.config.baseline_tests.passed }} tests passing</strong>
+  as of {{ product.config.baseline_tests.recorded }}
+  · {{ product.config.test_command or '' }}
+</div>
+{% endif %}
+
+<!-- Analysis running notice -->
+{% if product.analysis_status == 'running' %}
+<div class="notice notice-blue">
+  🔬 Analysis Run in progress — Claude is reading the codebase and generating ARCHITECTURE.md.
+  Check progress.md for status.
+</div>
+{% endif %}
+
+<!-- Open PR gate warning -->
+{% if open_prs >= 3 %}
+<div class="notice notice-amber">
+  ⚠ This product has {{ open_prs }} open PRs. The poller is paused until PRs are merged.
+  <a href="{{ product.github_repo }}/pulls" target="_blank">Review PRs ↗</a>
+</div>
+{% endif %}
+
+
+<!-- KANBAN BOARD -->
+{% set columns = [
+  ('Pending',      's-pending',      'Awaiting PM review'),
+  ('Approved',     's-approved',     'Queued for Claude'),
+  ('Implementing', 's-implementing', 'Claude working on it'),
+  ('Blocked',      's-blocked',      'Needs PM attention'),
+  ('Pushed',       's-pushed',       'PR open on GitHub'),
+] %}
+
+<div class="kanban">
+  {% for col_status, col_class, col_hint in columns %}
+  <div class="kanban-col">
+    <div class="kanban-header {{ col_class }}" title="{{ col_hint }}">
+      {{ col_status }}
+      <span class="col-count">
+        {{ features | selectattr('status', 'equalto', col_status) | list | length }}
+      </span>
+    </div>
+
+    {% for f in features if f.status == col_status %}
+    <div class="feature-card {% if f.source == 'ai' %}fc-ai{% endif %}">
+      <div class="feature-name">{{ f.name }}</div>
+
+      {% if f.source == 'ai' %}
+      <span class="ai-badge">🤖 AI</span>
+      {% endif %}
+
+      {% if f.description %}
+      <div class="feature-desc">{{ f.description }}</div>
+      {% endif %}
+
+      {% if f.pr_url %}
+      <a href="{{ f.pr_url }}" target="_blank" class="pr-link">PR #{{ f.pr_number }} ↗</a>
+      {% endif %}
+
+      {% if f.blocked_reason %}
+      <div class="blocked-reason">⚠ {{ f.blocked_reason }}</div>
+      {% endif %}
+
+      {% if f.fix_attempts > 0 %}
+      <div class="fix-attempts">{{ f.fix_attempts }}/3 attempts used</div>
+      {% endif %}
+
+      <!-- PM status change dropdown -->
+      {% set allowed = pm_transitions.get(f.status, []) %}
+      {% if allowed %}
+      <form method="post"
+            action="/product/{{ product.id }}/features/{{ f.id }}/status"
+            class="status-form">
+        <select name="status" onchange="this.form.submit()">
+          <option value="" disabled selected>Move to…</option>
+          {% for next_status in allowed %}
+          <option value="{{ next_status }}">→ {{ next_status }}</option>
+          {% endfor %}
+        </select>
+      </form>
+      {% endif %}
+    </div>
+    {% else %}
+    <div class="kanban-empty">—</div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+</div>
+
+<!-- Rejected / Reverted (collapsed section) -->
+{% set archived = features | selectattr('status', 'in', ['Rejected', 'Reverted']) | list %}
+{% if archived %}
+<details class="archived-section">
+  <summary>Rejected / Reverted ({{ archived | length }})</summary>
+  <div style="margin-top:8px">
+    {% for f in archived %}
+    <div class="feature-card" style="opacity:0.6">
+      <div class="feature-name">{{ f.name }}
+        <span class="badge badge-status-{{ f.status | lower }}" style="font-size:10px">{{ f.status }}</span>
+      </div>
+      {% set allowed = pm_transitions.get(f.status, []) %}
+      {% if allowed %}
+      <form method="post"
+            action="/product/{{ product.id }}/features/{{ f.id }}/status"
+            class="status-form">
+        <select name="status" onchange="this.form.submit()">
+          <option value="" disabled selected>Restore…</option>
+          {% for next_status in allowed %}
+          <option value="{{ next_status }}">→ {{ next_status }}</option>
+          {% endfor %}
+        </select>
+      </form>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</details>
+{% endif %}
+
+
+<!-- ADD FEATURE FORM -->
+<div class="card" style="margin-top:28px">
+  <h3>Add Feature</h3>
+  <form method="post" action="/product/{{ product.id }}/features" class="feature-form">
+    <div class="form-row">
+      <input type="text" name="name" placeholder="Feature name (required)" required>
+      <input type="number" name="priority" value="50" min="1" max="100" title="Priority 1=highest 100=lowest" style="width:80px">
+    </div>
+    <textarea name="description"
+              placeholder="Description — what should be built, why, acceptance criteria"
+              rows="3"></textarea>
+    <button type="submit">Add Feature</button>
+  </form>
+</div>
+
+{% endblock %}

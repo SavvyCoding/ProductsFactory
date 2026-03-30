@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Products — ProductFactory{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>Products</h1>
+</div>
+
+<!-- Register product form -->
+<form method="post" action="/product/register" class="register-form">
+  <input type="text" name="working_dir"
+         placeholder="C:/path/to/product  or  /home/user/myapp"
+         required autocomplete="off">
+  <button type="submit">+ Register</button>
+</form>
+
+{% if products %}
+<div class="product-grid">
+  {% for p in products %}
+  <a href="/product/{{ p.id }}" class="product-card">
+    <div class="product-name">{{ p.name or p.working_dir.split('/')[-1] or p.working_dir }}</div>
+
+    <div class="product-meta">
+      <span class="badge badge-{{ p.type }}">{{ p.type }}</span>
+      <span class="badge badge-status-{{ p.status }}">{{ p.status }}</span>
+      {% if p.analysis_status == 'running' %}
+      <span class="badge badge-analysis">🔬 analysing</span>
+      {% endif %}
+    </div>
+
+    {% if p.tech_stack %}
+    <div class="product-stack">{{ p.tech_stack | join(' · ') }}</div>
+    {% endif %}
+
+    {% if p.last_run_at %}
+    <div class="product-last-run">Last session: {{ p.last_run_at.strftime('%Y-%m-%d %H:%M') }} UTC</div>
+    {% else %}
+    <div class="product-last-run muted">Never run</div>
+    {% endif %}
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">
+  <p>No products registered yet.</p>
+  <p>Enter the path to a product folder above. The folder must already have a git remote set up.</p>
+</div>
+{% endif %}
+
+{% endblock %}

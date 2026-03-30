@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}progress.md — {{ product.name or product.working_dir }}{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <div>
+    <h1>progress.md</h1>
+    <p class="muted" style="margin-top:4px">{{ product.name or product.working_dir }}</p>
+  </div>
+  <a href="/product/{{ product.id }}" class="btn btn-outline">← Back</a>
+</div>
+
+<div class="progress-viewer">
+  {% if content %}
+    <div class="md-body">{{ content | safe }}</div>
+  {% elif product.github_repo %}
+    <div class="empty-state">
+      <p>progress.md not found in this repo yet.</p>
+      <p class="muted">It will appear here once the first Claude session starts.</p>
+    </div>
+  {% else %}
+    <div class="empty-state">
+      <p>No GitHub repo configured for this product.</p>
+      <p class="muted">The poller will discover the GitHub remote automatically from the working directory.</p>
+    </div>
+  {% endif %}
+</div>
+
+{% endblock %}

@@ -1,0 +1,33 @@
+# ProductFactory — PM Website Image
+# Lightweight Python image for the FastAPI PM website.
+# Built by docker-compose, NOT the same as the agent image.
+#
+# Runs: uvicorn website.main:app
+
+FROM python:3.12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# libpq-dev + gcc needed to compile psycopg2-binary on some platforms
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev gcc curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python deps first (cached layer)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY website/   website/
+COPY templates/ templates/
+COPY db/        db/
+COPY alembic.ini .
+
+# Run Alembic migrations then start the server.
+# Using a shell entrypoint so migrations run on every container start —
+# safe because Alembic is idempotent (skips already-applied migrations).
+CMD ["sh", "-c", \
+     "alembic upgrade head && \
+      uvicorn website.main:app --host 0.0.0.0 --port 8080 --workers 2"]

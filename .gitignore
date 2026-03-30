@@ -1,0 +1,39 @@
+# Secrets — never commit these
+.env
+*.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+orchestrator/poller.log
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Alembic — don't ignore migrations, but ignore pycache inside
+db/migrations/__pycache__/
+
+# IDE
+.vscode/
+.idea/
+.claude/
+
+# Claude Code local settings
+.claude/

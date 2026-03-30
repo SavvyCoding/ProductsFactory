@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}ProductFactory{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <nav>
+    <a href="/" class="logo">Product<span>Factory</span></a>
+    <a href="/">Products</a>
+    {% if alert_count %}
+    <a href="/api/alerts/unread" class="nav-alerts">
+      ⚠ Alerts <span class="alert-badge">{{ alert_count }}</span>
+    </a>
+    {% endif %}
+  </nav>
+
+  {% if error %}
+  <div class="flash flash-error">{{ error }}</div>
+  {% endif %}
+
+  <main class="page">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>
