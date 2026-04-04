@@ -37,6 +37,14 @@ SESSION_TIMEOUT_SECONDS = int(os.environ.get("SESSION_TIMEOUT_MINUTES", "90")) *
 # The PM generates this key and adds it as a GitHub deploy key.
 DEPLOY_KEY_FILENAME = os.environ.get("DEPLOY_KEY_FILENAME", "id_ed25519_productfactory")
 
+# ── Ollama backend config ─────────────────────────────────────────────────────
+# Set AGENT_BACKEND=ollama to use local Ollama instead of the Claude CLI.
+# Ollama must be running on the Windows host (accessible as host.docker.internal:11434).
+AGENT_BACKEND  = os.environ.get("AGENT_BACKEND", "claude")   # "claude" | "ollama"
+OLLAMA_HOST    = os.environ.get("OLLAMA_HOST",   "http://host.docker.internal:11434")
+DESIGNER_MODEL = os.environ.get("DESIGNER_MODEL", "gemma3:27b")
+CODER_MODEL    = os.environ.get("CODER_MODEL",    "qwen3-coder:30b")
+
 
 def _get_deploy_key_path(product: dict) -> Path | None:
     """
@@ -95,22 +103,40 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     persona_env = ["-e", f"AGENT_PERSONA={persona}"] if persona else []
 
+    # Select the agent command based on backend
+    if AGENT_BACKEND == "ollama":
+        agent_cmd = ["python", "/app/ollama_agent.py", "-p", prompt]
+        ollama_env = [
+            "-e", f"OLLAMA_HOST={OLLAMA_HOST}",
+            "-e", f"DESIGNER_MODEL={DESIGNER_MODEL}",
+            "-e", f"CODER_MODEL={CODER_MODEL}",
+        ]
+        # Ollama backend: no Claude OAuth mount needed
+        claude_mount = []
+        log.info(f"Using Ollama backend — host={OLLAMA_HOST} persona={persona}")
+    else:
+        agent_cmd = ["claude", "--dangerously-skip-permissions", "-p", prompt]
+        ollama_env = []
+        claude_mount = ["-v", f"{CLAUDE_DIR}:/root/.claude:ro"]
+
     cmd = [
         "docker", "run", "--rm",
         "--name", f"pf-{product['id']}-{session_uid}",
         "--network", "productfactory-net",
         "--add-host", "pm-api:host-gateway",  # resolves to Windows host where pm-api container exposes :8080
+        "--add-host", "host.docker.internal:host-gateway",  # Ollama on Windows host
         "--memory", "4g",
         "--cpus", "2",
         "-v", f"{working_dir}:/workspace",
-        "-v", f"{CLAUDE_DIR}:/root/.claude:ro",   # read-only — OAuth session
+        *claude_mount,                             # OAuth session (claude backend only)
         *ssh_mount,                                # deploy key :ro (not whole .ssh dir)
         *gh_env,                                   # GH_TOKEN for gh CLI auth
         *persona_env,                              # AGENT_PERSONA for prompt selection
+        *ollama_env,                               # Ollama model config (ollama backend only)
         "-e", f"PM_API_URL={PM_API_URL}",
         "-e", f"SESSION_UID={session_uid}",
         AGENT_IMAGE,
-        "claude", "--dangerously-skip-permissions", "-p", prompt,
+        *agent_cmd,
     ]
 
     log.info(f"docker run: session={session_uid} product={product['name']}")

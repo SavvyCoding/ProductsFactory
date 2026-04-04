@@ -125,8 +125,15 @@ RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh && \
 # Claude writes test JSON here; ensure it always exists.
 RUN mkdir -p /workspace/Results
 
+# ── Layer 12: Ollama agent runner ─────────────────────────────────────────────
+# ollama_agent.py is used when AGENT_BACKEND=ollama (local testing with Ollama).
+# Provides identical -p {prompt} interface as the claude CLI.
+RUN mkdir -p /app
+COPY orchestrator/ollama_agent.py /app/ollama_agent.py
+RUN pyenv global 3.12.4 && pip install --no-cache-dir httpx
+
 # ── Runtime mounts (provided by poller at launch — never baked in) ───────────
-# /root/.claude  ← ~/.claude from Windows host  :ro  (OAuth session)
+# /root/.claude  ← ~/.claude from Windows host  :ro  (OAuth session — claude backend)
 # /root/.ssh     ← deploy key dir from host     :ro  (overwrites known_hosts layer above)
 # /workspace     ← product working_dir          :rw
 
@@ -139,6 +146,7 @@ RUN python3 --version && \
     git --version && \
     pip-audit --version && \
     govulncheck -version && \
-    claude --version
+    claude --version && \
+    python3 /app/ollama_agent.py --help
 
 WORKDIR /workspace
