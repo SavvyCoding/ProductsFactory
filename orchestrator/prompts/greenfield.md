@@ -23,13 +23,15 @@ Follow it exactly. Do not deviate without PM approval.
 4. Fetch and rebase current feature branch on main
 
 **Batch work:**
-- GET {pm_api_url}/api/features/approved?product_id={product_id}
+- GET {pm_api_url}/api/features/approved?product_id={product_id} (also picks up Designed features)
+  - For Designed features: read the design doc at docs/feature_{{id:03d}}_design.md first
 - Take max 3 features (or max_batch_size from product_config.json)
-- For each: Implement → Test (--cov-fail-under=70) → Commit → Push → Open PR
-- PATCH feature status at each transition
+- For each: Implement → Test (--cov-fail-under=70) → Commit → Push → Open PR → PATCH status to Reviewing
+- PATCH feature status at each transition (Approved/Designed → Implementing → Reviewing)
 - Push progress.md after every atomic step (heartbeat)
 - features.md updated on main branch ONLY
 
+**After opening PR:** PATCH the feature status to `Reviewing` with pr_number and pr_url set.
 **On push failure:** Set feature status → Blocked. Write reason to progress.md. Never exit 0.
 
 **After all features:** Run competitor research → recommend new features as Pending via POST {pm_api_url}/api/features

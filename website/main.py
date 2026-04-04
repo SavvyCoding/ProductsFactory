@@ -46,6 +46,7 @@ import os
 from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import Optional
 
 import mistune
 from fastapi import FastAPI, Depends, HTTPException, Request, Form
@@ -329,6 +330,7 @@ async def add_feature_form(
     name: str = Form(...),
     description: str = Form(""),
     priority: int = Form(50),
+    skip_design: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
 ):
     """PM adds a feature via the product detail form."""
@@ -339,6 +341,7 @@ async def add_feature_form(
         description=description.strip() or None,
         priority=max(1, min(100, priority)),
         source="pm",
+        skip_design=(skip_design == "true"),
     )
     db.add(feature)
     await db.flush()
@@ -588,7 +591,7 @@ async def api_create_product(
 async def api_next_product(db: AsyncSession = Depends(get_db)):
     """
     Returns the next product for the poller to process.
-    Selects: status=ready, has ≥1 Approved feature, ordered by last_run_at ASC NULLS FIRST.
+    Selects: status=ready, has ≥1 actionable feature (Approved or Designed), ordered by last_run_at ASC NULLS FIRST.
     """
     result = await db.execute(
         select(Product)
@@ -596,7 +599,7 @@ async def api_next_product(db: AsyncSession = Depends(get_db)):
         .where(
             Product.id.in_(
                 select(Feature.product_id)
-                .where(Feature.status == "Approved")
+                .where(Feature.status.in_(["Approved", "Designed"]))
                 .distinct()
             )
         )
@@ -622,12 +625,30 @@ async def api_update_product(
 # REST API — Features
 # ══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/api/features/approved", response_model=list[schemas.FeatureOut])
-async def api_approved_features(product_id: int, db: AsyncSession = Depends(get_db)):
-    """Poller fetches the approved feature batch for a product."""
+@app.get("/api/products/{product_id}/features", response_model=list[schemas.FeatureOut])
+async def api_product_features(product_id: int, db: AsyncSession = Depends(get_db)):
+    """Fetch all features for a product (used by poller for PR reconciliation)."""
     result = await db.execute(
         select(Feature)
-        .where(Feature.product_id == product_id, Feature.status == "Approved")
+        .where(Feature.product_id == product_id)
+        .order_by(Feature.priority, Feature.created_at)
+    )
+    return result.scalars().all()
+
+
+@app.get("/api/features/approved", response_model=list[schemas.FeatureOut])
+async def api_approved_features(product_id: int, db: AsyncSession = Depends(get_db)):
+    """Poller fetches features ready for coder: Approved (with skip_design) + Designed."""
+    result = await db.execute(
+        select(Feature)
+        .where(
+            Feature.product_id == product_id,
+            Feature.status.in_(["Approved", "Designed"]),
+        )
+        .where(
+            (Feature.status == "Designed") |
+            ((Feature.status == "Approved") & (Feature.skip_design == True))
+        )
         .order_by(Feature.priority, Feature.created_at)
     )
     return result.scalars().all()
@@ -678,20 +699,65 @@ async def api_pm_status_update(
 async def api_reset_stuck(db: AsyncSession = Depends(get_db)):
     """
     Poller calls this each cycle.
-    Resets features stuck in 'Implementing' for >2h back to 'Approved'.
+    Resets features stuck in in-progress agent states for >2h back to their prior ready state.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
     result = await db.execute(
         select(Feature).where(
-            Feature.status == "Implementing",
+            Feature.status.in_(["Implementing", "Designing", "Reviewing"]),
             Feature.updated_at < cutoff,
         )
     )
     stuck = result.scalars().all()
     for f in stuck:
-        f.status = "Approved"
+        if f.status == "Implementing":
+            # Reset to Designed if a design doc was written, otherwise back to Approved
+            f.status = "Designed" if f.design_doc_path else "Approved"
+        elif f.status == "Designing":
+            f.status = "Approved"
+        elif f.status == "Reviewing":
+            f.status = "Implementing"  # Coder will re-open or reviewer will re-pick
     await db.flush()
     return {"reset_count": len(stuck)}
+
+
+@app.get("/api/features/next-for-persona", response_model=schemas.FeatureOut | None)
+async def api_next_feature_for_persona(
+    persona: str,
+    product_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns the next feature for a given persona to work on.
+    - designer: Approved features where skip_design=False
+    - coder:    Designed features OR Approved features where skip_design=True
+    - reviewer: Reviewing features that have a PR number
+    Optional product_id filter scopes to a single product.
+    Returns null if nothing to do.
+    """
+    q = select(Feature).order_by(Feature.priority, Feature.created_at).limit(1)
+
+    if persona == "designer":
+        q = q.where(Feature.status == "Approved", Feature.skip_design == False)
+    elif persona == "coder":
+        q = q.where(
+            Feature.status.in_(["Designed", "Approved"]),
+            # For Approved features, only pick them if skip_design is True
+            # (Designed features are always ready for coder)
+        ).where(
+            (Feature.status == "Designed") |
+            ((Feature.status == "Approved") & (Feature.skip_design == True))
+        )
+    elif persona == "reviewer":
+        q = q.where(Feature.status == "Reviewing", Feature.pr_number.isnot(None))
+    else:
+        raise HTTPException(status_code=422, detail=f"Unknown persona: {persona!r}")
+
+    if product_id is not None:
+        q = q.where(Feature.product_id == product_id)
+
+    result = await db.execute(q)
+    return result.scalar_one_or_none()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -811,6 +877,25 @@ async def api_end_session(
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(session, field, value)
     return session
+
+
+@app.patch("/api/products/{product_id}/last-session/persona")
+async def api_set_last_session_persona(product_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    """Poller calls this after container exits to record the persona on the most recent session."""
+    body = await request.json()
+    persona = body.get("persona")
+    if not persona:
+        raise HTTPException(status_code=422, detail="persona required")
+    result = await db.execute(
+        select(DBSession)
+        .where(DBSession.product_id == product_id)
+        .order_by(DBSession.started_at.desc())
+        .limit(1)
+    )
+    session = result.scalar_one_or_none()
+    if session:
+        session.persona = persona
+    return {"ok": True}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

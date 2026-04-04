@@ -50,10 +50,18 @@ Every `POLL_INTERVAL` seconds (default 60s), the poller:
 1. Auth-checks Claude: `claude -p ping` (real API call, validates OAuth tokens are mounted)
 2. Auto-discovers new products in `PRODUCTS_BASE_DIR` via `setup_product.py`
 3. Kills stale Docker containers via heartbeat check (progress.md not pushed in >45 min)
-4. Selects next product: `ORDER BY last_run_at ASC` (round-robin, null = never run = highest priority)
-5. Skips products with ≥3 open PRs (waits for PM to merge)
-6. Syncs merged PRs from GitHub → marks features as "Pushed" in DB
-7. Launches `docker run --rm productfactory-agent claude -p {prompt}` with workspace, OAuth, and SSH deploy key mounted
+4. Checks globally for reviewer work (Reviewing+PR) — runs reviewer session first if found
+5. Otherwise, selects next product: `ORDER BY last_run_at ASC` (round-robin)
+6. Determines persona (designer vs coder) via `/api/features/next-for-persona`
+7. Coder: skips if ≥3 open PRs; syncs merged PRs from GitHub → Pushed
+8. Launches `docker run --rm productfactory-agent claude -p {prompt} -e AGENT_PERSONA={persona}`
+
+### Multi-Agent Personas
+
+Three personas run as separate Docker sessions:
+- **Designer** (`designer.md`): Picks `Approved` features (skip_design=False), writes `docs/feature_NNN_design.md`, sets `Designed`
+- **Coder** (`greenfield.md` / `brownfield.md`): Picks `Designed` or `skip_design Approved` features, implements, opens PR, sets `Reviewing`
+- **Reviewer** (`reviewer.md`): Picks `Reviewing` features with PR numbers, reviews diff, approves or requests changes, sets `Reviewed`
 
 ### Product Lifecycle
 
@@ -61,9 +69,10 @@ Every `POLL_INTERVAL` seconds (default 60s), the poller:
 registered → discovered → ready → [running] → (repeats)
 ```
 
-Feature states: `Pending → Approved → Implementing → Pushed`
+Feature states: `Pending → Approved → [Designing → Designed →] Implementing → Reviewing → [Reviewed →] Pushed`
 
-The poller only picks features with status `Approved`. Claude claims them (`Implementing`), implements, pushes a branch, opens a PR, then the poller reconciles merged PRs back to `Pushed`.
+New DB columns on `features`: `skip_design`, `design_doc`, `design_doc_path`, `review_outcome`, `review_notes`
+New DB column on `sessions`: `persona`
 
 ### Database
 

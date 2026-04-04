@@ -88,15 +88,23 @@ def reconcile_merged_prs(product: dict):
         merged_numbers = [pr["number"] for pr in merged_prs]
         log.info(f"Reconciling merged PRs: {merged_numbers}")
 
-        # Update features in DB that match these PR numbers
+        # Fetch all features for this product and find any with merged PR numbers
+        # (features can be in Reviewing, Reviewed, or Implementing when PR merges)
         with httpx.Client(base_url=PM_API_URL) as client:
-            features = client.get(
-                "/api/features/approved",
-                params={"product_id": product["id"]},
-            ).json()
+            all_features = client.get(
+                "/api/products/{product_id}/features".format(product_id=product["id"]),
+            )
+            if all_features.status_code != 200:
+                # Fallback: use the approved endpoint if the all-features endpoint isn't available
+                features_data = client.get(
+                    "/api/features/approved",
+                    params={"product_id": product["id"]},
+                ).json()
+            else:
+                features_data = all_features.json()
 
-            for feature in features:
-                if feature.get("pr_number") in merged_numbers:
+            for feature in features_data:
+                if feature.get("pr_number") in merged_numbers and feature.get("status") not in ("Pushed", "Rejected", "Reverted"):
                     client.patch(
                         f"/api/features/{feature['id']}",
                         json={"status": "Pushed"},

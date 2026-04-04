@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Optional, List
 from sqlalchemy import (
     Integer, String, Text, DateTime, Boolean, ARRAY,
-    ForeignKey, func, CheckConstraint, event
+    ForeignKey, func, CheckConstraint, event, Numeric
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -18,8 +18,12 @@ PRODUCT_STATUSES   = ('registered', 'discovering', 'discovered', 'ready', 'pause
                       'greenfield_pending')
 PRODUCT_TYPES      = ('greenfield', 'brownfield')
 ANALYSIS_STATUSES  = ('pending', 'running', 'done')
-FEATURE_STATUSES   = ('Pending', 'Approved', 'Implementing', 'Implemented',
-                      'Testing', 'Committed', 'Pushed', 'Blocked', 'Rejected', 'Reverted')
+FEATURE_STATUSES   = ('Pending', 'Approved',
+                      'Designing', 'Designed',
+                      'Implementing', 'Implemented',
+                      'Reviewing', 'Reviewed',
+                      'Testing', 'Committed', 'Pushed',
+                      'Blocked', 'Rejected', 'Reverted')
 ALERT_LEVELS       = ('info', 'warning', 'error', 'critical')
 
 
@@ -75,6 +79,11 @@ class Feature(Base):
     pr_url:         Mapped[Optional[str]]  = mapped_column(Text)
     pr_number:      Mapped[Optional[int]]  = mapped_column(Integer)
     blocked_reason: Mapped[Optional[str]]  = mapped_column(Text)
+    skip_design:    Mapped[bool]           = mapped_column(Boolean, nullable=False, default=False)
+    design_doc:     Mapped[Optional[str]]  = mapped_column(Text)
+    design_doc_path: Mapped[Optional[str]] = mapped_column(Text)
+    review_outcome: Mapped[Optional[str]]  = mapped_column(String(32))
+    review_notes:   Mapped[Optional[str]]  = mapped_column(Text)
     created_at:     Mapped[datetime]       = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at:     Mapped[datetime]       = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -96,7 +105,8 @@ class Session(Base):
     notes:               Mapped[Optional[str]]  = mapped_column(Text)
     tokens_input:        Mapped[Optional[int]]  = mapped_column(Integer)
     tokens_output:       Mapped[Optional[int]]  = mapped_column(Integer)
-    cost_usd:            Mapped[Optional[float]] = mapped_column()
+    cost_usd:            Mapped[Optional[float]] = mapped_column(Numeric(10, 6))
+    persona:             Mapped[Optional[str]]  = mapped_column(String(32))
 
     product: Mapped["Product"] = relationship("Product", back_populates="sessions")
 

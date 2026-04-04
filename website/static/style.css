@@ -642,8 +642,16 @@ button[type=submit]:hover { background: #1d4ed8; border-color: #1d4ed8; }
 .s-pending::before     { background: #94a3b8; }
 .s-approved    { color: #166534; }
 .s-approved::before    { background: var(--green); }
+.s-designing   { color: #7c3aed; }
+.s-designing::before   { background: #a78bfa; animation: dot-pulse 2s ease-in-out infinite; }
+.s-designed    { color: #6d28d9; }
+.s-designed::before    { background: #c4b5fd; }
 .s-implementing{ color: #1d4ed8; }
 .s-implementing::before{ background: var(--blue); animation: dot-pulse 2s ease-in-out infinite; }
+.s-reviewing   { color: #b45309; }
+.s-reviewing::before   { background: #fbbf24; animation: dot-pulse 2s ease-in-out infinite; }
+.s-reviewed    { color: #854d0e; }
+.s-reviewed::before    { background: #fde68a; }
 .s-blocked     { color: #991b1b; }
 .s-blocked::before     { background: var(--red); }
 .s-pushed      { color: #15803d; }
@@ -1307,6 +1315,37 @@ code {
 .exit-ok  { color: var(--green); font-weight: 700; }
 .exit-err { color: var(--red);   font-weight: 700; }
 .exit-run { color: var(--amber); font-weight: 700; }
+
+/* ── PERSONA BADGES ───────────────────────────────────────── */
+.persona-badge {
+  display: inline-block;
+  font-size: 11px; font-weight: 600;
+  padding: 2px 7px;
+  border-radius: var(--r-xl);
+  white-space: nowrap;
+}
+.persona-designer { background: #ede9fe; color: #7c3aed; }
+.persona-coder    { background: #dbeafe; color: #1d4ed8; }
+.persona-reviewer { background: #fef3c7; color: #b45309; }
+
+/* ── REVIEW OUTCOME ───────────────────────────────────────── */
+.review-outcome { font-size: 11px; font-weight: 600; margin-top: 4px; }
+.review-ok      { color: var(--green); }
+.review-changes { color: var(--amber); }
+
+/* ── SKIP DESIGN BADGE ────────────────────────────────────── */
+.skip-design-badge {
+  display: inline-block;
+  font-size: 10px; font-weight: 600;
+  padding: 1px 6px;
+  border-radius: var(--r-xl);
+  background: #fef9c3; color: #a16207;
+  margin-left: 4px;
+}
+
+/* ── DESIGN DOC LINK ──────────────────────────────────────── */
+.design-doc-link { font-size: 11px; margin-top: 3px; }
+.design-doc-link a { color: var(--text-muted); text-decoration: underline; }
 .health-score {
   display: inline-flex; align-items: center; gap: 4px;
   font-size: 11px; font-weight: 700;

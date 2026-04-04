@@ -32,3 +32,6 @@ Follow it exactly — especially the brownfield-specific rules.
 5. **Architecture:** Follow ARCHITECTURE.md patterns exactly — same patterns, same conventions.
 
 Same startup, heartbeat, and exit rules as greenfield apply.
+
+**After opening PR:** PATCH the feature status to `Reviewing` with pr_number and pr_url set.
+If the feature has a design doc at docs/feature_{id:03d}_design.md, read it before implementing.

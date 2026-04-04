@@ -4,19 +4,26 @@ ProductFactory Poller — main loop (Windows localhost).
 Runs as a Windows Service via NSSM.
 Poll interval: 60s when idle, 5s between products.
 
+Multi-agent persona routing:
+  - Designer: writes design docs for Approved features (before coding)
+  - Coder:    implements Designed (or skip_design Approved) features, opens PRs, sets Reviewing
+  - Reviewer: reviews open PRs, approves or requests changes, sets Reviewed
+
 Flow per cycle:
   1. Auth health check (real API call, not --version)
   2. Scaffold any greenfield_pending products
   3. Discover any newly-registered folders
   4. Heartbeat — kill stale containers (progress.md not pushed in >45m)
-  5. Reset stuck features (Implementing > 2h)
+  5. Reset stuck features (Implementing/Designing/Reviewing > 2h)
   6. Deliver pending PM messages to workspace files
-  7. Pick next product: run_now flag first, then round-robin
-  8. Quiet hours gate (skip if current hour is in quiet window)
-  9. Daily session cap gate
-  10. PR count gate (≥3 open PRs → pause product)
-  11. GitHub PR reconciliation (sync merged PRs → DB)
-  12. Run Claude in Docker (blocks until session ends)
+  7a. Reviewer-first: check globally for Reviewing features with PRs
+  7b. If none: pick next product via round-robin (has Approved/Designed features)
+  7c. Determine persona: designer (Approved+no skip_design) or coder
+  8. Quiet hours gate (reviewers skip this gate — reviews are time-sensitive)
+  9. Daily session cap gate (reviewers exempt)
+  10. PR count gate (coder only — designer/reviewer don't open new PRs)
+  11. GitHub PR reconciliation (sync merged PRs → DB → Pushed)
+  12. Run Claude in Docker with persona (blocks until session ends)
   13. Update last_run_at ONLY on clean exit (exit code 0)
 """
 
@@ -155,6 +162,46 @@ def is_daily_cap_reached(product: dict) -> bool:
     return _daily_session_counts.get(product["id"], 0) >= cap
 
 
+def get_next_reviewer_product(products: list[dict]) -> tuple[dict | None, str | None]:
+    """
+    Check if any ready product has features in 'Reviewing' state with a PR number.
+    Reviewer sessions take global priority over normal designer/coder scheduling.
+    Returns (product, 'reviewer') or (None, None).
+    """
+    ready_ids = {p["id"] for p in products if p["status"] == "ready"}
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            resp = client.get("/api/features/next-for-persona", params={"persona": "reviewer"})
+        if resp.status_code == 200 and resp.json():
+            feature = resp.json()
+            pid = feature["product_id"]
+            if pid in ready_ids:
+                product = next((p for p in products if p["id"] == pid), None)
+                return product, "reviewer"
+    except httpx.HTTPError as e:
+        log.error(f"get_next_reviewer_product failed: {e}")
+    return None, None
+
+
+def determine_persona(product: dict) -> str:
+    """
+    Decide which persona (designer or coder) should run for this product.
+    - If there are Approved features with skip_design=False → designer
+    - Otherwise → coder
+    """
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            resp = client.get(
+                "/api/features/next-for-persona",
+                params={"persona": "designer", "product_id": product["id"]}
+            )
+        if resp.status_code == 200 and resp.json():
+            return "designer"
+    except httpx.HTTPError as e:
+        log.error(f"determine_persona failed: {e}")
+    return "coder"
+
+
 def deliver_pm_messages(product: dict):
     """
     Write pending PM messages from product.config to pm_message.md in the workspace.
@@ -235,52 +282,75 @@ def main():
                 if (product.get("config") or {}).get("pm_messages"):
                     deliver_pm_messages(product)
 
-            # ⑦ Pick next product
-            product = get_next_product(products)
-            if not product:
-                log.debug("No products ready — sleeping")
-                time.sleep(POLL_INTERVAL)
-                continue
+            # ⑦a Reviewer-first: check globally for PRs awaiting review
+            reviewer_product, persona = get_next_reviewer_product(products)
 
-            log.info(f"Selected product: {product['name']} (id={product['id']})")
+            if reviewer_product:
+                product = reviewer_product
+                log.info(f"Reviewer session for: {product['name']} (id={product['id']})")
+            else:
+                # ⑦b Normal round-robin for designer/coder work
+                product = get_next_product(products)
+                if not product:
+                    log.debug("No products ready — sleeping")
+                    time.sleep(POLL_INTERVAL)
+                    continue
+
+                log.info(f"Selected product: {product['name']} (id={product['id']})")
+
+                # ⑦c Determine whether to run designer or coder
+                persona = determine_persona(product)
+                log.info(f"Persona: {persona}")
 
             # Clear run_now flag if set
             if product.get("run_now"):
                 clear_run_now(product["id"])
 
-            # ⑧ Quiet hours gate
-            if is_quiet_hours(product):
+            # ⑧ Quiet hours gate (skip for reviewer — reviews are time-sensitive)
+            if persona != "reviewer" and is_quiet_hours(product):
                 h_start = product.get("quiet_hours_start")
                 h_end   = product.get("quiet_hours_end")
                 log.info(f"Quiet hours ({h_start}–{h_end} UTC) — skipping {product['name']}")
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            # ⑨ Daily session cap gate
-            if is_daily_cap_reached(product):
+            # ⑨ Daily session cap gate (reviewer doesn't count against cap)
+            if persona != "reviewer" and is_daily_cap_reached(product):
                 log.info(f"Daily cap reached for {product['name']} — skipping")
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            # ⑩ PR count gate
-            open_pr_count = count_open_prs(product)
-            if open_pr_count >= 3:
-                log.info(f"PR gate: {open_pr_count} open PRs — skipping")
-                send_alert("warning", f"{product['name']}: ≥3 open PRs unmerged — pausing")
-                time.sleep(300)
-                continue
+            # ⑩ PR count gate (only applies to coder — designer/reviewer don't open new PRs)
+            if persona == "coder":
+                open_pr_count = count_open_prs(product)
+                if open_pr_count >= 3:
+                    log.info(f"PR gate: {open_pr_count} open PRs — skipping")
+                    send_alert("warning", f"{product['name']}: ≥3 open PRs unmerged — pausing")
+                    time.sleep(300)
+                    continue
 
             # ⑪ GitHub PR reconciliation
             reconcile_merged_prs(product)
 
             # ⑫ Run Claude session
-            log.info(f"Launching Claude session for: {product['name']}")
-            exit_code = run_claude_in_docker(product)
-            log.info(f"Session ended — exit_code={exit_code}")
+            log.info(f"Launching {persona} session for: {product['name']}")
+            exit_code = run_claude_in_docker(product, persona=persona)
+            log.info(f"Session ended — exit_code={exit_code} persona={persona}")
 
-            # Track daily count
-            _reset_daily_counts_if_new_day()
-            _daily_session_counts[product["id"]] = _daily_session_counts.get(product["id"], 0) + 1
+            # Record persona on the most recent session row
+            try:
+                with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                    client.patch(
+                        f"/api/products/{product['id']}/last-session/persona",
+                        json={"persona": persona},
+                    )
+            except Exception as e:
+                log.warning(f"Failed to record persona on session: {e}")
+
+            # Track daily count (reviewers exempt)
+            if persona != "reviewer":
+                _reset_daily_counts_if_new_day()
+                _daily_session_counts[product["id"]] = _daily_session_counts.get(product["id"], 0) + 1
 
             # ⑬ Update last_run_at ONLY on clean exit
             if exit_code == 0:
@@ -290,7 +360,7 @@ def main():
                         json={"last_run_at": datetime.now(timezone.utc).isoformat()},
                     )
             else:
-                send_alert("warning", f"{product['name']}: session exited with code {exit_code}")
+                send_alert("warning", f"{product['name']}: {persona} session exited with code {exit_code}")
 
         except KeyboardInterrupt:
             log.info("Poller stopped by user")

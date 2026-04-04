@@ -67,14 +67,15 @@ def _get_gh_token() -> str | None:
         return None
 
 
-def run_claude_in_docker(product: dict) -> int:
+def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     """
     Launches the agent container. Blocks until container exits.
     Returns Docker exit code (0 = clean, non-zero = crash/auth failure).
+    persona: 'designer', 'coder', 'reviewer', or None (uses legacy routing).
     """
     session_uid = str(uuid.uuid4())[:8]
     working_dir = product["working_dir"]
-    prompt = build_prompt(product, session_uid)
+    prompt = build_prompt(product, session_uid, persona=persona)
 
     lock_path = Path(working_dir) / "session.lock"
     if lock_path.exists():
@@ -92,6 +93,8 @@ def run_claude_in_docker(product: dict) -> int:
     gh_token = _get_gh_token()
     gh_env = ["-e", f"GH_TOKEN={gh_token}"] if gh_token else []
 
+    persona_env = ["-e", f"AGENT_PERSONA={persona}"] if persona else []
+
     cmd = [
         "docker", "run", "--rm",
         "--name", f"pf-{product['id']}-{session_uid}",
@@ -103,6 +106,7 @@ def run_claude_in_docker(product: dict) -> int:
         "-v", f"{CLAUDE_DIR}:/root/.claude:ro",   # read-only — OAuth session
         *ssh_mount,                                # deploy key :ro (not whole .ssh dir)
         *gh_env,                                   # GH_TOKEN for gh CLI auth
+        *persona_env,                              # AGENT_PERSONA for prompt selection
         "-e", f"PM_API_URL={PM_API_URL}",
         "-e", f"SESSION_UID={session_uid}",
         AGENT_IMAGE,

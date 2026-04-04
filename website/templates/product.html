@@ -107,9 +107,13 @@ const PRODUCT_ID = {{ product.id }};
   {% set columns = [
     ('Pending',      's-pending',      'Awaiting PM review'),
     ('Approved',     's-approved',     'Queued for Claude'),
-    ('Implementing', 's-implementing', 'Claude working on it'),
+    ('Designing',    's-designing',    'Designer agent writing spec'),
+    ('Designed',     's-designed',     'Design doc ready — awaiting coder'),
+    ('Implementing', 's-implementing', 'Coder agent working on it'),
+    ('Reviewing',    's-reviewing',    'PR open — awaiting reviewer'),
+    ('Reviewed',     's-reviewed',     'Review done — awaiting merge'),
     ('Blocked',      's-blocked',      'Needs PM attention'),
-    ('Pushed',       's-pushed',       'PR open on GitHub'),
+    ('Pushed',       's-pushed',       'Merged to main'),
   ] %}
 
   <div class="kanban" id="kanban">
@@ -140,8 +144,13 @@ const PRODUCT_ID = {{ product.id }};
         {% endif %}
         <div class="feature-name">{{ f.name }}</div>
         {% if f.source == 'ai' %}<span class="ai-badge">🤖 AI</span>{% endif %}
+        {% if f.skip_design %}<span class="skip-design-badge">⚡ Skip design</span>{% endif %}
         {% if f.description %}<div class="feature-desc">{{ f.description }}</div>{% endif %}
+        {% if f.design_doc_path %}<div class="design-doc-link">📄 <a href="/workspace/{{ f.design_doc_path }}" title="Design doc">design doc</a></div>{% endif %}
         {% if f.pr_url %}<a href="{{ f.pr_url }}" target="_blank" class="pr-link">PR #{{ f.pr_number }} ↗</a>{% endif %}
+        {% if f.review_outcome == 'approved' %}<div class="review-outcome review-ok">✓ Reviewer approved</div>{% endif %}
+        {% if f.review_outcome == 'changes_requested' %}<div class="review-outcome review-changes">↩ Changes requested</div>{% endif %}
+        {% if f.review_notes and f.review_outcome == 'changes_requested' %}<div class="feature-desc" style="font-size:11px;color:var(--text-muted)">{{ f.review_notes[:120] }}{% if f.review_notes|length > 120 %}…{% endif %}</div>{% endif %}
         {% if f.blocked_reason %}<div class="blocked-reason">⚠ {{ f.blocked_reason }}</div>{% endif %}
         {% if f.fix_attempts > 0 %}<div class="fix-attempts">{{ f.fix_attempts }}/3 attempts used</div>{% endif %}
       </div>
@@ -194,6 +203,10 @@ const PRODUCT_ID = {{ product.id }};
       <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
         <button type="submit">Add Feature</button>
         <button type="button" class="btn btn-outline" onclick="toggleTemplates()">📋 Templates</button>
+        <label style="display:flex; align-items:center; gap:5px; font-size:13px; color:var(--text-muted); cursor:pointer">
+          <input type="checkbox" name="skip_design" value="true" style="margin:0">
+          Skip design phase (go straight to coder)
+        </label>
       </div>
     </form>
 
@@ -263,6 +276,7 @@ const PRODUCT_ID = {{ product.id }};
     <thead>
       <tr>
         <th>Started</th>
+        <th>Persona</th>
         <th>Duration</th>
         <th>Features</th>
         <th>Cost</th>
@@ -273,6 +287,17 @@ const PRODUCT_ID = {{ product.id }};
     {% for s in sessions %}
     <tr>
       <td>{{ s.started_at.strftime('%Y-%m-%d %H:%M') }}</td>
+      <td>
+        {% if s.persona == 'designer' %}
+          <span class="persona-badge persona-designer">✏ Designer</span>
+        {% elif s.persona == 'reviewer' %}
+          <span class="persona-badge persona-reviewer">🔍 Reviewer</span>
+        {% elif s.persona == 'coder' %}
+          <span class="persona-badge persona-coder">⚙ Coder</span>
+        {% else %}
+          <span class="persona-badge persona-coder">⚙ Coder</span>
+        {% endif %}
+      </td>
       <td>
         {% if s.ended_at %}
           {% set dur = (s.ended_at - s.started_at).seconds %}

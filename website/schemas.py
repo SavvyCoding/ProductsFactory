@@ -69,6 +69,7 @@ class FeatureCreate(BaseModel):
     priority:    int = 50
     depends_on:  Optional[int] = None
     source:      str = "pm"
+    skip_design: bool = False
 
     @field_validator("priority")
     @classmethod
@@ -86,13 +87,17 @@ class FeatureCreate(BaseModel):
 
 
 class FeatureUpdate(BaseModel):
-    """Used by Claude (poller) to update feature status during implementation."""
-    status:         Optional[str] = None
-    fix_attempts:   Optional[int] = None
-    branch_name:    Optional[str] = None
-    pr_url:         Optional[str] = None
-    pr_number:      Optional[int] = None
-    blocked_reason: Optional[str] = None
+    """Used by Claude agents to update feature status during implementation."""
+    status:          Optional[str] = None
+    fix_attempts:    Optional[int] = None
+    branch_name:     Optional[str] = None
+    pr_url:          Optional[str] = None
+    pr_number:       Optional[int] = None
+    blocked_reason:  Optional[str] = None
+    design_doc:      Optional[str] = None
+    design_doc_path: Optional[str] = None
+    review_outcome:  Optional[str] = None
+    review_notes:    Optional[str] = None
 
 
 class FeatureStatusUpdate(BaseModel):
@@ -109,21 +114,26 @@ class FeatureStatusUpdate(BaseModel):
 
 
 class FeatureOut(BaseModel):
-    id:             int
-    product_id:     int
-    name:           str
-    description:    Optional[str]
-    status:         str
-    priority:       int
-    depends_on:     Optional[int]
-    fix_attempts:   int
-    source:         str
-    branch_name:    Optional[str]
-    pr_url:         Optional[str]
-    pr_number:      Optional[int]
-    blocked_reason: Optional[str]
-    created_at:     datetime
-    updated_at:     datetime
+    id:              int
+    product_id:      int
+    name:            str
+    description:     Optional[str]
+    status:          str
+    priority:        int
+    depends_on:      Optional[int]
+    fix_attempts:    int
+    source:          str
+    branch_name:     Optional[str]
+    pr_url:          Optional[str]
+    pr_number:       Optional[int]
+    blocked_reason:  Optional[str]
+    skip_design:     bool = False
+    design_doc:      Optional[str] = None
+    design_doc_path: Optional[str] = None
+    review_outcome:  Optional[str] = None
+    review_notes:    Optional[str] = None
+    created_at:      datetime
+    updated_at:      datetime
 
     model_config = {"from_attributes": True}
 
@@ -145,6 +155,7 @@ class SessionEnd(BaseModel):
     tokens_input:       Optional[int]      = None
     tokens_output:      Optional[int]      = None
     cost_usd:           Optional[float]    = None
+    persona:            Optional[str]      = None
 
 
 class SessionOut(BaseModel):
@@ -160,6 +171,7 @@ class SessionOut(BaseModel):
     tokens_input:       Optional[int]
     tokens_output:      Optional[int]
     cost_usd:           Optional[float]
+    persona:            Optional[str]
     notes:              Optional[str]
 
     model_config = {"from_attributes": True}
