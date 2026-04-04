@@ -14,7 +14,10 @@ import os
 import uuid
 import subprocess
 import logging
+import threading
 from pathlib import Path
+
+import httpx
 
 from orchestrator.prompts import build_prompt
 from orchestrator.alerts import send_alert
@@ -54,6 +57,16 @@ def _get_deploy_key_path(product: dict) -> Path | None:
     return None
 
 
+def _get_gh_token() -> str | None:
+    """Fetch GitHub PAT from system config for GH_TOKEN injection into agent containers."""
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
+            resp = client.get("/api/system-config")
+            return resp.json().get("github_pat") or None
+    except Exception:
+        return None
+
+
 def run_claude_in_docker(product: dict) -> int:
     """
     Launches the agent container. Blocks until container exits.
@@ -75,6 +88,10 @@ def run_claude_in_docker(product: dict) -> int:
     if deploy_key:
         ssh_mount = ["-v", f"{deploy_key}:/root/.ssh/id_ed25519:ro"]
 
+    # Inject GH_TOKEN so `gh` CLI works inside the container without a separate login
+    gh_token = _get_gh_token()
+    gh_env = ["-e", f"GH_TOKEN={gh_token}"] if gh_token else []
+
     cmd = [
         "docker", "run", "--rm",
         "--name", f"pf-{product['id']}-{session_uid}",
@@ -85,6 +102,7 @@ def run_claude_in_docker(product: dict) -> int:
         "-v", f"{working_dir}:/workspace",
         "-v", f"{CLAUDE_DIR}:/root/.claude:ro",   # read-only — OAuth session
         *ssh_mount,                                # deploy key :ro (not whole .ssh dir)
+        *gh_env,                                   # GH_TOKEN for gh CLI auth
         "-e", f"PM_API_URL={PM_API_URL}",
         "-e", f"SESSION_UID={session_uid}",
         AGENT_IMAGE,
@@ -93,14 +111,57 @@ def run_claude_in_docker(product: dict) -> int:
 
     log.info(f"docker run: session={session_uid} product={product['name']}")
 
+    # Clear old log buffer before starting
     try:
-        result = subprocess.run(cmd, timeout=SESSION_TIMEOUT_SECONDS)
-        return result.returncode
-    except subprocess.TimeoutExpired:
-        log.error(f"Session timed out after {SESSION_TIMEOUT_SECONDS}s — killing container")
-        subprocess.run(["docker", "kill", f"pf-{product['id']}-{session_uid}"], capture_output=True)
-        send_alert("error", f"{product['name']}: session timed out after {SESSION_TIMEOUT_SECONDS//60}m")
-        return 1
+        httpx.delete(f"{PM_API_URL}/api/products/{product['id']}/session/log", timeout=5)
+    except Exception:
+        pass
+
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+
+        def _stream_logs():
+            buffer: list[str] = []
+            for raw_line in process.stdout:
+                line = raw_line.rstrip("\n")
+                log.debug(f"[agent] {line}")
+                buffer.append(line)
+                if len(buffer) >= 10:
+                    _post_log_lines(product["id"], buffer)
+                    buffer = []
+            if buffer:
+                _post_log_lines(product["id"], buffer)
+
+        log_thread = threading.Thread(target=_stream_logs, daemon=True)
+        log_thread.start()
+
+        try:
+            process.wait(timeout=SESSION_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            log.error(f"Session timed out after {SESSION_TIMEOUT_SECONDS}s — killing container")
+            subprocess.run(["docker", "kill", f"pf-{product['id']}-{session_uid}"], capture_output=True)
+            send_alert("error", f"{product['name']}: session timed out after {SESSION_TIMEOUT_SECONDS//60}m")
+            return 1
+        finally:
+            log_thread.join(timeout=10)
+
+        return process.returncode
+
     except Exception as e:
         log.exception(f"docker run failed: {e}")
         return 1
+
+
+def _post_log_lines(product_id: int, lines: list[str]) -> None:
+    """Fire-and-forget: push log lines to PM API for SSE streaming."""
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
+            client.post(f"/api/products/{product_id}/session/log", json={"lines": lines})
+    except Exception:
+        pass

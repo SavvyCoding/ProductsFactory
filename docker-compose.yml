@@ -40,6 +40,8 @@ services:
       DATABASE_URL: postgresql+asyncpg://productfactory:ProductDBPassword@db:5432/productfactory
       PM_USERNAME: admin
       PM_PASSWORD: ProductDBPassword
+      # Set this to enable AI feature recommendations on the Greenfield form
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     ports:
       - "8080:8080"     # exposed to Windows host: poller uses http://localhost:8080
     depends_on:

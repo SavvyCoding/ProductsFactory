@@ -4,8 +4,11 @@
 
 <!-- Header -->
 <div class="page-header">
-  <div>
-    <h1>{{ product.name or product.working_dir }}</h1>
+  <div class="product-header-title">
+    <div>
+      <div class="breadcrumb"><a href="/">← Products</a></div>
+      <h1>{{ product.name or product.working_dir }}</h1>
+    </div>
     <div class="product-meta" style="margin-top:6px">
       <span class="badge badge-{{ product.type }}">{{ product.type }}</span>
       <span class="badge badge-status-{{ product.status }}">{{ product.status }}</span>
@@ -22,6 +25,7 @@
 
   <div class="actions">
     <a href="/product/{{ product.id }}/progress" class="btn btn-outline">📄 progress.md</a>
+    <a href="/product/{{ product.id }}/architecture" class="btn btn-outline">🏗 arch</a>
 
     {% if product.status == 'ready' %}
     <form method="post" action="/product/{{ product.id }}/pause" style="display:inline">
@@ -33,6 +37,10 @@
     </form>
     {% endif %}
 
+    <form method="post" action="/product/{{ product.id }}/run-now" style="display:inline">
+      <button class="btn btn-outline" title="Queue this product to run on the next poller cycle">⚡ Run now</button>
+    </form>
+
     {% if product.type == 'brownfield' and product.analysis_status != 'running' and product.analysis_status != 'done' %}
     <form method="post" action="/product/{{ product.id }}/trigger_analysis" style="display:inline">
       <button class="btn btn-orange">🔬 Run Analysis</button>
@@ -41,7 +49,10 @@
   </div>
 </div>
 
-<!-- Baseline test badge (brownfield) -->
+{% if product.run_now %}
+<div class="notice notice-blue" style="margin-bottom:14px">⚡ This product is queued for the next poller cycle.</div>
+{% endif %}
+
 {% if product.config and product.config.baseline_tests %}
 <div class="baseline-bar">
   Baseline: <strong>{{ product.config.baseline_tests.passed }} tests passing</strong>
@@ -50,132 +61,531 @@
 </div>
 {% endif %}
 
-<!-- Analysis running notice -->
 {% if product.analysis_status == 'running' %}
-<div class="notice notice-blue">
-  🔬 Analysis Run in progress — Claude is reading the codebase and generating ARCHITECTURE.md.
-  Check progress.md for status.
-</div>
+<div class="notice notice-blue">🔬 Analysis Run in progress. Check progress.md for status.</div>
 {% endif %}
 
-<!-- Open PR gate warning -->
 {% if open_prs >= 3 %}
 <div class="notice notice-amber">
-  ⚠ This product has {{ open_prs }} open PRs. The poller is paused until PRs are merged.
-  <a href="{{ product.github_repo }}/pulls" target="_blank">Review PRs ↗</a>
+  ⚠ {{ open_prs }} open PRs — poller paused until PRs are merged.
+  {% if product.github_repo %}<a href="{{ product.github_repo }}/pulls" target="_blank">Review PRs ↗</a>{% endif %}
 </div>
 {% endif %}
 
+{# JS data #}
+<script>
+const PM_TRANSITIONS = {{ pm_transitions | tojson }};
+const PRODUCT_ID = {{ product.id }};
+</script>
 
-<!-- KANBAN BOARD -->
-{% set columns = [
-  ('Pending',      's-pending',      'Awaiting PM review'),
-  ('Approved',     's-approved',     'Queued for Claude'),
-  ('Implementing', 's-implementing', 'Claude working on it'),
-  ('Blocked',      's-blocked',      'Needs PM attention'),
-  ('Pushed',       's-pushed',       'PR open on GitHub'),
-] %}
-
-<div class="kanban">
-  {% for col_status, col_class, col_hint in columns %}
-  <div class="kanban-col">
-    <div class="kanban-header {{ col_class }}" title="{{ col_hint }}">
-      {{ col_status }}
-      <span class="col-count">
-        {{ features | selectattr('status', 'equalto', col_status) | list | length }}
-      </span>
-    </div>
-
-    {% for f in features if f.status == col_status %}
-    <div class="feature-card {% if f.source == 'ai' %}fc-ai{% endif %}">
-      <div class="feature-name">{{ f.name }}</div>
-
-      {% if f.source == 'ai' %}
-      <span class="ai-badge">🤖 AI</span>
-      {% endif %}
-
-      {% if f.description %}
-      <div class="feature-desc">{{ f.description }}</div>
-      {% endif %}
-
-      {% if f.pr_url %}
-      <a href="{{ f.pr_url }}" target="_blank" class="pr-link">PR #{{ f.pr_number }} ↗</a>
-      {% endif %}
-
-      {% if f.blocked_reason %}
-      <div class="blocked-reason">⚠ {{ f.blocked_reason }}</div>
-      {% endif %}
-
-      {% if f.fix_attempts > 0 %}
-      <div class="fix-attempts">{{ f.fix_attempts }}/3 attempts used</div>
-      {% endif %}
-
-      <!-- PM status change dropdown -->
-      {% set allowed = pm_transitions.get(f.status, []) %}
-      {% if allowed %}
-      <form method="post"
-            action="/product/{{ product.id }}/features/{{ f.id }}/status"
-            class="status-form">
-        <select name="status" onchange="this.form.submit()">
-          <option value="" disabled selected>Move to…</option>
-          {% for next_status in allowed %}
-          <option value="{{ next_status }}">→ {{ next_status }}</option>
-          {% endfor %}
-        </select>
-      </form>
-      {% endif %}
-    </div>
-    {% else %}
-    <div class="kanban-empty">—</div>
-    {% endfor %}
-  </div>
-  {% endfor %}
+<!-- TABS -->
+<div class="product-tabs">
+  <button class="product-tab {% if active_tab == 'board' %}active{% endif %}" onclick="switchTab('board', this)">Board</button>
+  <button class="product-tab {% if active_tab == 'prs' %}active{% endif %}" onclick="switchTab('prs', this)">
+    Pull Requests{% if open_prs %} <span class="col-count" style="margin-left:4px">{{ open_prs }}</span>{% endif %}
+  </button>
+  <button class="product-tab {% if active_tab == 'history' %}active{% endif %}" onclick="switchTab('history', this)">History</button>
+  <button class="product-tab {% if active_tab == 'live' %}active{% endif %}" onclick="switchTab('live', this)">Live Session</button>
+  <button class="product-tab {% if active_tab == 'settings' %}active{% endif %}" onclick="switchTab('settings', this)">Settings</button>
 </div>
 
-<!-- Rejected / Reverted (collapsed section) -->
-{% set archived = features | selectattr('status', 'in', ['Rejected', 'Reverted']) | list %}
-{% if archived %}
-<details class="archived-section">
-  <summary>Rejected / Reverted ({{ archived | length }})</summary>
-  <div style="margin-top:8px">
-    {% for f in archived %}
-    <div class="feature-card" style="opacity:0.6">
-      <div class="feature-name">{{ f.name }}
-        <span class="badge badge-status-{{ f.status | lower }}" style="font-size:10px">{{ f.status }}</span>
+
+<!-- ══ TAB: BOARD ══════════════════════════════════════════ -->
+<div class="tab-content" id="tab-board" {% if active_tab != 'board' %}style="display:none"{% endif %}>
+
+  <!-- Bulk approve bar -->
+  <div class="bulk-bar" id="bulk-bar">
+    <span id="bulk-count">0 selected</span>
+    <form method="post" action="/product/{{ product.id }}/features/bulk-approve" id="bulk-form">
+      <input type="hidden" name="feature_ids" id="bulk-ids">
+      <button type="submit" class="btn btn-green" style="padding:5px 14px">✓ Approve selected</button>
+    </form>
+    <button onclick="clearSelection()" class="btn btn-outline" style="padding:5px 12px">✗ Clear</button>
+  </div>
+
+  <!-- KANBAN -->
+  {% set columns = [
+    ('Pending',      's-pending',      'Awaiting PM review'),
+    ('Approved',     's-approved',     'Queued for Claude'),
+    ('Implementing', 's-implementing', 'Claude working on it'),
+    ('Blocked',      's-blocked',      'Needs PM attention'),
+    ('Pushed',       's-pushed',       'PR open on GitHub'),
+  ] %}
+
+  <div class="kanban" id="kanban">
+    {% for col_status, col_class, col_hint in columns %}
+    <div class="kanban-col"
+         data-status="{{ col_status }}"
+         ondragover="onDragOver(event, this)"
+         ondragleave="onDragLeave(this)"
+         ondrop="onDrop(event, this)">
+      <div class="kanban-header {{ col_class }}" title="{{ col_hint }}">
+        <span class="col-label">{{ col_status }}</span>
+        <span class="col-count" id="count-{{ col_status }}">
+          {{ features | selectattr('status', 'equalto', col_status) | list | length }}
+        </span>
       </div>
-      {% set allowed = pm_transitions.get(f.status, []) %}
-      {% if allowed %}
-      <form method="post"
-            action="/product/{{ product.id }}/features/{{ f.id }}/status"
-            class="status-form">
-        <select name="status" onchange="this.form.submit()">
-          <option value="" disabled selected>Restore…</option>
-          {% for next_status in allowed %}
-          <option value="{{ next_status }}">→ {{ next_status }}</option>
-          {% endfor %}
-        </select>
-      </form>
-      {% endif %}
+
+      {% for f in features if f.status == col_status %}
+      <div class="feature-card {% if f.source == 'ai' %}fc-ai{% endif %}"
+           draggable="true"
+           data-feature-id="{{ f.id }}"
+           data-status="{{ f.status }}"
+           ondragstart="onDragStart(event, this)"
+           ondragend="onDragEnd(this)">
+        {% if f.status == 'Pending' %}
+        <input type="checkbox" class="feature-checkbox"
+               onchange="toggleSelect({{ f.id }}, this)"
+               onclick="event.stopPropagation()">
+        {% endif %}
+        <div class="feature-name">{{ f.name }}</div>
+        {% if f.source == 'ai' %}<span class="ai-badge">🤖 AI</span>{% endif %}
+        {% if f.description %}<div class="feature-desc">{{ f.description }}</div>{% endif %}
+        {% if f.pr_url %}<a href="{{ f.pr_url }}" target="_blank" class="pr-link">PR #{{ f.pr_number }} ↗</a>{% endif %}
+        {% if f.blocked_reason %}<div class="blocked-reason">⚠ {{ f.blocked_reason }}</div>{% endif %}
+        {% if f.fix_attempts > 0 %}<div class="fix-attempts">{{ f.fix_attempts }}/3 attempts used</div>{% endif %}
+      </div>
+      {% else %}
+      <div class="kanban-empty" id="empty-{{ col_status }}">—</div>
+      {% endfor %}
     </div>
     {% endfor %}
   </div>
-</details>
-{% endif %}
 
-
-<!-- ADD FEATURE FORM -->
-<div class="card" style="margin-top:28px">
-  <h3>Add Feature</h3>
-  <form method="post" action="/product/{{ product.id }}/features" class="feature-form">
-    <div class="form-row">
-      <input type="text" name="name" placeholder="Feature name (required)" required>
-      <input type="number" name="priority" value="50" min="1" max="100" title="Priority 1=highest 100=lowest" style="width:80px">
+  <!-- Archived -->
+  {% set archived = features | selectattr('status', 'in', ['Rejected', 'Reverted']) | list %}
+  {% if archived %}
+  <details class="archived-section">
+    <summary>Rejected / Reverted ({{ archived | length }})</summary>
+    <div style="margin-top:8px">
+      {% for f in archived %}
+      <div class="feature-card" style="opacity:0.6">
+        <div class="feature-name">{{ f.name }}
+          <span class="badge badge-status-{{ f.status | lower }}" style="font-size:10px">{{ f.status }}</span>
+        </div>
+        {% set allowed = pm_transitions.get(f.status, []) %}
+        {% if allowed %}
+        <form method="post" action="/product/{{ product.id }}/features/{{ f.id }}/status" class="status-form">
+          <select name="status" onchange="this.form.submit()">
+            <option value="" disabled selected>Restore…</option>
+            {% for s in allowed %}<option value="{{ s }}">→ {{ s }}</option>{% endfor %}
+          </select>
+        </form>
+        {% endif %}
+      </div>
+      {% endfor %}
     </div>
-    <textarea name="description"
-              placeholder="Description — what should be built, why, acceptance criteria"
-              rows="3"></textarea>
-    <button type="submit">Add Feature</button>
-  </form>
+  </details>
+  {% endif %}
+
+  <!-- Add Feature -->
+  <div class="card" style="margin-top:28px">
+    <div class="settings-card-title">
+      <span class="title-icon" style="background:var(--green-lt)">✦</span>
+      Add Feature
+    </div>
+    <form method="post" action="/product/{{ product.id }}/features" class="feature-form">
+      <div class="form-row">
+        <input type="text" name="name" id="feat-name" placeholder="Feature name (required)" required>
+        <input type="number" name="priority" value="50" min="1" max="100" style="width:80px" title="Priority">
+      </div>
+      <textarea name="description" id="feat-desc" rows="3"
+                placeholder="Description — what to build, why, acceptance criteria"></textarea>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+        <button type="submit">Add Feature</button>
+        <button type="button" class="btn btn-outline" onclick="toggleTemplates()">📋 Templates</button>
+      </div>
+    </form>
+
+    <!-- Feature Templates -->
+    <div class="template-panel" id="template-panel" style="display:none; margin-top:12px">
+      <div class="template-grid">
+        {% for tpl in [
+          ('🔐','Authentication','User login, registration, password reset, session management'),
+          ('📋','CRUD Endpoints','REST API for create, read, update, delete operations'),
+          ('🔔','Notifications','Email or in-app notification system'),
+          ('🔍','Search','Full-text search with filters and pagination'),
+          ('📊','Dashboard / Analytics','Metrics overview, charts, KPI display'),
+          ('📤','File Upload','Upload, store, and serve files (images, docs)'),
+          ('👤','User Roles & Permissions','Role-based access control (admin, user, guest)'),
+          ('🌐','API Rate Limiting','Throttle requests per user or IP'),
+          ('📝','Audit Log','Track and display user actions and changes'),
+          ('💳','Payments','Stripe or payment gateway integration'),
+          ('🗓','Scheduling / Cron','Background jobs, scheduled tasks'),
+          ('🧪','Test Suite','Automated tests covering core functionality'),
+        ] %}
+        <div class="template-card" onclick="applyTemplate('{{ tpl[1] }}', '{{ tpl[2] }}')">
+          <div class="t-icon">{{ tpl[0] }}</div>
+          <div class="t-name">{{ tpl[1] }}</div>
+          <div class="t-desc">{{ tpl[2][:60] }}…</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+</div><!-- /tab-board -->
+
+
+<!-- ══ TAB: PULL REQUESTS ══════════════════════════════════ -->
+<div class="tab-content" id="tab-prs" style="display:none">
+  {% if open_prs_list %}
+  <div class="pr-list">
+    {% for pr in open_prs_list %}
+    <div class="pr-row">
+      <span class="pr-num">#{{ pr.number }}</span>
+      <span class="pr-title">{{ pr.title }}</span>
+      <span class="pr-branch">{{ pr.branch }}</span>
+      <a href="{{ pr.url }}" target="_blank" class="btn btn-outline" style="padding:4px 10px;font-size:12px">View ↗</a>
+      <form method="post" action="/product/{{ product.id }}/merge-pr/{{ pr.number }}" style="display:inline">
+        <button class="btn btn-green" style="padding:4px 10px;font-size:12px"
+                onclick="return confirm('Merge PR #{{ pr.number }} via squash?')">
+          Merge ↩
+        </button>
+      </form>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div class="empty-icon">✅</div>
+    <h2>No open PRs</h2>
+    <p>All pull requests have been merged or none have been created yet.</p>
+  </div>
+  {% endif %}
 </div>
+
+
+<!-- ══ TAB: HISTORY ════════════════════════════════════════ -->
+<div class="tab-content" id="tab-history" style="display:none">
+  {% if sessions %}
+  <table class="history-table">
+    <thead>
+      <tr>
+        <th>Started</th>
+        <th>Duration</th>
+        <th>Features</th>
+        <th>Cost</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for s in sessions %}
+    <tr>
+      <td>{{ s.started_at.strftime('%Y-%m-%d %H:%M') }}</td>
+      <td>
+        {% if s.ended_at %}
+          {% set dur = (s.ended_at - s.started_at).seconds %}
+          {{ '%d:%02d'|format(dur // 60, dur % 60) }}m
+        {% else %}
+          <span class="exit-run">running…</span>
+        {% endif %}
+      </td>
+      <td>{{ s.features_pushed }}/{{ s.features_attempted }} pushed</td>
+      <td>
+        {% if s.cost_usd %}${{ '%.4f'|format(s.cost_usd) }}{% else %}—{% endif %}
+      </td>
+      <td>
+        {% if s.ended_at is none %}
+          <span class="exit-run">▶ Running</span>
+        {% elif s.exit_code == 0 %}
+          <span class="exit-ok">✓ OK</span>
+        {% else %}
+          <span class="exit-err">✗ Exit {{ s.exit_code }}</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty-state">
+    <div class="empty-icon">📂</div>
+    <h2>No sessions yet</h2>
+    <p>Sessions appear here once the poller runs Claude on this product.</p>
+  </div>
+  {% endif %}
+</div>
+
+
+<!-- ══ TAB: LIVE SESSION ═══════════════════════════════════ -->
+<div class="tab-content" id="tab-live" style="display:none">
+  <div class="session-panel" style="margin-top:0">
+    <div class="session-panel-header">
+      <div class="session-status-dot" id="session-dot"></div>
+      <span class="session-title">Agent Session — Live Output</span>
+      <button onclick="toggleSession()" id="session-toggle"
+              style="background:none;border:1px solid #334155;color:#94a3b8;font-size:11px;
+                     padding:3px 10px;border-radius:4px;cursor:pointer">
+        Connect
+      </button>
+    </div>
+    <div class="session-terminal" id="session-terminal">
+      <span class="log-empty">Session output appears here when an agent is running.<br>Click Connect to stream.</span>
+    </div>
+    <div class="session-input-bar">
+      <input type="text" id="session-msg"
+             placeholder="Leave a note for Claude (written to pm_message.md)…"
+             onkeydown="if(event.key==='Enter')sendMessage()">
+      <button onclick="sendMessage()">Send ↵</button>
+    </div>
+    <div class="session-hint">Messages are written to <code>pm_message.md</code> in the workspace. Claude checks this file during its session.</div>
+  </div>
+</div>
+
+
+<!-- ══ TAB: SETTINGS ═══════════════════════════════════════ -->
+<div class="tab-content" id="tab-settings" style="display:none">
+  <div class="settings-grid">
+
+    <!-- Run Now -->
+    <div class="run-now-bar">
+      <div>
+        <strong style="color:var(--green)">⚡ Manual Run</strong>
+        <p>Queue this product to be picked up on the next poller cycle, bypassing the round-robin order.</p>
+      </div>
+      <form method="post" action="/product/{{ product.id }}/run-now">
+        <button class="btn btn-green" {% if product.run_now %}disabled{% endif %}>
+          {% if product.run_now %}Queued{% else %}Run now{% endif %}
+        </button>
+      </form>
+    </div>
+
+    <!-- Scheduling -->
+    <div class="settings-card">
+      <div class="settings-card-title">
+        <span class="title-icon icon-config">🕐</span>
+        Scheduling
+      </div>
+      <form method="post" action="/product/{{ product.id }}/schedule">
+        <div class="form-group">
+          <label>Quiet hours (UTC) — no sessions launched during this window</label>
+          <div style="display:flex; gap:8px; align-items:center">
+            <input type="number" name="quiet_hours_start" min="0" max="23"
+                   value="{{ product.quiet_hours_start if product.quiet_hours_start is not none else '' }}"
+                   placeholder="Start (e.g. 9)" style="width:120px">
+            <span class="muted">to</span>
+            <input type="number" name="quiet_hours_end" min="0" max="23"
+                   value="{{ product.quiet_hours_end if product.quiet_hours_end is not none else '' }}"
+                   placeholder="End (e.g. 18)" style="width:120px">
+          </div>
+          <p class="field-hint">Set start=22, end=6 for overnight-only operation. Leave blank to disable.</p>
+        </div>
+        <div class="form-group">
+          <label>Daily session cap</label>
+          <input type="number" name="daily_session_cap" min="1" max="50"
+                 value="{{ product.daily_session_cap or '' }}"
+                 placeholder="e.g. 3" style="width:120px">
+          <p class="field-hint">Maximum number of sessions to run per day. Leave blank for unlimited.</p>
+        </div>
+        <button type="submit">Save schedule</button>
+      </form>
+    </div>
+
+    <!-- Custom Prompt -->
+    <div class="settings-card">
+      <div class="settings-card-title">
+        <span class="title-icon" style="background:var(--purple-lt)">💬</span>
+        Agent Prompt Override
+      </div>
+      <form method="post" action="/product/{{ product.id }}/prompt">
+        <div class="form-group">
+          <label for="custom-prompt">Custom instructions for Claude</label>
+          <textarea id="custom-prompt" name="custom_prompt" rows="8"
+                    placeholder="Leave blank to use the default AGENT_WORKFLOW.md instructions.&#10;&#10;Override the system prompt here — e.g. specify coding style, testing requirements, branch naming, or constraints specific to this product.">{{ product.custom_prompt or '' }}</textarea>
+          <p class="field-hint">This replaces the default prompt when launching agent sessions for this product.</p>
+        </div>
+        <button type="submit">Save prompt</button>
+      </form>
+    </div>
+
+  </div>
+</div>
+
+
+<script>
+// ── TAB SWITCHING ─────────────────────────────────────────
+const TAB_IDS = ['board','prs','history','live','settings'];
+
+function switchTab(name, btn) {
+  TAB_IDS.forEach(id => {
+    document.getElementById('tab-' + id).style.display = id === name ? '' : 'none';
+  });
+  document.querySelectorAll('.product-tab').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  history.replaceState(null, '', `?tab=${name}`);
+}
+
+// Restore tab from URL on load
+(function() {
+  const params = new URLSearchParams(window.location.search);
+  const tab = params.get('tab') || 'board';
+  const btn = document.querySelector(`.product-tab[onclick*="'${tab}'"]`);
+  if (tab !== 'board') switchTab(tab, btn);
+})();
+
+
+// ── DRAG AND DROP ─────────────────────────────────────────
+let dragFeatureId = null;
+let dragSourceStatus = null;
+
+function onDragStart(e, card) {
+  dragFeatureId    = card.dataset.featureId;
+  dragSourceStatus = card.dataset.status;
+  card.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+}
+
+function onDragEnd(card) {
+  card.classList.remove('dragging');
+  document.querySelectorAll('.kanban-col').forEach(c => c.classList.remove('drag-over','drag-invalid'));
+}
+
+function onDragOver(e, col) {
+  e.preventDefault();
+  const target  = col.dataset.status;
+  const allowed = PM_TRANSITIONS[dragSourceStatus] || [];
+  if (target === dragSourceStatus) return;
+  col.classList.remove('drag-over','drag-invalid');
+  col.classList.add(allowed.includes(target) ? 'drag-over' : 'drag-invalid');
+  e.dataTransfer.dropEffect = allowed.includes(target) ? 'move' : 'none';
+}
+
+function onDragLeave(col) {
+  col.classList.remove('drag-over','drag-invalid');
+}
+
+async function onDrop(e, col) {
+  e.preventDefault();
+  col.classList.remove('drag-over','drag-invalid');
+  const target  = col.dataset.status;
+  if (!dragFeatureId || target === dragSourceStatus) return;
+  const allowed = PM_TRANSITIONS[dragSourceStatus] || [];
+  if (!allowed.includes(target)) return;
+
+  const card = document.querySelector(`[data-feature-id="${dragFeatureId}"]`);
+  const emptyEl = col.querySelector('.kanban-empty');
+  if (emptyEl) emptyEl.remove();
+  card.dataset.status = target;
+  col.appendChild(card);
+  updateCounts();
+
+  const srcCol = document.querySelector(`.kanban-col[data-status="${dragSourceStatus}"]`);
+  if (!srcCol.querySelector('.feature-card')) {
+    const ghost = document.createElement('div');
+    ghost.className = 'kanban-empty';
+    ghost.textContent = '—';
+    srcCol.appendChild(ghost);
+  }
+
+  try {
+    const r = await fetch(`/product/${PRODUCT_ID}/features/${dragFeatureId}/status`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: `status=${encodeURIComponent(target)}`,
+    });
+    if (!r.ok) throw new Error('rejected');
+    dragSourceStatus = target;
+  } catch {
+    alert('Move failed — reloading');
+    location.reload();
+  }
+}
+
+function updateCounts() {
+  document.querySelectorAll('.kanban-col').forEach(col => {
+    const n  = col.querySelectorAll('.feature-card').length;
+    const el = document.getElementById('count-' + col.dataset.status);
+    if (el) el.textContent = n;
+  });
+}
+
+
+// ── BULK APPROVE ──────────────────────────────────────────
+const selectedIds = new Set();
+
+function toggleSelect(id, cb) {
+  cb.checked ? selectedIds.add(id) : selectedIds.delete(id);
+  updateBulkBar();
+}
+
+function updateBulkBar() {
+  const bar = document.getElementById('bulk-bar');
+  document.getElementById('bulk-count').textContent = `${selectedIds.size} selected`;
+  document.getElementById('bulk-ids').value = [...selectedIds].join(',');
+  bar.classList.toggle('visible', selectedIds.size > 0);
+}
+
+function clearSelection() {
+  selectedIds.clear();
+  document.querySelectorAll('.feature-checkbox').forEach(cb => cb.checked = false);
+  updateBulkBar();
+}
+
+
+// ── FEATURE TEMPLATES ─────────────────────────────────────
+function toggleTemplates() {
+  const p = document.getElementById('template-panel');
+  p.style.display = p.style.display === 'none' ? '' : 'none';
+}
+
+function applyTemplate(name, desc) {
+  document.getElementById('feat-name').value = name;
+  document.getElementById('feat-desc').value = desc;
+  document.getElementById('template-panel').style.display = 'none';
+  document.getElementById('feat-name').focus();
+}
+
+
+// ── SESSION LOG STREAMING ─────────────────────────────────
+let evtSource = null;
+
+function toggleSession() {
+  if (evtSource) {
+    evtSource.close();
+    evtSource = null;
+    document.getElementById('session-dot').classList.remove('live');
+    document.getElementById('session-toggle').textContent = 'Connect';
+    return;
+  }
+  const terminal = document.getElementById('session-terminal');
+  terminal.innerHTML = '';
+  evtSource = new EventSource(`/api/products/${PRODUCT_ID}/session/stream`);
+  document.getElementById('session-dot').classList.add('live');
+  document.getElementById('session-toggle').textContent = 'Disconnect';
+
+  evtSource.onmessage = (e) => {
+    const line = JSON.parse(e.data);
+    appendLine(terminal, line);
+  };
+  evtSource.onerror = () => {
+    appendLine(terminal, '— connection lost —', 'err');
+    document.getElementById('session-dot').classList.remove('live');
+  };
+}
+
+function appendLine(terminal, text, cls) {
+  const empty = terminal.querySelector('.log-empty');
+  if (empty) empty.remove();
+  const el = document.createElement('span');
+  el.className = 'log-line' + (cls ? ' ' + cls : '') + (text.startsWith('[PM]') ? ' pm-msg' : '');
+  el.textContent = text;
+  terminal.appendChild(el);
+  terminal.appendChild(document.createElement('br'));
+  terminal.scrollTop = terminal.scrollHeight;
+}
+
+async function sendMessage() {
+  const input = document.getElementById('session-msg');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+  await fetch(`/api/products/${PRODUCT_ID}/session/message`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ message: msg }),
+  });
+}
+</script>
 
 {% endblock %}

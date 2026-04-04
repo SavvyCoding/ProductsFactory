@@ -34,21 +34,28 @@ class ProductUpdate(BaseModel):
     analysis_status: Optional[str]       = None
     config:          Optional[dict]      = None
     last_run_at:     Optional[datetime]  = None
+    run_now:         Optional[bool]      = None
+    custom_prompt:   Optional[str]       = None
 
 
 class ProductOut(BaseModel):
-    id:              int
-    working_dir:     str
-    name:            Optional[str]
-    github_repo:     Optional[str]
-    tech_stack:      Optional[List[str]]
-    type:            str
-    status:          str
-    analysis_status: str
-    config:          Optional[dict]
-    last_run_at:     Optional[datetime]
-    created_at:      datetime
-    updated_at:      datetime
+    id:                 int
+    working_dir:        str
+    name:               Optional[str]
+    github_repo:        Optional[str]
+    tech_stack:         Optional[List[str]]
+    type:               str
+    status:             str
+    analysis_status:    str
+    config:             Optional[dict]
+    last_run_at:        Optional[datetime]
+    run_now:            bool = False
+    custom_prompt:      Optional[str] = None
+    quiet_hours_start:  Optional[int] = None
+    quiet_hours_end:    Optional[int] = None
+    daily_session_cap:  Optional[int] = None
+    created_at:         datetime
+    updated_at:         datetime
 
     model_config = {"from_attributes": True}
 
@@ -135,6 +142,9 @@ class SessionEnd(BaseModel):
     features_attempted: Optional[int]      = None
     features_pushed:    Optional[int]      = None
     notes:              Optional[str]      = None
+    tokens_input:       Optional[int]      = None
+    tokens_output:      Optional[int]      = None
+    cost_usd:           Optional[float]    = None
 
 
 class SessionOut(BaseModel):
@@ -147,6 +157,10 @@ class SessionOut(BaseModel):
     exit_code:          Optional[int]
     features_attempted: int
     features_pushed:    int
+    tokens_input:       Optional[int]
+    tokens_output:      Optional[int]
+    cost_usd:           Optional[float]
+    notes:              Optional[str]
 
     model_config = {"from_attributes": True}
 
@@ -162,6 +176,66 @@ class AlertOut(BaseModel):
     created_at:  datetime
 
     model_config = {"from_attributes": True}
+
+
+# ── System Config ─────────────────────────────────────────────────────────────
+
+class SystemConfigOut(BaseModel):
+    products_root_dir:     Optional[str] = None
+    github_org:            Optional[str] = None
+    github_pat:            Optional[str] = None
+    github_ssh_key_name:   str = "productfactory-deploy"
+    slack_webhook_url:     Optional[str] = None
+    github_webhook_secret: Optional[str] = None
+    max_sessions_per_day:  Optional[int] = None
+
+    model_config = {"from_attributes": True}
+
+
+class ProductSchedule(BaseModel):
+    quiet_hours_start: Optional[int] = None
+    quiet_hours_end:   Optional[int] = None
+    daily_session_cap: Optional[int] = None
+
+
+class BulkApprove(BaseModel):
+    feature_ids: List[int]
+
+
+# ── PM Users ──────────────────────────────────────────────────────────────────
+
+class PMUserCreate(BaseModel):
+    name:     str
+    username: str
+    password: str
+
+    @field_validator("password")
+    @classmethod
+    def password_min_length(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("password must be at least 8 characters")
+        return v
+
+
+class PMUserOut(BaseModel):
+    id:         int
+    name:       str
+    username:   str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ── LLM Recommendations ───────────────────────────────────────────────────────
+
+class RecommendRequest(BaseModel):
+    vision:          str
+    preferred_stack: str = "python"
+
+
+class ArticulateRequest(BaseModel):
+    vision:          str
+    preferred_stack: str = "python"
 
 
 # ── Misc ─────────────────────────────────────────────────────────────────────

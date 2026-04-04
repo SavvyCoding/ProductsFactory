@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" id="html-root">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -8,12 +8,24 @@
 </head>
 <body>
   <nav>
-    <a href="/" class="logo">Product<span>Factory</span></a>
-    <a href="/">Products</a>
+    <a href="/" class="logo">
+      <div class="logo-mark">⚙</div>
+      Product<span>Factory</span>
+    </a>
+    <a href="/" class="{{ 'nav-active' if request.url.path == '/' else '' }}">Products</a>
+    <a href="/admin" class="{{ 'nav-active' if request.url.path.startswith('/admin') else '' }}">Admin</a>
     {% if alert_count %}
     <a href="/api/alerts/unread" class="nav-alerts">
       ⚠ Alerts <span class="alert-badge">{{ alert_count }}</span>
     </a>
+    {% endif %}
+    <div class="nav-spacer"></div>
+    <button class="dark-toggle" onclick="toggleDark()" id="dark-btn" title="Toggle dark mode">🌙</button>
+    {% if current_pm %}
+    <div class="nav-user">
+      <div class="nav-avatar">{{ current_pm[0].upper() }}</div>
+      {{ current_pm }}
+    </div>
     {% endif %}
   </nav>
 
@@ -24,5 +36,23 @@
   <main class="page">
     {% block content %}{% endblock %}
   </main>
+<script>
+(function() {
+  const saved = localStorage.getItem('pf-theme') || 'light';
+  if (saved === 'dark') document.getElementById('html-root').setAttribute('data-theme', 'dark');
+})();
+function toggleDark() {
+  const el = document.getElementById('html-root');
+  const isDark = el.getAttribute('data-theme') === 'dark';
+  el.setAttribute('data-theme', isDark ? 'light' : 'dark');
+  localStorage.setItem('pf-theme', isDark ? 'light' : 'dark');
+  document.getElementById('dark-btn').textContent = isDark ? '🌙' : '☀️';
+}
+// Set initial icon
+(function() {
+  const saved = localStorage.getItem('pf-theme') || 'light';
+  if (saved === 'dark') document.getElementById('dark-btn').textContent = '☀️';
+})();
+</script>
 </body>
 </html>

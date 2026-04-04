@@ -6,21 +6,26 @@ Poll interval: 60s when idle, 5s between products.
 
 Flow per cycle:
   1. Auth health check (real API call, not --version)
-  2. Discover any newly-registered folders
-  3. Heartbeat — kill stale containers (progress.md not pushed in >45m)
-  4. Reset stuck features (Implementing > 2h)
-  5. Pick next product (ORDER BY last_run_at ASC)
-  6. PR count gate (≥3 open PRs → pause product)
-  7. GitHub PR reconciliation (sync merged PRs → DB)
-  8. Run Claude in Docker (blocks until session ends)
-  9. Update last_run_at ONLY on clean exit (exit code 0)
+  2. Scaffold any greenfield_pending products
+  3. Discover any newly-registered folders
+  4. Heartbeat — kill stale containers (progress.md not pushed in >45m)
+  5. Reset stuck features (Implementing > 2h)
+  6. Deliver pending PM messages to workspace files
+  7. Pick next product: run_now flag first, then round-robin
+  8. Quiet hours gate (skip if current hour is in quiet window)
+  9. Daily session cap gate
+  10. PR count gate (≥3 open PRs → pause product)
+  11. GitHub PR reconciliation (sync merged PRs → DB)
+  12. Run Claude in Docker (blocks until session ends)
+  13. Update last_run_at ONLY on clean exit (exit code 0)
 """
 
 import os
 import time
 import logging
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
+from pathlib import Path
 
 import httpx
 
@@ -29,9 +34,11 @@ from orchestrator.docker_runner import run_claude_in_docker
 from orchestrator.github_client import count_open_prs, reconcile_merged_prs
 from orchestrator.heartbeat import check_stale_sessions
 from orchestrator.alerts import send_alert
+from orchestrator.greenfield_scaffold import scaffold_greenfield
 
-PM_API_URL = os.environ["PM_API_URL"]          # e.g. https://ubuntu-vm:8080
+PM_API_URL    = os.environ["PM_API_URL"]
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "60"))
+SSH_DIR       = Path(os.environ.get("SSH_DIR", "C:/Users/digvi/.ssh"))
 AUTH_CHECK_TIMEOUT = 30
 
 logging.basicConfig(
@@ -43,6 +50,18 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger("poller")
+
+# Track sessions launched today per product: {product_id: count}
+_daily_session_counts: dict[int, int] = {}
+_daily_session_date: date | None = None
+
+
+def _reset_daily_counts_if_new_day():
+    global _daily_session_counts, _daily_session_date
+    today = datetime.now(timezone.utc).date()
+    if _daily_session_date != today:
+        _daily_session_counts = {}
+        _daily_session_date = today
 
 
 def claude_auth_healthy() -> bool:
@@ -65,8 +84,30 @@ def claude_auth_healthy() -> bool:
         return False
 
 
-def get_next_product() -> dict | None:
-    """Fetch the product with oldest last_run_at that has approved features."""
+def get_system_config() -> dict:
+    """Fetch system config (github_pat, github_org, etc.) from PM API."""
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            resp = client.get("/api/system-config")
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.HTTPError as e:
+        log.error(f"get_system_config failed: {e}")
+        return {}
+
+
+def get_next_product(products: list[dict]) -> dict | None:
+    """
+    Select next product to run:
+    1. run_now=True products have priority (first one found)
+    2. Otherwise: status=ready, has Approved features, round-robin by last_run_at
+    """
+    # Priority: run_now flag
+    for p in products:
+        if p.get("run_now") and p["status"] == "ready":
+            return p
+
+    # Normal round-robin via API
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
             resp = client.get("/api/products/next")
@@ -85,12 +126,72 @@ def reset_stuck_features():
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
             resp = client.post("/api/features/reset_stuck")
         resp.raise_for_status()
-        data = resp.json()
-        count = data.get("reset_count", 0)
+        count = resp.json().get("reset_count", 0)
         if count:
             log.info(f"Reset {count} stuck feature(s) from Implementing → Approved")
     except httpx.HTTPError as e:
         log.error(f"reset_stuck_features failed: {e}")
+
+
+def is_quiet_hours(product: dict) -> bool:
+    """Return True if current UTC hour falls within the product's quiet window."""
+    start = product.get("quiet_hours_start")
+    end   = product.get("quiet_hours_end")
+    if start is None or end is None:
+        return False
+    current_hour = datetime.now(timezone.utc).hour
+    if start <= end:
+        return start <= current_hour < end
+    else:  # wraps midnight e.g. 22–6
+        return current_hour >= start or current_hour < end
+
+
+def is_daily_cap_reached(product: dict) -> bool:
+    """Return True if this product has hit its daily session cap."""
+    cap = product.get("daily_session_cap")
+    if not cap:
+        return False
+    _reset_daily_counts_if_new_day()
+    return _daily_session_counts.get(product["id"], 0) >= cap
+
+
+def deliver_pm_messages(product: dict):
+    """
+    Write pending PM messages from product.config to pm_message.md in the workspace.
+    Clears them from DB after writing.
+    """
+    config = product.get("config") or {}
+    messages = config.get("pm_messages", [])
+    if not messages:
+        return
+
+    working_dir = Path(product["working_dir"])
+    if not working_dir.exists():
+        return
+
+    msg_file = working_dir / "pm_message.md"
+    lines = [f"# PM Messages\n\n"]
+    for m in messages:
+        lines.append(f"- [{m.get('sent_at', '')}] {m.get('text', '')}\n")
+    msg_file.write_text("".join(lines), encoding="utf-8")
+    log.info(f"Wrote {len(messages)} PM message(s) to {msg_file}")
+
+    # Clear from DB
+    new_config = {**config, "pm_messages": []}
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            client.patch(f"/api/products/{product['id']}", json={"config": new_config})
+    except Exception as e:
+        log.warning(f"Failed to clear pm_messages from DB: {e}")
+
+
+def clear_run_now(product_id: int):
+    """Clear the run_now flag after picking the product."""
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            client.patch(f"/api/products/{product_id}", json={"run_now": False})
+    except Exception as e:
+        log.warning(f"Failed to clear run_now: {e}")
 
 
 def main():
@@ -105,23 +206,37 @@ def main():
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            # ② Discover new products
+            # Fetch all products for this cycle
             with httpx.Client(base_url=PM_API_URL) as client:
                 products = client.get("/api/products").json()
 
+            # ② Scaffold greenfield_pending products
+            greenfield_pending = [p for p in products if p["status"] == "greenfield_pending"]
+            if greenfield_pending:
+                system_config = get_system_config()
+                for product in greenfield_pending:
+                    log.info(f"Scaffolding greenfield: {product.get('name', product['id'])}")
+                    scaffold_greenfield(product, system_config, PM_API_URL, SSH_DIR)
+
+            # ③ Discover newly-registered products
             for product in products:
                 if product["status"] == "registered":
                     log.info(f"Discovering product: {product['working_dir']}")
                     discover_and_populate(product)
 
-            # ③ Heartbeat — kill stale containers
+            # ④ Heartbeat — kill stale containers
             check_stale_sessions(products)
 
-            # ④ Reset stuck features
+            # ⑤ Reset stuck features
             reset_stuck_features()
 
-            # ⑤ Pick next product
-            product = get_next_product()
+            # ⑥ Deliver PM messages
+            for product in products:
+                if (product.get("config") or {}).get("pm_messages"):
+                    deliver_pm_messages(product)
+
+            # ⑦ Pick next product
+            product = get_next_product(products)
             if not product:
                 log.debug("No products ready — sleeping")
                 time.sleep(POLL_INTERVAL)
@@ -129,29 +244,53 @@ def main():
 
             log.info(f"Selected product: {product['name']} (id={product['id']})")
 
-            # ⑥ PR count gate
+            # Clear run_now flag if set
+            if product.get("run_now"):
+                clear_run_now(product["id"])
+
+            # ⑧ Quiet hours gate
+            if is_quiet_hours(product):
+                h_start = product.get("quiet_hours_start")
+                h_end   = product.get("quiet_hours_end")
+                log.info(f"Quiet hours ({h_start}–{h_end} UTC) — skipping {product['name']}")
+                time.sleep(POLL_INTERVAL)
+                continue
+
+            # ⑨ Daily session cap gate
+            if is_daily_cap_reached(product):
+                log.info(f"Daily cap reached for {product['name']} — skipping")
+                time.sleep(POLL_INTERVAL)
+                continue
+
+            # ⑩ PR count gate
             open_pr_count = count_open_prs(product)
             if open_pr_count >= 3:
-                log.info(f"PR gate: {open_pr_count} open PRs — skipping, waiting for PM to merge")
-                send_alert("warning", f"{product['name']}: ≥3 open PRs unmerged — pausing until merged")
+                log.info(f"PR gate: {open_pr_count} open PRs — skipping")
+                send_alert("warning", f"{product['name']}: ≥3 open PRs unmerged — pausing")
                 time.sleep(300)
                 continue
 
-            # ⑦ GitHub PR reconciliation
+            # ⑪ GitHub PR reconciliation
             reconcile_merged_prs(product)
 
-            # ⑧ Run Claude session
+            # ⑫ Run Claude session
             log.info(f"Launching Claude session for: {product['name']}")
             exit_code = run_claude_in_docker(product)
             log.info(f"Session ended — exit_code={exit_code}")
 
-            # ⑨ Update last_run_at ONLY on clean exit
+            # Track daily count
+            _reset_daily_counts_if_new_day()
+            _daily_session_counts[product["id"]] = _daily_session_counts.get(product["id"], 0) + 1
+
+            # ⑬ Update last_run_at ONLY on clean exit
             if exit_code == 0:
                 with httpx.Client(base_url=PM_API_URL) as client:
                     client.patch(
                         f"/api/products/{product['id']}",
                         json={"last_run_at": datetime.now(timezone.utc).isoformat()},
                     )
+            else:
+                send_alert("warning", f"{product['name']}: session exited with code {exit_code}")
 
         except KeyboardInterrupt:
             log.info("Poller stopped by user")

@@ -47,11 +47,24 @@ def discover_and_populate(product: dict):
     _update_product(product["id"], {"status": "discovering"})
 
     updates: dict = {}
-    updates["name"]        = _discover_name(working_dir)
-    updates["github_repo"] = _discover_github_repo(working_dir)
-    updates["tech_stack"]  = _discover_tech_stack(working_dir)
-    updates["type"]        = _detect_product_type(working_dir)
-    updates["config"]      = _load_product_config(working_dir)
+    updates["name"]   = _discover_name(working_dir)
+
+    # Don't overwrite github_repo if already set (greenfield products set this during scaffold)
+    if not product.get("github_repo"):
+        updates["github_repo"] = _discover_github_repo(working_dir)
+
+    # If product was greenfield-scaffolded (has preferred_stack in config), trust those values
+    existing_config = product.get("config") or {}
+    if existing_config.get("preferred_stack"):
+        # Greenfield: use pre-set stack; don't re-detect type (already 'greenfield')
+        if not product.get("tech_stack"):
+            updates["tech_stack"] = [existing_config["preferred_stack"]]
+    else:
+        # Brownfield or untyped: scan the working dir
+        updates["tech_stack"] = _discover_tech_stack(working_dir)
+        updates["type"]       = _detect_product_type(working_dir)
+
+    updates["config"] = _load_product_config(working_dir)
 
     # Merge discovered data into product dict so renderer has full context
     merged = {**product, **updates}

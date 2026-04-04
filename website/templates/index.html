@@ -2,49 +2,482 @@
 {% block title %}Products — ProductFactory{% endblock %}
 {% block content %}
 
-<div class="page-header">
-  <h1>Products</h1>
+<!-- ── PAGE HEADER ─────────────────────────────────────────── -->
+<div class="page-header" style="margin-bottom:20px">
+  <div>
+    <h1>Products</h1>
+    <p class="muted" style="margin-top:3px">Manage and monitor your autonomous development pipeline</p>
+  </div>
+  <div class="actions">
+    <button class="btn btn-outline" onclick="togglePanel('brownfield')">+ Brownfield</button>
+    <button class="btn btn-green"   onclick="togglePanel('greenfield')">✦ New Greenfield</button>
+  </div>
 </div>
 
-<!-- Register product form -->
-<form method="post" action="/product/register" class="register-form">
-  <input type="text" name="working_dir"
-         placeholder="C:/path/to/product  or  /home/user/myapp"
-         required autocomplete="off">
-  <button type="submit">+ Register</button>
-</form>
 
+<!-- ── STATS BAR ──────────────────────────────────────────── -->
+{% set total    = products | length %}
+{% set running  = products | selectattr('status', 'equalto', 'running')  | list | length %}
+{% set ready    = products | selectattr('status', 'equalto', 'ready')    | list | length %}
+{% set paused   = products | selectattr('status', 'equalto', 'paused')   | list | length %}
+{% set gf       = products | selectattr('type',   'equalto', 'greenfield')| list | length %}
+
+<div class="stats-bar">
+  <div class="stat-item">
+    <span class="stat-value">{{ total }}</span>
+    <span class="stat-label">Total</span>
+  </div>
+  <div class="stat-divider"></div>
+  <div class="stat-item">
+    <span class="stat-value" style="color:var(--green)">{{ ready }}</span>
+    <span class="stat-label">Ready</span>
+  </div>
+  <div class="stat-divider"></div>
+  <div class="stat-item">
+    <span class="stat-value" style="color:var(--blue)">{{ running }}</span>
+    <span class="stat-label">Running</span>
+  </div>
+  <div class="stat-divider"></div>
+  <div class="stat-item">
+    <span class="stat-value" style="color:var(--slate)">{{ paused }}</span>
+    <span class="stat-label">Paused</span>
+  </div>
+  <div class="stat-divider"></div>
+  <div class="stat-item">
+    <span class="stat-value" style="color:var(--purple)">{{ gf }}</span>
+    <span class="stat-label">Greenfield</span>
+  </div>
+</div>
+
+
+<!-- ── BROWNFIELD DRAWER ───────────────────────────────────── -->
+<div class="register-drawer" id="drawer-brownfield">
+  <div class="drawer-inner">
+    <div class="drawer-heading">
+      <span>Register existing repository</span>
+      <button class="drawer-close" onclick="togglePanel('brownfield')">✕</button>
+    </div>
+    <form method="post" action="/product/register" class="register-form">
+      <input type="text" name="working_dir"
+             placeholder="C:/path/to/existing/repo"
+             required autocomplete="off">
+      <button type="submit" class="btn btn-blue">+ Register</button>
+    </form>
+    <p class="muted" style="margin-top:8px;font-size:12px">
+      ProductFactory will auto-discover the stack and install agent workflow templates.
+    </p>
+  </div>
+</div>
+
+
+<!-- ── GREENFIELD DRAWER ────────────────────────────────────── -->
+<div class="register-drawer" id="drawer-greenfield">
+  <div class="drawer-inner" style="max-width:none">
+    <div class="drawer-heading">
+      <span>✦ Create new greenfield product</span>
+      <button class="drawer-close" onclick="togglePanel('greenfield')">✕</button>
+    </div>
+
+    {% if not products_root_dir %}
+    <div class="notice notice-amber" style="margin-bottom:16px">
+      ⚙ <strong>Admin not configured.</strong>
+      <a href="/admin">Set the products root directory and GitHub details</a> before creating greenfield products.
+    </div>
+    {% endif %}
+
+    <form method="post" action="/product/register/greenfield" class="greenfield-form">
+      <div class="gf-grid">
+
+        <!-- Left column: meta -->
+        <div class="gf-col">
+          <div class="form-group">
+            <label for="gf-name">Product name</label>
+            <input type="text" id="gf-name" name="product_name"
+                   placeholder="My Awesome App" required autocomplete="off">
+          </div>
+
+          <div class="form-group">
+            <label for="gf-repo">GitHub repo name</label>
+            <input type="text" id="gf-repo" name="github_repo_name"
+                   placeholder="my-awesome-app" required autocomplete="off"
+                   pattern="[a-z0-9_\-]+" title="lowercase letters, numbers, hyphens only">
+            <div class="path-preview" id="path-preview" data-root="{{ products_root_dir or '' }}">
+              📁 <span id="path-preview-text">{{ products_root_dir or '{root}' }}/<span class="highlight">my-awesome-app</span></span>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="gf-stack">Tech stack</label>
+            <select id="gf-stack" name="preferred_stack" onchange="onStackChange(this)">
+              <optgroup label="Python">
+                <option value="python+postgresql">Python + PostgreSQL</option>
+                <option value="python+mysql">Python + MySQL</option>
+                <option value="python+mongodb">Python + MongoDB</option>
+                <option value="python+redis">Python + Redis</option>
+                <option value="python+sqlite">Python + SQLite</option>
+              </optgroup>
+              <optgroup label="Node.js">
+                <option value="node+postgresql">Node.js + PostgreSQL</option>
+                <option value="node+mongodb">Node.js + MongoDB</option>
+                <option value="node+mysql">Node.js + MySQL</option>
+                <option value="node+redis">Node.js + Redis</option>
+              </optgroup>
+              <optgroup label="Full-stack">
+                <option value="nextjs+postgresql">Next.js + PostgreSQL</option>
+                <option value="nextjs+mongodb">Next.js + MongoDB</option>
+                <option value="react+node+postgresql">React + Node.js + PostgreSQL</option>
+                <option value="react+node+mongodb">React + Node.js + MongoDB</option>
+              </optgroup>
+              <optgroup label="Go">
+                <option value="go+postgresql">Go + PostgreSQL</option>
+                <option value="go+mysql">Go + MySQL</option>
+                <option value="go+redis">Go + Redis</option>
+              </optgroup>
+              <optgroup label="Other">
+                <option value="other">Other (specify below)</option>
+              </optgroup>
+            </select>
+            <input type="text" id="gf-stack-other" name="preferred_stack_other"
+                   placeholder="e.g. Rust + PostgreSQL"
+                   style="display:none; margin-top:8px" autocomplete="off">
+          </div>
+        </div>
+
+        <!-- Right column: vision -->
+        <div class="gf-col">
+          <div class="form-group" style="flex:1">
+            <label for="gf-vision">Vision / goal</label>
+            <div class="voice-field">
+              <textarea id="gf-vision" name="vision" rows="7"
+                        placeholder="Describe what this product does, who it's for, and its core value proposition…"
+                        required></textarea>
+              <button type="button" class="voice-btn" id="voice-btn-vision"
+                      onclick="startVoice('gf-vision', this)" title="Voice input">🎙</button>
+            </div>
+          </div>
+
+          <div class="gf-actions">
+            <button type="button" class="btn btn-purple" id="articulate-btn" onclick="articulateVision()">
+              ✦ Articulate Vision
+            </button>
+            <button type="button" class="btn btn-outline" id="suggest-btn" onclick="suggestFeatures()">
+              ✨ Suggest features
+            </button>
+            <span class="muted" id="articulate-status" style="font-size:12px"></span>
+            <span class="muted" id="suggest-status" style="font-size:12px"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- AI SUGGESTIONS PANEL -->
+      <div id="gf-suggestions" class="ai-suggestions hidden">
+        <p style="font-size:12px; font-weight:600; color:var(--dark); margin-bottom:10px">
+          Suggested features — click to select, then submit to auto-create them as Pending:
+        </p>
+        <div class="suggestions-grid" id="suggestions-grid"></div>
+        <p class="suggestions-hint" id="suggestions-hint"></p>
+      </div>
+      <input type="hidden" id="gf-suggestions-json" name="suggested_features" value="[]">
+
+      <div class="gf-submit-row">
+        <button type="submit" class="btn btn-green"
+                {% if not products_root_dir %}disabled title="Configure Admin first"{% endif %}>
+          🚀 Create product
+        </button>
+        <span class="muted" style="font-size:12px">
+          Repo will be created at
+          <code style="font-size:11px">{{ products_root_dir or '{root}' }}/<span id="submit-path-hint">…</span></code>
+        </span>
+      </div>
+    </form>
+  </div>
+</div>
+
+
+<!-- ── PRODUCT LIST ────────────────────────────────────────── -->
 {% if products %}
-<div class="product-grid">
-  {% for p in products %}
-  <a href="/product/{{ p.id }}" class="product-card">
-    <div class="product-name">{{ p.name or p.working_dir.split('/')[-1] or p.working_dir }}</div>
 
-    <div class="product-meta">
-      <span class="badge badge-{{ p.type }}">{{ p.type }}</span>
-      <span class="badge badge-status-{{ p.status }}">{{ p.status }}</span>
-      {% if p.analysis_status == 'running' %}
-      <span class="badge badge-analysis">🔬 analysing</span>
-      {% endif %}
+<div class="list-controls">
+  <div class="search-bar" style="margin-bottom:0">
+    <input type="text" id="product-search" placeholder="Search products…" oninput="filterProducts()">
+  </div>
+  <div class="filter-chips">
+    <span class="filter-chip active" data-filter="all"         onclick="setFilter('all',this)">All <em>{{ total }}</em></span>
+    <span class="filter-chip"        data-filter="ready"       onclick="setFilter('ready',this)">Ready</span>
+    <span class="filter-chip"        data-filter="paused"      onclick="setFilter('paused',this)">Paused</span>
+    <span class="filter-chip"        data-filter="greenfield"  onclick="setFilter('greenfield',this)">Greenfield</span>
+    <span class="filter-chip"        data-filter="brownfield"  onclick="setFilter('brownfield',this)">Brownfield</span>
+  </div>
+  <span class="product-count" id="visible-count">{{ products | length }}</span>
+</div>
+
+<div class="product-grid" id="product-grid">
+  {% for p in products %}
+  <a href="/product/{{ p.id }}" class="product-card"
+     data-type="{{ p.type }}"
+     data-status="{{ p.status }}"
+     data-name="{{ (p.name or '') | lower }}">
+
+    <div class="product-card-top">
+      <div class="product-type-dot product-type-dot--{{ p.type }}"></div>
+      <div class="product-name">{{ p.name or p.working_dir.split('/')[-1] or p.working_dir }}</div>
+      <div class="product-status-pill status-pill--{{ p.status }}">{{ p.status }}</div>
     </div>
 
     {% if p.tech_stack %}
-    <div class="product-stack">{{ p.tech_stack | join(' · ') }}</div>
+    <div class="product-stack-chips">
+      {% for tech in p.tech_stack %}
+      <span class="stack-chip">{{ tech }}</span>
+      {% endfor %}
+    </div>
     {% endif %}
 
-    {% if p.last_run_at %}
-    <div class="product-last-run">Last session: {{ p.last_run_at.strftime('%Y-%m-%d %H:%M') }} UTC</div>
-    {% else %}
-    <div class="product-last-run muted">Never run</div>
+    <div class="product-card-footer">
+      <span class="product-type-label">{{ p.type }}</span>
+      <span class="product-last-run">
+        {% if p.last_run_at %}
+          🕐 {{ p.last_run_at.strftime('%b %d, %H:%M') }}
+        {% else %}
+          Never run
+        {% endif %}
+      </span>
+    </div>
+
+    {% if p.run_now %}
+    <div class="run-queued-badge">⚡ Run queued</div>
+    {% endif %}
+    {% if p.analysis_status == 'running' %}
+    <div class="run-queued-badge" style="background:var(--blue-lt);color:var(--blue);border-color:var(--blue-mid)">🔬 Analysing</div>
     {% endif %}
   </a>
   {% endfor %}
 </div>
+
 {% else %}
-<div class="empty-state">
-  <p>No products registered yet.</p>
-  <p>Enter the path to a product folder above. The folder must already have a git remote set up.</p>
+
+<div class="empty-state" style="margin-top:40px">
+  <div class="empty-icon">📦</div>
+  <h2>No products yet</h2>
+  <p>Register a brownfield repo or create a new greenfield product to get started.</p>
+  <div style="display:flex;gap:10px;justify-content:center;margin-top:20px">
+    <button class="btn btn-outline" onclick="togglePanel('brownfield')">+ Brownfield</button>
+    <button class="btn btn-green"   onclick="togglePanel('greenfield')">✦ New Greenfield</button>
+  </div>
 </div>
+
 {% endif %}
+
+
+<script>
+// ── DRAWER TOGGLE ─────────────────────────────────────────
+function togglePanel(name) {
+  const drawers = ['brownfield','greenfield'];
+  drawers.forEach(d => {
+    const el = document.getElementById('drawer-' + d);
+    if (d === name) {
+      const isOpen = el.classList.contains('open');
+      el.classList.toggle('open', !isOpen);
+    } else {
+      el.classList.remove('open');
+    }
+  });
+}
+
+// ── SEARCH & FILTER ───────────────────────────────────────
+let activeFilter = 'all';
+
+function setFilter(filter, el) {
+  activeFilter = filter;
+  document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  filterProducts();
+}
+
+function filterProducts() {
+  const q = document.getElementById('product-search').value.toLowerCase();
+  const cards = document.querySelectorAll('#product-grid .product-card');
+  let visible = 0;
+  cards.forEach(card => {
+    const matchQ = !q || (card.dataset.name || '').includes(q);
+    const matchF = activeFilter === 'all'
+      || card.dataset.status === activeFilter
+      || card.dataset.type   === activeFilter;
+    card.style.display = (matchQ && matchF) ? '' : 'none';
+    if (matchQ && matchF) visible++;
+  });
+  const el = document.getElementById('visible-count');
+  if (el) el.textContent = visible;
+}
+
+// ── STACK DROPDOWN ────────────────────────────────────────
+function onStackChange(sel) {
+  const other = document.getElementById('gf-stack-other');
+  const show  = sel.value === 'other';
+  other.style.display = show ? 'block' : 'none';
+  other.required = show;
+  if (!show) other.value = '';
+}
+
+document.querySelector('.greenfield-form').addEventListener('submit', function(e) {
+  const sel   = document.getElementById('gf-stack');
+  const other = document.getElementById('gf-stack-other');
+  if (sel.value === 'other') {
+    if (!other.value.trim()) { e.preventDefault(); other.focus(); return; }
+    sel.name   = '';
+    other.name = 'preferred_stack';
+  }
+});
+
+// ── PATH PREVIEW ──────────────────────────────────────────
+const repoInput  = document.getElementById('gf-repo');
+const previewEl  = document.getElementById('path-preview-text');
+const submitHint = document.getElementById('submit-path-hint');
+const root       = document.getElementById('path-preview').dataset.root || '{root}';
+
+function updatePathPreview() {
+  const repo = repoInput.value || 'my-awesome-app';
+  previewEl.innerHTML  = root + '/<span class="highlight">' + escHtml(repo) + '</span>';
+  submitHint.textContent = repo;
+}
+repoInput.addEventListener('input', updatePathPreview);
+updatePathPreview();
+
+// ── VOICE INPUT ───────────────────────────────────────────
+const speechSupported = 'webkitSpeechRecognition' in window || 'SpeechRecognition' in window;
+if (!speechSupported) document.querySelectorAll('.voice-btn').forEach(b => b.style.display = 'none');
+
+let activeRecognition = null;
+
+function startVoice(targetId, btn) {
+  if (!speechSupported) return;
+  if (activeRecognition) { activeRecognition.stop(); activeRecognition = null; return; }
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const rec = new SR();
+  rec.lang = 'en-US'; rec.interimResults = true; rec.maxAlternatives = 1;
+  activeRecognition = rec;
+  btn.classList.add('recording'); btn.title = 'Click to stop';
+
+  let final = '';
+  rec.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) final += e.results[i][0].transcript + ' ';
+      else interim += e.results[i][0].transcript;
+    }
+    const el = document.getElementById(targetId);
+    el.value = el.value.trimEnd() + (el.value ? ' ' : '') + final + interim;
+  };
+  rec.onend = () => {
+    btn.classList.remove('recording'); btn.title = 'Voice input';
+    activeRecognition = null;
+    document.getElementById(targetId).value = document.getElementById(targetId).value.trim();
+  };
+  rec.onerror = (e) => {
+    btn.classList.remove('recording'); btn.title = 'Voice input';
+    activeRecognition = null;
+    if (e.error !== 'no-speech' && e.error !== 'aborted') alert('Voice error: ' + e.error);
+  };
+  rec.start();
+}
+
+// ── ARTICULATE VISION ─────────────────────────────────────
+async function articulateVision() {
+  const textarea = document.getElementById('gf-vision');
+  const vision   = textarea.value.trim();
+  if (vision.length < 10) { alert('Please enter a brief description first.'); return; }
+
+  const sel   = document.getElementById('gf-stack');
+  const stack = sel.value === 'other' ? (document.getElementById('gf-stack-other').value || 'other') : sel.value;
+  const btn   = document.getElementById('articulate-btn');
+  const status = document.getElementById('articulate-status');
+
+  btn.disabled = true; btn.textContent = '⏳ Articulating…'; status.textContent = '';
+  try {
+    const resp = await fetch('/api/articulate/vision', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ vision, preferred_stack: stack })
+    });
+    if (!resp.ok) throw new Error((await resp.json()).detail || 'Server error');
+    textarea.value = (await resp.json()).vision;
+    status.textContent = '✓ Done';
+  } catch (err) {
+    status.textContent = '✗ ' + err.message;
+  } finally {
+    btn.disabled = false; btn.textContent = '✦ Articulate Vision';
+  }
+}
+
+// ── AI FEATURE SUGGESTIONS ────────────────────────────────
+let selectedSuggestions = [];
+
+async function suggestFeatures() {
+  const vision = document.getElementById('gf-vision').value.trim();
+  const sel    = document.getElementById('gf-stack');
+  const stack  = sel.value === 'other' ? (document.getElementById('gf-stack-other').value || 'other') : sel.value;
+  if (vision.length < 20) { alert('Please describe the product vision first.'); return; }
+
+  const btn    = document.getElementById('suggest-btn');
+  const panel  = document.getElementById('gf-suggestions');
+  const grid   = document.getElementById('suggestions-grid');
+  const hint   = document.getElementById('suggestions-hint');
+  const status = document.getElementById('suggest-status');
+
+  btn.disabled = true; btn.textContent = '⏳ Thinking…'; status.textContent = '';
+  selectedSuggestions = []; updateSuggestionsJson();
+
+  try {
+    const resp = await fetch('/api/recommend/features', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ vision, preferred_stack: stack })
+    });
+    if (!resp.ok) throw new Error(resp.status === 501 ? 'ANTHROPIC_API_KEY not configured' : 'Server error');
+    const data = await resp.json();
+    panel.classList.remove('hidden');
+    grid.innerHTML = data.features.map((f, i) => `
+      <div class="suggestion-card" id="sc-${i}" onclick="toggleSuggestion(${i}, ${escAttr(JSON.stringify(f))})">
+        <div class="suggestion-name">${escHtml(f.name)}</div>
+        <div class="suggestion-desc">${escHtml(f.description || '')}</div>
+        <span class="suggestion-tag">Click to select</span>
+      </div>`).join('');
+    hint.textContent = `${data.features.length} suggestions — select which to create automatically.`;
+  } catch (err) {
+    panel.classList.remove('hidden');
+    grid.innerHTML = `<div class="notice notice-amber" style="grid-column:1/-1">${escHtml(err.message)}</div>`;
+    hint.textContent = '';
+  } finally {
+    btn.disabled = false; btn.textContent = '✨ Suggest features';
+  }
+}
+
+function toggleSuggestion(idx, feature) {
+  const card = document.getElementById('sc-' + idx);
+  const pos  = selectedSuggestions.findIndex(f => f.name === feature.name);
+  if (pos >= 0) {
+    selectedSuggestions.splice(pos, 1);
+    card.classList.remove('selected');
+    card.querySelector('.suggestion-tag').textContent = 'Click to select';
+  } else {
+    selectedSuggestions.push(feature);
+    card.classList.add('selected');
+    card.querySelector('.suggestion-tag').textContent = '✓ Selected';
+  }
+  updateSuggestionsJson();
+  document.getElementById('suggest-status').textContent =
+    selectedSuggestions.length ? `${selectedSuggestions.length} selected` : '';
+}
+
+function updateSuggestionsJson() {
+  document.getElementById('gf-suggestions-json').value = JSON.stringify(selectedSuggestions);
+}
+
+// ── UTILITIES ─────────────────────────────────────────────
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escAttr(s) {
+  return "'" + String(s).replace(/'/g, "\\'") + "'";
+}
+</script>
 
 {% endblock %}

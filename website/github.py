@@ -61,6 +61,68 @@ def fetch_progress_md(github_repo: str) -> str | None:
     return None
 
 
+def fetch_architecture_md(github_repo: str) -> str | None:
+    """Fetch ARCHITECTURE.md from the default branch, same pattern as progress.md."""
+    slug = parse_repo_slug(github_repo)
+    if not slug:
+        return None
+    owner, repo = slug
+    try:
+        resp = httpx.get(
+            f"https://api.github.com/repos/{owner}/{repo}/contents/ARCHITECTURE.md",
+            headers=_headers(),
+            timeout=_TIMEOUT,
+        )
+        return resp.text if resp.status_code == 200 else None
+    except Exception as e:
+        log.warning(f"fetch_architecture_md error: {e}")
+    return None
+
+
+def list_open_prs(github_repo: str) -> list[dict]:
+    """Return list of open PRs with number, title, url, branch."""
+    slug = parse_repo_slug(github_repo)
+    if not slug:
+        return []
+    owner, repo = slug
+    try:
+        resp = httpx.get(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls",
+            params={"state": "open", "per_page": 20},
+            headers={**_headers(), "Accept": "application/vnd.github+json"},
+            timeout=_TIMEOUT,
+        )
+        if resp.status_code == 200:
+            return [
+                {"number": pr["number"], "title": pr["title"],
+                 "url": pr["html_url"], "branch": pr["head"]["ref"]}
+                for pr in resp.json()
+            ]
+    except Exception as e:
+        log.warning(f"list_open_prs error: {e}")
+    return []
+
+
+def merge_pr(github_repo: str, pr_number: int, token: str) -> bool:
+    """Merge a PR via GitHub API. Returns True on success."""
+    slug = parse_repo_slug(github_repo)
+    if not slug:
+        return False
+    owner, repo = slug
+    try:
+        h = {**_headers(), "Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}"}
+        resp = httpx.put(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/merge",
+            json={"merge_method": "squash"},
+            headers=h,
+            timeout=_TIMEOUT,
+        )
+        return resp.status_code in (200, 201)
+    except Exception as e:
+        log.warning(f"merge_pr error: {e}")
+    return False
+
+
 def count_open_prs(github_repo: str) -> int:
     """Returns the number of open PRs. Returns 0 on any error."""
     slug = parse_repo_slug(github_repo)

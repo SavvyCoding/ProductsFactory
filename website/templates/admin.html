@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% block title %}Admin — ProductFactory{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>Admin</h1>
+</div>
+
+{% if saved %}
+<div class="notice notice-blue" style="margin-bottom:20px">✓ Settings saved.</div>
+{% endif %}
+
+<div class="admin-grid">
+
+  <!-- ── SYSTEM CONFIGURATION ─────────────────────────────── -->
+  <div class="settings-card">
+    <div class="settings-card-title">
+      <span class="title-icon icon-config">⚙</span>
+      System Configuration
+    </div>
+    <form method="post" action="/admin/settings">
+
+      <div class="form-group">
+        <label for="a-root">Products root directory</label>
+        <input type="text" id="a-root" name="products_root_dir"
+               value="{{ config.products_root_dir or '' }}"
+               placeholder="C:/Users/digvi/Products" required autocomplete="off">
+        <p class="field-hint">All greenfield products are created as sub-folders here. Must be writable by ProductFactory.</p>
+      </div>
+
+      <div class="form-group">
+        <label for="a-org">GitHub organisation</label>
+        <input type="text" id="a-org" name="github_org"
+               value="{{ config.github_org or '' }}"
+               placeholder="my-org" autocomplete="off">
+        <p class="field-hint">Repos are created as <code>{org}/{repo-name}</code>. Use your GitHub username for personal accounts.</p>
+      </div>
+
+      <div class="form-group">
+        <label for="a-pat">GitHub Personal Access Token</label>
+        <div class="pat-field">
+          <input type="password" id="a-pat" name="github_pat"
+                 value="{{ config.github_pat or '' }}"
+                 placeholder="ghp_…" autocomplete="new-password">
+          <button type="button" class="btn btn-sm btn-outline" onclick="togglePat()">Show</button>
+        </div>
+        <p class="field-hint">
+          Required scopes: <code>repo</code> · <code>admin:public_key</code><br>
+          Used to create repos, upload deploy keys, and authenticate <code>gh</code> CLI inside agent containers.
+        </p>
+      </div>
+
+      <div class="form-group">
+        <label for="a-key">Deploy key label</label>
+        <input type="text" id="a-key" name="github_ssh_key_name"
+               value="{{ config.github_ssh_key_name or 'productfactory-deploy' }}"
+               placeholder="productfactory-deploy">
+        <p class="field-hint">Label shown on GitHub under repo Settings → Deploy keys.</p>
+      </div>
+
+      <div style="margin-top:4px">
+        <button type="submit">Save configuration</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- ── NOTIFICATIONS ────────────────────────────────────── -->
+  <div class="settings-card">
+    <div class="settings-card-title">
+      <span class="title-icon" style="background:var(--amber-lt)">🔔</span>
+      Notifications & Webhooks
+    </div>
+    <form method="post" action="/admin/settings/notifications">
+
+      <div class="form-group">
+        <label for="a-slack">Slack Webhook URL</label>
+        <input type="url" id="a-slack" name="slack_webhook_url"
+               value="{{ config.slack_webhook_url or '' }}"
+               placeholder="https://hooks.slack.com/services/…" autocomplete="off">
+        <p class="field-hint">Alerts (session failures, PR gates, auth issues) are posted here. Works with any Slack-compatible webhook (Teams, Discord).</p>
+      </div>
+
+      <div class="form-group">
+        <label for="a-wh-secret">GitHub Webhook Secret</label>
+        <div class="pat-field">
+          <input type="password" id="a-wh-secret" name="github_webhook_secret"
+                 value="{{ config.github_webhook_secret or '' }}"
+                 placeholder="secret string" autocomplete="new-password">
+          <button type="button" class="btn btn-sm btn-outline" onclick="toggleWhSecret()">Show</button>
+        </div>
+        <p class="field-hint">
+          Set the same secret in GitHub repo → Settings → Webhooks.<br>
+          Payload URL: <code>{{ request.url.scheme }}://{{ request.url.netloc }}/api/webhooks/github</code> · Event: <code>pull_request</code>
+        </p>
+      </div>
+
+      <div class="form-group">
+        <label for="a-cap">Global max sessions per day</label>
+        <input type="number" id="a-cap" name="max_sessions_per_day"
+               value="{{ config.max_sessions_per_day or '' }}"
+               placeholder="unlimited" min="1" style="width:140px">
+        <p class="field-hint">Hard cap across all products. Per-product caps can be set on each product's Settings tab.</p>
+      </div>
+
+      <div style="margin-top:4px">
+        <button type="submit">Save notifications</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- ── PM ACCOUNTS ───────────────────────────────────────── -->
+  <div class="settings-card">
+    <div class="settings-card-title">
+      <span class="title-icon icon-pm">👤</span>
+      PM Accounts
+    </div>
+
+    {% if pms %}
+    <table class="pm-table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Username</th>
+          <th>Added</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for pm in pms %}
+        <tr>
+          <td>{{ pm.name }}</td>
+          <td>
+            <code style="font-size:12px">{{ pm.username }}</code>
+          </td>
+          <td class="muted">{{ pm.created_at.strftime('%Y-%m-%d') }}</td>
+          <td>
+            <form method="post" action="/admin/pms/{{ pm.id }}/delete" style="display:inline">
+              <button type="submit" class="btn btn-sm btn-danger"
+                      onclick="return confirm('Remove {{ pm.username }}? They will lose access immediately.')">
+                Remove
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted" style="margin-bottom:18px">
+      No PM accounts yet. Add accounts below — each PM gets their own login with attributed activity.
+    </p>
+    {% endif %}
+
+    <details class="add-pm-details">
+      <summary>+ Add PM account</summary>
+      <form method="post" action="/admin/pms" class="add-pm-form">
+        <div class="form-group">
+          <label>Full name</label>
+          <input type="text" name="name" placeholder="Jane Smith" required autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label>Username</label>
+          <input type="text" name="username" placeholder="jsmith" required
+                 autocomplete="off" pattern="[a-z0-9_\-]+"
+                 title="lowercase letters, numbers, hyphens only">
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <div class="pat-field">
+            <input type="password" id="pm-pass" name="password"
+                   placeholder="••••••••" required autocomplete="new-password" minlength="8">
+            <button type="button" class="btn btn-sm btn-outline" onclick="togglePmPass()">Show</button>
+          </div>
+          <p class="field-hint">Minimum 8 characters.</p>
+        </div>
+        <button type="submit">Add PM</button>
+      </form>
+    </details>
+  </div>
+
+</div>
+
+<script>
+function togglePat() {
+  const inp = document.getElementById('a-pat');
+  const btn = inp.nextElementSibling;
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+  btn.textContent = inp.type === 'password' ? 'Show' : 'Hide';
+}
+
+function togglePmPass() {
+  const inp = document.getElementById('pm-pass');
+  const btn = inp.nextElementSibling;
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+  btn.textContent = inp.type === 'password' ? 'Show' : 'Hide';
+}
+
+function toggleWhSecret() {
+  const inp = document.getElementById('a-wh-secret');
+  const btn = inp.nextElementSibling;
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+  btn.textContent = inp.type === 'password' ? 'Show' : 'Hide';
+}
+</script>
+
+{% endblock %}

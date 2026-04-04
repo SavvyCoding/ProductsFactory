@@ -27,6 +27,9 @@ mistune==3.0.2
 pydantic==2.9.2             # request/response validation (FastAPI uses this)
 pydantic-settings==2.6.0
 
+# LLM feature recommendations
+anthropic>=0.40.0
+
 # Dev / test
 pytest==8.3.3
 pytest-asyncio==0.24.0

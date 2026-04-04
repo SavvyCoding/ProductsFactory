@@ -14,7 +14,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from website.database import Base
 
 
-PRODUCT_STATUSES   = ('registered', 'discovering', 'discovered', 'ready', 'paused', 'error')
+PRODUCT_STATUSES   = ('registered', 'discovering', 'discovered', 'ready', 'paused', 'error',
+                      'greenfield_pending')
 PRODUCT_TYPES      = ('greenfield', 'brownfield')
 ANALYSIS_STATUSES  = ('pending', 'running', 'done')
 FEATURE_STATUSES   = ('Pending', 'Approved', 'Implementing', 'Implemented',
@@ -38,10 +39,15 @@ class Product(Base):
     type:            Mapped[str]           = mapped_column(Text, nullable=False, default="greenfield")
     status:          Mapped[str]           = mapped_column(Text, nullable=False, default="registered")
     analysis_status: Mapped[str]           = mapped_column(Text, nullable=False, default="pending")
-    config:          Mapped[Optional[dict]] = mapped_column(JSONB)
-    last_run_at:     Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    created_at:      Mapped[datetime]      = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at:      Mapped[datetime]      = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    config:             Mapped[Optional[dict]] = mapped_column(JSONB)
+    last_run_at:        Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    run_now:            Mapped[bool]           = mapped_column(Boolean, nullable=False, default=False)
+    custom_prompt:      Mapped[Optional[str]]  = mapped_column(Text)
+    quiet_hours_start:  Mapped[Optional[int]]  = mapped_column(Integer)
+    quiet_hours_end:    Mapped[Optional[int]]  = mapped_column(Integer)
+    daily_session_cap:  Mapped[Optional[int]]  = mapped_column(Integer)
+    created_at:         Mapped[datetime]       = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at:         Mapped[datetime]       = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     features: Mapped[List["Feature"]] = relationship("Feature", back_populates="product", cascade="all, delete")
     sessions:  Mapped[List["Session"]]  = relationship("Session",  back_populates="product", cascade="all, delete")
@@ -88,8 +94,43 @@ class Session(Base):
     features_attempted:  Mapped[int]            = mapped_column(Integer, default=0)
     features_pushed:     Mapped[int]            = mapped_column(Integer, default=0)
     notes:               Mapped[Optional[str]]  = mapped_column(Text)
+    tokens_input:        Mapped[Optional[int]]  = mapped_column(Integer)
+    tokens_output:       Mapped[Optional[int]]  = mapped_column(Integer)
+    cost_usd:            Mapped[Optional[float]] = mapped_column()
 
     product: Mapped["Product"] = relationship("Product", back_populates="sessions")
+
+
+class SystemConfig(Base):
+    """
+    Global system configuration — single row (id=1 always).
+    Upserted via POST /admin/settings. Never create multiple rows.
+    """
+    __tablename__ = "system_config"
+
+    id:                    Mapped[int]           = mapped_column(Integer, primary_key=True, default=1)
+    products_root_dir:     Mapped[Optional[str]] = mapped_column(Text)
+    github_org:            Mapped[Optional[str]] = mapped_column(Text)
+    github_pat:            Mapped[Optional[str]] = mapped_column(Text)
+    github_ssh_key_name:   Mapped[str]           = mapped_column(Text, nullable=False, default="productfactory-deploy")
+    slack_webhook_url:     Mapped[Optional[str]] = mapped_column(Text)
+    github_webhook_secret: Mapped[Optional[str]] = mapped_column(Text)
+    max_sessions_per_day:  Mapped[Optional[int]] = mapped_column(Integer)
+    updated_at:            Mapped[datetime]       = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class PMUser(Base):
+    """
+    PM accounts. If any rows exist, they override env-var Basic Auth entirely.
+    Passwords stored as passlib bcrypt hashes.
+    """
+    __tablename__ = "pm_users"
+
+    id:            Mapped[int]     = mapped_column(Integer, primary_key=True)
+    name:          Mapped[str]     = mapped_column(Text, nullable=False)
+    username:      Mapped[str]     = mapped_column(Text, unique=True, nullable=False)
+    password_hash: Mapped[str]     = mapped_column(Text, nullable=False)
+    created_at:    Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Alert(Base):

@@ -1,10 +1,10 @@
 {% extends "base.html" %}
-{% block title %}progress.md — {{ product.name or product.working_dir }}{% endblock %}
+{% block title %}{{ doc_title or 'progress.md' }} — {{ product.name or product.working_dir }}{% endblock %}
 {% block content %}
 
 <div class="page-header">
   <div>
-    <h1>progress.md</h1>
+    <h1>{{ doc_title or 'progress.md' }}</h1>
     <p class="muted" style="margin-top:4px">{{ product.name or product.working_dir }}</p>
   </div>
   <a href="/product/{{ product.id }}" class="btn btn-outline">← Back</a>
