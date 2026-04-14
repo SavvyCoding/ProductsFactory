@@ -186,6 +186,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             "-e", f"DESIGNER_MODEL={DESIGNER_MODEL}",
             "-e", f"CODER_MODEL={CODER_MODEL}",
             "-e", f"MAX_FEATURES_PER_RUN={effective_max_features}",
+            "-e", f"OLLAMA_TIMEOUT={os.environ.get('OLLAMA_TIMEOUT', '600')}",
         ]
         # Ollama backend: no Claude OAuth mount needed
         claude_mount = []
