@@ -56,7 +56,7 @@ Your working directory is /workspace. All files must be written inside /workspac
    {{
      "product_id": {product_id},
      "name": "Security: <short description>",
-     "description": "PR #{pr_number} — <detailed description of the vulnerability and fix>",
+     "description": "PR #<pr_number> — <detailed description of the vulnerability and fix>",
      "feature_type": "bug",
      "priority": 90,
      "skip_design": true,
