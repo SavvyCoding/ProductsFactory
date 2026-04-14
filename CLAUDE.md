@@ -57,6 +57,8 @@ python scripts/test_run.py \
 
 ### Orchestration Loop (poller.py)
 
+On startup the poller acquires a **distributed lock** via `POST /api/poller/lock` (stored in `system_config` — 409 if another live poller holds it). A background thread refreshes the heartbeat every 15 s (`POST /api/poller/heartbeat`); TTL is 30 s. Lock released via `DELETE /api/poller/lock` on clean exit (also registered with `atexit`).
+
 Every `POLL_INTERVAL` seconds (default 60s), the poller:
 1. Auth-checks Claude: `claude -p ping` (real API call, validates OAuth tokens are mounted)
 2. Auto-discovers new products in `PRODUCTS_BASE_DIR` via `setup_product.py`
@@ -66,6 +68,7 @@ Every `POLL_INTERVAL` seconds (default 60s), the poller:
 6. Determines persona (designer vs coder) via `/api/features/next-for-persona`
 7. Coder: skips if ≥3 open PRs; syncs merged PRs from GitHub → Pushed
 8. Launches `docker run --rm productfactory-agent claude -p {prompt} -e AGENT_PERSONA={persona}`
+9. After Docker exits: reads `session_result.json` from the product working dir and applies all recorded status updates (see Agent Contract below)
 
    Alternatively, when `USE_OLLAMA=1` is set, step 8 instead runs `orchestrator/ollama_agent.py` inside the container — a self-contained tool-use loop against Ollama's OpenAI-compatible API (no Claude API key required). Model selection: `DESIGNER_MODEL` (default `gemma3:27b`) for designer/reviewer, `CODER_MODEL` (default `qwen3-coder:30b`) for coder.
 
@@ -102,9 +105,14 @@ registered → discovered → ready → [running] → (repeats)
 
 Feature states: `Pending → Approved → [Designing → Designed →] Implementing → Reviewing → [Reviewed →] Pushed` (also: `Deferred`, `Blocked`, `Rejected`, `Reverted`)
 
-New DB columns on `features`: `skip_design`, `design_doc`, `design_doc_path`, `review_outcome`, `review_notes`, `feature_type` (`feature | bug | chore`, default `feature`)
-New DB column on `sessions`: `persona`
-New table `feature_reviews`: full audit trail of code reviews (one row per review cycle, FK → features)
+### Agent Contract (session_result.json)
+
+Agents write `{working_dir}/session_result.json` **incrementally** as they complete each feature — one JSON object per line (newline-delimited). After the Docker container exits, `docker_runner.py` reads this file and applies all status updates via the PM API. Features with no entry in `session_result.json` and no open PR are rolled back to avoid stuck states.
+
+Each line format:
+```json
+{"feature_id": 42, "status": "Reviewing", "pr_number": 7}
+```
 
 ### Database
 
@@ -112,6 +120,7 @@ New table `feature_reviews`: full audit trail of code reviews (one row per revie
 - **Alembic migrations** use psycopg2 (sync) — driver is swapped in `db/migrations/env.py`
 - PostgreSQL runs in Docker (`docker-compose.yml`); PM website connects via `productfactory-net` bridge network
 - Key tables: `products`, `features`, `sessions`, `alerts`, `feature_reviews`
+- Notable columns: `features.skip_design`, `features.design_doc`, `features.design_doc_path`, `features.review_outcome`, `features.review_notes`, `features.feature_type` (`feature | bug | chore`); `sessions.persona`, `sessions.container_id`; `system_config.poller_pid/host/locked_at/heartbeat_at`
 - Tests use real PostgreSQL (not mocks) — each test runs inside a rolled-back transaction for isolation; requires `TEST_DATABASE_URL`
 
 ### Templates
