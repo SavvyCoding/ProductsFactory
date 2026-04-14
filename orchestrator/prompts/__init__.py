@@ -55,6 +55,7 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None) ->
         "{max_features_per_run}": str(
             product.get("max_features_per_run") or int(os.environ.get("MAX_FEATURES_PER_RUN", "1"))
         ),
+        "{auto_merge_enabled}": str(product.get("_auto_merge_enabled", False)),
     }
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)

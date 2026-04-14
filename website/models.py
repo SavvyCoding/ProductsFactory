@@ -164,6 +164,7 @@ class SystemConfig(Base):
     max_features_per_run:       Mapped[Optional[int]] = mapped_column(Integer)  # default 1
     brownfield_file_threshold:  Mapped[Optional[int]] = mapped_column(Integer)  # default 10
     recommender_pending_threshold: Mapped[Optional[int]] = mapped_column(Integer)  # default 15
+    auto_merge_enabled:            Mapped[Optional[bool]] = mapped_column(Boolean)  # default False
 
     # ── Agent / Ollama settings ───────────────────────────────────────────────
     agent_backend:     Mapped[Optional[str]] = mapped_column(Text)   # "claude" | "ollama"

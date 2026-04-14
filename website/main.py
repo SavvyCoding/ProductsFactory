@@ -140,12 +140,13 @@ _CFG_DEFAULTS = {
     "session_timeout_minutes":     90,
     "stale_threshold_minutes":     45,
     "auth_check_timeout":          30,
-    "max_open_prs":                3,
+    "max_open_prs":                1,
     "pr_gate_sleep":               300,
     "stuck_feature_timeout_hours": 0.33,  # ~20 minutes — fast rollback for local dev
     "max_features_per_run":        1,
     "brownfield_file_threshold":   10,
     "recommender_pending_threshold": 15,
+    "auto_merge_enabled":            False,
     # Agent / Ollama
     "agent_backend":    "claude",
     "ollama_host":      "http://host.docker.internal:11434",
@@ -602,6 +603,7 @@ async def admin_save_poller_settings(
     config.max_features_per_run        = _int("max_features_per_run")
     config.brownfield_file_threshold       = _int("brownfield_file_threshold")
     config.recommender_pending_threshold   = _int("recommender_pending_threshold")
+    config.auto_merge_enabled              = form.get("auto_merge_enabled") == "1"
     config.agent_backend               = _str("agent_backend")
     config.ollama_host                 = _str("ollama_host")
     config.designer_model              = _str("designer_model")

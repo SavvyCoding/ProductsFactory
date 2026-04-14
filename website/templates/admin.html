@@ -203,6 +203,17 @@
           <p class="field-hint">Skip recommender agent when Pending backlog reaches this count. Set 0 to always run.</p>
         </div>
 
+        <div class="form-group" style="grid-column:1/-1">
+          <label class="toggle-label">
+            <input type="checkbox" id="p-auto-merge" name="auto_merge_enabled" value="1"
+                   {% if config.auto_merge_enabled %}checked{% endif %}>
+            <span class="toggle-text">
+              <strong>Auto Merge</strong>
+              <span class="field-hint" style="margin:0">When enabled, the Reviewer agent auto-merges PRs it marks as high-confidence approved. Low-confidence reviews stay open for human sign-off.</span>
+            </span>
+          </label>
+        </div>
+
       </div>
 
       <p class="admin-section-label" style="margin-top:24px">Agent Profile</p>

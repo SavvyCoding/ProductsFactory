@@ -154,6 +154,79 @@ def _reconcile_session_result(working_dir: str, product_id: int, exit_code: int)
         pass
 
 
+def _auto_merge_approved(product: dict, working_dir: str) -> None:
+    """
+    After a reviewer session, read session_result.json and merge any features
+    that were approved with high confidence. Called only when auto_merge_enabled=True.
+    """
+    import json as _json
+    result_file = Path(working_dir) / "session_result.json"
+    if not result_file.exists():
+        return
+    try:
+        data = _json.loads(result_file.read_text(encoding="utf-8"))
+    except Exception as e:
+        log.warning(f"[auto-merge] Could not read session_result.json: {e}")
+        return
+
+    gh_token = _get_gh_token()
+    if not gh_token:
+        log.warning("[auto-merge] No GitHub PAT configured — skipping auto-merge")
+        return
+
+    github_repo = product.get("github_repo", "")
+    if not github_repo:
+        log.warning("[auto-merge] Product has no github_repo — skipping auto-merge")
+        return
+
+    for entry in data.get("features", []):
+        if entry.get("review_outcome") != "approved":
+            continue
+        if entry.get("confidence", "low") != "high":
+            log.info(f"[auto-merge] Feature #{entry.get('id')} approved but low-confidence — skipping merge")
+            continue
+
+        # Look up the PR number for this feature
+        fid = entry.get("id")
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                feat = client.get(f"/api/features/{fid}").json()
+                pr_number = feat.get("pr_number")
+        except Exception as e:
+            log.warning(f"[auto-merge] Could not fetch feature #{fid}: {e}")
+            continue
+
+        if not pr_number:
+            log.warning(f"[auto-merge] Feature #{fid} has no PR number — skipping")
+            continue
+
+        log.info(f"[auto-merge] Merging PR #{pr_number} for feature #{fid} (high-confidence approval)")
+        try:
+            resp = httpx.put(
+                f"https://api.github.com/repos/{_parse_repo_slug(github_repo)}/pulls/{pr_number}/merge",
+                json={"merge_method": "squash", "commit_title": f"feat: auto-merge PR #{pr_number} [ProductFactory]"},
+                headers={"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"},
+                timeout=15,
+            )
+            if resp.status_code in (200, 201):
+                log.info(f"[auto-merge] PR #{pr_number} merged successfully")
+                # Update feature status to Pushed
+                with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                    client.patch(f"/api/features/{fid}", json={"status": "Pushed"})
+            else:
+                body = resp.json() if "application/json" in resp.headers.get("content-type", "") else {}
+                log.warning(f"[auto-merge] GitHub {resp.status_code} for PR #{pr_number}: {body.get('message', resp.text[:100])}")
+        except Exception as e:
+            log.warning(f"[auto-merge] Error merging PR #{pr_number}: {e}")
+
+
+def _parse_repo_slug(github_repo: str) -> str:
+    """Extract 'owner/repo' from a GitHub URL for API calls."""
+    import re
+    m = re.search(r"[:/]([^/]+/[^/]+?)(?:\.git)?$", github_repo)
+    return m.group(1) if m else github_repo
+
+
 def _get_gh_token() -> str | None:
     """Fetch GitHub PAT from system config for GH_TOKEN injection into agent containers."""
     try:
@@ -255,6 +328,9 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # Read backend from DB config (overrides env var)
     sys_cfg = _get_system_config_sync()
     effective_backend = (sys_cfg.get("agent_backend") or AGENT_BACKEND)
+    # Pass auto_merge setting into prompt via product dict (prompt builder reads _auto_merge_enabled)
+    product = dict(product)
+    product["_auto_merge_enabled"] = bool(sys_cfg.get("auto_merge_enabled", False))
 
     # Guard: check DB for an already-running session for this product.
     # Cross-check with docker ps — if the container is gone, auto-close the stale DB record.
@@ -533,6 +609,10 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     if exit_code == 2:
         return 2
+
+    # After a successful reviewer session: auto-merge high-confidence approvals if enabled
+    if exit_code == 0 and persona == "reviewer" and product.get("_auto_merge_enabled"):
+        _auto_merge_approved(product, working_dir)
 
     # After a successful coder session: QA → Security → video → recommender
     if exit_code == 0 and persona == "coder":
