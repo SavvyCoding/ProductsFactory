@@ -174,8 +174,11 @@ class FeatureReviewOut(BaseModel):
 # ── Sessions ─────────────────────────────────────────────────────────────────
 
 class SessionCreate(BaseModel):
-    product_id:  int
-    session_uid: str
+    product_id:   int
+    session_uid:  str
+    container_id: Optional[str] = None   # set at launch time: pf-{id}-{uid}
+    persona:      Optional[str] = None
+    backend:      Optional[str] = None   # "claude" | "ollama"
 
 
 class SessionEnd(BaseModel):
@@ -205,6 +208,7 @@ class SessionOut(BaseModel):
     tokens_output:      Optional[int]
     cost_usd:           Optional[float]
     persona:            Optional[str]
+    backend:            Optional[str]
     notes:              Optional[str]
 
     model_config = {"from_attributes": True}

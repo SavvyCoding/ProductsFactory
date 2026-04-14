@@ -363,12 +363,44 @@ def _release_pid_lock():
         pass
 
 
+def _close_orphaned_sessions():
+    """
+    On startup: close any sessions that have no ended_at but whose containers
+    are no longer running. Happens when the poller was killed mid-session.
+    """
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            resp = client.get("/api/sessions/active")
+            orphans = resp.json() if isinstance(resp.json(), list) else []
+        if not orphans:
+            return
+        # Check which containers are actually running
+        running = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}"],
+            capture_output=True, text=True
+        ).stdout.strip().splitlines()
+        running_set = set(running)
+        now = datetime.now(timezone.utc).isoformat()
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            for s in orphans:
+                cid = s.get("container_id") or ""
+                if cid not in running_set:
+                    client.patch(f"/api/sessions/{s['id']}", json={
+                        "ended_at":  now,
+                        "exit_code": 1,
+                    })
+                    log.info(f"Closed orphaned session {s['id']} (container={cid or 'none'}) on startup")
+    except Exception as e:
+        log.warning(f"Could not close orphaned sessions: {e}")
+
+
 def main():
     if not _acquire_pid_lock():
         return
     import atexit
     atexit.register(_release_pid_lock)
     log.info("ProductFactory Poller starting...")
+    _close_orphaned_sessions()
 
     while True:
         try:

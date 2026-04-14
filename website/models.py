@@ -129,6 +129,7 @@ class Session(Base):
     tokens_output:       Mapped[Optional[int]]  = mapped_column(Integer)
     cost_usd:            Mapped[Optional[float]] = mapped_column(Numeric(10, 6))
     persona:             Mapped[Optional[str]]  = mapped_column(String(32))
+    backend:             Mapped[Optional[str]]  = mapped_column(String(16))  # "claude" | "ollama"
 
     product: Mapped["Product"] = relationship("Product", back_populates="sessions")
 

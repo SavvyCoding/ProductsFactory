@@ -189,16 +189,29 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     sys_cfg = _get_system_config_sync()
     effective_backend = (sys_cfg.get("agent_backend") or AGENT_BACKEND)
 
-    # Guard: skip if a container for this product is already running.
-    # This prevents the poller from launching duplicates if it restarts mid-session.
+    # Guard: check DB for an already-running session for this product.
+    # Using the DB (not docker ps) means the check survives poller restarts.
     product_id = product["id"]
-    running = subprocess.run(
-        ["docker", "ps", "--filter", f"name=pf-{product_id}-", "--format", "{{.Names}}"],
-        capture_output=True, text=True
-    ).stdout.strip()
-    if running:
-        log.warning(f"Container already running for product {product_id} ({running}) — skipping")
-        return 1
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            resp = client.get("/api/sessions/active", params={"product_id": product_id})
+            active = resp.json()
+            if active:
+                log.warning(
+                    f"Active session in DB for {product['name']} "
+                    f"(container={active.get('container_id')} persona={active.get('persona')}) — skipping"
+                )
+                return 1
+    except Exception as e:
+        log.warning(f"Could not check active session in DB: {e} — falling back to docker ps")
+        # Fallback to docker ps if API is unreachable
+        running = subprocess.run(
+            ["docker", "ps", "--filter", f"name=pf-{product_id}-", "--format", "{{.Names}}"],
+            capture_output=True, text=True
+        ).stdout.strip()
+        if running:
+            log.warning(f"Container already running for product {product_id} ({running}) — skipping")
+            return 1
 
     # Mount only the deploy key, not the whole .ssh directory.
     # This preserves the known_hosts baked into the image.
@@ -301,13 +314,18 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     log.info(f"docker run: session={session_uid} product={product['name']}")
 
-    # Record session start
+    # Record session start — include container_id, persona, backend upfront so
+    # the DB is queryable immediately (used by active-session guard on next poll).
     session_id: int | None = None
+    container_name = f"pf-{product['id']}-{session_uid}"
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
             resp = client.post("/api/sessions", json={
-                "product_id":  product["id"],
-                "session_uid": session_uid,
+                "product_id":   product["id"],
+                "session_uid":  session_uid,
+                "container_id": container_name,
+                "persona":      persona,
+                "backend":      effective_backend,
             })
             resp.raise_for_status()
             session_id = resp.json()["id"]
@@ -374,10 +392,8 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         try:
             with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
                 client.patch(f"/api/sessions/{session_id}", json={
-                    "ended_at":    datetime.now(timezone.utc).isoformat(),
-                    "exit_code":   exit_code,
-                    "container_id": f"pf-{product['id']}-{session_uid}",
-                    "persona":     persona,
+                    "ended_at":  datetime.now(timezone.utc).isoformat(),
+                    "exit_code": exit_code,
                 })
         except Exception as e:
             log.warning(f"Could not update session record: {e}")

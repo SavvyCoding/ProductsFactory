@@ -1078,6 +1078,24 @@ async def api_start_session(body: schemas.SessionCreate, db: AsyncSession = Depe
     return session
 
 
+@app.get("/api/sessions/active")
+async def api_active_session(product_id: int | None = None, db: AsyncSession = Depends(get_db)):
+    """
+    Returns the currently running session(s) — ended_at IS NULL.
+    Poller calls this before launching a container to avoid duplicates.
+    If product_id is given, returns the active session for that product (or null).
+    Without product_id, returns all active sessions.
+    """
+    q = select(DBSession).where(DBSession.ended_at.is_(None))
+    if product_id is not None:
+        q = q.where(DBSession.product_id == product_id)
+    result = await db.execute(q)
+    sessions = result.scalars().all()
+    if product_id is not None:
+        return sessions[0] if sessions else None
+    return sessions
+
+
 @app.patch("/api/sessions/{session_id}", response_model=schemas.SessionOut)
 async def api_end_session(
     session_id: int, body: schemas.SessionEnd,
