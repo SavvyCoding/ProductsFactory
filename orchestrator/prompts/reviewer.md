@@ -75,12 +75,19 @@ Your working directory is /workspace. All files must be written inside /workspac
    ```
    (Setting back to Implementing so the Coder picks it up again.)
 
-8. **Return to main branch:**
+8. **Append to `/workspace/session_result.json`** after each review decision:
+   ```json
+   {"features": [{"id": {{feature_id}}, "status": "Reviewed", "review_outcome": "approved"}]}
+   ```
+   Or for changes requested: `"status": "Implementing", "review_outcome": "changes_requested"`
+   Read/parse/append/write if the file already exists. Create it if not.
+
+9. **Return to main branch:**
    ```
    git checkout main
    ```
 
-9. **Repeat** steps 1–8 for up to {max_features_per_run} PR(s) per session.
+11. **Repeat** steps 1–10 for up to {max_features_per_run} PR(s) per session.
 
 10. **Exit 0** when done.
 

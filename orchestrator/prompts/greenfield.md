@@ -34,6 +34,14 @@ Follow it exactly. Do not deviate without PM approval.
 **After opening PR:** PATCH the feature status to `Reviewing` with pr_number and pr_url set.
 **On push failure:** Set feature status → Blocked. Write reason to progress.md. Never exit 0.
 
+**After each feature reaches Reviewing or Blocked:** append to `/workspace/session_result.json`
+(create if missing — read/parse/append/write if it exists):
+```json
+{"features": [{"id": <feature_id>, "status": "Reviewing", "pr_number": <n>, "pr_url": "<url>"}]}
+```
+This is the authoritative status record — the poller reads it after the session ends to apply
+status updates even if the container is killed before task_done.
+
 **After all features:** Run competitor research → recommend new features as Pending via POST {pm_api_url}/api/features
 
 **Exit cleanly** (exit 0) only when all work is done and pushed.

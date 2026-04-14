@@ -35,3 +35,11 @@ Same startup, heartbeat, and exit rules as greenfield apply.
 
 **After opening PR:** PATCH the feature status to `Reviewing` with pr_number and pr_url set.
 If the feature has a design doc at docs/feature_{{id:03d}}_design.md, read it before implementing.
+
+**After each feature reaches Reviewing or Blocked:** append to `/workspace/session_result.json`
+(create if missing — read/parse/append/write if it exists):
+```json
+{"features": [{"id": <feature_id>, "status": "Reviewing", "pr_number": <n>, "pr_url": "<url>"}]}
+```
+This is the authoritative status record — the poller reads it after the session ends to apply
+status updates even if the container is killed before task_done.

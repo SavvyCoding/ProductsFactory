@@ -72,11 +72,15 @@ def _get_deploy_key_path(product: dict) -> Path | None:
 
 
 def _rollback_stuck_features(product_id: int, persona: str | None) -> None:
-    """Roll back features that were claimed by a session that never completed."""
+    """
+    Roll back features that were claimed by a session that never completed.
+    Only resets features with NO evidence of completion (no PR, not in session_result.json).
+    Features that have pr_number set are left alone — they're already in Reviewing.
+    """
     stuck_statuses = {
         "designer": ["Designing"],
         "coder":    ["Implementing"],
-        "reviewer": [],  # reviewer doesn't change status at start
+        "reviewer": [],
     }
     rollback_from = stuck_statuses.get(persona or "", ["Designing", "Implementing"])
     if not rollback_from:
@@ -85,12 +89,68 @@ def _rollback_stuck_features(product_id: int, persona: str | None) -> None:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
             feats = client.get(f"/api/products/{product_id}/features").json()
             for f in feats:
-                if f["status"] in rollback_from:
-                    target = "Approved"
-                    client.patch(f"/api/features/{f['id']}", json={"status": target})
-                    log.info(f"Rolled back feature #{f['id']} '{f['name']}' {f['status']} -> {target}")
+                if f["status"] in rollback_from and not f.get("pr_number"):
+                    client.patch(f"/api/features/{f['id']}", json={"status": "Approved"})
+                    log.info(f"Rolled back feature #{f['id']} '{f['name']}' {f['status']} -> Approved")
     except Exception as e:
         log.warning(f"Could not rollback stuck features: {e}")
+
+
+def _reconcile_session_result(working_dir: str, product_id: int, exit_code: int) -> None:
+    """
+    Read session_result.json written by the agent and apply all status updates
+    via the PM API. This runs AFTER the container exits — status authority lives
+    here, not inside the container, so kills/crashes can't leave status wrong.
+
+    File format (agent writes this incrementally after each feature):
+      {
+        "features": [
+          {"id": 21, "status": "Reviewing", "pr_number": 5, "pr_url": "https://..."},
+          {"id": 22, "status": "Designed",  "design_doc_path": "docs/feature_022_design.md"},
+          {"id": 25, "status": "Blocked",   "blocked_reason": "tests failing"}
+        ]
+      }
+
+    After applying, the file is deleted so it doesn't affect the next session.
+    """
+    result_file = Path(working_dir) / "session_result.json"
+    if not result_file.exists():
+        return
+
+    import json as _json
+    try:
+        data = _json.loads(result_file.read_text(encoding="utf-8"))
+    except Exception as e:
+        log.warning(f"Could not read session_result.json: {e}")
+        return
+
+    features = data.get("features", [])
+    if not features:
+        result_file.unlink(missing_ok=True)
+        return
+
+    applied = 0
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            for entry in features:
+                fid = entry.get("id")
+                if not fid:
+                    continue
+                patch_body = {k: v for k, v in entry.items() if k != "id"}
+                try:
+                    client.patch(f"/api/features/{fid}", json=patch_body)
+                    log.info(f"[reconcile] Feature #{fid} → {patch_body.get('status', '?')}")
+                    applied += 1
+                except Exception as fe:
+                    log.warning(f"[reconcile] Could not update feature #{fid}: {fe}")
+    except Exception as e:
+        log.warning(f"[reconcile] PM API error: {e}")
+
+    log.info(f"[reconcile] Applied {applied}/{len(features)} feature updates from session_result.json")
+    try:
+        result_file.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _get_gh_token() -> str | None:
@@ -386,7 +446,13 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             except Exception:
                 pass
 
-    # Record session end
+    # ── Post-exit reconciliation (runs regardless of exit code) ─────────────────
+    # 1. Apply status updates from session_result.json (written by agent incrementally).
+    #    This is the authoritative status update — runs outside the container so it
+    #    can never be skipped by a kill/crash.
+    _reconcile_session_result(working_dir, product["id"], exit_code)
+
+    # 2. Record session end in DB.
     if session_id is not None:
         from datetime import datetime, timezone
         try:
@@ -398,11 +464,14 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         except Exception as e:
             log.warning(f"Could not update session record: {e}")
 
-    # Exit code 2 = agent exited cleanly but never called task_done (incomplete session).
-    # Roll back any features the agent may have claimed (Designing/Implementing → Approved).
-    if exit_code == 2:
-        log.warning(f"Incomplete session for {product['name']} (no task_done) — rolling back stuck features")
+    # 3. Roll back any intermediate-state features with no PR evidence.
+    #    Covers cases where agent claimed a feature but never finished it.
+    #    (Features with pr_number are left alone — they're already Reviewing.)
+    if exit_code != 0:
+        log.warning(f"Non-zero exit ({exit_code}) for {product['name']} — rolling back incomplete features")
         _rollback_stuck_features(product["id"], persona)
+
+    if exit_code == 2:
         return 2
 
     # After a successful coder session: QA → Security → video → recommender

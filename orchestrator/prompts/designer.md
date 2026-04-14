@@ -67,16 +67,24 @@ Your working directory is /workspace. All files must be written inside /workspac
    {{"status": "Designed", "design_doc_path": "docs/feature_{{feature_id:03d}}_design.md"}}
    ```
 
-6. **Repeat** steps 1–5 for up to {max_features_per_run} feature(s) per session.
+6. **Append to `/workspace/session_result.json`** (create if missing) after each feature completes.
+   This file is the authoritative record — the poller reads it after the session ends to ensure
+   status is correct even if the container is killed.
+   ```json
+   {{"features": [{{"id": {{feature_id}}, "status": "Designed", "design_doc_path": "docs/feature_{{feature_id:03d}}_design.md"}}]}}
+   ```
+   If the file already exists, append to the `features` array (read → parse → append → write).
 
-7. **Push progress** — commit the design docs and push:
+7. **Repeat** steps 1–6 for up to {max_features_per_run} feature(s) per session.
+
+8. **Push progress** — commit the design docs and push:
    ```
    git add docs/
    git commit -m "design: feature design docs [designer-{session_uid}]"
    git push
    ```
 
-8. **Exit 0** when done.
+9. **Exit 0** when done.
 
 ---
 
