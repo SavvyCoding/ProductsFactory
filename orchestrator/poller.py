@@ -121,7 +121,7 @@ def claude_auth_healthy() -> bool:
     try:
         result = subprocess.run(
             ["claude", "-p", "ping", "--max-budget-usd", "0.001"],
-            timeout=AUTH_CHECK_TIMEOUT,
+            timeout=_cfg["auth_check_timeout"],
             capture_output=True,
             text=True,
         )
