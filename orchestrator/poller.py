@@ -421,10 +421,10 @@ def main():
             # ⑩ PR count gate (only applies to coder — designer/reviewer don't open new PRs)
             if persona == "coder":
                 open_pr_count = count_open_prs(product)
-                if open_pr_count >= MAX_OPEN_PRS:
+                if open_pr_count >= _cfg["max_open_prs"]:
                     log.info(f"PR gate: {open_pr_count} open PRs — skipping")
-                    send_alert("warning", f"{product['name']}: ≥{MAX_OPEN_PRS} open PRs unmerged — pausing")
-                    time.sleep(PR_GATE_SLEEP)
+                    send_alert("warning", f"{product['name']}: ≥{_cfg['max_open_prs']} open PRs unmerged — pausing")
+                    time.sleep(_cfg["pr_gate_sleep"])
                     continue
 
             # ⑪ GitHub PR reconciliation
