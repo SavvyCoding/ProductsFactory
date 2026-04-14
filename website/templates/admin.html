@@ -196,6 +196,13 @@
           <p class="field-hint">Source file count above which → auto-detected brownfield.</p>
         </div>
 
+        <div class="form-group">
+          <label for="p-rec-thresh">Recommender skip threshold <span class="field-unit">pending</span></label>
+          <input type="number" id="p-rec-thresh" name="recommender_pending_threshold"
+                 value="{{ config.recommender_pending_threshold }}" placeholder="15" min="0" class="field-narrow">
+          <p class="field-hint">Skip recommender agent when Pending backlog reaches this count. Set 0 to always run.</p>
+        </div>
+
       </div>
 
       <p class="admin-section-label" style="margin-top:24px">Agent Profile</p>

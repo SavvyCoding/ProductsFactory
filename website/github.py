@@ -14,10 +14,11 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 _TIMEOUT = 10
 
 
-def _headers() -> dict:
+def _headers(token: str | None = None) -> dict:
     h = {"Accept": "application/vnd.github.raw+json", "X-GitHub-Api-Version": "2022-11-28"}
-    if GITHUB_TOKEN:
-        h["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    effective_token = token or GITHUB_TOKEN
+    if effective_token:
+        h["Authorization"] = f"Bearer {effective_token}"
     return h
 
 
@@ -79,7 +80,7 @@ def fetch_architecture_md(github_repo: str) -> str | None:
     return None
 
 
-def list_open_prs(github_repo: str) -> list[dict]:
+def list_open_prs(github_repo: str, token: str | None = None) -> list[dict]:
     """Return list of open PRs with number, title, url, branch."""
     slug = parse_repo_slug(github_repo)
     if not slug:
@@ -89,7 +90,7 @@ def list_open_prs(github_repo: str) -> list[dict]:
         resp = httpx.get(
             f"https://api.github.com/repos/{owner}/{repo}/pulls",
             params={"state": "open", "per_page": 20},
-            headers={**_headers(), "Accept": "application/vnd.github+json"},
+            headers={**_headers(token), "Accept": "application/vnd.github+json"},
             timeout=_TIMEOUT,
         )
         if resp.status_code == 200:
@@ -98,6 +99,7 @@ def list_open_prs(github_repo: str) -> list[dict]:
                  "url": pr["html_url"], "branch": pr["head"]["ref"]}
                 for pr in resp.json()
             ]
+        log.warning(f"list_open_prs: GitHub returned {resp.status_code} for {owner}/{repo}")
     except Exception as e:
         log.warning(f"list_open_prs error: {e}")
     return []

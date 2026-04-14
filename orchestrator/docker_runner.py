@@ -550,8 +550,11 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             commit_and_push_output(working_dir, deploy_key=_get_deploy_key_path(product))
         else:
             log.warning("Product video generation skipped or failed — continuing to recommender")
-        # Skip recommender if the backlog already has ≥15 Pending features — no point
-        # adding more ideas when there's already plenty waiting for PM approval.
+        # Skip recommender if the Pending backlog is at or above the configured threshold.
+        # Threshold is read from system_config (recommender_pending_threshold, default 15).
+        # Set to 0 to always run the recommender.
+        _sys_cfg = _get_system_config_sync()
+        _rec_threshold = int(_sys_cfg.get("recommender_pending_threshold") or 15)
         try:
             with httpx.Client(base_url=PM_API_URL, timeout=10) as _client:
                 _resp = _client.get(
@@ -563,13 +566,13 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             log.warning(f"Could not count pending features: {_e} — running recommender anyway")
             _pending_count = 0
 
-        if _pending_count >= 15:
+        if _rec_threshold > 0 and _pending_count >= _rec_threshold:
             log.info(
                 f"Skipping recommender for {product['name']} — "
-                f"{_pending_count} Pending features already in backlog (≥15)"
+                f"{_pending_count} Pending features in backlog (threshold: {_rec_threshold})"
             )
         else:
-            log.info(f"Launching recommender for {product['name']} ({_pending_count} Pending features)")
+            log.info(f"Launching recommender for {product['name']} ({_pending_count} Pending, threshold: {_rec_threshold})")
             run_claude_in_docker(product, persona="recommender")
 
     return exit_code

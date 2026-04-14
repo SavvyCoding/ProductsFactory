@@ -145,6 +145,7 @@ _CFG_DEFAULTS = {
     "stuck_feature_timeout_hours": 0.33,  # ~20 minutes — fast rollback for local dev
     "max_features_per_run":        1,
     "brownfield_file_threshold":   10,
+    "recommender_pending_threshold": 15,
     # Agent / Ollama
     "agent_backend":    "claude",
     "ollama_host":      "http://host.docker.internal:11434",
@@ -296,7 +297,9 @@ async def product_detail(
     )
     sessions = sess_result.scalars().all()
     alert_count = await _unread_alert_count(db)
-    open_prs_list = list_open_prs(product.github_repo or "") if product.github_repo else []
+    _sys_cfg = await _get_system_config(db)
+    _gh_pat = _sys_cfg.github_pat if _sys_cfg else None
+    open_prs_list = list_open_prs(product.github_repo or "", token=_gh_pat) if product.github_repo else []
     open_prs = len(open_prs_list)
     tab = request.query_params.get("tab", "board")
     return templates.TemplateResponse("product.html", {
@@ -551,6 +554,7 @@ _POLLER_INT_BOUNDS: dict[str, tuple[int, int]] = {
     "stuck_feature_timeout_hours": (1,     48),
     "max_features_per_run":        (1,     10),
     "brownfield_file_threshold":   (1,    100),
+    "recommender_pending_threshold": (0,   500),
     "ollama_timeout":              (30,  1800),
     "bash_timeout":                (10,   600),
     "max_turns":                   (5,    500),
@@ -596,7 +600,8 @@ async def admin_save_poller_settings(
     config.pr_gate_sleep               = _int("pr_gate_sleep")
     config.stuck_feature_timeout_hours = _int("stuck_feature_timeout_hours")
     config.max_features_per_run        = _int("max_features_per_run")
-    config.brownfield_file_threshold   = _int("brownfield_file_threshold")
+    config.brownfield_file_threshold       = _int("brownfield_file_threshold")
+    config.recommender_pending_threshold   = _int("recommender_pending_threshold")
     config.agent_backend               = _str("agent_backend")
     config.ollama_host                 = _str("ollama_host")
     config.designer_model              = _str("designer_model")

@@ -163,6 +163,7 @@ class SystemConfig(Base):
     stuck_feature_timeout_hours:Mapped[Optional[int]] = mapped_column(Integer)  # default 2h
     max_features_per_run:       Mapped[Optional[int]] = mapped_column(Integer)  # default 1
     brownfield_file_threshold:  Mapped[Optional[int]] = mapped_column(Integer)  # default 10
+    recommender_pending_threshold: Mapped[Optional[int]] = mapped_column(Integer)  # default 15
 
     # ── Agent / Ollama settings ───────────────────────────────────────────────
     agent_backend:     Mapped[Optional[str]] = mapped_column(Text)   # "claude" | "ollama"
