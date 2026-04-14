@@ -243,17 +243,11 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # This discards any half-baked code from failed/incomplete previous sessions.
     _reset_workspace(working_dir, product.get("name", str(working_dir)))
 
-    # Ensure standard agent-writable directories exist with open permissions.
-    # The container runs as non-root 'agent' (UID 1000); host-created dirs default
-    # to owner-only write (drwxr-xr-x) which causes EACCES inside the container.
+    # Ensure standard agent-writable directories exist on the host.
+    # Permissions are fixed inside the container via docker exec -u 0 after startup
+    # (Windows NTFS bind-mounts appear as root-owned inside Docker; host chmod is a no-op).
     for _agent_dir in ("docs", "Results", "Temp"):
-        _d = Path(working_dir) / _agent_dir
-        _d.mkdir(exist_ok=True)
-        try:
-            import os as _os
-            _os.chmod(_d, 0o777)
-        except Exception:
-            pass
+        Path(working_dir, _agent_dir).mkdir(exist_ok=True)
     # Per-product override takes precedence over global env default
     effective_max_features = product.get("max_features_per_run") or MAX_FEATURES_PER_RUN
     prompt = build_prompt(product, session_uid, persona=persona)
@@ -453,6 +447,21 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             text=True,
             bufsize=1,
         )
+
+        # Fix workspace dir permissions as root immediately after container starts.
+        # Windows bind-mounts appear as root-owned inside Docker; the agent user (UID 1001)
+        # is "other" and can't write without this chmod.
+        def _fix_workspace_perms():
+            import time as _t
+            _t.sleep(3)  # Give container time to initialise
+            # Use sh -c to avoid Git Bash converting /workspace/* to Windows paths
+            subprocess.run(
+                ["docker", "exec", "-u", "0", container_name,
+                 "sh", "-c",
+                 "chmod 777 /workspace/docs /workspace/Results /workspace/Temp 2>/dev/null || true"],
+                capture_output=True,
+            )
+        threading.Thread(target=_fix_workspace_perms, daemon=True).start()
 
         def _stream_logs():
             buffer: list[str] = []
