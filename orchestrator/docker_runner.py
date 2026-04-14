@@ -69,6 +69,28 @@ def _get_deploy_key_path(product: dict) -> Path | None:
     return None
 
 
+def _rollback_stuck_features(product_id: int, persona: str | None) -> None:
+    """Roll back features that were claimed by a session that never completed."""
+    stuck_statuses = {
+        "designer": ["Designing"],
+        "coder":    ["Implementing"],
+        "reviewer": [],  # reviewer doesn't change status at start
+    }
+    rollback_from = stuck_statuses.get(persona or "", ["Designing", "Implementing"])
+    if not rollback_from:
+        return
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            feats = client.get(f"/api/products/{product_id}/features").json()
+            for f in feats:
+                if f["status"] in rollback_from:
+                    target = "Approved"
+                    client.patch(f"/api/features/{f['id']}", json={"status": target})
+                    log.info(f"Rolled back feature #{f['id']} '{f['name']}' {f['status']} -> {target}")
+    except Exception as e:
+        log.warning(f"Could not rollback stuck features: {e}")
+
+
 def _get_gh_token() -> str | None:
     """Fetch GitHub PAT from system config for GH_TOKEN injection into agent containers."""
     try:
@@ -221,6 +243,13 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 })
         except Exception as e:
             log.warning(f"Could not update session record: {e}")
+
+    # Exit code 2 = agent exited cleanly but never called task_done (incomplete session).
+    # Roll back any features the agent may have claimed (Designing/Implementing → Approved).
+    if exit_code == 2:
+        log.warning(f"Incomplete session for {product['name']} (no task_done) — rolling back stuck features")
+        _rollback_stuck_features(product["id"], persona)
+        return 2
 
     # After a successful coder session: QA → Security → video → recommender
     if exit_code == 0 and persona == "coder":

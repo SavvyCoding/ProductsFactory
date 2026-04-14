@@ -138,7 +138,7 @@ _CFG_DEFAULTS = {
     "auth_check_timeout":          30,
     "max_open_prs":                3,
     "pr_gate_sleep":               300,
-    "stuck_feature_timeout_hours": 2,
+    "stuck_feature_timeout_hours": 0.33,  # ~20 minutes — fast rollback for local dev
     "max_features_per_run":        1,
     "brownfield_file_threshold":   10,
     # Agent / Ollama

@@ -411,10 +411,10 @@ def run_agent(initial_prompt: str) -> int:
 
         if not tool_calls:
             if finish_reason in ("stop", "end_turn", ""):
-                _log("Agent finished without calling task_done — treating as clean exit")
-                return 0
-            _log(f"No tool calls and finish_reason={finish_reason!r} — done")
-            return 0
+                _log("Agent finished without calling task_done — exiting with code 2 (incomplete)")
+                return 2
+            _log(f"No tool calls and finish_reason={finish_reason!r} — exiting with code 2 (incomplete)")
+            return 2
 
         # Execute each tool call
         tool_results = []
