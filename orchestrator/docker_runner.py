@@ -17,6 +17,7 @@ import uuid
 import subprocess
 import logging
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -241,6 +242,18 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # Always reset workspace to clean main before starting a new session.
     # This discards any half-baked code from failed/incomplete previous sessions.
     _reset_workspace(working_dir, product.get("name", str(working_dir)))
+
+    # Ensure standard agent-writable directories exist with open permissions.
+    # The container runs as non-root 'agent' (UID 1000); host-created dirs default
+    # to owner-only write (drwxr-xr-x) which causes EACCES inside the container.
+    for _agent_dir in ("docs", "Results", "Temp"):
+        _d = Path(working_dir) / _agent_dir
+        _d.mkdir(exist_ok=True)
+        try:
+            import os as _os
+            _os.chmod(_d, 0o777)
+        except Exception:
+            pass
     # Per-product override takes precedence over global env default
     effective_max_features = product.get("max_features_per_run") or MAX_FEATURES_PER_RUN
     prompt = build_prompt(product, session_uid, persona=persona)
@@ -250,18 +263,40 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     effective_backend = (sys_cfg.get("agent_backend") or AGENT_BACKEND)
 
     # Guard: check DB for an already-running session for this product.
-    # Using the DB (not docker ps) means the check survives poller restarts.
+    # Cross-check with docker ps — if the container is gone, auto-close the stale DB record.
     product_id = product["id"]
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
             resp = client.get("/api/sessions/active", params={"product_id": product_id})
             active = resp.json()
             if active:
-                log.warning(
-                    f"Active session in DB for {product['name']} "
-                    f"(container={active.get('container_id')} persona={active.get('persona')}) — skipping"
+                container_id = active.get("container_id", "")
+                # Verify container is actually running — stale DB records block forever otherwise
+                docker_check = subprocess.run(
+                    ["docker", "ps", "--filter", f"name={container_id}", "--format", "{{.Names}}"],
+                    capture_output=True, text=True
                 )
-                return 1
+                if container_id and docker_check.stdout.strip():
+                    log.info(
+                        f"Active session for {product['name']} already running "
+                        f"(container={container_id} persona={active.get('persona')}) — waiting"
+                    )
+                    return 99  # Sentinel: already running, not an error
+                else:
+                    # Container is gone but DB record is open — close it
+                    session_id = active.get("id")
+                    log.warning(
+                        f"Orphaned session {session_id} in DB for {product['name']} "
+                        f"(container {container_id} not running) — closing and proceeding"
+                    )
+                    try:
+                        client.patch(f"/api/sessions/{session_id}", json={
+                            "ended_at": datetime.now(timezone.utc).isoformat(),
+                            "exit_code": 1,
+                            "notes": "orphaned - container exited without cleanup",
+                        })
+                    except Exception as ce:
+                        log.warning(f"Could not close orphaned session {session_id}: {ce}")
     except Exception as e:
         log.warning(f"Could not check active session in DB: {e} — falling back to docker ps")
         # Fallback to docker ps if API is unreachable
@@ -270,8 +305,8 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             capture_output=True, text=True
         ).stdout.strip()
         if running:
-            log.warning(f"Container already running for product {product_id} ({running}) — skipping")
-            return 1
+            log.info(f"Container already running for product {product_id} ({running}) — waiting")
+            return 99  # Sentinel: already running, not an error
 
     # Mount only the deploy key, not the whole .ssh directory.
     # This preserves the known_hosts baked into the image.
@@ -327,8 +362,19 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             _tmp_claude_dir = None
 
         mount_dir = _tmp_claude_dir or creds_src
-        # Container now runs as non-root 'agent' user — home is /home/agent
-        claude_mount = ["-v", f"{mount_dir}:/home/agent/.claude:ro"]
+
+        # Pre-create session-env/ so the Claude Code harness can write session state.
+        # Without this directory the harness fails to initialise and the Bash tool is broken.
+        if _tmp_claude_dir:
+            (Path(_tmp_claude_dir) / "session-env").mkdir(exist_ok=True)
+            # Mount read-write — safe because mount_dir is a temp copy, not the original.
+            # The harness must be able to write to session-env/ at runtime.
+            claude_mount = ["-v", f"{mount_dir}:/home/agent/.claude"]
+        else:
+            # Fallback: direct mount — keep read-only to protect original credentials.
+            # session-env writes will fail but that's better than exposing originals as rw.
+            claude_mount = ["-v", f"{mount_dir}:/home/agent/.claude:ro"]
+            log.warning("Mounting original .claude dir read-only — Bash tool may be broken")
 
         # Also mount .claude.json (sits alongside .claude/ in the host home dir)
         creds_parent = str(Path(creds_src).parent)
@@ -460,7 +506,6 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     # 2. Record session end in DB.
     if session_id is not None:
-        from datetime import datetime, timezone
         try:
             with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
                 client.patch(f"/api/sessions/{session_id}", json={

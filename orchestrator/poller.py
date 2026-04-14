@@ -585,6 +585,12 @@ def main():
             exit_code = run_claude_in_docker(product, persona=persona)
             log.info(f"Session ended — exit_code={exit_code} persona={persona}")
 
+            # exit_code=99 means "already running — skipped". Not an error; don't count or alert.
+            if exit_code == 99:
+                log.info(f"Session skipped (already running) for {product['name']} — will retry next cycle")
+                time.sleep(30)  # Short sleep so we re-check soon
+                continue
+
             # Track daily count (reviewers exempt)
             if persona != "reviewer":
                 _reset_daily_counts_if_new_day()
