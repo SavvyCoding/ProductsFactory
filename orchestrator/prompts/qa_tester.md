@@ -6,6 +6,8 @@ Tech stack: {tech_stack}
 
 Your working directory is /workspace. All files must be written inside /workspace.
 
+> **Tool note:** Use the **Bash** tool with `curl` for ALL PM API calls — WebFetch cannot reach internal Docker hostnames like `pm-api:8080`. Example: `curl -s -X PATCH http://pm-api:8080/api/features/42 -H "Content-Type: application/json" -d '{"status":"Designed"}'`
+
 ---
 
 ## Your mission

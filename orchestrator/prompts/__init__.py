@@ -44,11 +44,18 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None) ->
     template_path = Path(__file__).parent / f"{template_name}.md"
     template = template_path.read_text(encoding="utf-8")
 
-    return template.format(
-        product_id=product["id"],
-        product_name=product.get("name", product["working_dir"]),
-        session_uid=session_uid,
-        pm_api_url=os.environ.get("PM_API_URL_CONTAINER", os.environ["PM_API_URL"]),
-        tech_stack=", ".join(product.get("tech_stack") or []),
-        max_features_per_run=product.get("max_features_per_run") or int(os.environ.get("MAX_FEATURES_PER_RUN", "1")),
-    )
+    # Use explicit replacement instead of str.format() so that JSON examples
+    # like {"status": "..."} in the templates are not misinterpreted as placeholders.
+    replacements = {
+        "{product_id}": str(product["id"]),
+        "{product_name}": str(product.get("name", product["working_dir"])),
+        "{session_uid}": str(session_uid),
+        "{pm_api_url}": str(os.environ.get("PM_API_URL_CONTAINER", os.environ["PM_API_URL"])),
+        "{tech_stack}": ", ".join(product.get("tech_stack") or []),
+        "{max_features_per_run}": str(
+            product.get("max_features_per_run") or int(os.environ.get("MAX_FEATURES_PER_RUN", "1"))
+        ),
+    }
+    for placeholder, value in replacements.items():
+        template = template.replace(placeholder, value)
+    return template
