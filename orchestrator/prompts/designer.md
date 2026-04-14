@@ -6,6 +6,8 @@ Tech stack: {tech_stack}
 
 Your working directory is /workspace. All files must be written inside /workspace.
 
+> **IMPORTANT:** The workspace contains an `AGENT_WORKFLOW.md` file — that is the **Coder** workflow. **Do NOT read or follow it.** Follow only the instructions below.
+
 ---
 
 ## Your mission

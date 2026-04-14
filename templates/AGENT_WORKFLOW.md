@@ -1,7 +1,17 @@
 # Agent Workflow — {PRODUCT_NAME}
 
-This file is your standing operating procedure. Read it at the start of every session without exception.
-Edit this file to change Claude's behaviour without touching the poller.
+> **⚠️ PERSONA CHECK — READ THIS FIRST**
+>
+> Check your `AGENT_PERSONA` environment variable:
+> ```
+> echo $AGENT_PERSONA
+> ```
+> - **`designer`** → **STOP. Do NOT follow this file.** Your instructions are in the `-p` prompt you were launched with. Follow those exclusively.
+> - **`reviewer`** → **STOP. Do NOT follow this file.** Your instructions are in the `-p` prompt you were launched with. Follow those exclusively.
+> - **`coder`** (or empty) → continue reading below. This workflow is for you.
+>
+> This file is the **Coder** standing operating procedure only.
+> Edit this file to change Coder behaviour without touching the poller.
 
 ---
 
