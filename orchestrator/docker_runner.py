@@ -550,8 +550,27 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             commit_and_push_output(working_dir, deploy_key=_get_deploy_key_path(product))
         else:
             log.warning("Product video generation skipped or failed — continuing to recommender")
-        log.info(f"Launching recommender for {product['name']}")
-        run_claude_in_docker(product, persona="recommender")
+        # Skip recommender if the backlog already has ≥15 Pending features — no point
+        # adding more ideas when there's already plenty waiting for PM approval.
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=10) as _client:
+                _resp = _client.get(
+                    "/api/features/count",
+                    params={"product_id": product["id"], "status": "Pending"},
+                )
+                _pending_count = _resp.json().get("count", 0)
+        except Exception as _e:
+            log.warning(f"Could not count pending features: {_e} — running recommender anyway")
+            _pending_count = 0
+
+        if _pending_count >= 15:
+            log.info(
+                f"Skipping recommender for {product['name']} — "
+                f"{_pending_count} Pending features already in backlog (≥15)"
+            )
+        else:
+            log.info(f"Launching recommender for {product['name']} ({_pending_count} Pending features)")
+            run_claude_in_docker(product, persona="recommender")
 
     return exit_code
 

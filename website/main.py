@@ -836,6 +836,16 @@ async def api_product_features(product_id: int, db: AsyncSession = Depends(get_d
     return result.scalars().all()
 
 
+@app.get("/api/features/count")
+async def api_feature_count(product_id: int, status: str | None = None, db: AsyncSession = Depends(get_db)):
+    """Return {"count": N} for features matching product_id and optional status filter."""
+    q = select(func.count()).select_from(Feature).where(Feature.product_id == product_id)
+    if status:
+        q = q.where(Feature.status == status)
+    result = await db.execute(q)
+    return {"count": result.scalar()}
+
+
 @app.get("/api/features/approved", response_model=list[schemas.FeatureOut])
 async def api_approved_features(product_id: int, db: AsyncSession = Depends(get_db)):
     """Poller fetches features ready for coder: Approved (with skip_design) + Designed."""
