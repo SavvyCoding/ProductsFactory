@@ -1268,6 +1268,125 @@ async def api_clear_session_log(product_id: int):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# REST API — Poller Distributed Lock
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Three-endpoint protocol:
+#   POST   /api/poller/lock       — atomic acquire (409 if another poller is live)
+#   POST   /api/poller/heartbeat  — refresh TTL every 15s while running
+#   DELETE /api/poller/lock       — release on clean exit
+#
+# The lock row lives on system_config id=1. A lock is considered free when
+# poller_heartbeat_at IS NULL or is older than 30s (dead poller TTL).
+
+_LOCK_TTL_SECONDS = 30
+
+
+@app.post("/api/poller/lock")
+async def api_acquire_poller_lock(
+    body: schemas.PollerLockRequest,
+    db:   AsyncSession = Depends(get_db),
+):
+    """
+    Atomically acquire the poller lock.
+    Returns 200 + lock info on success, 409 + current holder on conflict.
+    Safe against concurrent callers: a single UPDATE WHERE is atomic in PostgreSQL.
+    """
+    # Ensure the singleton config row exists (idempotent)
+    config = await db.get(SystemConfig, 1)
+    if not config:
+        config = SystemConfig(id=1)
+        db.add(config)
+        await db.flush()
+
+    now    = datetime.now(timezone.utc)
+    stale  = now - timedelta(seconds=_LOCK_TTL_SECONDS)
+
+    result = await db.execute(
+        text("""
+            UPDATE system_config
+               SET poller_pid          = :pid,
+                   poller_host         = :host,
+                   poller_locked_at    = :now,
+                   poller_heartbeat_at = :now
+             WHERE id = 1
+               AND (poller_heartbeat_at IS NULL OR poller_heartbeat_at < :stale)
+            RETURNING poller_pid, poller_host, poller_locked_at, poller_heartbeat_at
+        """),
+        {"pid": body.pid, "host": body.host, "now": now, "stale": stale},
+    )
+    row = result.fetchone()
+
+    if row:
+        return {
+            "pid":          row.poller_pid,
+            "host":         row.poller_host,
+            "locked_at":    row.poller_locked_at.isoformat(),
+            "heartbeat_at": row.poller_heartbeat_at.isoformat(),
+        }
+
+    # Lock is held — include current holder in 409 so caller can log it
+    config = await db.get(SystemConfig, 1)
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error":        "lock_held",
+            "holder_pid":   config.poller_pid  if config else None,
+            "holder_host":  config.poller_host if config else None,
+            "heartbeat_at": config.poller_heartbeat_at.isoformat()
+                            if config and config.poller_heartbeat_at else None,
+        },
+    )
+
+
+@app.post("/api/poller/heartbeat")
+async def api_poller_heartbeat(
+    body: schemas.PollerHeartbeatRequest,
+    db:   AsyncSession = Depends(get_db),
+):
+    """Refresh heartbeat. Returns 404 if this pid+host no longer holds the lock."""
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        text("""
+            UPDATE system_config
+               SET poller_heartbeat_at = :now
+             WHERE id = 1
+               AND poller_pid  = :pid
+               AND poller_host = :host
+            RETURNING id
+        """),
+        {"now": now, "pid": body.pid, "host": body.host},
+    )
+    if not result.fetchone():
+        raise HTTPException(status_code=404, detail="Lock not held by this pid/host")
+    return {"ok": True, "heartbeat_at": now.isoformat()}
+
+
+@app.delete("/api/poller/lock")
+async def api_release_poller_lock(
+    body: schemas.PollerHeartbeatRequest,
+    db:   AsyncSession = Depends(get_db),
+):
+    """Release the lock. No-op if this pid+host no longer holds it."""
+    result = await db.execute(
+        text("""
+            UPDATE system_config
+               SET poller_pid          = NULL,
+                   poller_host         = NULL,
+                   poller_locked_at    = NULL,
+                   poller_heartbeat_at = NULL
+             WHERE id = 1
+               AND poller_pid  = :pid
+               AND poller_host = :host
+            RETURNING id
+        """),
+        {"pid": body.pid, "host": body.host},
+    )
+    if not result.fetchone():
+        raise HTTPException(status_code=404, detail="Lock not held by this pid/host")
+    return {"ok": True}
+
+
 # REST API — Misc
 # ══════════════════════════════════════════════════════════════════════════════
 

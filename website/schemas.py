@@ -214,6 +214,23 @@ class SessionOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# ── Poller Distributed Lock ──────────────────────────────────────────────────
+
+class PollerLockRequest(BaseModel):
+    pid:  int
+    host: str
+
+class PollerLockOut(BaseModel):
+    pid:          int
+    host:         str
+    locked_at:    datetime
+    heartbeat_at: datetime
+
+class PollerHeartbeatRequest(BaseModel):
+    pid:  int
+    host: str
+
+
 # ── Alerts ───────────────────────────────────────────────────────────────────
 
 class AlertOut(BaseModel):

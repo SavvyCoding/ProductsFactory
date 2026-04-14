@@ -42,7 +42,9 @@ if _env_file.exists():
 
 import time
 import logging
+import socket
 import subprocess
+import threading
 from datetime import datetime, timezone, date, timedelta
 
 import httpx
@@ -336,31 +338,71 @@ def clear_run_now(product_id: int):
         log.warning(f"Failed to clear run_now: {e}")
 
 
-_PID_FILE = Path(__file__).parent.parent / ".poller.pid"
+_LOCK_PID  = os.getpid()
+_LOCK_HOST = socket.gethostname()
+_HEARTBEAT_INTERVAL = 15   # seconds between heartbeat updates
+_LOCK_TTL           = 30   # seconds — stale lock threshold (must match server)
+
+_hb_stop: threading.Event | None = None
 
 
-def _acquire_pid_lock() -> bool:
-    """Write our PID to .poller.pid; return False if another live poller is running."""
-    import signal
-    if _PID_FILE.exists():
-        try:
-            existing_pid = int(_PID_FILE.read_text().strip())
-            # On Windows/WSL, os.kill(pid, 0) raises if the process doesn't exist
-            os.kill(existing_pid, 0)
-            log.error(f"Another poller is already running (PID {existing_pid}). Exiting.")
-            return False
-        except (OSError, ProcessLookupError):
-            pass  # PID file stale — overwrite it
-    _PID_FILE.write_text(str(os.getpid()))
-    return True
-
-
-def _release_pid_lock():
+def _acquire_db_lock() -> bool:
+    """
+    Atomically acquire the poller distributed lock via PM API.
+    Uses a single PostgreSQL UPDATE WHERE so two callers can never both succeed.
+    Returns True on success, False if another live poller holds the lock.
+    Falls back to True (allow start) if the API is unreachable — better to risk
+    a duplicate than to prevent all pollers from ever starting.
+    """
     try:
-        if _PID_FILE.exists() and int(_PID_FILE.read_text().strip()) == os.getpid():
-            _PID_FILE.unlink()
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            resp = client.post("/api/poller/lock", json={"pid": _LOCK_PID, "host": _LOCK_HOST})
+        if resp.status_code == 200:
+            log.info(f"Poller lock acquired (pid={_LOCK_PID}, host={_LOCK_HOST})")
+            return True
+        if resp.status_code == 409:
+            d = resp.json().get("detail", {})
+            log.error(
+                f"Another poller holds the lock — "
+                f"pid={d.get('holder_pid')}, host={d.get('holder_host')}, "
+                f"last_heartbeat={d.get('heartbeat_at')}. Exiting."
+            )
+            return False
+        log.error(f"Unexpected response from lock endpoint: {resp.status_code} — allowing start")
+        return True
+    except Exception as e:
+        log.warning(f"Could not acquire DB lock ({e}) — allowing start (API may be starting up)")
+        return True
+
+
+def _release_db_lock():
+    """Release the lock. Called via atexit — best-effort, never raises."""
+    global _hb_stop
+    if _hb_stop is not None:
+        _hb_stop.set()
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
+            client.delete("/api/poller/lock", json={"pid": _LOCK_PID, "host": _LOCK_HOST})
+        log.info("Poller lock released")
     except Exception:
         pass
+
+
+def _heartbeat_loop(stop_event: threading.Event):
+    """
+    Background thread: refreshes the DB lock heartbeat every 15s.
+    If the API returns 404, the lock was stolen (another poller took over) — log it.
+    """
+    while not stop_event.wait(_HEARTBEAT_INTERVAL):
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
+                resp = client.post("/api/poller/heartbeat", json={"pid": _LOCK_PID, "host": _LOCK_HOST})
+            if resp.status_code == 404:
+                log.critical("Heartbeat 404 — lock was stolen or expired. A duplicate poller may start.")
+            elif resp.status_code != 200:
+                log.warning(f"Heartbeat unexpected status: {resp.status_code}")
+        except Exception as e:
+            log.warning(f"Heartbeat failed: {e}")
 
 
 def _close_orphaned_sessions():
@@ -395,10 +437,21 @@ def _close_orphaned_sessions():
 
 
 def main():
-    if not _acquire_pid_lock():
+    if not _acquire_db_lock():
         return
+
     import atexit
-    atexit.register(_release_pid_lock)
+    atexit.register(_release_db_lock)
+
+    # Start heartbeat background thread
+    global _hb_stop
+    _hb_stop = threading.Event()
+    _hb_thread = threading.Thread(
+        target=_heartbeat_loop, args=(_hb_stop,),
+        daemon=True, name="poller-heartbeat"
+    )
+    _hb_thread.start()
+
     log.info("ProductFactory Poller starting...")
     _close_orphaned_sessions()
 
@@ -515,6 +568,8 @@ def main():
 
         except KeyboardInterrupt:
             log.info("Poller stopped by user")
+            if _hb_stop is not None:
+                _hb_stop.set()
             break
         except Exception as e:
             log.exception(f"Unexpected error in poll loop: {e}")

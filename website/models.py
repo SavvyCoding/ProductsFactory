@@ -177,6 +177,14 @@ class SystemConfig(Base):
 
     updated_at:        Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
+    # ── Poller distributed lock ───────────────────────────────────────────────
+    # Atomically acquired by poller on startup; heartbeat refreshed every 15s.
+    # If heartbeat_at is NULL or > 30s old the lock is considered stale/free.
+    poller_pid:          Mapped[Optional[int]]      = mapped_column(Integer)
+    poller_host:         Mapped[Optional[str]]      = mapped_column(Text)
+    poller_locked_at:    Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    poller_heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
 
 class PMUser(Base):
     """
