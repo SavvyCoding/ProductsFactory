@@ -105,24 +105,29 @@ def list_open_prs(github_repo: str, token: str | None = None) -> list[dict]:
     return []
 
 
-def merge_pr(github_repo: str, pr_number: int, token: str) -> bool:
-    """Merge a PR via GitHub API. Returns True on success."""
+def merge_pr(github_repo: str, pr_number: int, token: str) -> tuple[bool, str]:
+    """Merge a PR via GitHub API. Returns (success, error_message)."""
     slug = parse_repo_slug(github_repo)
     if not slug:
-        return False
+        return False, "Could not parse repo slug from github_repo"
     owner, repo = slug
     try:
-        h = {**_headers(), "Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}"}
+        h = {**_headers(token), "Accept": "application/vnd.github+json"}
         resp = httpx.put(
             f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/merge",
             json={"merge_method": "squash"},
             headers=h,
             timeout=_TIMEOUT,
         )
-        return resp.status_code in (200, 201)
+        if resp.status_code in (200, 201):
+            return True, ""
+        body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+        msg = body.get("message", resp.text[:200])
+        log.warning(f"merge_pr: GitHub returned {resp.status_code} for {owner}/{repo} PR#{pr_number}: {msg}")
+        return False, f"GitHub {resp.status_code}: {msg}"
     except Exception as e:
         log.warning(f"merge_pr error: {e}")
-    return False
+        return False, str(e)
 
 
 def count_open_prs(github_repo: str) -> int:

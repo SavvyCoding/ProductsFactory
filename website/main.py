@@ -726,9 +726,17 @@ async def merge_pr_action(
     token = (config.github_pat if config else None) or os.environ.get("GITHUB_TOKEN", "")
     if not token:
         raise HTTPException(422, "GitHub PAT not configured — set it in Admin")
-    ok = merge_pr(product.github_repo or "", pr_number, token)
+    ok, err = merge_pr(product.github_repo or "", pr_number, token)
     if not ok:
-        raise HTTPException(502, "GitHub merge failed — check PAT permissions or PR state")
+        raise HTTPException(502, f"GitHub merge failed: {err}")
+    # Mark matching feature as Pushed
+    result = await db.execute(
+        select(Feature).where(Feature.product_id == product_id, Feature.pr_number == pr_number)
+    )
+    feature = result.scalar_one_or_none()
+    if feature:
+        feature.status = "Pushed"
+        await db.commit()
     return RedirectResponse(f"/product/{product_id}", status_code=303)
 
 
