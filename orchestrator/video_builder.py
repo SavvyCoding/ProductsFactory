@@ -187,7 +187,7 @@ def build_product_video(product: dict, working_dir: Path) -> Optional[Path]:
 
     video_path = output_dir / "product_video.mp4"
 
-    log.info(f"Building product video for '{product_name}' ({len(shipped)} shipped features) → {video_path}")
+    log.info(f"Building product video for '{product_name}' ({len(shipped)} shipped features) -> {video_path}")
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
