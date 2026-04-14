@@ -336,7 +336,38 @@ def clear_run_now(product_id: int):
         log.warning(f"Failed to clear run_now: {e}")
 
 
+_PID_FILE = Path(__file__).parent.parent / ".poller.pid"
+
+
+def _acquire_pid_lock() -> bool:
+    """Write our PID to .poller.pid; return False if another live poller is running."""
+    import signal
+    if _PID_FILE.exists():
+        try:
+            existing_pid = int(_PID_FILE.read_text().strip())
+            # On Windows/WSL, os.kill(pid, 0) raises if the process doesn't exist
+            os.kill(existing_pid, 0)
+            log.error(f"Another poller is already running (PID {existing_pid}). Exiting.")
+            return False
+        except (OSError, ProcessLookupError):
+            pass  # PID file stale — overwrite it
+    _PID_FILE.write_text(str(os.getpid()))
+    return True
+
+
+def _release_pid_lock():
+    try:
+        if _PID_FILE.exists() and int(_PID_FILE.read_text().strip()) == os.getpid():
+            _PID_FILE.unlink()
+    except Exception:
+        pass
+
+
 def main():
+    if not _acquire_pid_lock():
+        return
+    import atexit
+    atexit.register(_release_pid_lock)
     log.info("ProductFactory Poller starting...")
 
     while True:

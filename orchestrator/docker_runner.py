@@ -189,9 +189,15 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     sys_cfg = _get_system_config_sync()
     effective_backend = (sys_cfg.get("agent_backend") or AGENT_BACKEND)
 
-    lock_path = Path(working_dir) / "session.lock"
-    if lock_path.exists():
-        log.warning(f"session.lock exists for {product['name']} — skipping (duplicate launch guard)")
+    # Guard: skip if a container for this product is already running.
+    # This prevents the poller from launching duplicates if it restarts mid-session.
+    product_id = product["id"]
+    running = subprocess.run(
+        ["docker", "ps", "--filter", f"name=pf-{product_id}-", "--format", "{{.Names}}"],
+        capture_output=True, text=True
+    ).stdout.strip()
+    if running:
+        log.warning(f"Container already running for product {product_id} ({running}) — skipping")
         return 1
 
     # Mount only the deploy key, not the whole .ssh directory.
