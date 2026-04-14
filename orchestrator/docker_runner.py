@@ -199,7 +199,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     deploy_key = _get_deploy_key_path(product)
     ssh_mount = []
     if deploy_key:
-        ssh_mount = ["-v", f"{deploy_key}:/root/.ssh/id_ed25519:ro"]
+        ssh_mount = ["-v", f"{deploy_key}:/home/agent/.ssh/id_ed25519:ro"]
 
     # Inject GH_TOKEN so `gh` CLI works inside the container without a separate login
     gh_token = _get_gh_token()
@@ -248,26 +248,26 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             _tmp_claude_dir = None
 
         mount_dir = _tmp_claude_dir or creds_src
-        claude_mount = ["-v", f"{mount_dir}:/root/.claude:ro"]
+        # Container now runs as non-root 'agent' user — home is /home/agent
+        claude_mount = ["-v", f"{mount_dir}:/home/agent/.claude:ro"]
 
-        # Also mount .claude.json (sits alongside the .claude/ dir in the home dir)
+        # Also mount .claude.json (sits alongside .claude/ in the host home dir)
         creds_parent = str(Path(creds_src).parent)
         claude_json_src = str(Path(creds_parent) / ".claude.json")
         if Path(claude_json_src).exists():
-            claude_mount += ["-v", f"{claude_json_src}:/root/.claude.json:ro"]
+            claude_mount += ["-v", f"{claude_json_src}:/home/agent/.claude.json:ro"]
         else:
-            # Try to restore from backup inside the .claude dir
+            # Restore from backup inside the .claude dir
             backup_dir = Path(mount_dir) / "backups"
             if backup_dir.exists():
                 backups = sorted(backup_dir.glob(".claude.json.backup.*"))
                 if backups and _tmp_claude_dir:
                     shutil.copy2(str(backups[-1]), str(Path(_tmp_claude_dir) / ".claude.json"))
-                    claude_mount += ["-v", f"{_tmp_claude_dir}/.claude.json:/root/.claude.json:ro"]
+                    claude_mount += ["-v", f"{_tmp_claude_dir}/.claude.json:/home/agent/.claude.json:ro"]
                     log.info(f"Restored .claude.json from backup: {backups[-1].name}")
 
-        # Don't use --dangerously-skip-permissions (blocked for root in container).
-        # settings.json in .claude/ has skipDangerousModePermissionPrompt=true instead.
-        agent_cmd = ["claude", "-p", prompt]
+        # --dangerously-skip-permissions works now that container runs as non-root
+        agent_cmd = ["claude", "--dangerously-skip-permissions", "-p", prompt]
         ollama_env = [
             "-e", f"MAX_FEATURES_PER_RUN={effective_max_features}",
             "-e", f"CLAUDE_MODEL={claude_model}",

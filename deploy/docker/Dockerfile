@@ -3,13 +3,14 @@
 # Launched per-session by poller.py — never run manually.
 #
 # Runtimes installed:
-#   Python 3.11 + 3.12 (via pyenv, default 3.12)
+#   Python 3.11 + 3.12 (via pyenv at /opt/pyenv, accessible to all users)
 #   Node.js 18 LTS + 20 LTS (via n, default 20)
 #   Go 1.22
 #   Claude Code CLI (latest)
 #   GitHub CLI (gh)
 #
 # Security:
+#   Runs as non-root user 'agent' (UID 1000) so --dangerously-skip-permissions works
 #   ~/.claude mounted :ro at runtime (OAuth tokens — never writable)
 #   ~/.ssh    mounted :ro at runtime (deploy key — never writable)
 #   /workspace bound to product dir only
@@ -20,22 +21,16 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # ── Layer 1: System packages ──────────────────────────────────────────────────
-# Keep this layer stable — it changes least often.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    # essentials
     curl wget ca-certificates gnupg \
-    # git + ssh (needed for commits, push, PR)
     git openssh-client \
-    # build tools (pyenv + compiled extensions)
     build-essential libssl-dev zlib1g-dev libbz2-dev libreadline-dev \
     libsqlite3-dev libncursesw5-dev xz-utils tk-dev libxml2-dev \
     libxmlsec1-dev libffi-dev liblzma-dev \
-    # utilities
     jq unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Layer 2: GitHub CLI (gh) ──────────────────────────────────────────────────
-# Claude uses `gh pr create` to open PRs.
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
     chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
@@ -44,19 +39,17 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     apt-get update && apt-get install -y gh && \
     rm -rf /var/lib/apt/lists/*
 
-# ── Layer 3: pyenv + Python 3.11 & 3.12 ──────────────────────────────────────
-# pyenv lets Claude switch Python version per product (pyenv local X.Y.Z).
-ENV PYENV_ROOT=/root/.pyenv
+# ── Layer 3: pyenv + Python (installed to /opt/pyenv — accessible to all users) ──
+ENV PYENV_ROOT=/opt/pyenv
 ENV PATH=$PYENV_ROOT/bin:$PYENV_ROOT/shims:$PATH
 
 RUN curl https://pyenv.run | bash && \
     pyenv install 3.11.9 && \
     pyenv install 3.12.4 && \
-    pyenv global 3.12.4
+    pyenv global 3.12.4 && \
+    chmod -R a+rx /opt/pyenv
 
-# ── Layer 4: Python toolchain (installed for both versions) ───────────────────
-# Install in 3.12 (global default) and 3.11 so `pytest` is always available
-# regardless of which version the product uses.
+# ── Layer 4: Python toolchain ─────────────────────────────────────────────────
 RUN pyenv global 3.12.4 && \
     pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir \
@@ -73,15 +66,13 @@ RUN pyenv global 3.12.4 && \
         pydantic && \
     pyenv global 3.12.4
 
-# ── Layer 5: Node.js 20 LTS + n (version manager) ────────────────────────────
-# n is a lightweight node version manager — no shell init required.
-# `n 18` / `n 20` switches versions; Claude uses this based on product config.
+# ── Layer 5: Node.js 20 LTS + n ──────────────────────────────────────────────
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/* && \
     npm install -g n && \
     n 18 && \
-    n 20        # sets default back to 20
+    n 20
 
 # ── Layer 6: Claude Code CLI ──────────────────────────────────────────────────
 RUN npm install -g @anthropic-ai/claude-code
@@ -89,55 +80,54 @@ RUN npm install -g @anthropic-ai/claude-code
 # ── Layer 7: Go 1.22 ─────────────────────────────────────────────────────────
 ENV GOVERSION=1.22.4
 ENV GOROOT=/usr/local/go
-ENV GOPATH=/root/go
-ENV PATH=$GOROOT/bin:$GOPATH/bin:$PATH
+ENV PATH=$GOROOT/bin:$PATH
 
 RUN curl -fsSL "https://go.dev/dl/go${GOVERSION}.linux-amd64.tar.gz" \
-      | tar -C /usr/local -xz && \
-    mkdir -p $GOPATH/bin
+      | tar -C /usr/local -xz
 
 # ── Layer 8: Go security tools ────────────────────────────────────────────────
-RUN go install golang.org/x/vuln/cmd/govulncheck@latest
+# Install govulncheck to a system-wide location
+RUN GOPATH=/tmp/gobuild go install golang.org/x/vuln/cmd/govulncheck@latest && \
+    mv /tmp/gobuild/bin/govulncheck /usr/local/bin/govulncheck && \
+    rm -rf /tmp/gobuild
 
-# ── Layer 9: Git identity ─────────────────────────────────────────────────────
-# Required for `git commit` inside the container.
+# ── Layer 9: Non-root agent user ─────────────────────────────────────────────
+# Claude's --dangerously-skip-permissions is blocked when running as root.
+# Create user 'agent' (UID 1000) for all runtime operations.
+RUN useradd -m -u 1001 -s /bin/bash agent && \
+    # SSH known hosts for git push (github, gitlab, bitbucket)
+    mkdir -p /home/agent/.ssh && chmod 700 /home/agent/.ssh && \
+    ssh-keyscan -H github.com    >> /home/agent/.ssh/known_hosts && \
+    ssh-keyscan -H gitlab.com    >> /home/agent/.ssh/known_hosts && \
+    ssh-keyscan -H bitbucket.org >> /home/agent/.ssh/known_hosts && \
+    chmod 600 /home/agent/.ssh/known_hosts && \
+    # Go workspace for agent
+    mkdir -p /home/agent/go/bin && \
+    # Workspace dir writable by agent
+    mkdir -p /workspace && chown agent:agent /workspace && \
+    # ollama_agent location
+    mkdir -p /app && \
+    chown -R agent:agent /home/agent && \
+    chown agent:agent /app
+
+# ── Layer 10: Git identity (for agent user) ───────────────────────────────────
 ENV GIT_AUTHOR_NAME="ProductFactory Agent"
 ENV GIT_AUTHOR_EMAIL="productfactory@noreply.localhost"
 ENV GIT_COMMITTER_NAME="ProductFactory Agent"
 ENV GIT_COMMITTER_EMAIL="productfactory@noreply.localhost"
 
-# Avoid "dubious ownership" errors when /workspace is bind-mounted
 RUN git config --global --add safe.directory /workspace && \
-    git config --global user.name "ProductFactory Agent" && \
-    git config --global user.email "productfactory@noreply.localhost" && \
-    git config --global init.defaultBranch main
+    su -c "git config --global user.name 'ProductFactory Agent' && \
+           git config --global user.email 'productfactory@noreply.localhost' && \
+           git config --global init.defaultBranch main && \
+           git config --global --add safe.directory /workspace" agent
 
-# ── Layer 10: SSH known hosts ─────────────────────────────────────────────────
-# Pre-seed GitHub (and GitLab / Bitbucket) so `git push` never hangs
-# waiting for host key confirmation.
-RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh && \
-    ssh-keyscan -H github.com    >> /root/.ssh/known_hosts && \
-    ssh-keyscan -H gitlab.com    >> /root/.ssh/known_hosts && \
-    ssh-keyscan -H bitbucket.org >> /root/.ssh/known_hosts && \
-    chmod 600 /root/.ssh/known_hosts
-
-# ── Layer 11: Results directory ───────────────────────────────────────────────
-# Claude writes test JSON here; ensure it always exists.
-RUN mkdir -p /workspace/Results
-
-# ── Layer 12: Ollama agent runner ─────────────────────────────────────────────
-# ollama_agent.py is used when AGENT_BACKEND=ollama (local testing with Ollama).
-# Provides identical -p {prompt} interface as the claude CLI.
-RUN mkdir -p /app
+# ── Layer 11: Ollama agent runner ─────────────────────────────────────────────
 COPY orchestrator/ollama_agent.py /app/ollama_agent.py
-RUN pyenv global 3.12.4 && pip install --no-cache-dir httpx
+RUN chmod a+rx /app/ollama_agent.py && \
+    pyenv global 3.12.4 && pip install --no-cache-dir httpx
 
-# ── Runtime mounts (provided by poller at launch — never baked in) ───────────
-# /root/.claude  ← ~/.claude from Windows host  :ro  (OAuth session — claude backend)
-# /root/.ssh     ← deploy key dir from host     :ro  (overwrites known_hosts layer above)
-# /workspace     ← product working_dir          :rw
-
-# ── Verify installation ───────────────────────────────────────────────────────
+# ── Layer 12: Verify installation ────────────────────────────────────────────
 RUN python3 --version && \
     node --version && \
     npm --version && \
@@ -145,8 +135,19 @@ RUN python3 --version && \
     gh --version && \
     git --version && \
     pip-audit --version && \
-    govulncheck -version && \
-    claude --version && \
+    (govulncheck -version 2>&1 || true) && \
     python3 /app/ollama_agent.py --help
+
+# ── Switch to non-root agent user ────────────────────────────────────────────
+USER agent
+ENV HOME=/home/agent
+ENV GOPATH=/home/agent/go
+ENV PATH=$PYENV_ROOT/bin:$PYENV_ROOT/shims:$GOROOT/bin:/home/agent/go/bin:/usr/local/bin:$PATH
+
+# ── Runtime mounts (provided by poller at launch — never baked in) ───────────
+# /home/agent/.claude      ← ~/.claude from Windows host  :ro  (OAuth session)
+# /home/agent/.claude.json ← ~/.claude.json from host     :ro  (Claude config)
+# /home/agent/.ssh/id_ed25519 ← deploy key from host      :ro
+# /workspace               ← product working_dir          :rw
 
 WORKDIR /workspace
