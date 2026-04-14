@@ -10,9 +10,9 @@ Returns the authenticated username so routes can attribute actions to a PM.
 
 import os
 import secrets
+import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from passlib.context import CryptContext
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -20,7 +20,9 @@ from website.database import get_db
 from website.models import PMUser
 
 security = HTTPBasic()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def _verify(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode(), hashed.encode())
 
 PM_USERNAME = os.environ.get("PM_USERNAME", "admin")
 PM_PASSWORD = os.environ.get("PM_PASSWORD", "")
@@ -43,7 +45,7 @@ async def require_auth(
 
     if db_users:
         user = next((u for u in db_users if u.username == username), None)
-        if user and pwd_context.verify(password, user.password_hash):
+        if user and _verify(password, user.password_hash):
             return username
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

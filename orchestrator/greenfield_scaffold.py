@@ -120,8 +120,8 @@ def _create_github_repo(org: str, repo_name: str, pat: str) -> str:
             headers=headers, json=payload,
         )
         if resp.status_code in (404, 403, 422):
-            # 422 from org endpoint = not an org; try user repos
-            if resp.status_code == 422 and "already exists" not in resp.text:
+            # Org not found / no access / not an org → fall back to user repos
+            if "already exists" not in resp.text:
                 resp = client.post(
                     "https://api.github.com/user/repos",
                     headers=headers, json=payload,

@@ -26,7 +26,9 @@ REST API (used by poller — no auth on poller-only routes):
   GET  /api/features/approved          — approved features for product (batch planning)
   POST /api/features                   — create feature (PM or AI)
   PATCH /api/features/{id}             — update feature status (Claude)
+  GET  /api/features/{id}/reviews      — full review history for a feature
   PATCH /api/features/{id}/pm-status   — PM status change with transition validation
+  DELETE /api/features/{id}            — delete a Rejected feature (PM only)
   POST /api/features/reset_stuck       — reset Implementing→Approved if >2h (poller)
   GET  /api/products/{id}/open_pr_count — PR count gate (poller)
   GET  /api/system-config              — system config for poller (no auth)
@@ -50,15 +52,15 @@ from typing import Optional
 
 import mistune
 from fastapi import FastAPI, Depends, HTTPException, Request, Form
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from passlib.context import CryptContext
+import bcrypt as _bcrypt_lib
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from website.database import get_db
-from website.models import Product, Feature, Session as DBSession, Alert, SystemConfig, PMUser
+from website.models import Product, Feature, FeatureReview, Session as DBSession, Alert, SystemConfig, PMUser
 from website.auth import require_auth
 from website import schemas
 from website.github import fetch_progress_md, fetch_architecture_md, count_open_prs, list_open_prs, merge_pr
@@ -69,12 +71,32 @@ app = FastAPI(title="ProductFactory PM", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory="website/static"), name="static")
 templates = Jinja2Templates(directory="website/templates")
 
+# ── Video file serving ────────────────────────────────────────────────────────
+# Products root on the host is mounted read-only at /workspace inside the container.
+# PRODUCTS_BASE_DIR env var holds the host-side path (e.g. C:/Users/you/Products).
+# We map product.working_dir → /workspace/{relative_part} to locate output/ videos.
+_HOST_PRODUCTS_BASE     = os.environ.get("PRODUCTS_BASE_DIR", "").rstrip("/\\").replace("\\", "/")
+STUCK_FEATURE_HOURS     = int(os.environ.get("STUCK_FEATURE_TIMEOUT_HOURS", "2"))
+SESSION_LOG_MAXLEN      = int(os.environ.get("SESSION_LOG_MAXLEN", "1000"))
+_CONTAINER_WORKSPACE = Path("/workspace")
+
+
+def _output_dir_for_product(working_dir: str) -> Path:
+    """Map a product's host working_dir to its output/ dir visible inside the container."""
+    norm = working_dir.replace("\\", "/").rstrip("/")
+    if _HOST_PRODUCTS_BASE and norm.lower().startswith(_HOST_PRODUCTS_BASE.lower()):
+        rel = norm[len(_HOST_PRODUCTS_BASE):].lstrip("/")
+        return _CONTAINER_WORKSPACE / rel / "output"
+    # Fallback: direct path (works when running outside Docker)
+    return Path(working_dir) / "output"
+
 _md = mistune.create_markdown(plugins=["table"])
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+def _hash_password(pw: str) -> str:
+    return _bcrypt_lib.hashpw(pw.encode(), _bcrypt_lib.gensalt()).decode()
 
 # ── In-memory session log store ───────────────────────────────────────────────
 # product_id → deque of log lines (capped at 1000)
-_session_logs: dict[int, deque] = defaultdict(lambda: deque(maxlen=1000))
+_session_logs: dict[int, deque] = defaultdict(lambda: deque(maxlen=SESSION_LOG_MAXLEN))
 # product_id → list of asyncio.Queue (one per SSE subscriber)
 _session_subscribers: dict[int, list] = defaultdict(list)
 
@@ -108,22 +130,58 @@ async def _get_system_config(db: AsyncSession) -> SystemConfig | None:
     return await db.get(SystemConfig, 1)
 
 
+_CFG_DEFAULTS = {
+    # Poller
+    "poll_interval":               60,
+    "session_timeout_minutes":     90,
+    "stale_threshold_minutes":     45,
+    "auth_check_timeout":          30,
+    "max_open_prs":                3,
+    "pr_gate_sleep":               300,
+    "stuck_feature_timeout_hours": 2,
+    "max_features_per_run":        1,
+    "brownfield_file_threshold":   10,
+    # Agent / Ollama
+    "agent_backend":    "claude",
+    "ollama_host":      "http://host.docker.internal:11434",
+    "designer_model":   "gemma3:27b",
+    "coder_model":      "qwen3-coder:30b",
+    "ollama_timeout":   300,
+    "bash_timeout":     180,
+    "max_turns":        80,
+}
+
+
+def _cfg(config: SystemConfig | None, key: str):
+    """Return DB value if set, else env var, else built-in default."""
+    db_val = getattr(config, key, None) if config else None
+    if db_val is not None:
+        return db_val
+    env_key = key.upper()
+    env_val = os.environ.get(env_key)
+    if env_val is not None:
+        default = _CFG_DEFAULTS.get(key)
+        try:
+            return type(default)(env_val) if default is not None else env_val
+        except (ValueError, TypeError):
+            return env_val
+    return _CFG_DEFAULTS.get(key)
+
+
 def _config_as_dict(config: SystemConfig | None) -> dict:
-    if not config:
-        return {
-            "products_root_dir": "", "github_org": "", "github_pat": "",
-            "github_ssh_key_name": "productfactory-deploy",
-            "slack_webhook_url": "", "github_webhook_secret": "", "max_sessions_per_day": "",
-        }
-    return {
-        "products_root_dir":     config.products_root_dir or "",
-        "github_org":            config.github_org or "",
-        "github_pat":            config.github_pat or "",
-        "github_ssh_key_name":   config.github_ssh_key_name or "productfactory-deploy",
-        "slack_webhook_url":     config.slack_webhook_url or "",
-        "github_webhook_secret": config.github_webhook_secret or "",
-        "max_sessions_per_day":  config.max_sessions_per_day or "",
+    base = {
+        "products_root_dir":     (config.products_root_dir  if config else "") or "",
+        "github_org":            (config.github_org          if config else "") or "",
+        "github_pat":            (config.github_pat          if config else "") or "",
+        "github_ssh_key_name":   (config.github_ssh_key_name if config else "") or "productfactory-deploy",
+        "slack_webhook_url":     (config.slack_webhook_url   if config else "") or "",
+        "github_webhook_secret": (config.github_webhook_secret if config else "") or "",
+        "max_sessions_per_day":  (config.max_sessions_per_day  if config else "") or "",
     }
+    # Merge all operational settings with their effective values (DB → env → default)
+    for key in _CFG_DEFAULTS:
+        base[key] = _cfg(config, key)
+    return base
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -141,13 +199,42 @@ async def dashboard(
     products = result.scalars().all()
     alert_count = await _unread_alert_count(db)
     config = await _get_system_config(db)
+
+    # Feature counts per product for progress bars
+    _ACTIVE_STATUSES = {"Approved", "Designing", "Designed", "Implementing", "Reviewing", "Reviewed"}
+    counts_result = await db.execute(
+        select(Feature.product_id, Feature.status, func.count().label("cnt"))
+        .group_by(Feature.product_id, Feature.status)
+    )
+    feature_counts: dict[int, dict] = {}
+    for row in counts_result:
+        fc = feature_counts.setdefault(row.product_id, {"pushed": 0, "active": 0, "blocked": 0, "pending": 0, "total": 0})
+        fc["total"] += row.cnt
+        if row.status == "Pushed":
+            fc["pushed"] += row.cnt
+        elif row.status == "Blocked":
+            fc["blocked"] += row.cnt
+        elif row.status in _ACTIVE_STATUSES:
+            fc["active"] += row.cnt
+        elif row.status == "Pending":
+            fc["pending"] += row.cnt
+
     return templates.TemplateResponse("index.html", {
         "request": request,
         "products": products,
         "alert_count": alert_count,
         "current_pm": current_pm,
         "products_root_dir": config.products_root_dir if config else None,
+        "feature_counts": feature_counts,
     })
+
+
+@app.get("/api/products/running-count")
+async def running_count(db: AsyncSession = Depends(get_db)):
+    """Count products currently running — used by nav live indicator."""
+    result = await db.execute(select(func.count()).select_from(Product).where(Product.status == "running"))
+    count = result.scalar() or 0
+    return {"count": count}
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -189,8 +276,16 @@ async def product_detail(
     sess_result = await db.execute(
         select(DBSession)
         .where(DBSession.product_id == product_id)
+        .where(
+            # Exclude ghost sessions: failed AND ended within 10s (container startup errors)
+            ~(
+                (DBSession.exit_code != 0) &
+                (DBSession.ended_at != None) &
+                (func.extract("epoch", DBSession.ended_at - DBSession.started_at) < 10)
+            )
+        )
         .order_by(DBSession.started_at.desc())
-        .limit(20)
+        .limit(50)
     )
     sessions = sess_result.scalars().all()
     alert_count = await _unread_alert_count(db)
@@ -208,6 +303,7 @@ async def product_detail(
         "alert_count": alert_count,
         "current_pm": current_pm,
         "active_tab": tab,
+        "max_features_default": _cfg(await _get_system_config(db), "max_features_per_run"),
     })
 
 
@@ -330,17 +426,21 @@ async def add_feature_form(
     name: str = Form(...),
     description: str = Form(""),
     priority: int = Form(50),
+    feature_type: str = Form("feature"),
     skip_design: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
 ):
     """PM adds a feature via the product detail form."""
     await _get_product_or_404(product_id, db)
+    if feature_type not in ("feature", "bug", "chore"):
+        feature_type = "feature"
     feature = Feature(
         product_id=product_id,
         name=name.strip(),
         description=description.strip() or None,
         priority=max(1, min(100, priority)),
         source="pm",
+        feature_type=feature_type,
         skip_design=(skip_design == "true"),
     )
     db.add(feature)
@@ -432,6 +532,50 @@ async def admin_save_settings(
     return RedirectResponse("/admin?saved=true", status_code=303)
 
 
+@app.post("/admin/settings/poller")
+async def admin_save_poller_settings(
+    request: Request,
+    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
+):
+    """Save poller & agent operational settings."""
+    form = await request.form()
+
+    def _int(key: str) -> int | None:
+        v = form.get(key, "").strip()
+        try:
+            return int(v) if v else None
+        except ValueError:
+            return None
+
+    def _str(key: str) -> str | None:
+        v = form.get(key, "").strip()
+        return v or None
+
+    config = await db.get(SystemConfig, 1)
+    if not config:
+        config = SystemConfig(id=1)
+        db.add(config)
+
+    config.poll_interval               = _int("poll_interval")
+    config.session_timeout_minutes     = _int("session_timeout_minutes")
+    config.stale_threshold_minutes     = _int("stale_threshold_minutes")
+    config.auth_check_timeout          = _int("auth_check_timeout")
+    config.max_open_prs                = _int("max_open_prs")
+    config.pr_gate_sleep               = _int("pr_gate_sleep")
+    config.stuck_feature_timeout_hours = _int("stuck_feature_timeout_hours")
+    config.max_features_per_run        = _int("max_features_per_run")
+    config.brownfield_file_threshold   = _int("brownfield_file_threshold")
+    config.agent_backend               = _str("agent_backend")
+    config.ollama_host                 = _str("ollama_host")
+    config.designer_model              = _str("designer_model")
+    config.coder_model                 = _str("coder_model")
+    config.ollama_timeout              = _int("ollama_timeout")
+    config.bash_timeout                = _int("bash_timeout")
+    config.max_turns                   = _int("max_turns")
+    await db.flush()
+    return RedirectResponse("/admin?saved=true", status_code=303)
+
+
 @app.post("/admin/pms")
 async def admin_create_pm(
     name: str = Form(...),
@@ -448,7 +592,7 @@ async def admin_create_pm(
     user = PMUser(
         name=name.strip(),
         username=username.strip().lower(),
-        password_hash=pwd_context.hash(password),
+        password_hash=_hash_password(password),
     )
     db.add(user)
     await db.flush()
@@ -506,13 +650,15 @@ async def save_schedule(
     quiet_hours_start: str = Form(""),
     quiet_hours_end: str = Form(""),
     daily_session_cap: str = Form(""),
+    max_features_per_run: str = Form(""),
     db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
 ):
     """Save per-product scheduling settings."""
     product = await _get_product_or_404(product_id, db)
-    product.quiet_hours_start = int(quiet_hours_start) if quiet_hours_start.strip().isdigit() else None
-    product.quiet_hours_end   = int(quiet_hours_end)   if quiet_hours_end.strip().isdigit()   else None
-    product.daily_session_cap = int(daily_session_cap) if daily_session_cap.strip().isdigit() else None
+    product.quiet_hours_start    = int(quiet_hours_start)    if quiet_hours_start.strip().isdigit()    else None
+    product.quiet_hours_end      = int(quiet_hours_end)      if quiet_hours_end.strip().isdigit()      else None
+    product.daily_session_cap    = int(daily_session_cap)    if daily_session_cap.strip().isdigit()    else None
+    product.max_features_per_run = int(max_features_per_run) if max_features_per_run.strip().isdigit() else None
     await db.flush()
     return RedirectResponse(f"/product/{product_id}?tab=settings", status_code=303)
 
@@ -582,6 +728,12 @@ async def api_create_product(
 ):
     """JSON endpoint for PM or tooling to register a product."""
     product = Product(working_dir=body.working_dir)
+    if body.name:         product.name        = body.name
+    if body.type:         product.type        = body.type
+    if body.tech_stack:   product.tech_stack  = body.tech_stack
+    if body.status:       product.status      = body.status
+    if body.github_repo:  product.github_repo = body.github_repo
+    if body.config:       product.config      = body.config
     db.add(product)
     await db.flush()
     return product
@@ -591,22 +743,36 @@ async def api_create_product(
 async def api_next_product(db: AsyncSession = Depends(get_db)):
     """
     Returns the next product for the poller to process.
-    Selects: status=ready, has ≥1 actionable feature (Approved or Designed), ordered by last_run_at ASC NULLS FIRST.
+    Selects: status=ready, ordered by last_run_at ASC NULLS FIRST.
+    Includes products with Approved/Designed features (designer/coder work)
+    AND products with no actionable features at all (planner will generate new ones).
     """
+    # Products with actionable features (designer/coder work)
+    has_actionable = Product.id.in_(
+        select(Feature.product_id)
+        .where(Feature.status.in_(["Approved", "Designed"]))
+        .distinct()
+    )
+    # Products with NO in-flight features at all (needs planner)
+    has_no_actionable = ~Product.id.in_(
+        select(Feature.product_id)
+        .where(Feature.status.in_(["Pending", "Approved", "Designed", "Implementing", "Reviewing"]))
+        .distinct()
+    )
     result = await db.execute(
         select(Product)
         .where(Product.status == "ready")
-        .where(
-            Product.id.in_(
-                select(Feature.product_id)
-                .where(Feature.status.in_(["Approved", "Designed"]))
-                .distinct()
-            )
-        )
+        .where(has_actionable | has_no_actionable)
         .order_by(Product.last_run_at.asc().nullsfirst())
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+@app.get("/api/products/{product_id}", response_model=schemas.ProductOut)
+async def api_get_product(product_id: int, db: AsyncSession = Depends(get_db)):
+    """Fetch a single product by ID."""
+    return await _get_product_or_404(product_id, db)
 
 
 @app.patch("/api/products/{product_id}", response_model=schemas.ProductOut)
@@ -671,9 +837,32 @@ async def api_update_feature(
 ):
     """Claude updates feature status during implementation."""
     feature = await _get_feature_or_404(feature_id, db)
-    for field, value in body.model_dump(exclude_unset=True).items():
+    updates = body.model_dump(exclude_unset=True)
+    # session_uid is review metadata — not a column on features
+    feature_fields = {k: v for k, v in updates.items() if k != "session_uid"}
+    for field, value in feature_fields.items():
         setattr(feature, field, value)
+    # Auto-record review history whenever the reviewer sets an outcome
+    if "review_outcome" in updates and updates["review_outcome"]:
+        db.add(FeatureReview(
+            feature_id=feature_id,
+            review_outcome=updates["review_outcome"],
+            review_notes=updates.get("review_notes"),
+            session_uid=updates.get("session_uid"),
+        ))
     return feature
+
+
+@app.get("/api/features/{feature_id}/reviews", response_model=list[schemas.FeatureReviewOut])
+async def api_feature_reviews(feature_id: int, db: AsyncSession = Depends(get_db)):
+    """Full review history for a feature, newest first."""
+    await _get_feature_or_404(feature_id, db)
+    result = await db.execute(
+        select(FeatureReview)
+        .where(FeatureReview.feature_id == feature_id)
+        .order_by(FeatureReview.created_at.desc())
+    )
+    return result.scalars().all()
 
 
 @app.patch("/api/features/{feature_id}/pm-status", response_model=schemas.FeatureOut)
@@ -695,13 +884,29 @@ async def api_pm_status_update(
     return feature
 
 
+@app.delete("/api/features/{feature_id}", status_code=204)
+async def api_delete_feature(
+    feature_id: int,
+    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
+):
+    """PM deletes a Rejected feature. Only Rejected features may be deleted."""
+    feature = await _get_feature_or_404(feature_id, db)
+    if feature.status != "Rejected":
+        raise HTTPException(
+            status_code=422,
+            detail=f"Only Rejected features can be deleted (current status: {feature.status!r})",
+        )
+    await db.delete(feature)
+
+
 @app.post("/api/features/reset_stuck", response_model=schemas.ResetStuckResult)
 async def api_reset_stuck(db: AsyncSession = Depends(get_db)):
     """
     Poller calls this each cycle.
     Resets features stuck in in-progress agent states for >2h back to their prior ready state.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+    sys_cfg = await _get_system_config(db)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_cfg(sys_cfg, "stuck_feature_timeout_hours"))
     result = await db.execute(
         select(Feature).where(
             Feature.status.in_(["Implementing", "Designing", "Reviewing"]),
@@ -751,7 +956,9 @@ async def api_next_feature_for_persona(
     elif persona == "reviewer":
         q = q.where(Feature.status == "Reviewing", Feature.pr_number.isnot(None))
     else:
-        raise HTTPException(status_code=422, detail=f"Unknown persona: {persona!r}")
+        # Maintenance personas (qa_tester, security_auditor, documenter, etc.)
+        # discover their own work — return null so the agent handles the no-work case.
+        return None
 
     if product_id is not None:
         q = q.where(Feature.product_id == product_id)
@@ -879,6 +1086,69 @@ async def api_end_session(
     return session
 
 
+@app.get("/api/sessions/{session_id}")
+async def api_get_session(session_id: int, db: AsyncSession = Depends(get_db)):
+    session = await db.get(DBSession, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Features updated during this session's time window (best-effort activity tracking)
+    end_bound = session.ended_at or func.now()
+    features_result = await db.execute(
+        select(Feature.id, Feature.name, Feature.status, Feature.pr_url, Feature.pr_number,
+               Feature.updated_at, Feature.feature_type, Feature.review_outcome)
+        .where(
+            Feature.product_id == session.product_id,
+            Feature.updated_at >= session.started_at,
+            Feature.updated_at <= end_bound,
+        )
+        .order_by(Feature.updated_at)
+    )
+    activities = [
+        {
+            "id": row.id, "name": row.name, "status": row.status,
+            "feature_type": row.feature_type, "pr_url": row.pr_url,
+            "pr_number": row.pr_number, "review_outcome": row.review_outcome,
+            "updated_at": row.updated_at.isoformat(),
+        }
+        for row in features_result
+    ]
+
+    # Code reviews done in this session (via session_uid on feature_reviews)
+    reviews_result = await db.execute(
+        select(FeatureReview, Feature.name)
+        .join(Feature, FeatureReview.feature_id == Feature.id)
+        .where(FeatureReview.session_uid == session.session_uid)
+        .order_by(FeatureReview.created_at)
+    )
+    reviews = [
+        {"feature_name": row.name, "outcome": row.FeatureReview.review_outcome,
+         "notes": row.FeatureReview.review_notes, "created_at": row.FeatureReview.created_at.isoformat()}
+        for row in reviews_result
+    ]
+
+    dur = None
+    if session.ended_at:
+        dur = int((session.ended_at - session.started_at).total_seconds())
+    return {
+        "id": session.id,
+        "session_uid": session.session_uid,
+        "persona": session.persona,
+        "started_at": session.started_at.isoformat(),
+        "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+        "duration_seconds": dur,
+        "exit_code": session.exit_code,
+        "features_attempted": session.features_attempted,
+        "features_pushed": session.features_pushed,
+        "tokens_input": session.tokens_input,
+        "tokens_output": session.tokens_output,
+        "cost_usd": float(session.cost_usd) if session.cost_usd else None,
+        "notes": session.notes,
+        "activities": activities,
+        "reviews": reviews,
+    }
+
+
 @app.patch("/api/products/{product_id}/last-session/persona")
 async def api_set_last_session_persona(product_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     """Poller calls this after container exits to record the persona on the most recent session."""
@@ -1002,6 +1272,60 @@ async def api_unread_alerts(
     for a in alerts:
         a.delivered = True
     return alerts
+
+
+@app.get("/api/products/{product_id}/videos")
+async def api_list_videos(
+    product_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """List MP4 videos in the product's output/ folder, newest first."""
+    product = await _get_product_or_404(product_id, db)
+    output_dir = _output_dir_for_product(product.working_dir)
+    if not output_dir.exists():
+        return []
+    videos = sorted(output_dir.glob("product_video_*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return [
+        {
+            "filename": v.name,
+            "size_mb": round(v.stat().st_size / 1_048_576, 1),
+            "url": f"/product/{product_id}/output/{v.name}",
+        }
+        for v in videos
+    ]
+
+
+@app.get("/product/{product_id}/output/{filename}")
+async def serve_product_video(
+    product_id: int,
+    filename: str,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Serve a video file from the product's output/ folder (supports range requests)."""
+    if not filename.endswith(".mp4") or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    product = await _get_product_or_404(product_id, db)
+    file_path = _output_dir_for_product(product.working_dir) / filename
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Video not found")
+    return FileResponse(str(file_path), media_type="video/mp4")
+
+
+@app.delete("/api/products/{product_id}/sessions", status_code=200)
+async def api_clear_sessions(
+    product_id: int,
+    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
+):
+    """Delete all session history for a product."""
+    await _get_product_or_404(product_id, db)
+    result = await db.execute(
+        select(DBSession).where(DBSession.product_id == product_id)
+    )
+    sessions = result.scalars().all()
+    for s in sessions:
+        await db.delete(s)
+    return {"deleted": len(sessions)}
 
 
 @app.get("/api/products/{product_id}/sessions", response_model=list[schemas.SessionOut])

@@ -30,6 +30,11 @@ pydantic-settings==2.6.0
 # LLM feature recommendations
 anthropic>=0.40.0
 
+# Product video generation (post-coder step)
+Pillow>=10.0.0              # slide image creation
+edge-tts>=6.1.0             # Microsoft Edge Neural TTS narration (async)
+moviepy>=1.0.3              # video assembly (requires ffmpeg on PATH)
+
 # Dev / test
 pytest==8.3.3
 pytest-asyncio==0.24.0

@@ -25,7 +25,7 @@ Follow it exactly. Do not deviate without PM approval.
 **Batch work:**
 - GET {pm_api_url}/api/features/approved?product_id={product_id} (also picks up Designed features)
   - For Designed features: read the design doc at docs/feature_{{id:03d}}_design.md first
-- Take max 3 features (or max_batch_size from product_config.json)
+- Take max {max_features_per_run} feature(s) per session
 - For each: Implement → Test (--cov-fail-under=70) → Commit → Push → Open PR → PATCH status to Reviewing
 - PATCH feature status at each transition (Approved/Designed → Implementing → Reviewing)
 - Push progress.md after every atomic step (heartbeat)

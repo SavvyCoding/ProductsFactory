@@ -471,10 +471,9 @@ class TestApiFeatures:
 
 
 class TestResetStuck:
-    def test_resets_stale_implementing(self, client, db):
+    def test_resets_stale_implementing_to_approved(self, client, db):
         p = make_product(db)
-        f = make_feature(db, p.id, status="Implementing")
-        # Backdate updated_at past the 2h threshold
+        f = make_feature(db, p.id, status="Implementing")  # no design_doc_path → Approved
         db.execute(
             __import__("sqlalchemy").text(
                 "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
@@ -487,6 +486,51 @@ class TestResetStuck:
         assert r.json()["reset_count"] == 1
         db.refresh(f)
         assert f.status == "Approved"
+
+    def test_resets_stale_implementing_to_designed_when_has_design_doc(self, client, db):
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Implementing", design_doc_path="docs/feature_001_design.md")
+        db.execute(
+            __import__("sqlalchemy").text(
+                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
+            ),
+            {"id": f.id}
+        )
+        db.flush()
+        r = client.post("/api/features/reset_stuck")
+        assert r.json()["reset_count"] == 1
+        db.refresh(f)
+        assert f.status == "Designed"
+
+    def test_resets_stale_designing(self, client, db):
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Designing")
+        db.execute(
+            __import__("sqlalchemy").text(
+                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
+            ),
+            {"id": f.id}
+        )
+        db.flush()
+        r = client.post("/api/features/reset_stuck")
+        assert r.json()["reset_count"] == 1
+        db.refresh(f)
+        assert f.status == "Approved"
+
+    def test_resets_stale_reviewing(self, client, db):
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Reviewing", pr_number=42)
+        db.execute(
+            __import__("sqlalchemy").text(
+                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
+            ),
+            {"id": f.id}
+        )
+        db.flush()
+        r = client.post("/api/features/reset_stuck")
+        assert r.json()["reset_count"] == 1
+        db.refresh(f)
+        assert f.status == "Implementing"
 
     def test_does_not_reset_recent_implementing(self, client, db):
         p = make_product(db)
@@ -513,6 +557,95 @@ class TestResetStuck:
 # ══════════════════════════════════════════════════════════════════════════════
 # REST API — Sessions
 # ══════════════════════════════════════════════════════════════════════════════
+
+class TestPersonaRouting:
+    def test_designer_picks_approved_without_skip_design(self, client, db):
+        p = make_product(db, status="ready")
+        f = make_feature(db, p.id, status="Approved")  # skip_design defaults False
+        r = client.get(f"/api/features/next-for-persona?persona=designer&product_id={p.id}")
+        assert r.status_code == 200
+        assert r.json()["id"] == f.id
+
+    def test_designer_skips_approved_with_skip_design(self, client, db):
+        p = make_product(db, status="ready")
+        make_feature(db, p.id, status="Approved", skip_design=True)
+        r = client.get(f"/api/features/next-for-persona?persona=designer&product_id={p.id}")
+        assert r.json() is None
+
+    def test_coder_picks_designed(self, client, db):
+        p = make_product(db, status="ready")
+        f = make_feature(db, p.id, status="Designed")
+        r = client.get(f"/api/features/next-for-persona?persona=coder&product_id={p.id}")
+        assert r.status_code == 200
+        assert r.json()["id"] == f.id
+
+    def test_coder_picks_approved_skip_design(self, client, db):
+        p = make_product(db, status="ready")
+        f = make_feature(db, p.id, status="Approved", skip_design=True)
+        r = client.get(f"/api/features/next-for-persona?persona=coder&product_id={p.id}")
+        assert r.json()["id"] == f.id
+
+    def test_coder_skips_approved_without_skip_design(self, client, db):
+        p = make_product(db, status="ready")
+        make_feature(db, p.id, status="Approved", skip_design=False)
+        r = client.get(f"/api/features/next-for-persona?persona=coder&product_id={p.id}")
+        assert r.json() is None
+
+    def test_reviewer_picks_reviewing_with_pr(self, client, db):
+        p = make_product(db, status="ready")
+        f = make_feature(db, p.id, status="Reviewing", pr_number=5)
+        r = client.get(f"/api/features/next-for-persona?persona=reviewer&product_id={p.id}")
+        assert r.json()["id"] == f.id
+
+    def test_reviewer_skips_reviewing_without_pr(self, client, db):
+        p = make_product(db, status="ready")
+        make_feature(db, p.id, status="Reviewing")  # no pr_number
+        r = client.get(f"/api/features/next-for-persona?persona=reviewer&product_id={p.id}")
+        assert r.json() is None
+
+    def test_unknown_persona_rejected(self, client, db):
+        p = make_product(db)
+        r = client.get(f"/api/features/next-for-persona?persona=hacker&product_id={p.id}")
+        assert r.status_code == 422
+
+    def test_next_product_includes_designed_features(self, client, db):
+        p = make_product(db, status="ready")
+        make_feature(db, p.id, status="Designed")  # not Approved — should still trigger
+        r = client.get("/api/products/next")
+        assert r.json()["id"] == p.id
+
+    def test_add_feature_with_skip_design(self, client, db):
+        p = make_product(db)
+        r = client.post(f"/product/{p.id}/features",
+                        data={"name": "quick fix", "skip_design": "true"},
+                        auth=AUTH, follow_redirects=False)
+        assert r.status_code == 303
+        # Verify it was stored
+        feat_r = client.post("/api/features", json={"product_id": p.id, "name": "x", "skip_design": True})
+        assert feat_r.json()["skip_design"] is True
+
+    def test_feature_update_stores_design_doc(self, client, db):
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Designing")
+        r = client.patch(f"/api/features/{f.id}", json={
+            "status": "Designed",
+            "design_doc_path": "docs/feature_001_design.md",
+        })
+        assert r.status_code == 200
+        assert r.json()["status"] == "Designed"
+        assert r.json()["design_doc_path"] == "docs/feature_001_design.md"
+
+    def test_feature_update_stores_review_outcome(self, client, db):
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Reviewing", pr_number=10)
+        r = client.patch(f"/api/features/{f.id}", json={
+            "status": "Reviewed",
+            "review_outcome": "approved",
+            "review_notes": "LGTM",
+        })
+        assert r.status_code == 200
+        assert r.json()["review_outcome"] == "approved"
+
 
 class TestApiSessions:
     def test_start_session(self, client, db):
@@ -542,3 +675,67 @@ class TestApiSessions:
     def test_end_unknown_session(self, client):
         r = client.patch("/api/sessions/99999", json={"exit_code": 0})
         assert r.status_code == 404
+
+
+class TestFeatureReviews:
+    def test_review_recorded_on_feature_patch(self, client, db):
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Reviewing", pr_number=10)
+        client.patch(f"/api/features/{f.id}", json={
+            "status": "Reviewed",
+            "review_outcome": "approved",
+            "review_notes": "LGTM",
+        })
+        r = client.get(f"/api/features/{f.id}/reviews")
+        assert r.status_code == 200
+        reviews = r.json()
+        assert len(reviews) == 1
+        assert reviews[0]["review_outcome"] == "approved"
+        assert reviews[0]["review_notes"] == "LGTM"
+
+    def test_multiple_review_cycles_preserved(self, client, db):
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Reviewing", pr_number=11)
+        # First review: request changes
+        client.patch(f"/api/features/{f.id}", json={
+            "status": "Implementing",
+            "review_outcome": "changes_requested",
+            "review_notes": "Missing tests",
+        })
+        # Second review: approved
+        client.patch(f"/api/features/{f.id}", json={
+            "status": "Reviewed",
+            "review_outcome": "approved",
+            "review_notes": "LGTM now",
+        })
+        r = client.get(f"/api/features/{f.id}/reviews")
+        assert r.status_code == 200
+        reviews = r.json()
+        assert len(reviews) == 2
+        # Newest first
+        assert reviews[0]["review_outcome"] == "approved"
+        assert reviews[1]["review_outcome"] == "changes_requested"
+
+    def test_patch_without_review_outcome_creates_no_review(self, client, db):
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Implementing")
+        client.patch(f"/api/features/{f.id}", json={"status": "Reviewing", "pr_number": 12})
+        r = client.get(f"/api/features/{f.id}/reviews")
+        assert r.status_code == 200
+        assert r.json() == []
+
+    def test_review_history_404_for_unknown_feature(self, client):
+        r = client.get("/api/features/99999/reviews")
+        assert r.status_code == 404
+
+    def test_session_uid_stored_with_review(self, client, db):
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Reviewing", pr_number=13)
+        client.patch(f"/api/features/{f.id}", json={
+            "status": "Reviewed",
+            "review_outcome": "approved",
+            "review_notes": "ok",
+            "session_uid": "test-abc123",
+        })
+        r = client.get(f"/api/features/{f.id}/reviews")
+        assert r.json()[0]["session_uid"] == "test-abc123"

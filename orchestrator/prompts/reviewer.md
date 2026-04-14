@@ -65,13 +65,13 @@ Your working directory is /workspace. All files must be written inside /workspac
    On approve:
    ```
    PATCH {pm_api_url}/api/features/{{feature_id}}
-   {{"status": "Reviewed", "review_outcome": "approved", "review_notes": "Brief summary of what was reviewed."}}
+   {{"status": "Reviewed", "review_outcome": "approved", "review_notes": "Brief summary of what was reviewed.", "session_uid": "{session_uid}"}}
    ```
 
    On changes requested:
    ```
    PATCH {pm_api_url}/api/features/{{feature_id}}
-   {{"status": "Implementing", "review_outcome": "changes_requested", "review_notes": "{{issues}}"}}
+   {{"status": "Implementing", "review_outcome": "changes_requested", "review_notes": "{{issues}}", "session_uid": "{session_uid}"}}
    ```
    (Setting back to Implementing so the Coder picks it up again.)
 
@@ -80,7 +80,7 @@ Your working directory is /workspace. All files must be written inside /workspac
    git checkout main
    ```
 
-9. **Repeat** steps 1–8 for up to 3 PRs per session.
+9. **Repeat** steps 1–8 for up to {max_features_per_run} PR(s) per session.
 
 10. **Exit 0** when done.
 

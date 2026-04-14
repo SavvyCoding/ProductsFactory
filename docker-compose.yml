@@ -14,11 +14,13 @@ services:
     image: postgres:16-alpine
     container_name: ProductsFactoryDB
     environment:
-      POSTGRES_USER: productfactory
-      POSTGRES_PASSWORD: ProductDBPassword
-      POSTGRES_DB: productfactory
+      POSTGRES_USER:     ${POSTGRES_USER:-productfactory}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ProductDBPassword}
+      POSTGRES_DB:       ${POSTGRES_DB:-productfactory}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"     # exposed to Windows host for local pytest runs
     networks:
       - pf-internal
     restart: unless-stopped
@@ -37,11 +39,19 @@ services:
     container_name: pm-api
     environment:
       # db resolves via pf-internal compose network
-      DATABASE_URL: postgresql+asyncpg://productfactory:ProductDBPassword@db:5432/productfactory
-      PM_USERNAME: admin
-      PM_PASSWORD: ProductDBPassword
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-productfactory}:${POSTGRES_PASSWORD:-ProductDBPassword}@db:5432/${POSTGRES_DB:-productfactory}
+      PM_USERNAME: ${PM_USERNAME:-admin}
+      PM_PASSWORD: ${PM_PASSWORD:-ProductDBPassword}
+      STUCK_FEATURE_TIMEOUT_HOURS: ${STUCK_FEATURE_TIMEOUT_HOURS:-2}
+      SESSION_LOG_MAXLEN: ${SESSION_LOG_MAXLEN:-1000}
       # Set this to enable AI feature recommendations on the Greenfield form
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Host path to the products root — used to map working_dir → /workspace for video serving
+      PRODUCTS_BASE_DIR: ${PRODUCTS_BASE_DIR:-}
+    volumes:
+      # Mount products root read-only so the PM dashboard can serve output/ videos
+      # Set PRODUCTS_BASE_DIR in your .env, e.g. PRODUCTS_BASE_DIR=C:/Users/you/Products
+      - ${PRODUCTS_BASE_DIR:-./products}:/workspace:ro
     ports:
       - "8080:8080"     # exposed to Windows host: poller uses http://localhost:8080
     depends_on:

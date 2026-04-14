@@ -28,7 +28,7 @@ Your working directory is /workspace. All files must be written inside /workspac
    - /workspace/product_config.json (if it exists)
    - Any relevant existing source files for this feature area
 
-4. **Write a design document** to `/workspace/docs/feature_{feature_id:03d}_design.md`:
+4. **Write a design document** to `/workspace/docs/feature_{{feature_id:03d}}_design.md`:
 
    ```markdown
    # Feature Design: {{feature_name}}
@@ -67,7 +67,7 @@ Your working directory is /workspace. All files must be written inside /workspac
    {{"status": "Designed", "design_doc_path": "docs/feature_{{feature_id:03d}}_design.md"}}
    ```
 
-6. **Repeat** steps 1–5 for up to 3 features per session.
+6. **Repeat** steps 1–5 for up to {max_features_per_run} feature(s) per session.
 
 7. **Push progress** — commit the design docs and push:
    ```

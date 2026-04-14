@@ -14,16 +14,18 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from website.database import Base
 
 
+REVIEW_OUTCOMES    = ('approved', 'changes_requested')
 PRODUCT_STATUSES   = ('registered', 'discovering', 'discovered', 'ready', 'paused', 'error',
                       'greenfield_pending')
 PRODUCT_TYPES      = ('greenfield', 'brownfield')
 ANALYSIS_STATUSES  = ('pending', 'running', 'done')
+FEATURE_TYPES      = ('feature', 'bug', 'chore')
 FEATURE_STATUSES   = ('Pending', 'Approved',
                       'Designing', 'Designed',
                       'Implementing', 'Implemented',
                       'Reviewing', 'Reviewed',
                       'Testing', 'Committed', 'Pushed',
-                      'Blocked', 'Rejected', 'Reverted')
+                      'Blocked', 'Rejected', 'Reverted', 'Deferred')
 ALERT_LEVELS       = ('info', 'warning', 'error', 'critical')
 
 
@@ -49,7 +51,8 @@ class Product(Base):
     custom_prompt:      Mapped[Optional[str]]  = mapped_column(Text)
     quiet_hours_start:  Mapped[Optional[int]]  = mapped_column(Integer)
     quiet_hours_end:    Mapped[Optional[int]]  = mapped_column(Integer)
-    daily_session_cap:  Mapped[Optional[int]]  = mapped_column(Integer)
+    daily_session_cap:      Mapped[Optional[int]]  = mapped_column(Integer)
+    max_features_per_run:   Mapped[Optional[int]]  = mapped_column(Integer)
     created_at:         Mapped[datetime]       = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at:         Mapped[datetime]       = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -61,6 +64,7 @@ class Feature(Base):
     __tablename__ = "features"
     __table_args__ = (
         CheckConstraint(f"status IN {FEATURE_STATUSES}", name="ck_features_status"),
+        CheckConstraint(f"feature_type IN {FEATURE_TYPES}", name="ck_features_type"),
         CheckConstraint("priority BETWEEN 1 AND 100", name="ck_features_priority"),
         CheckConstraint("fix_attempts >= 0", name="ck_features_fix_attempts"),
         CheckConstraint("source IN ('pm', 'ai')", name="ck_features_source"),
@@ -75,6 +79,7 @@ class Feature(Base):
     depends_on:     Mapped[Optional[int]]  = mapped_column(Integer, ForeignKey("features.id"))
     fix_attempts:   Mapped[int]            = mapped_column(Integer, nullable=False, default=0)
     source:         Mapped[str]            = mapped_column(Text, nullable=False, default="pm")
+    feature_type:   Mapped[str]            = mapped_column(Text, nullable=False, default="feature")
     branch_name:    Mapped[Optional[str]]  = mapped_column(Text)
     pr_url:         Mapped[Optional[str]]  = mapped_column(Text)
     pr_number:      Mapped[Optional[int]]  = mapped_column(Integer)
@@ -88,6 +93,23 @@ class Feature(Base):
     updated_at:     Mapped[datetime]       = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     product: Mapped["Product"] = relationship("Product", back_populates="features")
+    reviews: Mapped[List["FeatureReview"]] = relationship("FeatureReview", back_populates="feature", cascade="all, delete")
+
+
+class FeatureReview(Base):
+    __tablename__ = "feature_reviews"
+    __table_args__ = (
+        CheckConstraint(f"review_outcome IN {REVIEW_OUTCOMES}", name="ck_feature_reviews_outcome"),
+    )
+
+    id:             Mapped[int]            = mapped_column(Integer, primary_key=True)
+    feature_id:     Mapped[int]            = mapped_column(Integer, ForeignKey("features.id", ondelete="CASCADE"), nullable=False, index=True)
+    review_outcome: Mapped[str]            = mapped_column(String(32), nullable=False)
+    review_notes:   Mapped[Optional[str]]  = mapped_column(Text)
+    session_uid:    Mapped[Optional[str]]  = mapped_column(Text)
+    created_at:     Mapped[datetime]       = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    feature: Mapped["Feature"] = relationship("Feature", back_populates="reviews")
 
 
 class Session(Base):
@@ -115,6 +137,9 @@ class SystemConfig(Base):
     """
     Global system configuration — single row (id=1 always).
     Upserted via POST /admin/settings. Never create multiple rows.
+
+    Operational settings here override env vars in the poller and website.
+    NULL means "use the env var / built-in default".
     """
     __tablename__ = "system_config"
 
@@ -126,7 +151,28 @@ class SystemConfig(Base):
     slack_webhook_url:     Mapped[Optional[str]] = mapped_column(Text)
     github_webhook_secret: Mapped[Optional[str]] = mapped_column(Text)
     max_sessions_per_day:  Mapped[Optional[int]] = mapped_column(Integer)
-    updated_at:            Mapped[datetime]       = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # ── Poller settings ───────────────────────────────────────────────────────
+    poll_interval:              Mapped[Optional[int]] = mapped_column(Integer)  # default 60s
+    session_timeout_minutes:    Mapped[Optional[int]] = mapped_column(Integer)  # default 90
+    stale_threshold_minutes:    Mapped[Optional[int]] = mapped_column(Integer)  # default 45
+    auth_check_timeout:         Mapped[Optional[int]] = mapped_column(Integer)  # default 30s
+    max_open_prs:               Mapped[Optional[int]] = mapped_column(Integer)  # default 3
+    pr_gate_sleep:              Mapped[Optional[int]] = mapped_column(Integer)  # default 300s
+    stuck_feature_timeout_hours:Mapped[Optional[int]] = mapped_column(Integer)  # default 2h
+    max_features_per_run:       Mapped[Optional[int]] = mapped_column(Integer)  # default 1
+    brownfield_file_threshold:  Mapped[Optional[int]] = mapped_column(Integer)  # default 10
+
+    # ── Agent / Ollama settings ───────────────────────────────────────────────
+    agent_backend:     Mapped[Optional[str]] = mapped_column(Text)   # "claude" | "ollama"
+    ollama_host:       Mapped[Optional[str]] = mapped_column(Text)   # default http://host.docker.internal:11434
+    designer_model:    Mapped[Optional[str]] = mapped_column(Text)   # default gemma3:27b
+    coder_model:       Mapped[Optional[str]] = mapped_column(Text)   # default qwen3-coder:30b
+    ollama_timeout:    Mapped[Optional[int]] = mapped_column(Integer) # default 300s
+    bash_timeout:      Mapped[Optional[int]] = mapped_column(Integer) # default 180s
+    max_turns:         Mapped[Optional[int]] = mapped_column(Integer) # default 80
+
+    updated_at:        Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class PMUser(Base):

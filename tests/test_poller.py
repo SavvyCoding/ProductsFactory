@@ -36,7 +36,7 @@ class TestGetNextProduct:
             mock_client.get.side_effect = mock_get
             mock_client_cls.return_value = mock_client
 
-            result = poller.get_next_product()
+            result = poller.get_next_product([])
 
         assert result == product_data
 
@@ -57,7 +57,7 @@ class TestGetNextProduct:
             mock_client.get.side_effect = mock_get
             mock_client_cls.return_value = mock_client
 
-            result = poller.get_next_product()
+            result = poller.get_next_product([])
 
         assert result is None
 
@@ -73,7 +73,7 @@ class TestGetNextProduct:
             mock_client.get.side_effect = httpx.ConnectError("refused")
             mock_client_cls.return_value = mock_client
 
-            result = poller.get_next_product()
+            result = poller.get_next_product([])
 
         assert result is None
 
@@ -419,6 +419,8 @@ class TestAlerts:
     def test_no_webhook_call_when_url_not_set(self, monkeypatch):
         from orchestrator import alerts
         monkeypatch.setattr(alerts, "ALERT_WEBHOOK_URL", "")
+        monkeypatch.setattr(alerts, "PM_API_URL", "")
+        monkeypatch.setattr(alerts, "_cached_webhook_url", None)
 
         post_calls = []
         with patch("httpx.post", side_effect=lambda *a, **kw: post_calls.append(a)):

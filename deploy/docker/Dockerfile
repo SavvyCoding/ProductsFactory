@@ -13,7 +13,7 @@
 #   ~/.claude mounted :ro at runtime (OAuth tokens — never writable)
 #   ~/.ssh    mounted :ro at runtime (deploy key — never writable)
 #   /workspace bound to product dir only
-#   Isolated bridge network — no --network host
+#   Isolated bridge network (productfactory-net) — not the host network
 
 FROM ubuntu:24.04
 

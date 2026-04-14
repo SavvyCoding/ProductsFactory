@@ -136,7 +136,8 @@ class TestDockerfileSecurity:
         assert "--privileged" not in dockerfile_text
 
     def test_no_network_host(self, dockerfile_text):
-        # Dockerfile itself should not set --network host
+        # Dockerfile itself should not run containers with --network host
+        # (--add-host with host-gateway is fine — that's for DNS resolution)
         assert "--network host" not in dockerfile_text
 
     def test_workdir_is_workspace(self, dockerfile_text):
@@ -165,27 +166,50 @@ def product():
 @pytest.fixture
 def env_vars(monkeypatch):
     monkeypatch.setenv("PM_API_URL", "http://pm-api:8080")
-    monkeypatch.setenv("UBUNTU_VM_IP", "192.168.1.100")
+
+
+def _setup_runner(monkeypatch, docker_runner, tmp_path):
+    """Common setup for docker_runner tests: patch module-level vars + Popen."""
+    monkeypatch.setenv("PM_API_URL", "http://pm-api:8080")
+    monkeypatch.setattr(docker_runner, "PM_API_URL", "http://pm-api:8080")
+    monkeypatch.setattr(docker_runner, "SSH_DIR", tmp_path)
+    monkeypatch.setattr(docker_runner, "CLAUDE_DIR", tmp_path)
+    monkeypatch.setattr(docker_runner, "AGENT_BACKEND", "claude")  # force claude backend
+
+    # Silence the httpx DELETE call that clears old logs
+    monkeypatch.setattr("httpx.delete", lambda *a, **kw: MagicMock(status_code=200))
+
+    # Mock httpx.Client context manager (session create POST + session end PATCH + GH token GET)
+    fake_session_resp = MagicMock()
+    fake_session_resp.json.return_value = {"id": 99}
+    fake_session_resp.raise_for_status = MagicMock()
+    fake_client = MagicMock()
+    fake_client.post.return_value = fake_session_resp
+    fake_client.patch.return_value = MagicMock(status_code=200)
+    fake_client.get.return_value = MagicMock(json=MagicMock(return_value={}))
+    fake_client.__enter__ = MagicMock(return_value=fake_client)
+    fake_client.__exit__ = MagicMock(return_value=False)
+    monkeypatch.setattr("httpx.Client", lambda *a, **kw: fake_client)
+
+    captured_cmd = []
+
+    fake_proc = MagicMock()
+    fake_proc.stdout = iter([])
+    fake_proc.returncode = 0
+    fake_proc.wait = MagicMock(return_value=0)
+
+    def fake_popen(cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        return fake_proc
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    return captured_cmd, fake_proc
 
 
 class TestDockerRunCommand:
     def test_uses_isolated_network_not_host(self, product, env_vars, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
         from orchestrator import docker_runner
-        monkeypatch.setattr(docker_runner, "PM_API_URL", "http://pm-api:8080")
-        monkeypatch.setattr(docker_runner, "UBUNTU_VM_IP", "192.168.1.100")
-        monkeypatch.setattr(docker_runner, "SSH_DIR", tmp_path)
-        monkeypatch.setattr(docker_runner, "CLAUDE_DIR", tmp_path)
-
-        captured_cmd = []
-
-        def fake_run(cmd, **kwargs):
-            captured_cmd.extend(cmd)
-            result = MagicMock()
-            result.returncode = 0
-            return result
-
-        monkeypatch.setattr("subprocess.run", fake_run)
+        captured_cmd, _ = _setup_runner(monkeypatch, docker_runner, tmp_path)
 
         docker_runner.run_claude_in_docker(product)
 
@@ -196,40 +220,14 @@ class TestDockerRunCommand:
 
     def test_no_privileged_flag_in_command(self, product, env_vars, tmp_path, monkeypatch):
         from orchestrator import docker_runner
-        monkeypatch.setattr(docker_runner, "PM_API_URL", "http://pm-api:8080")
-        monkeypatch.setattr(docker_runner, "UBUNTU_VM_IP", "192.168.1.100")
-        monkeypatch.setattr(docker_runner, "SSH_DIR", tmp_path)
-        monkeypatch.setattr(docker_runner, "CLAUDE_DIR", tmp_path)
-
-        captured_cmd = []
-
-        def fake_run(cmd, **kwargs):
-            captured_cmd.extend(cmd)
-            result = MagicMock()
-            result.returncode = 0
-            return result
-
-        monkeypatch.setattr("subprocess.run", fake_run)
+        captured_cmd, _ = _setup_runner(monkeypatch, docker_runner, tmp_path)
 
         docker_runner.run_claude_in_docker(product)
         assert "--privileged" not in captured_cmd
 
     def test_claude_dir_mounted_readonly(self, product, env_vars, tmp_path, monkeypatch):
         from orchestrator import docker_runner
-        monkeypatch.setattr(docker_runner, "PM_API_URL", "http://pm-api:8080")
-        monkeypatch.setattr(docker_runner, "UBUNTU_VM_IP", "192.168.1.100")
-        monkeypatch.setattr(docker_runner, "SSH_DIR", tmp_path)
-        monkeypatch.setattr(docker_runner, "CLAUDE_DIR", tmp_path)
-
-        captured_cmd = []
-
-        def fake_run(cmd, **kwargs):
-            captured_cmd.extend(cmd)
-            result = MagicMock()
-            result.returncode = 0
-            return result
-
-        monkeypatch.setattr("subprocess.run", fake_run)
+        captured_cmd, _ = _setup_runner(monkeypatch, docker_runner, tmp_path)
 
         docker_runner.run_claude_in_docker(product)
 
@@ -251,21 +249,7 @@ class TestDockerRunCommand:
         key_file = tmp_path / "id_ed25519_my_test_product"
         key_file.write_text("fake-key-content")
 
-        monkeypatch.setattr(docker_runner, "PM_API_URL", "http://pm-api:8080")
-        monkeypatch.setattr(docker_runner, "UBUNTU_VM_IP", "192.168.1.100")
-        monkeypatch.setattr(docker_runner, "SSH_DIR", tmp_path)
-        monkeypatch.setattr(docker_runner, "CLAUDE_DIR", tmp_path)
-
-        captured_cmd = []
-
-        def fake_run(cmd, **kwargs):
-            captured_cmd.extend(cmd)
-            result = MagicMock()
-            result.returncode = 0
-            return result
-
-        monkeypatch.setattr("subprocess.run", fake_run)
-
+        captured_cmd, _ = _setup_runner(monkeypatch, docker_runner, tmp_path)
         docker_runner.run_claude_in_docker(product)
 
         # The SSH mount must go to /root/.ssh/id_ed25519 (specific file), not /root/.ssh/
@@ -274,85 +258,54 @@ class TestDockerRunCommand:
         for m in ssh_mounts:
             assert "/root/.ssh/id_ed25519" in m, f"Must mount specific file, got: {m}"
             assert m.endswith(":ro"), f"Deploy key must be :ro, got: {m}"
-            # Must NOT be mounting the whole directory
             assert not m.split(":")[1].endswith("/.ssh/"), f"Must not mount entire .ssh dir: {m}"
 
     def test_uses_rm_flag(self, product, env_vars, tmp_path, monkeypatch):
         from orchestrator import docker_runner
-        monkeypatch.setattr(docker_runner, "PM_API_URL", "http://pm-api:8080")
-        monkeypatch.setattr(docker_runner, "UBUNTU_VM_IP", "192.168.1.100")
-        monkeypatch.setattr(docker_runner, "SSH_DIR", tmp_path)
-        monkeypatch.setattr(docker_runner, "CLAUDE_DIR", tmp_path)
-
-        captured_cmd = []
-
-        def fake_run(cmd, **kwargs):
-            captured_cmd.extend(cmd)
-            result = MagicMock()
-            result.returncode = 0
-            return result
-
-        monkeypatch.setattr("subprocess.run", fake_run)
+        captured_cmd, _ = _setup_runner(monkeypatch, docker_runner, tmp_path)
         docker_runner.run_claude_in_docker(product)
         assert "--rm" in captured_cmd
 
     def test_memory_and_cpu_limits_set(self, product, env_vars, tmp_path, monkeypatch):
         from orchestrator import docker_runner
-        monkeypatch.setattr(docker_runner, "PM_API_URL", "http://pm-api:8080")
-        monkeypatch.setattr(docker_runner, "UBUNTU_VM_IP", "192.168.1.100")
-        monkeypatch.setattr(docker_runner, "SSH_DIR", tmp_path)
-        monkeypatch.setattr(docker_runner, "CLAUDE_DIR", tmp_path)
-
-        captured_cmd = []
-
-        def fake_run(cmd, **kwargs):
-            captured_cmd.extend(cmd)
-            result = MagicMock()
-            result.returncode = 0
-            return result
-
-        monkeypatch.setattr("subprocess.run", fake_run)
+        captured_cmd, _ = _setup_runner(monkeypatch, docker_runner, tmp_path)
         docker_runner.run_claude_in_docker(product)
         assert "--memory" in captured_cmd
         assert "--cpus" in captured_cmd
 
     def test_uses_add_host_for_pm_api(self, product, env_vars, tmp_path, monkeypatch):
         from orchestrator import docker_runner
-        monkeypatch.setattr(docker_runner, "PM_API_URL", "http://pm-api:8080")
-        monkeypatch.setattr(docker_runner, "UBUNTU_VM_IP", "192.168.1.100")
-        monkeypatch.setattr(docker_runner, "SSH_DIR", tmp_path)
-        monkeypatch.setattr(docker_runner, "CLAUDE_DIR", tmp_path)
-
-        captured_cmd = []
-
-        def fake_run(cmd, **kwargs):
-            captured_cmd.extend(cmd)
-            result = MagicMock()
-            result.returncode = 0
-            return result
-
-        monkeypatch.setattr("subprocess.run", fake_run)
+        captured_cmd, _ = _setup_runner(monkeypatch, docker_runner, tmp_path)
         docker_runner.run_claude_in_docker(product)
         assert "--add-host" in captured_cmd
 
     def test_uses_dangerously_skip_permissions(self, product, env_vars, tmp_path, monkeypatch):
         from orchestrator import docker_runner
-        monkeypatch.setattr(docker_runner, "PM_API_URL", "http://pm-api:8080")
-        monkeypatch.setattr(docker_runner, "UBUNTU_VM_IP", "192.168.1.100")
-        monkeypatch.setattr(docker_runner, "SSH_DIR", tmp_path)
-        monkeypatch.setattr(docker_runner, "CLAUDE_DIR", tmp_path)
-
-        captured_cmd = []
-
-        def fake_run(cmd, **kwargs):
-            captured_cmd.extend(cmd)
-            result = MagicMock()
-            result.returncode = 0
-            return result
-
-        monkeypatch.setattr("subprocess.run", fake_run)
+        captured_cmd, _ = _setup_runner(monkeypatch, docker_runner, tmp_path)
         docker_runner.run_claude_in_docker(product)
         assert "--dangerously-skip-permissions" in captured_cmd
+
+    def test_ollama_backend_uses_python_agent(self, product, env_vars, tmp_path, monkeypatch):
+        from orchestrator import docker_runner
+        captured_cmd, _ = _setup_runner(monkeypatch, docker_runner, tmp_path)
+        monkeypatch.setattr(docker_runner, "AGENT_BACKEND", "ollama")
+        docker_runner.run_claude_in_docker(product, persona="coder")
+        assert any("ollama_agent.py" in arg for arg in captured_cmd)
+        assert not any(arg == "claude" for arg in captured_cmd)
+
+    def test_ollama_backend_skips_claude_mount(self, product, env_vars, tmp_path, monkeypatch):
+        from orchestrator import docker_runner
+        captured_cmd, _ = _setup_runner(monkeypatch, docker_runner, tmp_path)
+        monkeypatch.setattr(docker_runner, "AGENT_BACKEND", "ollama")
+        docker_runner.run_claude_in_docker(product, persona="coder")
+        claude_mounts = [a for a in captured_cmd if "/root/.claude" in a]
+        assert claude_mounts == [], "Ollama backend must not mount Claude OAuth dir"
+
+    def test_persona_env_var_injected(self, product, env_vars, tmp_path, monkeypatch):
+        from orchestrator import docker_runner
+        captured_cmd, _ = _setup_runner(monkeypatch, docker_runner, tmp_path)
+        docker_runner.run_claude_in_docker(product, persona="designer")
+        assert "AGENT_PERSONA=designer" in captured_cmd
 
 
 # ── Deploy key selection tests ────────────────────────────────────────────────
@@ -396,26 +349,13 @@ class TestDeployKeySelection:
 
     def test_no_ssh_mount_when_no_key(self, tmp_path, monkeypatch):
         from orchestrator import docker_runner
-        monkeypatch.setattr(docker_runner, "PM_API_URL", "http://pm-api:8080")
-        monkeypatch.setattr(docker_runner, "UBUNTU_VM_IP", "192.168.1.100")
-        monkeypatch.setattr(docker_runner, "SSH_DIR", tmp_path)
-        monkeypatch.setattr(docker_runner, "CLAUDE_DIR", tmp_path)
-
         product = {"name": "No Key", "id": "5", "working_dir": str(tmp_path)}
-        captured_cmd = []
-
-        def fake_run(cmd, **kwargs):
-            captured_cmd.extend(cmd)
-            result = MagicMock()
-            result.returncode = 0
-            return result
-
-        monkeypatch.setattr("subprocess.run", fake_run)
+        captured_cmd, _ = _setup_runner(monkeypatch, docker_runner, tmp_path)
         docker_runner.run_claude_in_docker(product)
 
-        # No SSH volume mount at all
-        ssh_mounts = [arg for arg in captured_cmd if "/root/.ssh" in arg]
-        assert ssh_mounts == [], f"Expected no SSH mount, got: {ssh_mounts}"
+        # No SSH volume mount at all (known_hosts from image is the only .ssh entry)
+        ssh_mounts = [arg for arg in captured_cmd if "/root/.ssh/id_ed25519" in arg]
+        assert ssh_mounts == [], f"Expected no SSH key mount, got: {ssh_mounts}"
 
 
 def _call_get_deploy_key(docker_runner_module, product, ssh_dir):
@@ -433,45 +373,35 @@ def _call_get_deploy_key(docker_runner_module, product, ssh_dir):
 class TestSessionLockGuard:
     def test_skips_launch_when_lock_exists(self, tmp_path, monkeypatch):
         from orchestrator import docker_runner
-        monkeypatch.setattr(docker_runner, "PM_API_URL", "http://pm-api:8080")
-        monkeypatch.setattr(docker_runner, "UBUNTU_VM_IP", "192.168.1.100")
-        monkeypatch.setattr(docker_runner, "SSH_DIR", tmp_path)
-        monkeypatch.setattr(docker_runner, "CLAUDE_DIR", tmp_path)
-
         lock = tmp_path / "session.lock"
         lock.write_text("locked")
 
         product = {"name": "Locked Product", "id": "6", "working_dir": str(tmp_path)}
 
-        docker_called = []
-        monkeypatch.setattr("subprocess.run", lambda cmd, **kw: docker_called.append(cmd))
+        popen_called = []
+        monkeypatch.setenv("PM_API_URL", "http://pm-api:8080")
+        monkeypatch.setattr(docker_runner, "PM_API_URL", "http://pm-api:8080")
+        monkeypatch.setattr(docker_runner, "SSH_DIR", tmp_path)
+        monkeypatch.setattr(docker_runner, "CLAUDE_DIR", tmp_path)
+        monkeypatch.setattr(docker_runner, "AGENT_BACKEND", "claude")
+        fake_client = MagicMock()
+        fake_client.__enter__ = MagicMock(return_value=fake_client)
+        fake_client.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr("httpx.Client", lambda *a, **kw: fake_client)
+        monkeypatch.setattr("subprocess.Popen", lambda cmd, **kw: popen_called.append(cmd))
 
         result = docker_runner.run_claude_in_docker(product)
         assert result == 1
-        assert docker_called == [], "Docker must not be launched when session.lock exists"
+        assert popen_called == [], "Docker must not be launched when session.lock exists"
 
     def test_launches_when_no_lock(self, tmp_path, monkeypatch):
         from orchestrator import docker_runner
-        monkeypatch.setattr(docker_runner, "PM_API_URL", "http://pm-api:8080")
-        monkeypatch.setattr(docker_runner, "UBUNTU_VM_IP", "192.168.1.100")
-        monkeypatch.setattr(docker_runner, "SSH_DIR", tmp_path)
-        monkeypatch.setattr(docker_runner, "CLAUDE_DIR", tmp_path)
-
         product = {"name": "Clean Product", "id": "7", "working_dir": str(tmp_path)}
-
-        docker_called = []
-
-        def fake_run(cmd, **kwargs):
-            docker_called.append(cmd)
-            result = MagicMock()
-            result.returncode = 0
-            return result
-
-        monkeypatch.setattr("subprocess.run", fake_run)
+        captured_cmd, _ = _setup_runner(monkeypatch, docker_runner, tmp_path)
 
         result = docker_runner.run_claude_in_docker(product)
         assert result == 0
-        assert len(docker_called) == 1
+        assert len(captured_cmd) > 0
 
 
 # ── Timeout behavior tests ────────────────────────────────────────────────────
@@ -479,50 +409,35 @@ class TestSessionLockGuard:
 class TestSessionTimeout:
     def test_returns_1_on_timeout(self, tmp_path, monkeypatch):
         from orchestrator import docker_runner
-        monkeypatch.setattr(docker_runner, "PM_API_URL", "http://pm-api:8080")
-        monkeypatch.setattr(docker_runner, "UBUNTU_VM_IP", "192.168.1.100")
-        monkeypatch.setattr(docker_runner, "SSH_DIR", tmp_path)
-        monkeypatch.setattr(docker_runner, "CLAUDE_DIR", tmp_path)
         monkeypatch.setattr(docker_runner, "SESSION_TIMEOUT_SECONDS", 10)
+        monkeypatch.setattr(docker_runner, "send_alert", lambda *a, **kw: None)
 
         product = {"name": "Timeout Product", "id": "8", "working_dir": str(tmp_path)}
 
-        def fake_run(cmd, **kwargs):
-            if "docker" in cmd and "kill" not in cmd:
-                raise subprocess.TimeoutExpired(cmd, 10)
-            result = MagicMock()
-            result.returncode = 0
-            return result
-
-        monkeypatch.setattr("subprocess.run", fake_run)
-        monkeypatch.setattr(docker_runner, "send_alert", lambda *a, **kw: None)
+        _, fake_proc = _setup_runner(monkeypatch, docker_runner, tmp_path)
+        fake_proc.wait.side_effect = subprocess.TimeoutExpired(["docker"], 10)
+        monkeypatch.setattr("subprocess.run", lambda cmd, **kw: MagicMock(returncode=0))
 
         result = docker_runner.run_claude_in_docker(product)
         assert result == 1
 
     def test_kills_container_on_timeout(self, tmp_path, monkeypatch):
         from orchestrator import docker_runner
-        monkeypatch.setattr(docker_runner, "PM_API_URL", "http://pm-api:8080")
-        monkeypatch.setattr(docker_runner, "UBUNTU_VM_IP", "192.168.1.100")
-        monkeypatch.setattr(docker_runner, "SSH_DIR", tmp_path)
-        monkeypatch.setattr(docker_runner, "CLAUDE_DIR", tmp_path)
         monkeypatch.setattr(docker_runner, "SESSION_TIMEOUT_SECONDS", 10)
+        monkeypatch.setattr(docker_runner, "send_alert", lambda *a, **kw: None)
 
         product = {"name": "Timeout Product", "id": "9", "working_dir": str(tmp_path)}
 
         kill_calls = []
+        _, fake_proc = _setup_runner(monkeypatch, docker_runner, tmp_path)
+        fake_proc.wait.side_effect = subprocess.TimeoutExpired(["docker"], 10)
 
-        def fake_run(cmd, **kwargs):
+        def fake_kill(cmd, **kw):
             if "kill" in cmd:
                 kill_calls.append(cmd)
-                result = MagicMock()
-                result.returncode = 0
-                return result
-            raise subprocess.TimeoutExpired(cmd, 10)
+            return MagicMock(returncode=0)
 
-        monkeypatch.setattr("subprocess.run", fake_run)
-        monkeypatch.setattr(docker_runner, "send_alert", lambda *a, **kw: None)
-
+        monkeypatch.setattr("subprocess.run", fake_kill)
         docker_runner.run_claude_in_docker(product)
         assert any("kill" in str(c) for c in kill_calls), "Must kill container on timeout"
 

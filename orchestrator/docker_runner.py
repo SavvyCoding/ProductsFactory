@@ -28,6 +28,9 @@ CLAUDE_DIR  = Path(os.environ.get("CLAUDE_DIR",  "C:/Users/digvi/.claude"))
 SSH_DIR     = Path(os.environ.get("SSH_DIR",     "C:/Users/digvi/.ssh"))
 AGENT_IMAGE = os.environ.get("AGENT_IMAGE", "productfactory-agent")
 PM_API_URL  = os.environ["PM_API_URL"]
+# Inside the agent container, pm-api is reachable via --add-host as http://pm-api:8080
+# The host-side PM_API_URL (localhost:8080) doesn't work inside Docker.
+PM_API_URL_CONTAINER = os.environ.get("PM_API_URL_CONTAINER", "http://pm-api:8080")
 
 # Timeout: kill container if it runs longer than this (minutes → seconds)
 SESSION_TIMEOUT_SECONDS = int(os.environ.get("SESSION_TIMEOUT_MINUTES", "90")) * 60
@@ -42,8 +45,9 @@ DEPLOY_KEY_FILENAME = os.environ.get("DEPLOY_KEY_FILENAME", "id_ed25519_productf
 # Ollama must be running on the Windows host (accessible as host.docker.internal:11434).
 AGENT_BACKEND  = os.environ.get("AGENT_BACKEND", "claude")   # "claude" | "ollama"
 OLLAMA_HOST    = os.environ.get("OLLAMA_HOST",   "http://host.docker.internal:11434")
-DESIGNER_MODEL = os.environ.get("DESIGNER_MODEL", "gemma3:27b")
-CODER_MODEL    = os.environ.get("CODER_MODEL",    "qwen3-coder:30b")
+DESIGNER_MODEL       = os.environ.get("DESIGNER_MODEL",       "gemma3:27b")
+CODER_MODEL          = os.environ.get("CODER_MODEL",          "qwen3-coder:30b")
+MAX_FEATURES_PER_RUN = int(os.environ.get("MAX_FEATURES_PER_RUN", "1"))
 
 
 def _get_deploy_key_path(product: dict) -> Path | None:
@@ -83,6 +87,8 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     """
     session_uid = str(uuid.uuid4())[:8]
     working_dir = product["working_dir"]
+    # Per-product override takes precedence over global env default
+    effective_max_features = product.get("max_features_per_run") or MAX_FEATURES_PER_RUN
     prompt = build_prompt(product, session_uid, persona=persona)
 
     lock_path = Path(working_dir) / "session.lock"
@@ -105,18 +111,19 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     # Select the agent command based on backend
     if AGENT_BACKEND == "ollama":
-        agent_cmd = ["python", "/app/ollama_agent.py", "-p", prompt]
+        agent_cmd = ["python", "//app/ollama_agent.py", "-p", prompt]
         ollama_env = [
             "-e", f"OLLAMA_HOST={OLLAMA_HOST}",
             "-e", f"DESIGNER_MODEL={DESIGNER_MODEL}",
             "-e", f"CODER_MODEL={CODER_MODEL}",
+            "-e", f"MAX_FEATURES_PER_RUN={effective_max_features}",
         ]
         # Ollama backend: no Claude OAuth mount needed
         claude_mount = []
         log.info(f"Using Ollama backend — host={OLLAMA_HOST} persona={persona}")
     else:
         agent_cmd = ["claude", "--dangerously-skip-permissions", "-p", prompt]
-        ollama_env = []
+        ollama_env = ["-e", f"MAX_FEATURES_PER_RUN={effective_max_features}"]
         claude_mount = ["-v", f"{CLAUDE_DIR}:/root/.claude:ro"]
 
     cmd = [
@@ -133,7 +140,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         *gh_env,                                   # GH_TOKEN for gh CLI auth
         *persona_env,                              # AGENT_PERSONA for prompt selection
         *ollama_env,                               # Ollama model config (ollama backend only)
-        "-e", f"PM_API_URL={PM_API_URL}",
+        "-e", f"PM_API_URL={PM_API_URL_CONTAINER}",
         "-e", f"SESSION_UID={session_uid}",
         AGENT_IMAGE,
         *agent_cmd,
@@ -141,12 +148,26 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     log.info(f"docker run: session={session_uid} product={product['name']}")
 
+    # Record session start
+    session_id: int | None = None
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            resp = client.post("/api/sessions", json={
+                "product_id":  product["id"],
+                "session_uid": session_uid,
+            })
+            resp.raise_for_status()
+            session_id = resp.json()["id"]
+    except Exception as e:
+        log.warning(f"Could not create session record: {e}")
+
     # Clear old log buffer before starting
     try:
         httpx.delete(f"{PM_API_URL}/api/products/{product['id']}/session/log", timeout=5)
     except Exception:
         pass
 
+    exit_code = 1
     try:
         process = subprocess.Popen(
             cmd,
@@ -177,15 +198,50 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             log.error(f"Session timed out after {SESSION_TIMEOUT_SECONDS}s — killing container")
             subprocess.run(["docker", "kill", f"pf-{product['id']}-{session_uid}"], capture_output=True)
             send_alert("error", f"{product['name']}: session timed out after {SESSION_TIMEOUT_SECONDS//60}m")
-            return 1
+            exit_code = 1
+        else:
+            exit_code = process.returncode
         finally:
             log_thread.join(timeout=10)
 
-        return process.returncode
-
     except Exception as e:
         log.exception(f"docker run failed: {e}")
-        return 1
+        exit_code = 1
+
+    # Record session end
+    if session_id is not None:
+        from datetime import datetime, timezone
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                client.patch(f"/api/sessions/{session_id}", json={
+                    "ended_at":    datetime.now(timezone.utc).isoformat(),
+                    "exit_code":   exit_code,
+                    "container_id": f"pf-{product['id']}-{session_uid}",
+                    "persona":     persona,
+                })
+        except Exception as e:
+            log.warning(f"Could not update session record: {e}")
+
+    # After a successful coder session: QA → Security → video → recommender
+    if exit_code == 0 and persona == "coder":
+        log.info(f"Coder succeeded — launching QA Tester for {product['name']}")
+        run_claude_in_docker(product, persona="qa_tester")
+
+        log.info(f"Launching Security Auditor for {product['name']}")
+        run_claude_in_docker(product, persona="security_auditor")
+
+        from orchestrator.video_builder import build_product_video, commit_and_push_output
+        working_dir = Path(product["working_dir"])
+        video_path  = build_product_video(product, working_dir)
+        if video_path:
+            log.info(f"Product video built: {video_path}")
+            commit_and_push_output(working_dir, deploy_key=_get_deploy_key_path(product))
+        else:
+            log.warning("Product video generation skipped or failed — continuing to recommender")
+        log.info(f"Launching recommender for {product['name']}")
+        run_claude_in_docker(product, persona="recommender")
+
+    return exit_code
 
 
 def _post_log_lines(product_id: int, lines: list[str]) -> None:

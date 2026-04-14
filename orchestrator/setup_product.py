@@ -24,9 +24,11 @@ from templates.renderer import install_templates
 log = logging.getLogger("poller.setup")
 
 PM_API_URL = os.environ["PM_API_URL"]
+# Agents run inside Docker — they must use the container-accessible URL, not the host URL
+PM_API_URL_CONTAINER = os.environ.get("PM_API_URL_CONTAINER", PM_API_URL)
 
 # Brownfield threshold: if more than this many source files exist → brownfield
-BROWNFIELD_FILE_THRESHOLD = 10
+BROWNFIELD_FILE_THRESHOLD = int(os.environ.get("BROWNFIELD_FILE_THRESHOLD", "10"))
 
 
 def discover_and_populate(product: dict):
@@ -71,7 +73,7 @@ def discover_and_populate(product: dict):
 
     # Install template files (skips any that already exist)
     try:
-        written = install_templates(merged, PM_API_URL, force=False)
+        written = install_templates(merged, PM_API_URL_CONTAINER, force=False)
         if written:
             log.info(f"Templates installed: {written}")
     except Exception as e:
@@ -79,7 +81,7 @@ def discover_and_populate(product: dict):
 
     updates["status"] = "discovered"
     _update_product(product["id"], updates)
-    log.info(f"Discovery complete for '{updates['name']}': type={updates['type']} stack={updates['tech_stack']}")
+    log.info(f"Discovery complete for '{updates['name']}': type={updates.get('type', product.get('type'))} stack={updates.get('tech_stack', product.get('tech_stack'))}")
 
 
 def _discover_name(working_dir: Path) -> str | None:

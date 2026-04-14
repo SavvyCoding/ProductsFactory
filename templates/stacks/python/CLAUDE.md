@@ -22,15 +22,13 @@ Temp/              ← scratch only          (never committed)
 ## Test command
 
 ```bash
-pytest TestCases/ -v \
-  --json-report --json-report-file=Results/{feature_name}_results.json \
-  --cov=SRC --cov-report=term-missing --cov-fail-under=70
+{TEST_COMMAND}
 ```
 
 ## Audit command
 
 ```bash
-pip-audit
+{AUDIT_COMMAND}
 # Run after every `pip install`. Block commit if any HIGH or CRITICAL found.
 ```
 

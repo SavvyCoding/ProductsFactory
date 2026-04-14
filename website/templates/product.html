@@ -49,29 +49,6 @@
   </div>
 </div>
 
-{% if product.run_now %}
-<div class="notice notice-blue" style="margin-bottom:14px">⚡ This product is queued for the next poller cycle.</div>
-{% endif %}
-
-{% if product.config and product.config.baseline_tests %}
-<div class="baseline-bar">
-  Baseline: <strong>{{ product.config.baseline_tests.passed }} tests passing</strong>
-  as of {{ product.config.baseline_tests.recorded }}
-  · {{ product.config.test_command or '' }}
-</div>
-{% endif %}
-
-{% if product.analysis_status == 'running' %}
-<div class="notice notice-blue">🔬 Analysis Run in progress. Check progress.md for status.</div>
-{% endif %}
-
-{% if open_prs >= 3 %}
-<div class="notice notice-amber">
-  ⚠ {{ open_prs }} open PRs — poller paused until PRs are merged.
-  {% if product.github_repo %}<a href="{{ product.github_repo }}/pulls" target="_blank">Review PRs ↗</a>{% endif %}
-</div>
-{% endif %}
-
 {# JS data #}
 <script>
 const PM_TRANSITIONS = {{ pm_transitions | tojson }};
@@ -85,6 +62,7 @@ const PRODUCT_ID = {{ product.id }};
     Pull Requests{% if open_prs %} <span class="col-count" style="margin-left:4px">{{ open_prs }}</span>{% endif %}
   </button>
   <button class="product-tab {% if active_tab == 'history' %}active{% endif %}" onclick="switchTab('history', this)">History</button>
+  <button class="product-tab {% if active_tab == 'videos' %}active{% endif %}" onclick="switchTab('videos', this); loadVideos()">Videos</button>
   <button class="product-tab {% if active_tab == 'live' %}active{% endif %}" onclick="switchTab('live', this)">Live Session</button>
   <button class="product-tab {% if active_tab == 'settings' %}active{% endif %}" onclick="switchTab('settings', this)">Settings</button>
 </div>
@@ -93,102 +71,28 @@ const PRODUCT_ID = {{ product.id }};
 <!-- ══ TAB: BOARD ══════════════════════════════════════════ -->
 <div class="tab-content" id="tab-board" {% if active_tab != 'board' %}style="display:none"{% endif %}>
 
-  <!-- Bulk approve bar -->
-  <div class="bulk-bar" id="bulk-bar">
-    <span id="bulk-count">0 selected</span>
-    <form method="post" action="/product/{{ product.id }}/features/bulk-approve" id="bulk-form">
-      <input type="hidden" name="feature_ids" id="bulk-ids">
-      <button type="submit" class="btn btn-green" style="padding:5px 14px">✓ Approve selected</button>
-    </form>
-    <button onclick="clearSelection()" class="btn btn-outline" style="padding:5px 12px">✗ Clear</button>
+  {% if product.run_now %}
+  <div class="notice notice-blue" style="margin-bottom:14px">⚡ Queued for next poller cycle.</div>
+  {% endif %}
+  {% if product.config and product.config.baseline_tests %}
+  <div class="baseline-bar" style="margin-bottom:14px">
+    Baseline: <strong>{{ product.config.baseline_tests.passed }} tests passing</strong>
+    as of {{ product.config.baseline_tests.recorded }}
+    · {{ product.config.test_command or '' }}
   </div>
-
-  <!-- KANBAN -->
-  {% set columns = [
-    ('Pending',      's-pending',      'Awaiting PM review'),
-    ('Approved',     's-approved',     'Queued for Claude'),
-    ('Designing',    's-designing',    'Designer agent writing spec'),
-    ('Designed',     's-designed',     'Design doc ready — awaiting coder'),
-    ('Implementing', 's-implementing', 'Coder agent working on it'),
-    ('Reviewing',    's-reviewing',    'PR open — awaiting reviewer'),
-    ('Reviewed',     's-reviewed',     'Review done — awaiting merge'),
-    ('Blocked',      's-blocked',      'Needs PM attention'),
-    ('Pushed',       's-pushed',       'Merged to main'),
-  ] %}
-
-  <div class="kanban" id="kanban">
-    {% for col_status, col_class, col_hint in columns %}
-    <div class="kanban-col"
-         data-status="{{ col_status }}"
-         ondragover="onDragOver(event, this)"
-         ondragleave="onDragLeave(this)"
-         ondrop="onDrop(event, this)">
-      <div class="kanban-header {{ col_class }}" title="{{ col_hint }}">
-        <span class="col-label">{{ col_status }}</span>
-        <span class="col-count" id="count-{{ col_status }}">
-          {{ features | selectattr('status', 'equalto', col_status) | list | length }}
-        </span>
-      </div>
-
-      {% for f in features if f.status == col_status %}
-      <div class="feature-card {% if f.source == 'ai' %}fc-ai{% endif %}"
-           draggable="true"
-           data-feature-id="{{ f.id }}"
-           data-status="{{ f.status }}"
-           ondragstart="onDragStart(event, this)"
-           ondragend="onDragEnd(this)">
-        {% if f.status == 'Pending' %}
-        <input type="checkbox" class="feature-checkbox"
-               onchange="toggleSelect({{ f.id }}, this)"
-               onclick="event.stopPropagation()">
-        {% endif %}
-        <div class="feature-name">{{ f.name }}</div>
-        {% if f.source == 'ai' %}<span class="ai-badge">🤖 AI</span>{% endif %}
-        {% if f.skip_design %}<span class="skip-design-badge">⚡ Skip design</span>{% endif %}
-        {% if f.description %}<div class="feature-desc">{{ f.description }}</div>{% endif %}
-        {% if f.design_doc_path %}<div class="design-doc-link">📄 <a href="/workspace/{{ f.design_doc_path }}" title="Design doc">design doc</a></div>{% endif %}
-        {% if f.pr_url %}<a href="{{ f.pr_url }}" target="_blank" class="pr-link">PR #{{ f.pr_number }} ↗</a>{% endif %}
-        {% if f.review_outcome == 'approved' %}<div class="review-outcome review-ok">✓ Reviewer approved</div>{% endif %}
-        {% if f.review_outcome == 'changes_requested' %}<div class="review-outcome review-changes">↩ Changes requested</div>{% endif %}
-        {% if f.review_notes and f.review_outcome == 'changes_requested' %}<div class="feature-desc" style="font-size:11px;color:var(--text-muted)">{{ f.review_notes[:120] }}{% if f.review_notes|length > 120 %}…{% endif %}</div>{% endif %}
-        {% if f.blocked_reason %}<div class="blocked-reason">⚠ {{ f.blocked_reason }}</div>{% endif %}
-        {% if f.fix_attempts > 0 %}<div class="fix-attempts">{{ f.fix_attempts }}/3 attempts used</div>{% endif %}
-      </div>
-      {% else %}
-      <div class="kanban-empty" id="empty-{{ col_status }}">—</div>
-      {% endfor %}
-    </div>
-    {% endfor %}
+  {% endif %}
+  {% if product.analysis_status == 'running' %}
+  <div class="notice notice-blue" style="margin-bottom:14px">🔬 Analysis run in progress. Check progress.md for status.</div>
+  {% endif %}
+  {% if open_prs >= 3 %}
+  <div class="notice notice-amber" style="margin-bottom:14px">
+    ⚠ {{ open_prs }} open PRs — poller paused until PRs are merged.
+    {% if product.github_repo %}<a href="{{ product.github_repo }}/pulls" target="_blank">Review PRs ↗</a>{% endif %}
   </div>
-
-  <!-- Archived -->
-  {% set archived = features | selectattr('status', 'in', ['Rejected', 'Reverted']) | list %}
-  {% if archived %}
-  <details class="archived-section">
-    <summary>Rejected / Reverted ({{ archived | length }})</summary>
-    <div style="margin-top:8px">
-      {% for f in archived %}
-      <div class="feature-card" style="opacity:0.6">
-        <div class="feature-name">{{ f.name }}
-          <span class="badge badge-status-{{ f.status | lower }}" style="font-size:10px">{{ f.status }}</span>
-        </div>
-        {% set allowed = pm_transitions.get(f.status, []) %}
-        {% if allowed %}
-        <form method="post" action="/product/{{ product.id }}/features/{{ f.id }}/status" class="status-form">
-          <select name="status" onchange="this.form.submit()">
-            <option value="" disabled selected>Restore…</option>
-            {% for s in allowed %}<option value="{{ s }}">→ {{ s }}</option>{% endfor %}
-          </select>
-        </form>
-        {% endif %}
-      </div>
-      {% endfor %}
-    </div>
-  </details>
   {% endif %}
 
   <!-- Add Feature -->
-  <div class="card" style="margin-top:28px">
+  <div class="card" style="margin-bottom:20px">
     <div class="settings-card-title">
       <span class="title-icon" style="background:var(--green-lt)">✦</span>
       Add Feature
@@ -201,11 +105,16 @@ const PRODUCT_ID = {{ product.id }};
       <textarea name="description" id="feat-desc" rows="3"
                 placeholder="Description — what to build, why, acceptance criteria"></textarea>
       <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
-        <button type="submit">Add Feature</button>
+        <button type="submit">Add</button>
+        <select name="feature_type" style="font-size:13px">
+          <option value="feature">✦ Feature</option>
+          <option value="bug">🐛 Bug</option>
+          <option value="chore">🔧 Chore</option>
+        </select>
         <button type="button" class="btn btn-outline" onclick="toggleTemplates()">📋 Templates</button>
         <label style="display:flex; align-items:center; gap:5px; font-size:13px; color:var(--text-muted); cursor:pointer">
           <input type="checkbox" name="skip_design" value="true" style="margin:0">
-          Skip design phase (go straight to coder)
+          Skip design
         </label>
       </div>
     </form>
@@ -236,6 +145,108 @@ const PRODUCT_ID = {{ product.id }};
       </div>
     </div>
   </div>
+
+  <!-- Bulk approve bar -->
+  <div class="bulk-bar" id="bulk-bar">
+    <span id="bulk-count">0 selected</span>
+    <form method="post" action="/product/{{ product.id }}/features/bulk-approve" id="bulk-form">
+      <input type="hidden" name="feature_ids" id="bulk-ids">
+      <button type="submit" class="btn btn-green" style="padding:5px 14px">✓ Approve selected</button>
+    </form>
+    <button onclick="clearSelection()" class="btn btn-outline" style="padding:5px 12px">✗ Clear</button>
+  </div>
+
+  <!-- KANBAN -->
+  {% set columns = [
+    ('Pending',      's-pending',      'Awaiting PM review'),
+    ('Approved',     's-approved',     'Queued for Claude'),
+    ('Designing',    's-designing',    'Designer agent writing spec'),
+    ('Designed',     's-designed',     'Design doc ready — awaiting coder'),
+    ('Implementing', 's-implementing', 'Coder agent working on it'),
+    ('Reviewing',    's-reviewing',    'PR open — awaiting reviewer'),
+    ('Reviewed',     's-reviewed',     'Review done — awaiting merge'),
+    ('Blocked',      's-blocked',      'Needs PM attention'),
+    ('Pushed',       's-pushed',       'Merged to main'),
+  ] %}
+
+  <div class="kanban" id="kanban">
+    {% for col_status, col_class, col_hint in columns %}
+    {% set col_features = features | selectattr('status', 'equalto', col_status) | list %}
+    {% set col_empty = col_features | length == 0 %}
+    <div class="kanban-col {% if col_empty %}col-empty{% endif %}"
+         data-status="{{ col_status }}"
+         ondragover="onDragOver(event, this)"
+         ondragleave="onDragLeave(this)"
+         ondrop="onDrop(event, this)"
+         {% if col_empty %}onclick="expandCol(this)" title="Click to expand · {{ col_hint }}"{% endif %}>
+      <div class="kanban-header {{ col_class }}" title="{{ col_hint }}"
+           onclick="toggleColCollapse(this.closest('.kanban-col'))">
+        <span class="col-label">{{ col_status }}</span>
+        <span class="col-count" id="count-{{ col_status }}">
+          {{ col_features | length }}
+        </span>
+        <span class="col-toggle">{% if col_empty %}▶{% else %}▼{% endif %}</span>
+      </div>
+
+      {% for f in col_features %}
+      <div class="feature-card {% if f.source == 'ai' %}fc-ai{% endif %}"
+           draggable="true"
+           data-feature-id="{{ f.id }}"
+           data-status="{{ f.status }}"
+           onclick="event.stopPropagation(); this.classList.toggle('expanded')"
+           ondragstart="onDragStart(event, this)"
+           ondragend="onDragEnd(this)">
+        {% if f.status == 'Pending' %}
+        <input type="checkbox" class="feature-checkbox"
+               onchange="toggleSelect({{ f.id }}, this)"
+               onclick="event.stopPropagation()">
+        {% endif %}
+        <div class="feature-name">{{ f.name }}</div>
+        {% if f.feature_type == 'bug' %}<span class="type-badge type-bug">🐛 Bug</span>
+        {% elif f.feature_type == 'chore' %}<span class="type-badge type-chore">🔧 Chore</span>{% endif %}
+        {% if f.source == 'ai' %}<span class="ai-badge">🤖 AI</span>{% endif %}
+        {% if f.skip_design %}<span class="skip-design-badge">⚡ Skip design</span>{% endif %}
+        {% if f.description %}<div class="feature-desc">{{ f.description }}</div>{% endif %}
+        {% if f.design_doc_path %}<div class="design-doc-link">📄 <a href="/workspace/{{ f.design_doc_path }}" title="Design doc" onclick="event.stopPropagation()">design doc</a></div>{% endif %}
+        {% if f.pr_url %}<a href="{{ f.pr_url }}" target="_blank" class="pr-link" onclick="event.stopPropagation()">PR #{{ f.pr_number }} ↗</a>{% endif %}
+        {% if f.review_outcome == 'approved' %}<div class="review-outcome review-ok">✓ Reviewer approved</div>{% endif %}
+        {% if f.review_outcome == 'changes_requested' %}<div class="review-outcome review-changes">↩ Changes requested</div>{% endif %}
+        {% if f.review_notes and f.review_outcome == 'changes_requested' %}<div class="feature-desc" style="font-size:11px;color:var(--text-muted)">{{ f.review_notes[:120] }}{% if f.review_notes|length > 120 %}…{% endif %}</div>{% endif %}
+        {% if f.blocked_reason %}<div class="blocked-reason">⚠ {{ f.blocked_reason }}</div>{% endif %}
+        {% if f.fix_attempts > 0 %}<div class="fix-attempts">{{ f.fix_attempts }}/3 attempts used</div>{% endif %}
+      </div>
+      {% else %}
+      <div class="kanban-empty" id="empty-{{ col_status }}">Drop here</div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- Archived -->
+  {% set archived = features | selectattr('status', 'in', ['Rejected', 'Reverted']) | list %}
+  {% if archived %}
+  <details class="archived-section">
+    <summary>Rejected / Reverted ({{ archived | length }})</summary>
+    <div style="margin-top:8px">
+      {% for f in archived %}
+      <div class="feature-card" style="opacity:0.6">
+        <div class="feature-name">{{ f.name }}
+          <span class="badge badge-status-{{ f.status | lower }}" style="font-size:10px">{{ f.status }}</span>
+        </div>
+        {% set allowed = pm_transitions.get(f.status, []) %}
+        {% if allowed %}
+        <form method="post" action="/product/{{ product.id }}/features/{{ f.id }}/status" class="status-form">
+          <select name="status" onchange="this.form.submit()">
+            <option value="" disabled selected>Restore…</option>
+            {% for s in allowed %}<option value="{{ s }}">→ {{ s }}</option>{% endfor %}
+          </select>
+        </form>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </details>
+  {% endif %}
 
 </div><!-- /tab-board -->
 
@@ -272,9 +283,13 @@ const PRODUCT_ID = {{ product.id }};
 <!-- ══ TAB: HISTORY ════════════════════════════════════════ -->
 <div class="tab-content" id="tab-history" style="display:none">
   {% if sessions %}
+  <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+    <button class="btn btn-sm btn-danger" onclick="clearHistory({{ product.id }})">Clear History</button>
+  </div>
   <table class="history-table">
     <thead>
       <tr>
+        <th></th>
         <th>Started</th>
         <th>Persona</th>
         <th>Duration</th>
@@ -285,7 +300,8 @@ const PRODUCT_ID = {{ product.id }};
     </thead>
     <tbody>
     {% for s in sessions %}
-    <tr>
+    <tr class="history-row" data-session-id="{{ s.id }}" onclick="toggleHistoryRow(this)">
+      <td class="hist-chevron">▶</td>
       <td>{{ s.started_at.strftime('%Y-%m-%d %H:%M') }}</td>
       <td>
         {% if s.persona == 'designer' %}
@@ -294,8 +310,26 @@ const PRODUCT_ID = {{ product.id }};
           <span class="persona-badge persona-reviewer">🔍 Reviewer</span>
         {% elif s.persona == 'coder' %}
           <span class="persona-badge persona-coder">⚙ Coder</span>
+        {% elif s.persona == 'planner' %}
+          <span class="persona-badge persona-planner">📋 Planner</span>
+        {% elif s.persona == 'recommender' %}
+          <span class="persona-badge persona-recommender">💡 Recommender</span>
+        {% elif s.persona == 'qa_tester' %}
+          <span class="persona-badge persona-qa">🧪 QA Tester</span>
+        {% elif s.persona == 'security_auditor' %}
+          <span class="persona-badge persona-security">🔒 Security</span>
+        {% elif s.persona == 'documenter' %}
+          <span class="persona-badge persona-documenter">📝 Documenter</span>
+        {% elif s.persona == 'refactorer' %}
+          <span class="persona-badge persona-refactorer">🔧 Refactorer</span>
+        {% elif s.persona == 'devops' %}
+          <span class="persona-badge persona-devops">⚙ DevOps</span>
+        {% elif s.persona == 'analytics' %}
+          <span class="persona-badge persona-analytics">📊 Analytics</span>
+        {% elif s.persona %}
+          <span class="persona-badge persona-coder">⚙ {{ s.persona | capitalize }}</span>
         {% else %}
-          <span class="persona-badge persona-coder">⚙ Coder</span>
+          <span class="persona-badge" style="color:var(--slate)">—</span>
         {% endif %}
       </td>
       <td>
@@ -320,6 +354,13 @@ const PRODUCT_ID = {{ product.id }};
         {% endif %}
       </td>
     </tr>
+    <tr class="history-detail-row" id="hist-detail-{{ s.id }}" style="display:none">
+      <td colspan="7">
+        <div class="hist-detail-body" id="hist-detail-body-{{ s.id }}">
+          <span class="hist-detail-loading">Loading…</span>
+        </div>
+      </td>
+    </tr>
     {% endfor %}
     </tbody>
   </table>
@@ -333,20 +374,41 @@ const PRODUCT_ID = {{ product.id }};
 </div>
 
 
+<!-- ══ TAB: VIDEOS ══════════════════════════════════════════ -->
+<div class="tab-content" id="tab-videos" style="display:none">
+  <div id="videos-loading" style="color:var(--text-muted);padding:24px 0">Loading videos…</div>
+  <div id="videos-grid" style="display:none"></div>
+  <div id="videos-empty" style="display:none">
+    <div class="empty-state">
+      <div class="empty-icon">🎬</div>
+      <h2>No videos yet</h2>
+      <p>Product videos are generated automatically after each successful coder session and stored in the <code>output/</code> folder.</p>
+    </div>
+  </div>
+</div>
+
+
 <!-- ══ TAB: LIVE SESSION ═══════════════════════════════════ -->
 <div class="tab-content" id="tab-live" style="display:none">
   <div class="session-panel" style="margin-top:0">
     <div class="session-panel-header">
       <div class="session-status-dot" id="session-dot"></div>
       <span class="session-title">Agent Session — Live Output</span>
+      <span class="session-elapsed" id="session-elapsed" style="display:none"></span>
+      <span class="session-thinking" id="session-thinking">···</span>
       <button onclick="toggleSession()" id="session-toggle"
               style="background:none;border:1px solid #334155;color:#94a3b8;font-size:11px;
-                     padding:3px 10px;border-radius:4px;cursor:pointer">
+                     padding:3px 10px;border-radius:4px;cursor:pointer"
+              aria-label="Connect to live session">
         Connect
       </button>
     </div>
-    <div class="session-terminal" id="session-terminal">
-      <span class="log-empty">Session output appears here when an agent is running.<br>Click Connect to stream.</span>
+    <div style="position:relative">
+      <div class="session-terminal" id="session-terminal">
+        <span class="log-empty">Session output appears here when an agent is running.<br>Click Connect to stream.</span>
+      </div>
+      <div class="new-msg-pill" id="new-msg-pill" onclick="scrollToBottom()">↓ New messages</div>
+      <button class="scroll-bottom-btn" id="scroll-btn" onclick="scrollToBottom()" title="Scroll to bottom" aria-label="Scroll to bottom">↓</button>
     </div>
     <div class="session-input-bar">
       <input type="text" id="session-msg"
@@ -403,6 +465,13 @@ const PRODUCT_ID = {{ product.id }};
                  placeholder="e.g. 3" style="width:120px">
           <p class="field-hint">Maximum number of sessions to run per day. Leave blank for unlimited.</p>
         </div>
+        <div class="form-group">
+          <label>Max features per run</label>
+          <input type="number" name="max_features_per_run" min="1" max="20"
+                 value="{{ product.max_features_per_run or '' }}"
+                 placeholder="e.g. 1" style="width:120px">
+          <p class="field-hint">How many features the agent implements in one session. Leave blank to use the global default ({{ max_features_default }}).</p>
+        </div>
         <button type="submit">Save schedule</button>
       </form>
     </div>
@@ -429,8 +498,15 @@ const PRODUCT_ID = {{ product.id }};
 
 
 <script>
+// ── GLOBAL HELPERS ────────────────────────────────────────
+function escHtmlGlobal(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
 // ── TAB SWITCHING ─────────────────────────────────────────
-const TAB_IDS = ['board','prs','history','live','settings'];
+const TAB_IDS = ['board','prs','history','videos','live','settings'];
 
 function switchTab(name, btn) {
   TAB_IDS.forEach(id => {
@@ -499,9 +575,10 @@ async function onDrop(e, col) {
   if (!srcCol.querySelector('.feature-card')) {
     const ghost = document.createElement('div');
     ghost.className = 'kanban-empty';
-    ghost.textContent = '—';
+    ghost.textContent = 'Drop here';
     srcCol.appendChild(ghost);
   }
+  updateCounts();
 
   try {
     const r = await fetch(`/product/${PRODUCT_ID}/features/${dragFeatureId}/status`, {
@@ -511,9 +588,10 @@ async function onDrop(e, col) {
     });
     if (!r.ok) throw new Error('rejected');
     dragSourceStatus = target;
+    showToast('success', `Moved to ${target}.`);
   } catch {
-    alert('Move failed — reloading');
-    location.reload();
+    showToast('error', 'Move failed — reloading…');
+    setTimeout(() => location.reload(), 1500);
   }
 }
 
@@ -522,6 +600,14 @@ function updateCounts() {
     const n  = col.querySelectorAll('.feature-card').length;
     const el = document.getElementById('count-' + col.dataset.status);
     if (el) el.textContent = n;
+    const toggle = col.querySelector('.col-toggle');
+    if (n === 0 && !col.classList.contains('col-empty')) {
+      col.classList.add('col-empty');
+      if (toggle) toggle.textContent = '▶';
+    } else if (n > 0 && col.classList.contains('col-empty')) {
+      col.classList.remove('col-empty');
+      if (toggle) toggle.textContent = '▼';
+    }
   });
 }
 
@@ -562,42 +648,138 @@ function applyTemplate(name, desc) {
 }
 
 
+// ── VIDEOS ────────────────────────────────────────────────
+let _videosLoaded = false;
+
+async function loadVideos() {
+  if (_videosLoaded) return;
+  _videosLoaded = true;
+  const loading = document.getElementById('videos-loading');
+  const grid    = document.getElementById('videos-grid');
+  const empty   = document.getElementById('videos-empty');
+  try {
+    const r = await fetch(`/api/products/${PRODUCT_ID}/videos`);
+    const videos = await r.json();
+    loading.style.display = 'none';
+    if (!videos.length) { empty.style.display = ''; return; }
+    grid.style.display = '';
+    grid.innerHTML = videos.map(v => `
+      <div class="video-card">
+        <video controls preload="metadata" style="width:100%;border-radius:6px;background:#000">
+          <source src="${v.url}" type="video/mp4">
+        </video>
+        <div class="video-meta">
+          <span class="video-name">${v.filename}</span>
+          <span class="video-size">${v.size_mb} MB</span>
+          <a href="${v.url}" download class="btn btn-outline" style="padding:3px 10px;font-size:12px">⬇ Download</a>
+        </div>
+      </div>`).join('');
+  } catch(e) {
+    loading.textContent = 'Failed to load videos.';
+  }
+}
+
+// Auto-load if videos tab is active on page load
+(function() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('tab') === 'videos') loadVideos();
+})();
+
+
 // ── SESSION LOG STREAMING ─────────────────────────────────
-let evtSource = null;
+let evtSource   = null;
+let sessionStart = null;
+let elapsedTimer = null;
+let thinkingTimer = null;
+let _atBottom = true;
+
+function scrollToBottom() {
+  const t = document.getElementById('session-terminal');
+  t.scrollTop = t.scrollHeight;
+  document.getElementById('new-msg-pill').classList.remove('visible');
+  document.getElementById('scroll-btn').classList.remove('visible');
+  _atBottom = true;
+}
 
 function toggleSession() {
   if (evtSource) {
-    evtSource.close();
-    evtSource = null;
+    evtSource.close(); evtSource = null;
+    clearInterval(elapsedTimer); elapsedTimer = null;
+    clearTimeout(thinkingTimer);
     document.getElementById('session-dot').classList.remove('live');
     document.getElementById('session-toggle').textContent = 'Connect';
+    document.getElementById('session-elapsed').style.display = 'none';
+    document.getElementById('session-thinking').classList.remove('visible');
     return;
   }
   const terminal = document.getElementById('session-terminal');
   terminal.innerHTML = '';
+  _atBottom = true;
+  sessionStart = Date.now();
   evtSource = new EventSource(`/api/products/${PRODUCT_ID}/session/stream`);
   document.getElementById('session-dot').classList.add('live');
   document.getElementById('session-toggle').textContent = 'Disconnect';
 
+  // Elapsed timer
+  const elapsedEl = document.getElementById('session-elapsed');
+  elapsedEl.style.display = '';
+  elapsedTimer = setInterval(() => {
+    const s = Math.floor((Date.now() - sessionStart) / 1000);
+    elapsedEl.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  }, 1000);
+
+  // Thinking indicator — shows when no output for >3s
+  function resetThinking() {
+    clearTimeout(thinkingTimer);
+    document.getElementById('session-thinking').classList.remove('visible');
+    thinkingTimer = setTimeout(() => {
+      if (evtSource) document.getElementById('session-thinking').classList.add('visible');
+    }, 3000);
+  }
+  resetThinking();
+
   evtSource.onmessage = (e) => {
     const line = JSON.parse(e.data);
     appendLine(terminal, line);
+    resetThinking();
   };
   evtSource.onerror = () => {
     appendLine(terminal, '— connection lost —', 'err');
     document.getElementById('session-dot').classList.remove('live');
+    document.getElementById('session-thinking').classList.remove('visible');
   };
+
+  // Scroll tracker
+  terminal.addEventListener('scroll', () => {
+    const atBottom = terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight < 40;
+    _atBottom = atBottom;
+    if (atBottom) {
+      document.getElementById('new-msg-pill').classList.remove('visible');
+      document.getElementById('scroll-btn').classList.remove('visible');
+    } else {
+      document.getElementById('scroll-btn').classList.add('visible');
+    }
+  });
 }
 
 function appendLine(terminal, text, cls) {
   const empty = terminal.querySelector('.log-empty');
   if (empty) empty.remove();
   const el = document.createElement('span');
-  el.className = 'log-line' + (cls ? ' ' + cls : '') + (text.startsWith('[PM]') ? ' pm-msg' : '');
+  let lineCls = 'log-line';
+  if (cls) lineCls += ' ' + cls;
+  else if (text.startsWith('[PM]')) lineCls += ' pm-msg';
+  else if (/error|failed|exception/i.test(text)) lineCls += ' err';
+  else if (/^\[Tool:/i.test(text)) lineCls += ' tool-call';
+  el.className = lineCls;
   el.textContent = text;
   terminal.appendChild(el);
   terminal.appendChild(document.createElement('br'));
-  terminal.scrollTop = terminal.scrollHeight;
+  if (_atBottom) {
+    terminal.scrollTop = terminal.scrollHeight;
+  } else {
+    document.getElementById('new-msg-pill').classList.add('visible');
+  }
 }
 
 async function sendMessage() {
@@ -605,12 +787,169 @@ async function sendMessage() {
   const msg = input.value.trim();
   if (!msg) return;
   input.value = '';
-  await fetch(`/api/products/${PRODUCT_ID}/session/message`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ message: msg }),
-  });
+  try {
+    await fetch(`/api/products/${PRODUCT_ID}/session/message`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ message: msg }),
+    });
+    showToast('info', 'Message sent to Claude.');
+  } catch(e) {
+    showToast('error', 'Failed to send message.');
+  }
 }
+
+// ── HISTORY: row expand ──────────────────────────────────
+const _histLoaded = new Set();
+const STATUS_ICONS = {
+  Pushed:'✅', Reviewing:'🔍', Reviewed:'🔍', Designed:'✏️', Designing:'✏️',
+  Implementing:'⚙️', Approved:'👍', Pending:'⏳', Blocked:'🚫',
+  Deferred:'⏸️', Rejected:'❌', Reverted:'↩️',
+};
+async function toggleHistoryRow(row) {
+  const sid = row.dataset.sessionId;
+  const detailRow = document.getElementById('hist-detail-' + sid);
+  const chevron = row.querySelector('.hist-chevron');
+  const open = detailRow.style.display !== 'none';
+  if (open) {
+    detailRow.style.display = 'none';
+    row.classList.remove('hist-open');
+    chevron.textContent = '▶';
+    return;
+  }
+  detailRow.style.display = 'table-row';
+  row.classList.add('hist-open');
+  chevron.textContent = '▼';
+  if (_histLoaded.has(sid)) return;
+  _histLoaded.add(sid);
+  try {
+    const r = await fetch('/api/sessions/' + sid);
+    const d = await r.json();
+    const body = document.getElementById('hist-detail-body-' + sid);
+
+    const fmtDur = s => s == null ? null : `${Math.floor(s/60)}m ${s%60}s`;
+    const fmtTime = s => s ? s.replace('T',' ').slice(0,19) : null;
+
+    // ── Meta strip ──
+    const meta = [
+      ['Persona',   d.persona || '—'],
+      ['Started',   fmtTime(d.started_at) || '—'],
+      ['Ended',     fmtTime(d.ended_at) || 'Still running'],
+      ['Duration',  fmtDur(d.duration_seconds) || '—'],
+      ['Exit code', d.exit_code != null ? (d.exit_code === 0 ? '✓ 0 (OK)' : `✗ ${d.exit_code}`) : '—'],
+      d.tokens_input || d.tokens_output
+        ? ['Tokens', `${(d.tokens_input||0).toLocaleString()} in / ${(d.tokens_output||0).toLocaleString()} out`]
+        : null,
+      d.cost_usd != null ? ['Cost', '$' + d.cost_usd.toFixed(4)] : null,
+      d.notes ? ['Notes', d.notes] : null,
+    ].filter(Boolean);
+
+    const metaHtml = `<div class="hist-meta-strip">` +
+      meta.map(([k,v]) => `<div class="hist-kv"><span>${k}</span><span>${escHtmlGlobal(String(v))}</span></div>`).join('') +
+      `</div>`;
+
+    // ── Activity timeline (features touched during session) ──
+    let actHtml = '';
+    if (d.activities && d.activities.length) {
+      // Merge with reviews by feature name for richer display
+      const reviewMap = {};
+      (d.reviews || []).forEach(rv => { reviewMap[rv.feature_name] = rv; });
+
+      actHtml = `<div class="hist-section-title">Features touched (${d.activities.length})</div>
+        <div class="hist-timeline">` +
+        d.activities.map(a => {
+          const icon = STATUS_ICONS[a.status] || '•';
+          const rv = reviewMap[a.name];
+          const rvBadge = rv
+            ? `<span class="hist-review-outcome ${rv.outcome==='approved'?'rv-ok':'rv-changes'}">${rv.outcome==='approved'?'✓ Approved':'↩ Changes'}</span>`
+            : '';
+          const prLink = a.pr_url
+            ? `<a href="${a.pr_url}" target="_blank" class="pr-link" onclick="event.stopPropagation()">PR #${a.pr_number} ↗</a>`
+            : '';
+          const typeLabel = a.feature_type !== 'feature'
+            ? `<span class="type-badge type-${a.feature_type}">${a.feature_type}</span>` : '';
+          const rvNotes = rv && rv.notes
+            ? `<div class="hist-review-notes">${escHtmlGlobal(rv.notes.slice(0,200))}${rv.notes.length>200?'…':''}</div>` : '';
+          return `<div class="hist-act-row">
+            <span class="hist-act-icon">${icon}</span>
+            <div class="hist-act-body">
+              <span class="hist-act-name">${escHtmlGlobal(a.name)}</span>
+              <span class="badge badge-status-${a.status.toLowerCase()}">${a.status}</span>
+              ${typeLabel}${rvBadge}${prLink}
+              ${rvNotes}
+            </div>
+            <span class="hist-act-time">${fmtTime(a.updated_at).slice(11)}</span>
+          </div>`;
+        }).join('') + `</div>`;
+    } else if (!d.reviews || !d.reviews.length) {
+      actHtml = `<div class="hist-empty-act">No feature activity recorded for this session.</div>`;
+    }
+
+    // ── Standalone reviews (reviewer persona, not in activities) ──
+    const actNames = new Set((d.activities||[]).map(a=>a.name));
+    const extraReviews = (d.reviews||[]).filter(rv => !actNames.has(rv.feature_name));
+    let rvHtml = '';
+    if (extraReviews.length) {
+      rvHtml = `<div class="hist-section-title">Code Reviews</div><div class="hist-reviews">` +
+        extraReviews.map(rv => `<div class="hist-review-item">
+          <span class="hist-review-feature">${escHtmlGlobal(rv.feature_name)}</span>
+          <span class="hist-review-outcome ${rv.outcome==='approved'?'rv-ok':'rv-changes'}">${rv.outcome==='approved'?'✓ Approved':'↩ Changes requested'}</span>
+          ${rv.notes?`<div class="hist-review-notes">${escHtmlGlobal(rv.notes.slice(0,200))}${rv.notes.length>200?'…':''}</div>`:''}
+        </div>`).join('') + `</div>`;
+    }
+
+    body.innerHTML = metaHtml + actHtml + rvHtml;
+  } catch(e) {
+    document.getElementById('hist-detail-body-' + sid).innerHTML =
+      `<span style="color:var(--red)">Failed to load details: ${escHtmlGlobal(String(e))}</span>`;
+  }
+}
+
+async function clearHistory(productId) {
+  if (!confirm('Delete all session history for this product?')) return;
+  try {
+    const r = await fetch(`/api/products/${productId}/sessions`, {method:'DELETE'});
+    const d = await r.json();
+    if (r.ok) {
+      document.querySelector('#tab-history table')?.remove();
+      document.querySelector('#tab-history .btn-danger')?.parentElement?.remove();
+      document.getElementById('tab-history').innerHTML +=
+        '<div class="empty-state"><div class="empty-icon">📂</div><h2>No sessions yet</h2><p>Sessions appear here once the poller runs Claude on this product.</p></div>';
+      showToast('success', `Cleared ${d.deleted} session(s)`);
+    } else {
+      showToast('error', 'Failed to clear history');
+    }
+  } catch(e) { showToast('error', 'Failed to clear history'); }
+}
+
+// ── KANBAN: collapse/expand columns ──────────────────────
+function toggleColCollapse(col) {
+  const isEmpty = col.querySelectorAll('.feature-card').length === 0;
+  const isCollapsed = col.classList.contains('col-empty');
+  if (isCollapsed) {
+    col.classList.remove('col-empty');
+    const toggle = col.querySelector('.col-toggle');
+    if (toggle) toggle.textContent = '▼';
+  } else if (isEmpty) {
+    // Only collapse if no cards
+    col.classList.add('col-empty');
+    const toggle = col.querySelector('.col-toggle');
+    if (toggle) toggle.textContent = '▶';
+  }
+}
+
+function expandCol(col) {
+  col.classList.remove('col-empty');
+  const toggle = col.querySelector('.col-toggle');
+  if (toggle) toggle.textContent = '▼';
+}
+
+// ── TOOL CALL STYLING (add to CSS via JS) ─────────────────
+(function() {
+  const s = document.createElement('style');
+  s.textContent = '.session-terminal .log-line.tool-call { color: #818cf8; }';
+  document.head.appendChild(s);
+})();
 </script>
 
 {% endblock %}

@@ -28,11 +28,22 @@ Flow per cycle:
 """
 
 import os
+from pathlib import Path
+
+# Auto-load .env from repo root — MUST happen before any other imports
+# because docker_runner.py reads env vars at module level.
+_env_file = Path(__file__).parent.parent / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ[_k.strip()] = _v.strip()
+
 import time
 import logging
 import subprocess
-from datetime import datetime, timezone, date
-from pathlib import Path
+from datetime import datetime, timezone, date, timedelta
 
 import httpx
 
@@ -44,9 +55,39 @@ from orchestrator.alerts import send_alert
 from orchestrator.greenfield_scaffold import scaffold_greenfield
 
 PM_API_URL    = os.environ["PM_API_URL"]
-POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "60"))
 SSH_DIR       = Path(os.environ.get("SSH_DIR", "C:/Users/digvi/.ssh"))
-AUTH_CHECK_TIMEOUT = 30
+
+# Env-var defaults — overridden by DB system config each cycle (see _load_runtime_cfg)
+_ENV_DEFAULTS = {
+    "poll_interval":               int(os.environ.get("POLL_INTERVAL",            "60")),
+    "auth_check_timeout":          int(os.environ.get("AUTH_CHECK_TIMEOUT",       "30")),
+    "max_open_prs":                int(os.environ.get("MAX_OPEN_PRS",             "3")),
+    "pr_gate_sleep":               int(os.environ.get("PR_GATE_SLEEP",            "300")),
+    "session_timeout_minutes":     int(os.environ.get("SESSION_TIMEOUT_MINUTES",  "90")),
+    "stale_threshold_minutes":     int(os.environ.get("STALE_THRESHOLD_MINUTES",  "45")),
+    "max_features_per_run":        int(os.environ.get("MAX_FEATURES_PER_RUN",     "1")),
+    "brownfield_file_threshold":   int(os.environ.get("BROWNFIELD_FILE_THRESHOLD","10")),
+}
+
+# Runtime config — refreshed from DB at the start of each cycle
+_cfg: dict = dict(_ENV_DEFAULTS)
+
+
+def _load_runtime_cfg():
+    """Fetch system config from PM API and overlay onto env defaults."""
+    global _cfg
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
+            resp = client.get("/api/system-config")
+            resp.raise_for_status()
+            data = resp.json()
+        merged = dict(_ENV_DEFAULTS)
+        for key in _ENV_DEFAULTS:
+            if data.get(key) is not None:
+                merged[key] = data[key]
+        _cfg = merged
+    except Exception as e:
+        log.warning(f"Could not load runtime config from DB — using env defaults: {e}")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,14 +116,23 @@ def claude_auth_healthy() -> bool:
     """
     Real auth check — makes an actual API call.
     claude --version always returns 0 even when logged out. Don't use it.
+    A budget-exceeded error means the API was reached and auth is valid.
     """
     try:
         result = subprocess.run(
             ["claude", "-p", "ping", "--max-budget-usd", "0.001"],
             timeout=AUTH_CHECK_TIMEOUT,
             capture_output=True,
+            text=True,
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            return True
+        # Budget exceeded = API reached = auth is healthy
+        combined = (result.stdout + result.stderr).lower()
+        if "budget" in combined or "cost" in combined:
+            return True
+        # "not logged in" / "unauthorized" / "oauth" = truly unhealthy
+        return False
     except subprocess.TimeoutExpired:
         log.warning("Auth check timed out")
         return False
@@ -183,23 +233,68 @@ def get_next_reviewer_product(products: list[dict]) -> tuple[dict | None, str | 
     return None, None
 
 
+# Maintenance persona schedule: persona → interval in days
+_MAINTENANCE_SCHEDULE = [
+    ("documenter",       3),
+    ("analytics",        7),
+    ("refactorer",       7),
+    ("devops",          14),
+]
+
+
+def _maintenance_persona_due(product: dict) -> str | None:
+    """Return the next maintenance persona that is due to run, or None."""
+    config = product.get("config") or {}
+    now = datetime.now(timezone.utc)
+    for persona, interval_days in _MAINTENANCE_SCHEDULE:
+        last_run_str = config.get(f"last_{persona}_at")
+        if not last_run_str:
+            return persona  # Never run before — schedule it
+        try:
+            last_run = datetime.fromisoformat(last_run_str)
+            if (now - last_run) >= timedelta(days=interval_days):
+                return persona
+        except ValueError:
+            return persona  # Malformed date — run it
+    return None
+
+
 def determine_persona(product: dict) -> str:
     """
-    Decide which persona (designer or coder) should run for this product.
-    - If there are Approved features with skip_design=False → designer
-    - Otherwise → coder
+    Decide which persona should run for this product (priority order):
+    1. designer  — Approved features with skip_design=False
+    2. coder     — Designed or skip_design Approved features
+    3. documenter / analytics / refactorer / devops  — scheduled maintenance
+    4. planner   — no actionable features; generate new ones
     """
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            # Check for designer work
             resp = client.get(
                 "/api/features/next-for-persona",
                 params={"persona": "designer", "product_id": product["id"]}
             )
-        if resp.status_code == 200 and resp.json():
-            return "designer"
+            if resp.status_code == 200 and resp.json():
+                return "designer"
+            # Check for coder work
+            resp2 = client.get(
+                "/api/features/next-for-persona",
+                params={"persona": "coder", "product_id": product["id"]}
+            )
+            if resp2.status_code == 200 and resp2.json():
+                return "coder"
     except httpx.HTTPError as e:
         log.error(f"determine_persona failed: {e}")
-    return "coder"
+        return "coder"
+
+    # No design/code work — check scheduled maintenance personas
+    maintenance = _maintenance_persona_due(product)
+    if maintenance:
+        log.info(f"Maintenance persona due: {maintenance}")
+        return maintenance
+
+    # Nothing else — run planner to generate new feature ideas
+    return "planner"
 
 
 def deliver_pm_messages(product: dict):
@@ -246,11 +341,14 @@ def main():
 
     while True:
         try:
+            # Refresh runtime config from DB at start of each cycle
+            _load_runtime_cfg()
+
             # ① Auth check
             if not claude_auth_healthy():
                 send_alert("critical", "Claude OAuth session expired — re-login needed")
                 log.warning("Auth unhealthy — skipping cycle")
-                time.sleep(POLL_INTERVAL)
+                time.sleep(_cfg["poll_interval"])
                 continue
 
             # Fetch all products for this cycle
@@ -293,7 +391,7 @@ def main():
                 product = get_next_product(products)
                 if not product:
                     log.debug("No products ready — sleeping")
-                    time.sleep(POLL_INTERVAL)
+                    time.sleep(_cfg["poll_interval"])
                     continue
 
                 log.info(f"Selected product: {product['name']} (id={product['id']})")
@@ -311,22 +409,22 @@ def main():
                 h_start = product.get("quiet_hours_start")
                 h_end   = product.get("quiet_hours_end")
                 log.info(f"Quiet hours ({h_start}–{h_end} UTC) — skipping {product['name']}")
-                time.sleep(POLL_INTERVAL)
+                time.sleep(_cfg["poll_interval"])
                 continue
 
             # ⑨ Daily session cap gate (reviewer doesn't count against cap)
             if persona != "reviewer" and is_daily_cap_reached(product):
                 log.info(f"Daily cap reached for {product['name']} — skipping")
-                time.sleep(POLL_INTERVAL)
+                time.sleep(_cfg["poll_interval"])
                 continue
 
             # ⑩ PR count gate (only applies to coder — designer/reviewer don't open new PRs)
             if persona == "coder":
                 open_pr_count = count_open_prs(product)
-                if open_pr_count >= 3:
+                if open_pr_count >= MAX_OPEN_PRS:
                     log.info(f"PR gate: {open_pr_count} open PRs — skipping")
-                    send_alert("warning", f"{product['name']}: ≥3 open PRs unmerged — pausing")
-                    time.sleep(300)
+                    send_alert("warning", f"{product['name']}: ≥{MAX_OPEN_PRS} open PRs unmerged — pausing")
+                    time.sleep(PR_GATE_SLEEP)
                     continue
 
             # ⑪ GitHub PR reconciliation
@@ -336,16 +434,6 @@ def main():
             log.info(f"Launching {persona} session for: {product['name']}")
             exit_code = run_claude_in_docker(product, persona=persona)
             log.info(f"Session ended — exit_code={exit_code} persona={persona}")
-
-            # Record persona on the most recent session row
-            try:
-                with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-                    client.patch(
-                        f"/api/products/{product['id']}/last-session/persona",
-                        json={"persona": persona},
-                    )
-            except Exception as e:
-                log.warning(f"Failed to record persona on session: {e}")
 
             # Track daily count (reviewers exempt)
             if persona != "reviewer":

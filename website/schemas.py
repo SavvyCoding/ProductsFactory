@@ -10,19 +10,26 @@ from pydantic import BaseModel, field_validator
 # Valid status values — kept in sync with models.py constants
 PM_ALLOWED_TRANSITIONS: dict[str, list[str]] = {
     # PM can make these status changes via the website
-    "Pending":  ["Approved", "Rejected"],
+    "Pending":  ["Approved", "Rejected", "Deferred"],
     "Approved": ["Pending"],
     "Blocked":  ["Approved", "Rejected"],
     "Pushed":   ["Reverted"],
-    "Rejected": ["Pending"],
+    "Rejected": ["Approved", "Pending"],
     "Reverted": ["Pending"],
+    "Deferred": ["Approved", "Pending"],
 }
 
 
 # ── Products ─────────────────────────────────────────────────────────────────
 
 class ProductCreate(BaseModel):
-    working_dir: str
+    working_dir:  str
+    name:         Optional[str]       = None
+    type:         Optional[str]       = None
+    tech_stack:   Optional[List[str]] = None
+    status:       Optional[str]       = None
+    github_repo:  Optional[str]       = None
+    config:       Optional[dict]      = None
 
 
 class ProductUpdate(BaseModel):
@@ -53,8 +60,9 @@ class ProductOut(BaseModel):
     custom_prompt:      Optional[str] = None
     quiet_hours_start:  Optional[int] = None
     quiet_hours_end:    Optional[int] = None
-    daily_session_cap:  Optional[int] = None
-    created_at:         datetime
+    daily_session_cap:      Optional[int] = None
+    max_features_per_run:   Optional[int] = None
+    created_at:             datetime
     updated_at:         datetime
 
     model_config = {"from_attributes": True}
@@ -63,13 +71,14 @@ class ProductOut(BaseModel):
 # ── Features ─────────────────────────────────────────────────────────────────
 
 class FeatureCreate(BaseModel):
-    product_id:  int
-    name:        str
-    description: Optional[str] = None
-    priority:    int = 50
-    depends_on:  Optional[int] = None
-    source:      str = "pm"
-    skip_design: bool = False
+    product_id:   int
+    name:         str
+    description:  Optional[str] = None
+    priority:     int = 50
+    depends_on:   Optional[int] = None
+    source:       str = "pm"
+    feature_type: str = "feature"
+    skip_design:  bool = False
 
     @field_validator("priority")
     @classmethod
@@ -85,19 +94,29 @@ class FeatureCreate(BaseModel):
             raise ValueError("source must be 'pm' or 'ai'")
         return v
 
+    @field_validator("feature_type")
+    @classmethod
+    def feature_type_valid(cls, v: str) -> str:
+        if v not in ("feature", "bug", "chore"):
+            raise ValueError("feature_type must be 'feature', 'bug', or 'chore'")
+        return v
+
 
 class FeatureUpdate(BaseModel):
     """Used by Claude agents to update feature status during implementation."""
-    status:          Optional[str] = None
-    fix_attempts:    Optional[int] = None
-    branch_name:     Optional[str] = None
-    pr_url:          Optional[str] = None
-    pr_number:       Optional[int] = None
-    blocked_reason:  Optional[str] = None
-    design_doc:      Optional[str] = None
-    design_doc_path: Optional[str] = None
-    review_outcome:  Optional[str] = None
-    review_notes:    Optional[str] = None
+    status:          Optional[str]  = None
+    feature_type:    Optional[str]  = None
+    fix_attempts:    Optional[int]  = None
+    branch_name:     Optional[str]  = None
+    pr_url:          Optional[str]  = None
+    pr_number:       Optional[int]  = None
+    blocked_reason:  Optional[str]  = None
+    design_doc:      Optional[str]  = None
+    design_doc_path: Optional[str]  = None
+    review_outcome:  Optional[str]  = None
+    review_notes:    Optional[str]  = None
+    session_uid:     Optional[str]  = None  # review authorship — stored in feature_reviews, not on feature
+    skip_design:     Optional[bool] = None  # PM may override design requirement
 
 
 class FeatureStatusUpdate(BaseModel):
@@ -119,6 +138,7 @@ class FeatureOut(BaseModel):
     name:            str
     description:     Optional[str]
     status:          str
+    feature_type:    str = "feature"
     priority:        int
     depends_on:      Optional[int]
     fix_attempts:    int
@@ -134,6 +154,19 @@ class FeatureOut(BaseModel):
     review_notes:    Optional[str] = None
     created_at:      datetime
     updated_at:      datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ── Feature Reviews ──────────────────────────────────────────────────────────
+
+class FeatureReviewOut(BaseModel):
+    id:             int
+    feature_id:     int
+    review_outcome: str
+    review_notes:   Optional[str]
+    session_uid:    Optional[str]
+    created_at:     datetime
 
     model_config = {"from_attributes": True}
 
@@ -205,9 +238,10 @@ class SystemConfigOut(BaseModel):
 
 
 class ProductSchedule(BaseModel):
-    quiet_hours_start: Optional[int] = None
-    quiet_hours_end:   Optional[int] = None
-    daily_session_cap: Optional[int] = None
+    quiet_hours_start:    Optional[int] = None
+    quiet_hours_end:      Optional[int] = None
+    daily_session_cap:    Optional[int] = None
+    max_features_per_run: Optional[int] = None
 
 
 class BulkApprove(BaseModel):

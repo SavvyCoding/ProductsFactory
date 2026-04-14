@@ -157,7 +157,7 @@ class TestInstallTemplatesPositive:
     def test_placeholders_resolved(self, product_dir):
         p = make_product(product_dir)
         install_templates(p, PM_API)
-        agent_wf = (product_dir / "AGENT_WORKFLOW.md").read_text()
+        agent_wf = (product_dir / "AGENT_WORKFLOW.md").read_text(encoding='utf-8')
         assert "Test Product" in agent_wf
         assert PM_API in agent_wf
         assert "{PRODUCT_NAME}" not in agent_wf   # all resolved
@@ -184,26 +184,26 @@ class TestInstallTemplatesPositive:
     def test_python_claude_md_contains_pytest(self, product_dir):
         p = make_product(product_dir, tech_stack=["python"])
         install_templates(p, PM_API)
-        claude_md = (product_dir / "CLAUDE.md").read_text()
+        claude_md = (product_dir / "CLAUDE.md").read_text(encoding='utf-8')
         assert "pytest" in claude_md
         assert "pip-audit" in claude_md
 
     def test_node_claude_md_contains_npm(self, product_dir):
         p = make_product(product_dir, tech_stack=["node"])
         install_templates(p, PM_API)
-        claude_md = (product_dir / "CLAUDE.md").read_text()
+        claude_md = (product_dir / "CLAUDE.md").read_text(encoding='utf-8')
         assert "npm" in claude_md
 
     def test_go_claude_md_contains_go_test(self, product_dir):
         p = make_product(product_dir, tech_stack=["go"])
         install_templates(p, PM_API)
-        claude_md = (product_dir / "CLAUDE.md").read_text()
+        claude_md = (product_dir / "CLAUDE.md").read_text(encoding='utf-8')
         assert "go test" in claude_md
 
     def test_max_batch_size_in_agent_workflow(self, product_dir):
         p = make_product(product_dir, config={"max_batch_size": 2})
         install_templates(p, PM_API)
-        content = (product_dir / "AGENT_WORKFLOW.md").read_text()
+        content = (product_dir / "AGENT_WORKFLOW.md").read_text(encoding='utf-8')
         assert "2" in content
         assert "{MAX_BATCH_SIZE}" not in content
 
@@ -230,15 +230,15 @@ class TestInstallTemplatesNegative:
         existing.write_text("# My custom workflow\n")
         p = make_product(product_dir)
         install_templates(p, PM_API)
-        assert existing.read_text() == "# My custom workflow\n"
+        assert existing.read_text(encoding='utf-8') == "# My custom workflow\n"
 
     def test_force_overwrites_existing(self, product_dir):
         existing = product_dir / "CLAUDE.md"
         existing.write_text("# old content\n")
         p = make_product(product_dir)
         install_templates(p, PM_API, force=True)
-        assert existing.read_text() != "# old content\n"
-        assert "Test Product" in existing.read_text()
+        assert existing.read_text(encoding='utf-8') != "# old content\n"
+        assert "Test Product" in existing.read_text(encoding='utf-8')
 
     def test_idempotent_second_install(self, product_dir):
         p = make_product(product_dir)
@@ -269,7 +269,7 @@ class TestInstallTemplatesEdge:
         p = make_product(product_dir)
         p["name"] = "My App & Co."
         install_templates(p, PM_API)
-        content = (product_dir / "AGENT_WORKFLOW.md").read_text()
+        content = (product_dir / "AGENT_WORKFLOW.md").read_text(encoding='utf-8')
         assert "My App & Co." in content
 
     def test_brownfield_config_overrides_test_command(self, product_dir):
@@ -277,7 +277,7 @@ class TestInstallTemplatesEdge:
         p = make_product(product_dir, type="brownfield",
                          config={"test_command": custom_cmd, "max_batch_size": 2})
         install_templates(p, PM_API)
-        claude_md = (product_dir / "CLAUDE.md").read_text()
+        claude_md = (product_dir / "CLAUDE.md").read_text(encoding='utf-8')
         assert custom_cmd in claude_md
 
     def test_all_known_stacks_have_templates(self):

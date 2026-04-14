@@ -18,6 +18,22 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None) ->
         template_name = "designer"
     elif persona == "reviewer":
         template_name = "reviewer"
+    elif persona == "recommender":
+        template_name = "recommender"
+    elif persona == "planner":
+        template_name = "planner"
+    elif persona == "qa_tester":
+        template_name = "qa_tester"
+    elif persona == "security_auditor":
+        template_name = "security_auditor"
+    elif persona == "documenter":
+        template_name = "documenter"
+    elif persona == "refactorer":
+        template_name = "refactorer"
+    elif persona == "devops":
+        template_name = "devops"
+    elif persona == "analytics":
+        template_name = "analytics"
     elif product.get("analysis_status") == "running":
         template_name = "analysis_run"
     elif product.get("type") == "brownfield":
@@ -32,6 +48,7 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None) ->
         product_id=product["id"],
         product_name=product.get("name", product["working_dir"]),
         session_uid=session_uid,
-        pm_api_url=os.environ["PM_API_URL"],
+        pm_api_url=os.environ.get("PM_API_URL_CONTAINER", os.environ["PM_API_URL"]),
         tech_stack=", ".join(product.get("tech_stack") or []),
+        max_features_per_run=product.get("max_features_per_run") or int(os.environ.get("MAX_FEATURES_PER_RUN", "1")),
     )

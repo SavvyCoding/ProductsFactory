@@ -9,8 +9,7 @@
     <p class="muted" style="margin-top:3px">Manage and monitor your autonomous development pipeline</p>
   </div>
   <div class="actions">
-    <button class="btn btn-outline" onclick="togglePanel('brownfield')">+ Brownfield</button>
-    <button class="btn btn-green"   onclick="togglePanel('greenfield')">✦ New Greenfield</button>
+    <button class="btn btn-green" onclick="openWizard()">+ Add Product</button>
   </div>
 </div>
 
@@ -23,172 +22,187 @@
 {% set gf       = products | selectattr('type',   'equalto', 'greenfield')| list | length %}
 
 <div class="stats-bar">
-  <div class="stat-item">
+  <div class="stat-item" data-filter="all" onclick="statFilter('all', this)" title="Show all products">
     <span class="stat-value">{{ total }}</span>
     <span class="stat-label">Total</span>
   </div>
   <div class="stat-divider"></div>
-  <div class="stat-item">
+  <div class="stat-item" data-filter="ready" onclick="statFilter('ready', this)" title="Filter: Ready">
     <span class="stat-value" style="color:var(--green)">{{ ready }}</span>
     <span class="stat-label">Ready</span>
   </div>
   <div class="stat-divider"></div>
-  <div class="stat-item">
+  <div class="stat-item" data-filter="running" onclick="statFilter('running', this)" title="Filter: Running">
     <span class="stat-value" style="color:var(--blue)">{{ running }}</span>
     <span class="stat-label">Running</span>
   </div>
   <div class="stat-divider"></div>
-  <div class="stat-item">
+  <div class="stat-item" data-filter="paused" onclick="statFilter('paused', this)" title="Filter: Paused">
     <span class="stat-value" style="color:var(--slate)">{{ paused }}</span>
     <span class="stat-label">Paused</span>
   </div>
   <div class="stat-divider"></div>
-  <div class="stat-item">
+  <div class="stat-item" data-filter="greenfield" onclick="statFilter('greenfield', this)" title="Filter: Greenfield">
     <span class="stat-value" style="color:var(--purple)">{{ gf }}</span>
     <span class="stat-label">Greenfield</span>
   </div>
 </div>
 
 
-<!-- ── BROWNFIELD DRAWER ───────────────────────────────────── -->
-<div class="register-drawer" id="drawer-brownfield">
-  <div class="drawer-inner">
-    <div class="drawer-heading">
-      <span>Register existing repository</span>
-      <button class="drawer-close" onclick="togglePanel('brownfield')">✕</button>
-    </div>
-    <form method="post" action="/product/register" class="register-form">
-      <input type="text" name="working_dir"
-             placeholder="C:/path/to/existing/repo"
-             required autocomplete="off">
-      <button type="submit" class="btn btn-blue">+ Register</button>
-    </form>
-    <p class="muted" style="margin-top:8px;font-size:12px">
-      ProductFactory will auto-discover the stack and install agent workflow templates.
-    </p>
-  </div>
-</div>
+<!-- ── ADD PRODUCT WIZARD MODAL ──────────────────────────── -->
+<div class="modal-overlay" id="add-product-modal" onclick="if(event.target===this)closeWizard()">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeWizard()" aria-label="Close">✕</button>
 
-
-<!-- ── GREENFIELD DRAWER ────────────────────────────────────── -->
-<div class="register-drawer" id="drawer-greenfield">
-  <div class="drawer-inner" style="max-width:none">
-    <div class="drawer-heading">
-      <span>✦ Create new greenfield product</span>
-      <button class="drawer-close" onclick="togglePanel('greenfield')">✕</button>
+    <!-- Steps indicator -->
+    <div class="wizard-steps" id="wizard-steps">
+      <div class="wizard-step active" id="ws-1">1 · Type</div>
+      <div class="wizard-step" id="ws-2">2 · Details</div>
+      <div class="wizard-step" id="ws-3">3 · Vision</div>
     </div>
 
-    {% if not products_root_dir %}
-    <div class="notice notice-amber" style="margin-bottom:16px">
-      ⚙ <strong>Admin not configured.</strong>
-      <a href="/admin">Set the products root directory and GitHub details</a> before creating greenfield products.
-    </div>
-    {% endif %}
-
-    <form method="post" action="/product/register/greenfield" class="greenfield-form">
-      <div class="gf-grid">
-
-        <!-- Left column: meta -->
-        <div class="gf-col">
-          <div class="form-group">
-            <label for="gf-name">Product name</label>
-            <input type="text" id="gf-name" name="product_name"
-                   placeholder="My Awesome App" required autocomplete="off">
-          </div>
-
-          <div class="form-group">
-            <label for="gf-repo">GitHub repo name</label>
-            <input type="text" id="gf-repo" name="github_repo_name"
-                   placeholder="my-awesome-app" required autocomplete="off"
-                   pattern="[a-z0-9_\-]+" title="lowercase letters, numbers, hyphens only">
-            <div class="path-preview" id="path-preview" data-root="{{ products_root_dir or '' }}">
-              📁 <span id="path-preview-text">{{ products_root_dir or '{root}' }}/<span class="highlight">my-awesome-app</span></span>
-            </div>
-          </div>
-
-          <div class="form-group">
-            <label for="gf-stack">Tech stack</label>
-            <select id="gf-stack" name="preferred_stack" onchange="onStackChange(this)">
-              <optgroup label="Python">
-                <option value="python+postgresql">Python + PostgreSQL</option>
-                <option value="python+mysql">Python + MySQL</option>
-                <option value="python+mongodb">Python + MongoDB</option>
-                <option value="python+redis">Python + Redis</option>
-                <option value="python+sqlite">Python + SQLite</option>
-              </optgroup>
-              <optgroup label="Node.js">
-                <option value="node+postgresql">Node.js + PostgreSQL</option>
-                <option value="node+mongodb">Node.js + MongoDB</option>
-                <option value="node+mysql">Node.js + MySQL</option>
-                <option value="node+redis">Node.js + Redis</option>
-              </optgroup>
-              <optgroup label="Full-stack">
-                <option value="nextjs+postgresql">Next.js + PostgreSQL</option>
-                <option value="nextjs+mongodb">Next.js + MongoDB</option>
-                <option value="react+node+postgresql">React + Node.js + PostgreSQL</option>
-                <option value="react+node+mongodb">React + Node.js + MongoDB</option>
-              </optgroup>
-              <optgroup label="Go">
-                <option value="go+postgresql">Go + PostgreSQL</option>
-                <option value="go+mysql">Go + MySQL</option>
-                <option value="go+redis">Go + Redis</option>
-              </optgroup>
-              <optgroup label="Other">
-                <option value="other">Other (specify below)</option>
-              </optgroup>
-            </select>
-            <input type="text" id="gf-stack-other" name="preferred_stack_other"
-                   placeholder="e.g. Rust + PostgreSQL"
-                   style="display:none; margin-top:8px" autocomplete="off">
-          </div>
+    <!-- ── STEP 1: type picker ── -->
+    <div class="wizard-panel active" id="wp-1">
+      <h2 style="margin-bottom:6px">What are you building?</h2>
+      <p class="muted" style="margin-bottom:20px;font-size:13px">Choose the product type to get started.</p>
+      <div class="type-picker">
+        <div class="type-pick-card" id="pick-greenfield" onclick="selectType('greenfield')" tabindex="0">
+          <div class="type-pick-icon">✦</div>
+          <div class="type-pick-title">New Greenfield</div>
+          <div class="type-pick-desc">Scaffold a brand-new product from scratch — Claude creates the repo, stack, and initial code.</div>
         </div>
-
-        <!-- Right column: vision -->
-        <div class="gf-col">
-          <div class="form-group" style="flex:1">
-            <label for="gf-vision">Vision / goal</label>
-            <div class="voice-field">
-              <textarea id="gf-vision" name="vision" rows="7"
-                        placeholder="Describe what this product does, who it's for, and its core value proposition…"
-                        required></textarea>
-              <button type="button" class="voice-btn" id="voice-btn-vision"
-                      onclick="startVoice('gf-vision', this)" title="Voice input">🎙</button>
-            </div>
-          </div>
-
-          <div class="gf-actions">
-            <button type="button" class="btn btn-purple" id="articulate-btn" onclick="articulateVision()">
-              ✦ Articulate Vision
-            </button>
-            <button type="button" class="btn btn-outline" id="suggest-btn" onclick="suggestFeatures()">
-              ✨ Suggest features
-            </button>
-            <span class="muted" id="articulate-status" style="font-size:12px"></span>
-            <span class="muted" id="suggest-status" style="font-size:12px"></span>
-          </div>
+        <div class="type-pick-card" id="pick-brownfield" onclick="selectType('brownfield')" tabindex="0">
+          <div class="type-pick-icon">🏗</div>
+          <div class="type-pick-title">Existing Repo</div>
+          <div class="type-pick-desc">Register an existing codebase. Claude will analyse it and start implementing features.</div>
         </div>
       </div>
+      <div class="wizard-footer">
+        <span></span>
+        <button class="btn btn-green" id="step1-next" onclick="wizardNext()" disabled>Next →</button>
+      </div>
+    </div>
 
-      <!-- AI SUGGESTIONS PANEL -->
+    <!-- ── STEP 2a: greenfield meta ── -->
+    <div class="wizard-panel" id="wp-2-greenfield">
+      {% if not products_root_dir %}
+      <div class="notice notice-amber" style="margin-bottom:16px">
+        ⚙ <strong>Admin not configured.</strong>
+        <a href="/admin">Set the products root directory and GitHub details</a> first.
+      </div>
+      {% endif %}
+      <h2 style="margin-bottom:18px">Product details</h2>
+      <div class="form-group">
+        <label for="gf-name">Product name</label>
+        <input type="text" id="gf-name" placeholder="My Awesome App" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label for="gf-repo">GitHub repo name</label>
+        <input type="text" id="gf-repo" placeholder="my-awesome-app" autocomplete="off"
+               pattern="[a-z0-9_\-]+" oninput="updatePathPreview()">
+        <div class="path-preview" id="path-preview" data-root="{{ products_root_dir or '' }}">
+          📁 <span id="path-preview-text">{{ products_root_dir or '{root}' }}/<span class="highlight">my-awesome-app</span></span>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="gf-stack">Tech stack</label>
+        <select id="gf-stack" onchange="onStackChange(this)">
+          <optgroup label="Python">
+            <option value="python+postgresql">Python + PostgreSQL</option>
+            <option value="python+mysql">Python + MySQL</option>
+            <option value="python+mongodb">Python + MongoDB</option>
+            <option value="python+redis">Python + Redis</option>
+            <option value="python+sqlite">Python + SQLite</option>
+          </optgroup>
+          <optgroup label="Node.js">
+            <option value="node+postgresql">Node.js + PostgreSQL</option>
+            <option value="node+mongodb">Node.js + MongoDB</option>
+            <option value="node+mysql">Node.js + MySQL</option>
+            <option value="node+redis">Node.js + Redis</option>
+          </optgroup>
+          <optgroup label="Full-stack">
+            <option value="nextjs+postgresql">Next.js + PostgreSQL</option>
+            <option value="nextjs+mongodb">Next.js + MongoDB</option>
+            <option value="react+node+postgresql">React + Node.js + PostgreSQL</option>
+            <option value="react+node+mongodb">React + Node.js + MongoDB</option>
+          </optgroup>
+          <optgroup label="Go">
+            <option value="go+postgresql">Go + PostgreSQL</option>
+            <option value="go+mysql">Go + MySQL</option>
+            <option value="go+redis">Go + Redis</option>
+          </optgroup>
+          <optgroup label="Other">
+            <option value="other">Other (specify below)</option>
+          </optgroup>
+        </select>
+        <input type="text" id="gf-stack-other" placeholder="e.g. Rust + PostgreSQL"
+               style="display:none; margin-top:8px" autocomplete="off">
+      </div>
+      <div class="wizard-footer">
+        <button class="btn btn-outline" onclick="wizardBack()">← Back</button>
+        <button class="btn btn-green" onclick="wizardNext2()">Next →</button>
+      </div>
+    </div>
+
+    <!-- ── STEP 2b: brownfield path ── -->
+    <div class="wizard-panel" id="wp-2-brownfield">
+      <h2 style="margin-bottom:18px">Register existing repository</h2>
+      <div class="form-group">
+        <label for="bf-working-dir">Path to repository</label>
+        <input type="text" id="bf-working-dir" placeholder="C:/path/to/existing/repo" autocomplete="off">
+        <p class="field-hint" style="margin-top:6px">ProductFactory will auto-discover the stack and install agent workflow templates.</p>
+      </div>
+      <div class="wizard-footer">
+        <button class="btn btn-outline" onclick="wizardBack()">← Back</button>
+        <button class="btn btn-green" onclick="submitBrownfield()">Register →</button>
+      </div>
+    </div>
+
+    <!-- ── STEP 3: vision & AI suggestions ── -->
+    <div class="wizard-panel" id="wp-3">
+      <h2 style="margin-bottom:18px">Vision &amp; initial features</h2>
+      <div class="form-group" style="margin-bottom:10px">
+        <label for="gf-vision">Vision / goal</label>
+        <div class="voice-field">
+          <textarea id="gf-vision" rows="5"
+                    placeholder="Describe what this product does, who it's for, and its core value proposition…"></textarea>
+          <button type="button" class="voice-btn" id="voice-btn-vision"
+                  onclick="startVoice('gf-vision', this)" title="Voice input" aria-label="Voice input">🎙</button>
+        </div>
+      </div>
+      <div class="gf-actions" style="margin-bottom:14px">
+        <button type="button" class="btn btn-purple" id="articulate-btn" onclick="articulateVision()">✦ Articulate Vision</button>
+        <button type="button" class="btn btn-outline" id="suggest-btn" onclick="suggestFeatures()">✨ Suggest features</button>
+        <span class="muted" id="articulate-status" style="font-size:12px"></span>
+        <span class="muted" id="suggest-status" style="font-size:12px"></span>
+      </div>
       <div id="gf-suggestions" class="ai-suggestions hidden">
-        <p style="font-size:12px; font-weight:600; color:var(--dark); margin-bottom:10px">
+        <p style="font-size:12px;font-weight:600;color:var(--dark);margin-bottom:10px">
           Suggested features — click to select, then submit to auto-create them as Pending:
         </p>
         <div class="suggestions-grid" id="suggestions-grid"></div>
         <p class="suggestions-hint" id="suggestions-hint"></p>
       </div>
-      <input type="hidden" id="gf-suggestions-json" name="suggested_features" value="[]">
-
-      <div class="gf-submit-row">
-        <button type="submit" class="btn btn-green"
+      <input type="hidden" id="gf-suggestions-json" value="[]">
+      <div class="wizard-footer">
+        <button class="btn btn-outline" onclick="wizardBack()">← Back</button>
+        <button class="btn btn-green" id="gf-submit-btn" onclick="submitGreenfield()"
                 {% if not products_root_dir %}disabled title="Configure Admin first"{% endif %}>
           🚀 Create product
         </button>
-        <span class="muted" style="font-size:12px">
-          Repo will be created at
-          <code style="font-size:11px">{{ products_root_dir or '{root}' }}/<span id="submit-path-hint">…</span></code>
-        </span>
       </div>
+    </div>
+
+    <!-- Hidden form for actual submission -->
+    <form method="post" action="/product/register/greenfield" id="gf-hidden-form" style="display:none">
+      <input type="hidden" name="product_name"      id="gf-h-name">
+      <input type="hidden" name="github_repo_name"  id="gf-h-repo">
+      <input type="hidden" name="preferred_stack"   id="gf-h-stack">
+      <input type="hidden" name="vision"            id="gf-h-vision">
+      <input type="hidden" name="suggested_features" id="gf-h-suggestions" value="[]">
+    </form>
+    <form method="post" action="/product/register" id="bf-hidden-form" style="display:none">
+      <input type="hidden" name="working_dir" id="bf-h-working-dir">
     </form>
   </div>
 </div>
@@ -213,10 +227,17 @@
 
 <div class="product-grid" id="product-grid">
   {% for p in products %}
+  {% set fc = feature_counts.get(p.id, {}) %}
+  {% set fc_total   = fc.get('total', 0) %}
+  {% set fc_pushed  = fc.get('pushed', 0) %}
+  {% set fc_active  = fc.get('active', 0) %}
+  {% set fc_blocked = fc.get('blocked', 0) %}
+  {% set fc_pending = fc.get('pending', 0) %}
   <a href="/product/{{ p.id }}" class="product-card"
      data-type="{{ p.type }}"
      data-status="{{ p.status }}"
-     data-name="{{ (p.name or '') | lower }}">
+     data-name="{{ (p.name or '') | lower }}"
+     data-last-run="{{ p.last_run_at.isoformat() if p.last_run_at else '' }}">
 
     <div class="product-card-top">
       <div class="product-type-dot product-type-dot--{{ p.type }}"></div>
@@ -232,11 +253,21 @@
     </div>
     {% endif %}
 
+    {% if fc_total > 0 %}
+    <div class="product-progress-bar" title="{{ fc_pushed }} pushed · {{ fc_active }} active · {{ fc_blocked }} blocked · {{ fc_pending }} pending">
+      {% if fc_pushed  %}<div class="ppb-pushed"  style="flex:{{ fc_pushed }}"></div>{% endif %}
+      {% if fc_active  %}<div class="ppb-active"  style="flex:{{ fc_active }}"></div>{% endif %}
+      {% if fc_blocked %}<div class="ppb-blocked" style="flex:{{ fc_blocked }}"></div>{% endif %}
+      {% if fc_pending %}<div class="ppb-pending" style="flex:{{ fc_pending }}"></div>{% endif %}
+    </div>
+    {% endif %}
+
     <div class="product-card-footer">
       <span class="product-type-label">{{ p.type }}</span>
       <span class="product-last-run">
         {% if p.last_run_at %}
-          🕐 {{ p.last_run_at.strftime('%b %d, %H:%M') }}
+          <span class="staleness-dot stale-fresh" id="stale-{{ p.id }}"></span>
+          <span class="rel-time" data-ts="{{ p.last_run_at.isoformat() }}">{{ p.last_run_at.strftime('%b %d, %H:%M') }}</span>
         {% else %}
           Never run
         {% endif %}
@@ -260,8 +291,7 @@
   <h2>No products yet</h2>
   <p>Register a brownfield repo or create a new greenfield product to get started.</p>
   <div style="display:flex;gap:10px;justify-content:center;margin-top:20px">
-    <button class="btn btn-outline" onclick="togglePanel('brownfield')">+ Brownfield</button>
-    <button class="btn btn-green"   onclick="togglePanel('greenfield')">✦ New Greenfield</button>
+    <button class="btn btn-green" onclick="openWizard()">+ Add Product</button>
   </div>
 </div>
 
@@ -269,18 +299,118 @@
 
 
 <script>
-// ── DRAWER TOGGLE ─────────────────────────────────────────
-function togglePanel(name) {
-  const drawers = ['brownfield','greenfield'];
-  drawers.forEach(d => {
-    const el = document.getElementById('drawer-' + d);
-    if (d === name) {
-      const isOpen = el.classList.contains('open');
-      el.classList.toggle('open', !isOpen);
-    } else {
-      el.classList.remove('open');
-    }
-  });
+// ── WIZARD STATE ──────────────────────────────────────────
+let wizardType = null; // 'greenfield' | 'brownfield'
+let wizardStep = 1;
+
+function openWizard() {
+  wizardType = null; wizardStep = 1;
+  document.querySelectorAll('.wizard-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.wizard-step').forEach(s => { s.classList.remove('active','done'); });
+  document.getElementById('wp-1').classList.add('active');
+  document.getElementById('ws-1').classList.add('active');
+  document.getElementById('step1-next').disabled = true;
+  document.querySelectorAll('.type-pick-card').forEach(c => c.classList.remove('selected'));
+  document.getElementById('add-product-modal').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+function closeWizard() {
+  document.getElementById('add-product-modal').classList.remove('open');
+  document.body.style.overflow = '';
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeWizard(); });
+
+function selectType(type) {
+  wizardType = type;
+  document.querySelectorAll('.type-pick-card').forEach(c => c.classList.remove('selected'));
+  document.getElementById('pick-' + type).classList.add('selected');
+  document.getElementById('step1-next').disabled = false;
+}
+
+function showPanel(id) {
+  document.querySelectorAll('.wizard-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+
+function wizardNext() {
+  if (!wizardType) return;
+  document.getElementById('ws-1').classList.remove('active');
+  document.getElementById('ws-1').classList.add('done');
+  document.getElementById('ws-2').classList.add('active');
+  wizardStep = 2;
+  showPanel(wizardType === 'greenfield' ? 'wp-2-greenfield' : 'wp-2-brownfield');
+  // Show wizard-step 3 only for greenfield
+  document.getElementById('ws-3').style.display = wizardType === 'greenfield' ? '' : 'none';
+}
+
+function wizardNext2() {
+  // Validate step 2 (greenfield)
+  const name = document.getElementById('gf-name').value.trim();
+  const repo = document.getElementById('gf-repo').value.trim();
+  if (!name) { document.getElementById('gf-name').focus(); showToast('error', 'Product name is required.'); return; }
+  if (!repo)  { document.getElementById('gf-repo').focus(); showToast('error', 'GitHub repo name is required.'); return; }
+  document.getElementById('ws-2').classList.remove('active');
+  document.getElementById('ws-2').classList.add('done');
+  document.getElementById('ws-3').classList.add('active');
+  wizardStep = 3;
+  showPanel('wp-3');
+}
+
+function wizardBack() {
+  if (wizardStep === 2) {
+    document.getElementById('ws-2').classList.remove('active','done');
+    document.getElementById('ws-1').classList.remove('done');
+    document.getElementById('ws-1').classList.add('active');
+    wizardStep = 1;
+    showPanel('wp-1');
+  } else if (wizardStep === 3) {
+    document.getElementById('ws-3').classList.remove('active','done');
+    document.getElementById('ws-2').classList.remove('done');
+    document.getElementById('ws-2').classList.add('active');
+    wizardStep = 2;
+    showPanel('wp-2-greenfield');
+  }
+}
+
+function submitBrownfield() {
+  const dir = document.getElementById('bf-working-dir').value.trim();
+  if (!dir) { document.getElementById('bf-working-dir').focus(); showToast('error', 'Path is required.'); return; }
+  document.getElementById('bf-h-working-dir').value = dir;
+  document.getElementById('bf-hidden-form').submit();
+}
+
+function submitGreenfield() {
+  const vision = document.getElementById('gf-vision').value.trim();
+  if (!vision) { document.getElementById('gf-vision').focus(); showToast('error', 'Vision is required.'); return; }
+  const sel   = document.getElementById('gf-stack');
+  let stack = sel.value;
+  if (stack === 'other') {
+    stack = document.getElementById('gf-stack-other').value.trim();
+    if (!stack) { showToast('error', 'Please specify the tech stack.'); return; }
+  }
+  document.getElementById('gf-h-name').value         = document.getElementById('gf-name').value.trim();
+  document.getElementById('gf-h-repo').value         = document.getElementById('gf-repo').value.trim();
+  document.getElementById('gf-h-stack').value        = stack;
+  document.getElementById('gf-h-vision').value       = vision;
+  document.getElementById('gf-h-suggestions').value  = document.getElementById('gf-suggestions-json').value;
+  document.getElementById('gf-hidden-form').submit();
+}
+
+// ── STACK DROPDOWN ────────────────────────────────────────
+function onStackChange(sel) {
+  const other = document.getElementById('gf-stack-other');
+  const show  = sel.value === 'other';
+  other.style.display = show ? 'block' : 'none';
+}
+
+// ── PATH PREVIEW ──────────────────────────────────────────
+function updatePathPreview() {
+  const repoInput  = document.getElementById('gf-repo');
+  const previewEl  = document.getElementById('path-preview-text');
+  const root       = document.getElementById('path-preview').dataset.root || '{root}';
+  if (!repoInput || !previewEl) return;
+  const repo = repoInput.value || 'my-awesome-app';
+  previewEl.innerHTML = root + '/<span class="highlight">' + escHtml(repo) + '</span>';
 }
 
 // ── SEARCH & FILTER ───────────────────────────────────────
@@ -289,19 +419,37 @@ let activeFilter = 'all';
 function setFilter(filter, el) {
   activeFilter = filter;
   document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
-  el.classList.add('active');
+  if (el) el.classList.add('active');
+  // Also sync stat items
+  document.querySelectorAll('.stat-item[data-filter]').forEach(s => {
+    s.classList.toggle('stat-active', s.dataset.filter === filter);
+  });
+  filterProducts();
+}
+
+function statFilter(filter, el) {
+  // Toggle: clicking active stat resets to 'all'
+  if (activeFilter === filter) filter = 'all';
+  activeFilter = filter;
+  document.querySelectorAll('.stat-item[data-filter]').forEach(s => {
+    s.classList.toggle('stat-active', s.dataset.filter === filter);
+  });
+  // Sync filter chips
+  document.querySelectorAll('.filter-chip').forEach(c => {
+    c.classList.toggle('active', c.dataset.filter === filter || (filter === 'all' && c.dataset.filter === 'all'));
+  });
   filterProducts();
 }
 
 function filterProducts() {
-  const q = document.getElementById('product-search').value.toLowerCase();
+  const q = document.getElementById('product-search') ? document.getElementById('product-search').value.toLowerCase() : '';
   const cards = document.querySelectorAll('#product-grid .product-card');
   let visible = 0;
   cards.forEach(card => {
     const matchQ = !q || (card.dataset.name || '').includes(q);
     const matchF = activeFilter === 'all'
-      || card.dataset.status === activeFilter
-      || card.dataset.type   === activeFilter;
+      || card.dataset.status   === activeFilter
+      || card.dataset.type     === activeFilter;
     card.style.display = (matchQ && matchF) ? '' : 'none';
     if (matchQ && matchF) visible++;
   });
@@ -309,55 +457,46 @@ function filterProducts() {
   if (el) el.textContent = visible;
 }
 
-// ── STACK DROPDOWN ────────────────────────────────────────
-function onStackChange(sel) {
-  const other = document.getElementById('gf-stack-other');
-  const show  = sel.value === 'other';
-  other.style.display = show ? 'block' : 'none';
-  other.required = show;
-  if (!show) other.value = '';
+// ── RELATIVE TIME ─────────────────────────────────────────
+function relTime(isoStr) {
+  const diff = (Date.now() - new Date(isoStr).getTime()) / 1000;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  return Math.floor(diff / 86400) + 'd ago';
 }
-
-document.querySelector('.greenfield-form').addEventListener('submit', function(e) {
-  const sel   = document.getElementById('gf-stack');
-  const other = document.getElementById('gf-stack-other');
-  if (sel.value === 'other') {
-    if (!other.value.trim()) { e.preventDefault(); other.focus(); return; }
-    sel.name   = '';
-    other.name = 'preferred_stack';
-  }
-});
-
-// ── PATH PREVIEW ──────────────────────────────────────────
-const repoInput  = document.getElementById('gf-repo');
-const previewEl  = document.getElementById('path-preview-text');
-const submitHint = document.getElementById('submit-path-hint');
-const root       = document.getElementById('path-preview').dataset.root || '{root}';
-
-function updatePathPreview() {
-  const repo = repoInput.value || 'my-awesome-app';
-  previewEl.innerHTML  = root + '/<span class="highlight">' + escHtml(repo) + '</span>';
-  submitHint.textContent = repo;
+function staleDotClass(isoStr) {
+  const h = (Date.now() - new Date(isoStr).getTime()) / 3600000;
+  if (h < 2) return 'stale-fresh';
+  if (h < 12) return 'stale-warn';
+  return 'stale-danger';
 }
-repoInput.addEventListener('input', updatePathPreview);
-updatePathPreview();
+(function initRelTimes() {
+  document.querySelectorAll('.rel-time[data-ts]').forEach(el => {
+    el.textContent = relTime(el.dataset.ts);
+  });
+  // stale dots
+  document.querySelectorAll('[data-last-run]').forEach(card => {
+    const ts = card.dataset.lastRun;
+    if (!ts) return;
+    const dot = card.querySelector('.staleness-dot');
+    if (dot) { dot.className = 'staleness-dot ' + staleDotClass(ts); }
+  });
+})();
 
 // ── VOICE INPUT ───────────────────────────────────────────
 const speechSupported = 'webkitSpeechRecognition' in window || 'SpeechRecognition' in window;
 if (!speechSupported) document.querySelectorAll('.voice-btn').forEach(b => b.style.display = 'none');
-
 let activeRecognition = null;
 
 function startVoice(targetId, btn) {
   if (!speechSupported) return;
   if (activeRecognition) { activeRecognition.stop(); activeRecognition = null; return; }
-
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   const rec = new SR();
   rec.lang = 'en-US'; rec.interimResults = true; rec.maxAlternatives = 1;
   activeRecognition = rec;
   btn.classList.add('recording'); btn.title = 'Click to stop';
-
   let final = '';
   rec.onresult = (e) => {
     let interim = '';
@@ -376,7 +515,7 @@ function startVoice(targetId, btn) {
   rec.onerror = (e) => {
     btn.classList.remove('recording'); btn.title = 'Voice input';
     activeRecognition = null;
-    if (e.error !== 'no-speech' && e.error !== 'aborted') alert('Voice error: ' + e.error);
+    if (e.error !== 'no-speech' && e.error !== 'aborted') showToast('error', 'Voice error: ' + e.error);
   };
   rec.start();
 }
@@ -385,13 +524,11 @@ function startVoice(targetId, btn) {
 async function articulateVision() {
   const textarea = document.getElementById('gf-vision');
   const vision   = textarea.value.trim();
-  if (vision.length < 10) { alert('Please enter a brief description first.'); return; }
-
+  if (vision.length < 10) { showToast('warn', 'Please enter a brief description first.'); return; }
   const sel   = document.getElementById('gf-stack');
   const stack = sel.value === 'other' ? (document.getElementById('gf-stack-other').value || 'other') : sel.value;
   const btn   = document.getElementById('articulate-btn');
   const status = document.getElementById('articulate-status');
-
   btn.disabled = true; btn.textContent = '⏳ Articulating…'; status.textContent = '';
   try {
     const resp = await fetch('/api/articulate/vision', {
@@ -401,8 +538,10 @@ async function articulateVision() {
     if (!resp.ok) throw new Error((await resp.json()).detail || 'Server error');
     textarea.value = (await resp.json()).vision;
     status.textContent = '✓ Done';
+    showToast('success', 'Vision articulated.');
   } catch (err) {
     status.textContent = '✗ ' + err.message;
+    showToast('error', err.message);
   } finally {
     btn.disabled = false; btn.textContent = '✦ Articulate Vision';
   }
@@ -415,17 +554,14 @@ async function suggestFeatures() {
   const vision = document.getElementById('gf-vision').value.trim();
   const sel    = document.getElementById('gf-stack');
   const stack  = sel.value === 'other' ? (document.getElementById('gf-stack-other').value || 'other') : sel.value;
-  if (vision.length < 20) { alert('Please describe the product vision first.'); return; }
-
+  if (vision.length < 20) { showToast('warn', 'Please describe the product vision first.'); return; }
   const btn    = document.getElementById('suggest-btn');
   const panel  = document.getElementById('gf-suggestions');
   const grid   = document.getElementById('suggestions-grid');
   const hint   = document.getElementById('suggestions-hint');
   const status = document.getElementById('suggest-status');
-
   btn.disabled = true; btn.textContent = '⏳ Thinking…'; status.textContent = '';
   selectedSuggestions = []; updateSuggestionsJson();
-
   try {
     const resp = await fetch('/api/recommend/features', {
       method: 'POST', headers: {'Content-Type':'application/json'},
@@ -441,10 +577,12 @@ async function suggestFeatures() {
         <span class="suggestion-tag">Click to select</span>
       </div>`).join('');
     hint.textContent = `${data.features.length} suggestions — select which to create automatically.`;
+    showToast('success', `${data.features.length} feature suggestions ready.`);
   } catch (err) {
     panel.classList.remove('hidden');
     grid.innerHTML = `<div class="notice notice-amber" style="grid-column:1/-1">${escHtml(err.message)}</div>`;
     hint.textContent = '';
+    showToast('error', err.message);
   } finally {
     btn.disabled = false; btn.textContent = '✨ Suggest features';
   }
@@ -478,6 +616,16 @@ function escHtml(s) {
 function escAttr(s) {
   return "'" + String(s).replace(/'/g, "\\'") + "'";
 }
+
+// Handle ?filter= query param (from nav live pill link)
+(function() {
+  const params = new URLSearchParams(window.location.search);
+  const f = params.get('filter');
+  if (f) {
+    const chip = document.querySelector(`.filter-chip[data-filter="${f}"]`);
+    setFilter(f, chip);
+  }
+})();
 </script>
 
 {% endblock %}

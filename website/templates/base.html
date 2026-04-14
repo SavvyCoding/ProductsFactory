@@ -15,12 +15,17 @@
     <a href="/" class="{{ 'nav-active' if request.url.path == '/' else '' }}">Products</a>
     <a href="/admin" class="{{ 'nav-active' if request.url.path.startswith('/admin') else '' }}">Admin</a>
     {% if alert_count %}
-    <a href="/api/alerts/unread" class="nav-alerts">
-      ⚠ Alerts <span class="alert-badge">{{ alert_count }}</span>
+    <a href="/api/alerts/unread" class="nav-alerts" title="Unread alerts">
+      🔔 <span class="alert-badge">{{ alert_count }}</span>
     </a>
     {% endif %}
     <div class="nav-spacer"></div>
-    <button class="dark-toggle" onclick="toggleDark()" id="dark-btn" title="Toggle dark mode">🌙</button>
+    <a href="/?filter=running" class="nav-live-pill" id="nav-live" title="Running products">
+      <span class="nav-live-dot" id="nav-live-dot"></span>
+      <span id="nav-live-text">Idle</span>
+    </a>
+    <button class="dark-toggle" onclick="toggleDark()" id="dark-btn"
+            title="Toggle dark mode" aria-label="Toggle dark mode">🌙</button>
     {% if current_pm %}
     <div class="nav-user">
       <div class="nav-avatar">{{ current_pm[0].upper() }}</div>
@@ -36,7 +41,12 @@
   <main class="page">
     {% block content %}{% endblock %}
   </main>
+
+  <!-- ── TOAST CONTAINER ──────────────────────────────────── -->
+  <div id="toast-container" aria-live="polite" aria-atomic="false"></div>
+
 <script>
+// ── THEME ────────────────────────────────────────────────
 (function() {
   const saved = localStorage.getItem('pf-theme') || 'light';
   if (saved === 'dark') document.getElementById('html-root').setAttribute('data-theme', 'dark');
@@ -48,10 +58,62 @@ function toggleDark() {
   localStorage.setItem('pf-theme', isDark ? 'light' : 'dark');
   document.getElementById('dark-btn').textContent = isDark ? '🌙' : '☀️';
 }
-// Set initial icon
 (function() {
   const saved = localStorage.getItem('pf-theme') || 'light';
   if (saved === 'dark') document.getElementById('dark-btn').textContent = '☀️';
+})();
+
+// ── TOAST SYSTEM ─────────────────────────────────────────
+function showToast(type, message, duration) {
+  duration = duration || 4000;
+  const container = document.getElementById('toast-container');
+  const toast = document.createElement('div');
+  toast.className = 'toast toast-' + type;
+  toast.innerHTML = `
+    <span class="toast-msg">${escHtmlGlobal(message)}</span>
+    <div class="toast-bar"></div>
+    <button class="toast-close" onclick="this.parentElement.remove()" aria-label="Dismiss">✕</button>
+  `;
+  container.appendChild(toast);
+  // Trigger animation
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => toast.classList.add('toast-in'));
+  });
+  const bar = toast.querySelector('.toast-bar');
+  bar.style.transition = `width ${duration}ms linear`;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => { bar.style.width = '0%'; });
+  });
+  const timer = setTimeout(() => {
+    toast.classList.remove('toast-in');
+    toast.addEventListener('transitionend', () => toast.remove(), { once: true });
+  }, duration);
+  toast.querySelector('.toast-close').addEventListener('click', () => clearTimeout(timer));
+}
+
+function escHtmlGlobal(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── LIVE NAV INDICATOR ───────────────────────────────────
+(function pollRunning() {
+  async function update() {
+    try {
+      const r = await fetch('/api/products/running-count');
+      const { count } = await r.json();
+      const dot  = document.getElementById('nav-live-dot');
+      const text = document.getElementById('nav-live-text');
+      if (count > 0) {
+        dot.classList.add('active');
+        text.textContent = count + ' Running';
+      } else {
+        dot.classList.remove('active');
+        text.textContent = 'Idle';
+      }
+    } catch(e) { /* silent */ }
+  }
+  update();
+  setInterval(update, 30000);
 })();
 </script>
 </body>

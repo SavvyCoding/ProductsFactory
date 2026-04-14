@@ -49,7 +49,7 @@ GET {PM_API_URL}/api/features/approved?product_id={PRODUCT_ID}
 ```
 
 - Sort results by `priority ASC`, then by `depends_on` (dependencies first)
-- Take max **{MAX_BATCH_SIZE}** features
+- Take max **{MAX_BATCH_SIZE}** feature(s) — never exceed this
 - Write `Temp/batch_{date}_plan.md` — one paragraph per feature: what, why, approach
 - Initialise `progress.md`:
 
@@ -149,10 +149,10 @@ gh pr create --title "feat: {description}" --base main
 
 On success:
 ```
-PATCH {PM_API_URL}/api/features/{id}  {"status": "Pushed", "pr_url": "...", "pr_number": ...}
+PATCH {PM_API_URL}/api/features/{id}  {"status": "Reviewing", "pr_url": "...", "pr_number": ...}
 ```
 
-On main branch: update `features.md` — mark feature as ✅ Pushed. Commit + push.
+On main branch: update `features.md` — mark feature as 🔍 Reviewing. Commit + push.
 
 Append **Session State Summary** to `progress.md`:
 > Key decisions made, patterns introduced, anything the next session must know about this feature.

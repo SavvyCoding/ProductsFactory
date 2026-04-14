@@ -2,114 +2,271 @@
 {% block title %}Admin — ProductFactory{% endblock %}
 {% block content %}
 
-<div class="page-header">
+<div class="page-header" style="margin-bottom:0">
   <h1>Admin</h1>
 </div>
 
 {% if saved %}
-<div class="notice notice-blue" style="margin-bottom:20px">✓ Settings saved.</div>
+<div class="notice notice-blue admin-notice">✓ Settings saved.</div>
 {% endif %}
 
-<div class="admin-grid">
+<!-- ── TAB BAR ──────────────────────────────────────────────── -->
+<div class="admin-tabs-wrap">
+  <div class="tab-bar admin-tab-bar">
+    <button class="tab-btn active" onclick="adminTab('system',this)">⚙ System</button>
+    <button class="tab-btn"        onclick="adminTab('notif',this)">🔔 Notifications</button>
+    <button class="tab-btn"        onclick="adminTab('poller',this)">🤖 Poller &amp; Agent</button>
+    <button class="tab-btn"        onclick="adminTab('pms',this)">👤 PM Accounts</button>
+  </div>
+</div>
 
-  <!-- ── SYSTEM CONFIGURATION ─────────────────────────────── -->
-  <div class="settings-card">
+<!-- ── TAB: SYSTEM ──────────────────────────────────────────── -->
+<div id="atab-system" class="admin-tab-panel">
+  <div class="settings-card admin-card-wide">
     <div class="settings-card-title">
       <span class="title-icon icon-config">⚙</span>
       System Configuration
     </div>
     <form method="post" action="/admin/settings">
+      <div class="admin-fields-grid">
 
-      <div class="form-group">
-        <label for="a-root">Products root directory</label>
-        <input type="text" id="a-root" name="products_root_dir"
-               value="{{ config.products_root_dir or '' }}"
-               placeholder="C:/Users/digvi/Products" required autocomplete="off">
-        <p class="field-hint">All greenfield products are created as sub-folders here. Must be writable by ProductFactory.</p>
-      </div>
-
-      <div class="form-group">
-        <label for="a-org">GitHub organisation</label>
-        <input type="text" id="a-org" name="github_org"
-               value="{{ config.github_org or '' }}"
-               placeholder="my-org" autocomplete="off">
-        <p class="field-hint">Repos are created as <code>{org}/{repo-name}</code>. Use your GitHub username for personal accounts.</p>
-      </div>
-
-      <div class="form-group">
-        <label for="a-pat">GitHub Personal Access Token</label>
-        <div class="pat-field">
-          <input type="password" id="a-pat" name="github_pat"
-                 value="{{ config.github_pat or '' }}"
-                 placeholder="ghp_…" autocomplete="new-password">
-          <button type="button" class="btn btn-sm btn-outline" onclick="togglePat()">Show</button>
+        <div class="form-group">
+          <label for="a-root">Products root directory</label>
+          <input type="text" id="a-root" name="products_root_dir"
+                 value="{{ config.products_root_dir or '' }}"
+                 placeholder="C:/Users/you/Products" required autocomplete="off">
+          <p class="field-hint">Greenfield products are created as sub-folders here. Must be writable by ProductFactory.</p>
         </div>
-        <p class="field-hint">
-          Required scopes: <code>repo</code> · <code>admin:public_key</code><br>
-          Used to create repos, upload deploy keys, and authenticate <code>gh</code> CLI inside agent containers.
-        </p>
-      </div>
 
-      <div class="form-group">
-        <label for="a-key">Deploy key label</label>
-        <input type="text" id="a-key" name="github_ssh_key_name"
-               value="{{ config.github_ssh_key_name or 'productfactory-deploy' }}"
-               placeholder="productfactory-deploy">
-        <p class="field-hint">Label shown on GitHub under repo Settings → Deploy keys.</p>
-      </div>
+        <div class="form-group">
+          <label for="a-org">GitHub organisation</label>
+          <input type="text" id="a-org" name="github_org"
+                 value="{{ config.github_org or '' }}"
+                 placeholder="my-org" autocomplete="off">
+          <p class="field-hint">Repos created as <code>{org}/{repo}</code>. Use your GitHub username for personal accounts.</p>
+        </div>
 
-      <div style="margin-top:4px">
+        <div class="form-group">
+          <label for="a-pat">GitHub Personal Access Token</label>
+          <div class="pat-field">
+            <input type="password" id="a-pat" name="github_pat"
+                   value="{{ config.github_pat or '' }}"
+                   placeholder="ghp_…" autocomplete="new-password">
+            <button type="button" class="btn btn-sm btn-outline" onclick="toggleField('a-pat',this)">Show</button>
+          </div>
+          <p class="field-hint">Required scopes: <code>repo</code> · <code>admin:public_key</code></p>
+        </div>
+
+        <div class="form-group">
+          <label for="a-key">Deploy key label</label>
+          <input type="text" id="a-key" name="github_ssh_key_name"
+                 value="{{ config.github_ssh_key_name or 'productfactory-deploy' }}"
+                 placeholder="productfactory-deploy">
+          <p class="field-hint">Label shown on GitHub under repo Settings → Deploy keys.</p>
+        </div>
+
+      </div>
+      <div class="form-actions">
         <button type="submit">Save configuration</button>
       </div>
     </form>
   </div>
+</div>
 
-  <!-- ── NOTIFICATIONS ────────────────────────────────────── -->
-  <div class="settings-card">
+<!-- ── TAB: NOTIFICATIONS ───────────────────────────────────── -->
+<div id="atab-notif" class="admin-tab-panel hidden">
+  <div class="settings-card admin-card-wide">
     <div class="settings-card-title">
       <span class="title-icon" style="background:var(--amber-lt)">🔔</span>
-      Notifications & Webhooks
+      Notifications &amp; Webhooks
     </div>
     <form method="post" action="/admin/settings/notifications">
+      <div class="admin-fields-grid">
 
-      <div class="form-group">
-        <label for="a-slack">Slack Webhook URL</label>
-        <input type="url" id="a-slack" name="slack_webhook_url"
-               value="{{ config.slack_webhook_url or '' }}"
-               placeholder="https://hooks.slack.com/services/…" autocomplete="off">
-        <p class="field-hint">Alerts (session failures, PR gates, auth issues) are posted here. Works with any Slack-compatible webhook (Teams, Discord).</p>
-      </div>
-
-      <div class="form-group">
-        <label for="a-wh-secret">GitHub Webhook Secret</label>
-        <div class="pat-field">
-          <input type="password" id="a-wh-secret" name="github_webhook_secret"
-                 value="{{ config.github_webhook_secret or '' }}"
-                 placeholder="secret string" autocomplete="new-password">
-          <button type="button" class="btn btn-sm btn-outline" onclick="toggleWhSecret()">Show</button>
+        <div class="form-group">
+          <label for="a-slack">Slack Webhook URL</label>
+          <input type="url" id="a-slack" name="slack_webhook_url"
+                 value="{{ config.slack_webhook_url or '' }}"
+                 placeholder="https://hooks.slack.com/services/…" autocomplete="off">
+          <p class="field-hint">Alerts posted here. Works with any Slack-compatible webhook (Teams, Discord).</p>
         </div>
-        <p class="field-hint">
-          Set the same secret in GitHub repo → Settings → Webhooks.<br>
-          Payload URL: <code>{{ request.url.scheme }}://{{ request.url.netloc }}/api/webhooks/github</code> · Event: <code>pull_request</code>
-        </p>
-      </div>
 
-      <div class="form-group">
-        <label for="a-cap">Global max sessions per day</label>
-        <input type="number" id="a-cap" name="max_sessions_per_day"
-               value="{{ config.max_sessions_per_day or '' }}"
-               placeholder="unlimited" min="1" style="width:140px">
-        <p class="field-hint">Hard cap across all products. Per-product caps can be set on each product's Settings tab.</p>
-      </div>
+        <div class="form-group">
+          <label for="a-wh-secret">GitHub Webhook Secret</label>
+          <div class="pat-field">
+            <input type="password" id="a-wh-secret" name="github_webhook_secret"
+                   value="{{ config.github_webhook_secret or '' }}"
+                   placeholder="secret string" autocomplete="new-password">
+            <button type="button" class="btn btn-sm btn-outline" onclick="toggleField('a-wh-secret',this)">Show</button>
+          </div>
+          <p class="field-hint">
+            Payload URL: <code>{{ request.url.scheme }}://{{ request.url.netloc }}/api/webhooks/github</code> · Event: <code>pull_request</code>
+          </p>
+        </div>
 
-      <div style="margin-top:4px">
+        <div class="form-group">
+          <label for="a-cap">Global max sessions per day</label>
+          <input type="number" id="a-cap" name="max_sessions_per_day"
+                 value="{{ config.max_sessions_per_day or '' }}"
+                 placeholder="unlimited" min="1" style="width:140px">
+          <p class="field-hint">Hard cap across all products. Per-product caps set on each product's Settings tab.</p>
+        </div>
+
+      </div>
+      <div class="form-actions">
         <button type="submit">Save notifications</button>
       </div>
     </form>
   </div>
+</div>
 
-  <!-- ── PM ACCOUNTS ───────────────────────────────────────── -->
-  <div class="settings-card">
+<!-- ── TAB: POLLER & AGENT ──────────────────────────────────── -->
+<div id="atab-poller" class="admin-tab-panel hidden">
+  <div class="settings-card admin-card-wide">
+    <div class="settings-card-title">
+      <span class="title-icon" style="background:var(--green-lt)">🤖</span>
+      Poller &amp; Agent Settings
+      <span style="margin-left:8px;font-weight:400;font-size:12px;color:var(--slate)">Blank = use env var / built-in default</span>
+    </div>
+    <form method="post" action="/admin/settings/poller">
+
+      <p class="admin-section-label">Poller</p>
+      <div class="admin-fields-grid">
+
+        <div class="form-group">
+          <label for="p-poll">Poll interval <span class="field-unit">seconds</span></label>
+          <input type="number" id="p-poll" name="poll_interval"
+                 value="{{ config.poll_interval }}" placeholder="60" min="10" class="field-narrow">
+          <p class="field-hint">How often the poller wakes up to check for work.</p>
+        </div>
+
+        <div class="form-group">
+          <label for="p-sess-to">Session timeout <span class="field-unit">minutes</span></label>
+          <input type="number" id="p-sess-to" name="session_timeout_minutes"
+                 value="{{ config.session_timeout_minutes }}" placeholder="90" min="5" class="field-narrow">
+          <p class="field-hint">Kill agent Docker container after this long.</p>
+        </div>
+
+        <div class="form-group">
+          <label for="p-stale">Stale threshold <span class="field-unit">minutes</span></label>
+          <input type="number" id="p-stale" name="stale_threshold_minutes"
+                 value="{{ config.stale_threshold_minutes }}" placeholder="45" min="5" class="field-narrow">
+          <p class="field-hint">Alert if progress.md not pushed within this window.</p>
+        </div>
+
+        <div class="form-group">
+          <label for="p-auth-to">Auth check timeout <span class="field-unit">seconds</span></label>
+          <input type="number" id="p-auth-to" name="auth_check_timeout"
+                 value="{{ config.auth_check_timeout }}" placeholder="30" min="5" class="field-narrow">
+          <p class="field-hint">Timeout for <code>claude -p ping</code> probe.</p>
+        </div>
+
+        <div class="form-group">
+          <label for="p-max-prs">Max open PRs</label>
+          <input type="number" id="p-max-prs" name="max_open_prs"
+                 value="{{ config.max_open_prs }}" placeholder="3" min="1" class="field-narrow">
+          <p class="field-hint">Pause coder when this many PRs are open.</p>
+        </div>
+
+        <div class="form-group">
+          <label for="p-pr-sleep">PR gate sleep <span class="field-unit">seconds</span></label>
+          <input type="number" id="p-pr-sleep" name="pr_gate_sleep"
+                 value="{{ config.pr_gate_sleep }}" placeholder="300" min="30" class="field-narrow">
+          <p class="field-hint">Wait time when PR gate is triggered.</p>
+        </div>
+
+        <div class="form-group">
+          <label for="p-stuck">Stuck feature timeout <span class="field-unit">hours</span></label>
+          <input type="number" id="p-stuck" name="stuck_feature_timeout_hours"
+                 value="{{ config.stuck_feature_timeout_hours }}" placeholder="2" min="1" class="field-narrow">
+          <p class="field-hint">Reset in-flight features after this many hours.</p>
+        </div>
+
+        <div class="form-group">
+          <label for="p-max-feat">Max features per run</label>
+          <input type="number" id="p-max-feat" name="max_features_per_run"
+                 value="{{ config.max_features_per_run }}" placeholder="1" min="1" class="field-narrow">
+          <p class="field-hint">Default per session (per-product override available).</p>
+        </div>
+
+        <div class="form-group">
+          <label for="p-bf-thresh">Brownfield threshold <span class="field-unit">files</span></label>
+          <input type="number" id="p-bf-thresh" name="brownfield_file_threshold"
+                 value="{{ config.brownfield_file_threshold }}" placeholder="10" min="1" class="field-narrow">
+          <p class="field-hint">Source file count above which → auto-detected brownfield.</p>
+        </div>
+
+      </div>
+
+      <p class="admin-section-label" style="margin-top:24px">Agent / Ollama</p>
+      <div class="admin-fields-grid">
+
+        <div class="form-group">
+          <label for="p-backend">Agent backend</label>
+          <select id="p-backend" name="agent_backend" style="width:180px">
+            <option value="claude" {% if config.agent_backend == 'claude' or not config.agent_backend %}selected{% endif %}>claude (default)</option>
+            <option value="ollama" {% if config.agent_backend == 'ollama' %}selected{% endif %}>ollama (local)</option>
+          </select>
+          <p class="field-hint">Claude CLI or local Ollama for agent sessions.</p>
+        </div>
+
+        <div class="form-group">
+          <label for="p-ollama-host">Ollama host</label>
+          <input type="text" id="p-ollama-host" name="ollama_host"
+                 value="{{ config.ollama_host or '' }}"
+                 placeholder="http://host.docker.internal:11434" autocomplete="off">
+          <p class="field-hint">Ollama API base URL (inside Docker containers).</p>
+        </div>
+
+        <div class="form-group">
+          <label for="p-designer">Designer model</label>
+          <input type="text" id="p-designer" name="designer_model"
+                 value="{{ config.designer_model or '' }}"
+                 placeholder="gemma3:27b" autocomplete="off">
+          <p class="field-hint">Ollama model for Designer / Reviewer / Planner.</p>
+        </div>
+
+        <div class="form-group">
+          <label for="p-coder">Coder model</label>
+          <input type="text" id="p-coder" name="coder_model"
+                 value="{{ config.coder_model or '' }}"
+                 placeholder="qwen3-coder:30b" autocomplete="off">
+          <p class="field-hint">Ollama model for Coder persona.</p>
+        </div>
+
+        <div class="form-group">
+          <label for="p-ollama-to">Ollama timeout <span class="field-unit">seconds</span></label>
+          <input type="number" id="p-ollama-to" name="ollama_timeout"
+                 value="{{ config.ollama_timeout }}" placeholder="300" min="30" class="field-narrow">
+          <p class="field-hint">Timeout for model inference calls.</p>
+        </div>
+
+        <div class="form-group">
+          <label for="p-bash-to">Bash timeout <span class="field-unit">seconds</span></label>
+          <input type="number" id="p-bash-to" name="bash_timeout"
+                 value="{{ config.bash_timeout }}" placeholder="180" min="10" class="field-narrow">
+          <p class="field-hint">Timeout for shell commands in Ollama agent.</p>
+        </div>
+
+        <div class="form-group">
+          <label for="p-max-turns">Max turns</label>
+          <input type="number" id="p-max-turns" name="max_turns"
+                 value="{{ config.max_turns }}" placeholder="80" min="5" class="field-narrow">
+          <p class="field-hint">Hard cap on agentic turns per Ollama session.</p>
+        </div>
+
+      </div>
+
+      <div class="form-actions">
+        <button type="submit">Save poller &amp; agent settings</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ── TAB: PM ACCOUNTS ─────────────────────────────────────── -->
+<div id="atab-pms" class="admin-tab-panel hidden">
+  <div class="settings-card admin-card-wide">
     <div class="settings-card-title">
       <span class="title-icon icon-pm">👤</span>
       PM Accounts
@@ -118,20 +275,13 @@
     {% if pms %}
     <table class="pm-table">
       <thead>
-        <tr>
-          <th>Name</th>
-          <th>Username</th>
-          <th>Added</th>
-          <th></th>
-        </tr>
+        <tr><th>Name</th><th>Username</th><th>Added</th><th></th></tr>
       </thead>
       <tbody>
         {% for pm in pms %}
         <tr>
           <td>{{ pm.name }}</td>
-          <td>
-            <code style="font-size:12px">{{ pm.username }}</code>
-          </td>
+          <td><code style="font-size:12px">{{ pm.username }}</code></td>
           <td class="muted">{{ pm.created_at.strftime('%Y-%m-%d') }}</td>
           <td>
             <form method="post" action="/admin/pms/{{ pm.id }}/delete" style="display:inline">
@@ -146,9 +296,7 @@
       </tbody>
     </table>
     {% else %}
-    <p class="muted" style="margin-bottom:18px">
-      No PM accounts yet. Add accounts below — each PM gets their own login with attributed activity.
-    </p>
+    <p class="muted" style="margin-bottom:18px">No PM accounts yet — add one below.</p>
     {% endif %}
 
     <details class="add-pm-details">
@@ -169,7 +317,7 @@
           <div class="pat-field">
             <input type="password" id="pm-pass" name="password"
                    placeholder="••••••••" required autocomplete="new-password" minlength="8">
-            <button type="button" class="btn btn-sm btn-outline" onclick="togglePmPass()">Show</button>
+            <button type="button" class="btn btn-sm btn-outline" onclick="toggleField('pm-pass',this)">Show</button>
           </div>
           <p class="field-hint">Minimum 8 characters.</p>
         </div>
@@ -177,27 +325,41 @@
       </form>
     </details>
   </div>
-
 </div>
 
 <script>
-function togglePat() {
-  const inp = document.getElementById('a-pat');
-  const btn = inp.nextElementSibling;
-  inp.type = inp.type === 'password' ? 'text' : 'password';
-  btn.textContent = inp.type === 'password' ? 'Show' : 'Hide';
+// ── TABS ─────────────────────────────────────────────────────
+const ADMIN_TABS = ['system','notif','poller','pms'];
+
+function adminTab(name, btn) {
+  ADMIN_TABS.forEach(t => {
+    document.getElementById('atab-' + t).classList.add('hidden');
+  });
+  document.querySelectorAll('.admin-tab-bar .tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('atab-' + name).classList.remove('hidden');
+  btn.classList.add('active');
+  localStorage.setItem('pf-admin-tab', name);
 }
 
-function togglePmPass() {
-  const inp = document.getElementById('pm-pass');
-  const btn = inp.nextElementSibling;
-  inp.type = inp.type === 'password' ? 'text' : 'password';
-  btn.textContent = inp.type === 'password' ? 'Show' : 'Hide';
-}
+// Restore last tab or auto-open the saved one
+(function() {
+  {% if saved %}
+  const saved_tab = document.referrer.includes('poller') ? 'poller'
+                  : document.referrer.includes('notifications') ? 'notif'
+                  : 'system';
+  {% else %}
+  const saved_tab = localStorage.getItem('pf-admin-tab') || 'system';
+  {% endif %}
+  const idx = ADMIN_TABS.indexOf(saved_tab);
+  if (idx >= 0) {
+    const btns = document.querySelectorAll('.admin-tab-bar .tab-btn');
+    adminTab(saved_tab, btns[idx]);
+  }
+})();
 
-function toggleWhSecret() {
-  const inp = document.getElementById('a-wh-secret');
-  const btn = inp.nextElementSibling;
+// ── PASSWORD TOGGLES ─────────────────────────────────────────
+function toggleField(id, btn) {
+  const inp = document.getElementById(id);
   inp.type = inp.type === 'password' ? 'text' : 'password';
   btn.textContent = inp.type === 'password' ? 'Show' : 'Hide';
 }
