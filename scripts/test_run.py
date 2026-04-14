@@ -54,13 +54,36 @@ sys.path.insert(0, str(REPO_ROOT))
 from orchestrator.prompts import build_prompt
 
 
+# ── Load .env (if present) ────────────────────────────────────────────────────
+_env_file = REPO_ROOT / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip())
+
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
 PM_API_URL     = os.environ.get("PM_API_URL",     "http://localhost:8080")
-OLLAMA_HOST    = os.environ.get("OLLAMA_HOST",    "http://localhost:11434")
+# For local runs, resolve Ollama to localhost:
+# - replace Docker-internal hostname with localhost
+# - fall back to localhost if value is missing or lacks http scheme
+_ollama_raw = os.environ.get("OLLAMA_HOST", "")
+if not _ollama_raw or not _ollama_raw.startswith("http"):
+    OLLAMA_HOST = "http://localhost:11434"
+elif "host.docker.internal" in _ollama_raw:
+    OLLAMA_HOST = _ollama_raw.replace("host.docker.internal", "localhost")
+else:
+    OLLAMA_HOST = _ollama_raw
 DESIGNER_MODEL = os.environ.get("DESIGNER_MODEL", "gemma3:27b")
 CODER_MODEL    = os.environ.get("CODER_MODEL",    "qwen3-coder:30b")
 MAX_TURNS      = os.environ.get("MAX_TURNS",      "80")
+
+# Ensure build_prompt() (which reads os.environ directly) sees the right values
+os.environ["PM_API_URL"]           = PM_API_URL
+os.environ["PM_API_URL_CONTAINER"] = PM_API_URL  # local run: same as host URL
+os.environ["OLLAMA_HOST"]          = OLLAMA_HOST
 
 # The agent script to invoke (no Docker — runs on host Python directly)
 AGENT_SCRIPT   = REPO_ROOT / "orchestrator" / "ollama_agent.py"
@@ -75,7 +98,10 @@ def parse_args():
     p.add_argument("--working-dir", required=True, help="Absolute path to the product working directory")
     p.add_argument("--feature",     help="Feature name to create (optional — omit to use existing Approved/Designed features)")
     p.add_argument("--desc",        default="", help="Feature description (used when --feature is given)")
-    p.add_argument("--persona",     default="coder", choices=["coder", "designer", "reviewer"],
+    p.add_argument("--persona",     default="coder",
+                   choices=["coder", "designer", "reviewer", "recommender",
+                            "qa_tester", "security_auditor", "documenter",
+                            "analytics", "refactorer", "devops", "planner"],
                    help="Agent persona to run (default: coder)")
     p.add_argument("--allow-push",  action="store_true",
                    help="Allow real git push and gh pr commands (default: intercepted/faked)")
