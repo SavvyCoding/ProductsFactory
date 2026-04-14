@@ -101,6 +101,49 @@ def _get_gh_token() -> str | None:
         return None
 
 
+def _reset_workspace(working_dir: str, product_name: str) -> None:
+    """
+    Reset the product workspace to a clean state before each session:
+    1. Checkout main (abandon any half-baked feature branch)
+    2. Pull latest from origin/main
+    3. Delete stale local feature branches
+    4. Remove untracked files left by previous sessions
+    """
+    wd = Path(working_dir)
+    if not (wd / ".git").exists():
+        return  # Not a git repo yet — skip
+
+    def _run(cmd: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(cmd, cwd=str(wd), capture_output=True, text=True)
+
+    # 1. Switch to main (or master)
+    for branch in ("main", "master"):
+        r = _run(["git", "checkout", branch])
+        if r.returncode == 0:
+            break
+    else:
+        log.warning(f"[{product_name}] Could not checkout main/master — workspace reset skipped")
+        return
+
+    # 2. Pull latest (soft fail — repo may not have a remote yet)
+    r = _run(["git", "pull", "--ff-only", "origin", "main"])
+    if r.returncode != 0:
+        _run(["git", "pull", "--ff-only", "origin", "master"])
+
+    # 3. Delete stale local feature branches (not main/master)
+    r = _run(["git", "branch"])
+    for line in r.stdout.splitlines():
+        branch = line.strip().lstrip("* ")
+        if branch and branch not in ("main", "master"):
+            _run(["git", "branch", "-D", branch])
+            log.info(f"[{product_name}] Deleted stale branch: {branch}")
+
+    # 4. Remove untracked files/dirs (junk left by previous sessions)
+    _run(["git", "clean", "-fd", "--exclude=output/", "--exclude=Results/"])
+
+    log.info(f"[{product_name}] Workspace reset to clean main")
+
+
 def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     """
     Launches the agent container. Blocks until container exits.
@@ -109,6 +152,10 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     """
     session_uid = str(uuid.uuid4())[:8]
     working_dir = product["working_dir"]
+
+    # Always reset workspace to clean main before starting a new session.
+    # This discards any half-baked code from failed/incomplete previous sessions.
+    _reset_workspace(working_dir, product.get("name", str(working_dir)))
     # Per-product override takes precedence over global env default
     effective_max_features = product.get("max_features_per_run") or MAX_FEATURES_PER_RUN
     prompt = build_prompt(product, session_uid, persona=persona)
