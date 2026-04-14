@@ -9,7 +9,9 @@ from pydantic import BaseModel, field_validator
 
 # Valid status values — kept in sync with models.py constants
 PM_ALLOWED_TRANSITIONS: dict[str, list[str]] = {
-    # PM can make these status changes via the website
+    # PM can make these status changes via the website.
+    # Note: agent endpoints (PATCH /api/features/{id}) bypass this table entirely —
+    # agents have unrestricted status authority so they can drive the full pipeline.
     "Pending":  ["Approved", "Rejected", "Deferred"],
     "Approved": ["Pending"],
     "Blocked":  ["Approved", "Rejected"],

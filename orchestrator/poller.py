@@ -340,6 +340,8 @@ def clear_run_now(product_id: int):
 
 _LOCK_PID  = os.getpid()
 _LOCK_HOST = socket.gethostname()
+# These must stay in sync with the server's TTL logic in /api/poller/heartbeat.
+# Do NOT make them env-configurable without also updating the server endpoint.
 _HEARTBEAT_INTERVAL = 15   # seconds between heartbeat updates
 _LOCK_TTL           = 30   # seconds — stale lock threshold (must match server)
 
@@ -417,18 +419,36 @@ def _close_orphaned_sessions():
         if not orphans:
             return
         # Check which containers are actually running
-        running = subprocess.run(
-            ["docker", "ps", "--format", "{{.Names}}"],
-            capture_output=True, text=True
-        ).stdout.strip().splitlines()
-        running_set = set(running)
-        now = datetime.now(timezone.utc).isoformat()
+        try:
+            docker_result = subprocess.run(
+                ["docker", "ps", "--format", "{{.Names}}"],
+                capture_output=True, text=True, timeout=15,
+            )
+            running_set = set(docker_result.stdout.strip().splitlines())
+        except Exception as docker_err:
+            # If docker ps fails, close any orphan older than SESSION_TIMEOUT_MINUTES
+            # to avoid permanently blocking those products.
+            log.warning(f"docker ps failed during orphan check: {docker_err} — closing timed-out orphans only")
+            running_set = None
+
+        now = datetime.now(timezone.utc)
+        timeout_minutes = _cfg.get("session_timeout_minutes", 90)
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
             for s in orphans:
                 cid = s.get("container_id") or ""
-                if cid not in running_set:
+                if running_set is not None:
+                    should_close = cid not in running_set
+                else:
+                    # Fallback: close if session is older than the timeout threshold
+                    started = s.get("started_at", "")
+                    try:
+                        age_minutes = int((now - datetime.fromisoformat(started)).total_seconds() / 60)
+                        should_close = age_minutes > timeout_minutes
+                    except Exception:
+                        should_close = True  # unknown age — close it
+                if should_close:
                     client.patch(f"/api/sessions/{s['id']}", json={
-                        "ended_at":  now,
+                        "ended_at":  now.isoformat(),
                         "exit_code": 1,
                     })
                     log.info(f"Closed orphaned session {s['id']} (container={cid or 'none'}) on startup")
@@ -467,9 +487,23 @@ def main():
                 time.sleep(_cfg["poll_interval"])
                 continue
 
-            # Fetch all products for this cycle
-            with httpx.Client(base_url=PM_API_URL) as client:
-                products = client.get("/api/products").json()
+            # Fetch all products for this cycle — retry on transient PM API failures
+            products = None
+            for _attempt in range(3):
+                try:
+                    with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                        products = client.get("/api/products").json()
+                    break
+                except Exception as _fetch_err:
+                    if _attempt < 2:
+                        log.warning(f"Failed to fetch products (attempt {_attempt + 1}/3): {_fetch_err} — retrying")
+                        time.sleep(2 ** _attempt)
+                    else:
+                        log.error(f"Could not fetch products after 3 attempts: {_fetch_err} — skipping cycle")
+                        send_alert("warning", f"Poller: PM API unreachable after 3 retries: {_fetch_err}")
+            if products is None:
+                time.sleep(_cfg["poll_interval"])
+                continue
 
             # ② Scaffold greenfield_pending products
             greenfield_pending = [p for p in products if p["status"] == "greenfield_pending"]

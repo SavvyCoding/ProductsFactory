@@ -74,7 +74,7 @@ class Feature(Base):
     product_id:     Mapped[int]            = mapped_column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False)
     name:           Mapped[str]            = mapped_column(Text, nullable=False)
     description:    Mapped[Optional[str]]  = mapped_column(Text)
-    status:         Mapped[str]            = mapped_column(Text, nullable=False, default="Pending")
+    status:         Mapped[str]            = mapped_column(Text, nullable=False, default="Pending", index=True)
     priority:       Mapped[int]            = mapped_column(Integer, nullable=False, default=50)
     depends_on:     Mapped[Optional[int]]  = mapped_column(Integer, ForeignKey("features.id"))
     fix_attempts:   Mapped[int]            = mapped_column(Integer, nullable=False, default=0)

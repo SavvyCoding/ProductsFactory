@@ -78,6 +78,10 @@ templates = Jinja2Templates(directory="website/templates")
 _HOST_PRODUCTS_BASE     = os.environ.get("PRODUCTS_BASE_DIR", "").rstrip("/\\").replace("\\", "/")
 STUCK_FEATURE_HOURS     = int(os.environ.get("STUCK_FEATURE_TIMEOUT_HOURS", "2"))
 SESSION_LOG_MAXLEN      = int(os.environ.get("SESSION_LOG_MAXLEN", "1000"))
+SESSION_LOG_WARN_AT     = int(SESSION_LOG_MAXLEN * 0.9)  # warn when buffer is 90% full
+
+# Claude model used for PM-facing LLM features (feature recommendations, vision articulation)
+_RECOMMENDATION_MODEL = "claude-haiku-4-5-20251001"
 _CONTAINER_WORKSPACE = Path("/workspace")
 
 
@@ -535,6 +539,24 @@ async def admin_save_settings(
     return RedirectResponse("/admin?saved=true", status_code=303)
 
 
+# Valid (inclusive) ranges for poller numeric settings — prevents misconfiguration
+# that would tight-loop the poller or block it from ever running.
+_POLLER_INT_BOUNDS: dict[str, tuple[int, int]] = {
+    "poll_interval":               (5,   3600),
+    "session_timeout_minutes":     (5,    480),
+    "stale_threshold_minutes":     (5,    120),
+    "auth_check_timeout":          (5,    120),
+    "max_open_prs":                (1,     20),
+    "pr_gate_sleep":               (60,  3600),
+    "stuck_feature_timeout_hours": (1,     48),
+    "max_features_per_run":        (1,     10),
+    "brownfield_file_threshold":   (1,    100),
+    "ollama_timeout":              (30,  1800),
+    "bash_timeout":                (10,   600),
+    "max_turns":                   (5,    500),
+}
+
+
 @app.post("/admin/settings/poller")
 async def admin_save_poller_settings(
     request: Request,
@@ -545,10 +567,17 @@ async def admin_save_poller_settings(
 
     def _int(key: str) -> int | None:
         v = form.get(key, "").strip()
+        if not v:
+            return None
         try:
-            return int(v) if v else None
+            val = int(v)
         except ValueError:
             return None
+        bounds = _POLLER_INT_BOUNDS.get(key)
+        if bounds:
+            lo, hi = bounds
+            val = max(lo, min(hi, val))
+        return val
 
     def _str(key: str) -> str | None:
         v = form.get(key, "").strip()
@@ -1001,7 +1030,7 @@ async def recommend_features(
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
         message = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=_RECOMMENDATION_MODEL,
             max_tokens=900,
             messages=[{
                 "role": "user",
@@ -1045,7 +1074,7 @@ async def articulate_vision(
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
         message = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=_RECOMMENDATION_MODEL,
             max_tokens=600,
             messages=[{
                 "role": "user",
@@ -1200,8 +1229,14 @@ async def api_append_session_log(product_id: int, request: Request):
     """Called by poller to push agent stdout lines. No auth — internal network only."""
     body = await request.json()
     lines: list[str] = body.get("lines", [])
+    buf = _session_logs[product_id]
+    if lines and len(buf) >= SESSION_LOG_WARN_AT:
+        log.warning(
+            f"Session log buffer near capacity for product {product_id} "
+            f"({len(buf)}/{SESSION_LOG_MAXLEN}) — oldest lines will be dropped"
+        )
     for line in lines:
-        _session_logs[product_id].append(line)
+        buf.append(line)
         for q in list(_session_subscribers[product_id]):
             await q.put(line)
     return {"ok": True}
@@ -1501,6 +1536,11 @@ async def github_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(sig_header, expected):
             raise HTTPException(401, "Invalid webhook signature")
+    else:
+        log.warning(
+            "GitHub webhook received without signature validation — "
+            "configure github_webhook_secret in Admin → Notifications for security"
+        )
 
     event = request.headers.get("X-GitHub-Event", "")
     if event != "pull_request":

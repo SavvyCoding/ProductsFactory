@@ -5,6 +5,7 @@ Failures are logged; never raise to caller.
 """
 
 import os
+import time
 import logging
 import httpx
 
@@ -14,6 +15,9 @@ ALERT_WEBHOOK_URL    = os.environ.get("ALERT_WEBHOOK_URL", "")
 PM_API_URL           = os.environ.get("PM_API_URL", "")
 WEBHOOK_FAIL_COUNTER = 0
 WEBHOOK_FAIL_MAX     = 3
+# After this many seconds the suppression resets and delivery is retried once
+WEBHOOK_FAIL_RESET_INTERVAL = 900  # 15 minutes
+_webhook_suppressed_since: float = 0.0
 
 _cached_webhook_url: str | None = None
 
@@ -62,8 +66,13 @@ def send_alert(level: str, message: str, product_name: str = ""):
         return
 
     if WEBHOOK_FAIL_COUNTER >= WEBHOOK_FAIL_MAX:
-        log.warning("Webhook failing repeatedly — suppressing delivery")
-        return
+        # Auto-reset after cooldown so delivery is retried once the webhook recovers
+        if time.time() - _webhook_suppressed_since >= WEBHOOK_FAIL_RESET_INTERVAL:
+            log.info("Webhook suppression cooldown expired — retrying delivery")
+            WEBHOOK_FAIL_COUNTER = 0
+        else:
+            log.warning("Webhook failing repeatedly — suppressing delivery until cooldown expires")
+            return
 
     try:
         resp = httpx.post(
@@ -73,9 +82,13 @@ def send_alert(level: str, message: str, product_name: str = ""):
         )
         if resp.status_code not in (200, 201, 202, 204):
             WEBHOOK_FAIL_COUNTER += 1
+            if WEBHOOK_FAIL_COUNTER == 1:
+                _webhook_suppressed_since = time.time()
             log.warning(f"Webhook delivery failed ({resp.status_code}) — fail count: {WEBHOOK_FAIL_COUNTER}")
         else:
             WEBHOOK_FAIL_COUNTER = 0
     except Exception as e:
         WEBHOOK_FAIL_COUNTER += 1
+        if WEBHOOK_FAIL_COUNTER == 1:
+            _webhook_suppressed_since = time.time()
         log.warning(f"Webhook exception: {e} — fail count: {WEBHOOK_FAIL_COUNTER}")

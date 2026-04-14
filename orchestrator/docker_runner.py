@@ -435,8 +435,14 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         finally:
             log_thread.join(timeout=10)
 
+    except FileNotFoundError:
+        log.error("'docker' not found in PATH — is Docker installed and on PATH?")
+        exit_code = 1
+    except PermissionError as e:
+        log.error(f"Permission denied running docker: {e}")
+        exit_code = 1
     except Exception as e:
-        log.exception(f"docker run failed: {e}")
+        log.exception(f"docker run failed unexpectedly: {e}")
         exit_code = 1
     finally:
         # Clean up temp credentials copy if we created one

@@ -32,7 +32,7 @@ def check_stale_sessions(products: list[dict]):
         last_push = _get_progress_last_push(product)
         if last_push is None:
             continue
-        age_minutes = (datetime.now(timezone.utc) - last_push).seconds // 60
+        age_minutes = int((datetime.now(timezone.utc) - last_push).total_seconds() / 60)
         if age_minutes > STALE_THRESHOLD_MIN:
             log.warning(f"Stale session detected: {product['name']} — progress.md not pushed in {age_minutes}m")
             send_alert("error", f"{product['name']}: session stale ({age_minutes}m since last heartbeat) — killing and relaunching")

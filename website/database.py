@@ -24,7 +24,13 @@ def _make_async_url(raw: str) -> str:
 _raw_url = os.environ.get("DATABASE_URL", "")
 DATABASE_URL = _make_async_url(_raw_url) if _raw_url else ""
 
-engine = create_async_engine(DATABASE_URL, pool_pre_ping=True, echo=False) if DATABASE_URL else None
+engine = create_async_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=20,
+    echo=False,
+) if DATABASE_URL else None
 
 AsyncSessionLocal = async_sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False
