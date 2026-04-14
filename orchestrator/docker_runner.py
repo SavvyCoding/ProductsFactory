@@ -231,18 +231,43 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 # Copy contents into the temp dir
                 shutil.copytree(str(src_path), _tmp_claude_dir, dirs_exist_ok=True)
                 log.info(f"Copied Claude credentials from {creds_src} to {_tmp_claude_dir}")
+                # Ensure settings.json has the permissions + model we want
+                import json as _json
+                settings_path = Path(_tmp_claude_dir) / "settings.json"
+                try:
+                    settings = _json.loads(settings_path.read_text()) if settings_path.exists() else {}
+                    settings["skipDangerousModePermissionPrompt"] = True
+                    settings["model"] = claude_model
+                    settings_path.write_text(_json.dumps(settings, indent=2))
+                except Exception as se:
+                    log.warning(f"Could not patch settings.json: {se}")
             else:
                 log.warning(f"Claude credentials dir not found: {creds_src} — container may fail auth")
         except Exception as e:
             log.warning(f"Could not copy Claude credentials: {e} — falling back to direct mount")
             _tmp_claude_dir = None
 
-        if _tmp_claude_dir:
-            claude_mount = ["-v", f"{_tmp_claude_dir}:/root/.claude:ro"]
-        else:
-            claude_mount = ["-v", f"{creds_src}:/root/.claude:ro"]
+        mount_dir = _tmp_claude_dir or creds_src
+        claude_mount = ["-v", f"{mount_dir}:/root/.claude:ro"]
 
-        agent_cmd = ["claude", "--dangerously-skip-permissions", "-p", prompt]
+        # Also mount .claude.json (sits alongside the .claude/ dir in the home dir)
+        creds_parent = str(Path(creds_src).parent)
+        claude_json_src = str(Path(creds_parent) / ".claude.json")
+        if Path(claude_json_src).exists():
+            claude_mount += ["-v", f"{claude_json_src}:/root/.claude.json:ro"]
+        else:
+            # Try to restore from backup inside the .claude dir
+            backup_dir = Path(mount_dir) / "backups"
+            if backup_dir.exists():
+                backups = sorted(backup_dir.glob(".claude.json.backup.*"))
+                if backups and _tmp_claude_dir:
+                    shutil.copy2(str(backups[-1]), str(Path(_tmp_claude_dir) / ".claude.json"))
+                    claude_mount += ["-v", f"{_tmp_claude_dir}/.claude.json:/root/.claude.json:ro"]
+                    log.info(f"Restored .claude.json from backup: {backups[-1].name}")
+
+        # Don't use --dangerously-skip-permissions (blocked for root in container).
+        # settings.json in .claude/ has skipDangerousModePermissionPrompt=true instead.
+        agent_cmd = ["claude", "-p", prompt]
         ollama_env = [
             "-e", f"MAX_FEATURES_PER_RUN={effective_max_features}",
             "-e", f"CLAUDE_MODEL={claude_model}",
