@@ -171,6 +171,8 @@ class SystemConfig(Base):
     ollama_timeout:    Mapped[Optional[int]] = mapped_column(Integer) # default 300s
     bash_timeout:      Mapped[Optional[int]] = mapped_column(Integer) # default 180s
     max_turns:         Mapped[Optional[int]] = mapped_column(Integer) # default 80
+    claude_model:            Mapped[Optional[str]] = mapped_column(Text)   # default claude-sonnet-4-6
+    claude_credentials_dir:  Mapped[Optional[str]] = mapped_column(Text)   # default C:/Users/digvi/.claude
 
     updated_at:        Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

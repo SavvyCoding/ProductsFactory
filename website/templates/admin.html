@@ -198,18 +198,31 @@
 
       </div>
 
-      <p class="admin-section-label" style="margin-top:24px">Agent / Ollama</p>
-      <div class="admin-fields-grid">
-
-        <div class="form-group">
-          <label for="p-backend">Agent backend</label>
-          <select id="p-backend" name="agent_backend" style="width:180px">
-            <option value="claude" {% if config.agent_backend == 'claude' or not config.agent_backend %}selected{% endif %}>claude (default)</option>
-            <option value="ollama" {% if config.agent_backend == 'ollama' %}selected{% endif %}>ollama (local)</option>
-          </select>
-          <p class="field-hint">Claude CLI or local Ollama for agent sessions.</p>
+      <p class="admin-section-label" style="margin-top:24px">Agent Profile</p>
+      <div class="admin-fields-grid" style="margin-bottom:20px">
+        <div class="form-group" style="grid-column:1/-1">
+          <div class="profile-switcher">
+            <label class="profile-option {% if config.agent_backend != 'claude' %}active{% endif %}">
+              <input type="radio" name="agent_backend" value="ollama"
+                     {% if config.agent_backend != 'claude' %}checked{% endif %}
+                     onchange="switchProfile('ollama')">
+              <span class="profile-icon">⚡</span>
+              <span class="profile-label">Local Ollama</span>
+              <span class="profile-desc">Fast local models, no API cost</span>
+            </label>
+            <label class="profile-option {% if config.agent_backend == 'claude' %}active{% endif %}">
+              <input type="radio" name="agent_backend" value="claude"
+                     {% if config.agent_backend == 'claude' %}checked{% endif %}
+                     onchange="switchProfile('claude')">
+              <span class="profile-icon">✦</span>
+              <span class="profile-label">Claude API</span>
+              <span class="profile-desc">Sonnet via Anthropic API</span>
+            </label>
+          </div>
         </div>
+      </div>
 
+      <div id="profile-ollama" class="admin-fields-grid" {% if config.agent_backend == 'claude' %}style="display:none"{% endif %}>
         <div class="form-group">
           <label for="p-ollama-host">Ollama host</label>
           <input type="text" id="p-ollama-host" name="ollama_host"
@@ -217,7 +230,6 @@
                  placeholder="http://host.docker.internal:11434" autocomplete="off">
           <p class="field-hint">Ollama API base URL (inside Docker containers).</p>
         </div>
-
         <div class="form-group">
           <label for="p-designer">Designer model</label>
           <input type="text" id="p-designer" name="designer_model"
@@ -225,7 +237,6 @@
                  placeholder="gemma3:27b" autocomplete="off">
           <p class="field-hint">Ollama model for Designer / Reviewer / Planner.</p>
         </div>
-
         <div class="form-group">
           <label for="p-coder">Coder model</label>
           <input type="text" id="p-coder" name="coder_model"
@@ -233,28 +244,49 @@
                  placeholder="qwen3-coder:30b" autocomplete="off">
           <p class="field-hint">Ollama model for Coder persona.</p>
         </div>
-
         <div class="form-group">
           <label for="p-ollama-to">Ollama timeout <span class="field-unit">seconds</span></label>
           <input type="number" id="p-ollama-to" name="ollama_timeout"
-                 value="{{ config.ollama_timeout }}" placeholder="300" min="30" class="field-narrow">
+                 value="{{ config.ollama_timeout }}" placeholder="600" min="30" class="field-narrow">
           <p class="field-hint">Timeout for model inference calls.</p>
         </div>
-
         <div class="form-group">
           <label for="p-bash-to">Bash timeout <span class="field-unit">seconds</span></label>
           <input type="number" id="p-bash-to" name="bash_timeout"
                  value="{{ config.bash_timeout }}" placeholder="180" min="10" class="field-narrow">
           <p class="field-hint">Timeout for shell commands in Ollama agent.</p>
         </div>
-
         <div class="form-group">
           <label for="p-max-turns">Max turns</label>
           <input type="number" id="p-max-turns" name="max_turns"
                  value="{{ config.max_turns }}" placeholder="80" min="5" class="field-narrow">
           <p class="field-hint">Hard cap on agentic turns per Ollama session.</p>
         </div>
+      </div>
 
+      <div id="profile-claude" class="admin-fields-grid" {% if config.agent_backend != 'claude' %}style="display:none"{% endif %}>
+        <div class="form-group">
+          <label for="p-claude-model">Claude model</label>
+          <select id="p-claude-model" name="claude_model">
+            <option value="claude-sonnet-4-6" {% if (config.claude_model or 'claude-sonnet-4-6') == 'claude-sonnet-4-6' %}selected{% endif %}>claude-sonnet-4-6 (Sonnet — recommended)</option>
+            <option value="claude-opus-4-6"   {% if config.claude_model == 'claude-opus-4-6'   %}selected{% endif %}>claude-opus-4-6 (Opus — most capable)</option>
+            <option value="claude-haiku-4-5-20251001" {% if config.claude_model == 'claude-haiku-4-5-20251001' %}selected{% endif %}>claude-haiku-4-5-20251001 (Haiku — fastest)</option>
+          </select>
+          <p class="field-hint">Model used for all agent personas in Claude API mode.</p>
+        </div>
+        <div class="form-group">
+          <label for="p-claude-creds">Credentials directory</label>
+          <input type="text" id="p-claude-creds" name="claude_credentials_dir"
+                 value="{{ config.claude_credentials_dir or '' }}"
+                 placeholder="C:/Users/you/.claude" autocomplete="off">
+          <p class="field-hint">Host path to ~/.claude (OAuth tokens). Copied into agent containers before each session.</p>
+        </div>
+        <div class="form-group">
+          <label for="p-max-turns-c">Max turns</label>
+          <input type="number" id="p-max-turns-c" name="max_turns"
+                 value="{{ config.max_turns }}" placeholder="80" min="5" class="field-narrow">
+          <p class="field-hint">Hard cap on agentic turns per Claude session.</p>
+        </div>
       </div>
 
       <div class="form-actions">
@@ -362,6 +394,13 @@ function toggleField(id, btn) {
   const inp = document.getElementById(id);
   inp.type = inp.type === 'password' ? 'text' : 'password';
   btn.textContent = inp.type === 'password' ? 'Show' : 'Hide';
+}
+
+function switchProfile(p) {
+  document.getElementById('profile-ollama').style.display = p === 'ollama' ? '' : 'none';
+  document.getElementById('profile-claude').style.display = p === 'claude'  ? '' : 'none';
+  document.querySelectorAll('.profile-option').forEach(el => el.classList.remove('active'));
+  document.querySelector(`.profile-option input[value="${p}"]`).closest('.profile-option').classList.add('active');
 }
 </script>
 

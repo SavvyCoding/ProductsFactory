@@ -11,6 +11,8 @@ Security model:
 """
 
 import os
+import shutil
+import tempfile
 import uuid
 import subprocess
 import logging
@@ -101,6 +103,29 @@ def _get_gh_token() -> str | None:
         return None
 
 
+def _get_system_config_sync() -> dict:
+    """Fetch current system config from PM API. Returns empty dict on failure."""
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
+            resp = client.get("/api/system-config")
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        log.warning(f"Could not fetch system config: {e}")
+        return {}
+
+
+def _get_claude_profile(sys_cfg: dict) -> tuple[str, str]:
+    """
+    Returns (credentials_dir, claude_model) from system config with sensible defaults.
+    credentials_dir: falls back to CLAUDE_DIR env var.
+    claude_model: falls back to 'claude-sonnet-4-6'.
+    """
+    credentials_dir = sys_cfg.get("claude_credentials_dir") or str(CLAUDE_DIR)
+    claude_model = sys_cfg.get("claude_model") or "claude-sonnet-4-6"
+    return credentials_dir, claude_model
+
+
 def _reset_workspace(working_dir: str, product_name: str) -> None:
     """
     Reset the product workspace to a clean state before each session:
@@ -160,6 +185,10 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     effective_max_features = product.get("max_features_per_run") or MAX_FEATURES_PER_RUN
     prompt = build_prompt(product, session_uid, persona=persona)
 
+    # Read backend from DB config (overrides env var)
+    sys_cfg = _get_system_config_sync()
+    effective_backend = (sys_cfg.get("agent_backend") or AGENT_BACKEND)
+
     lock_path = Path(working_dir) / "session.lock"
     if lock_path.exists():
         log.warning(f"session.lock exists for {product['name']} — skipping (duplicate launch guard)")
@@ -179,7 +208,8 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     persona_env = ["-e", f"AGENT_PERSONA={persona}"] if persona else []
 
     # Select the agent command based on backend
-    if AGENT_BACKEND == "ollama":
+    _tmp_claude_dir: str | None = None
+    if effective_backend == "ollama":
         agent_cmd = ["python", "//app/ollama_agent.py", "-p", prompt]
         ollama_env = [
             "-e", f"OLLAMA_HOST={OLLAMA_HOST}",
@@ -192,9 +222,31 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         claude_mount = []
         log.info(f"Using Ollama backend — host={OLLAMA_HOST} persona={persona}")
     else:
+        # Claude backend: copy credentials to a temp dir and mount the copy
+        creds_src, claude_model = _get_claude_profile(sys_cfg)
+        try:
+            _tmp_claude_dir = tempfile.mkdtemp(prefix="pf_claude_creds_")
+            src_path = Path(creds_src)
+            if src_path.exists():
+                # Copy contents into the temp dir
+                shutil.copytree(str(src_path), _tmp_claude_dir, dirs_exist_ok=True)
+                log.info(f"Copied Claude credentials from {creds_src} to {_tmp_claude_dir}")
+            else:
+                log.warning(f"Claude credentials dir not found: {creds_src} — container may fail auth")
+        except Exception as e:
+            log.warning(f"Could not copy Claude credentials: {e} — falling back to direct mount")
+            _tmp_claude_dir = None
+
+        if _tmp_claude_dir:
+            claude_mount = ["-v", f"{_tmp_claude_dir}:/root/.claude:ro"]
+        else:
+            claude_mount = ["-v", f"{creds_src}:/root/.claude:ro"]
+
         agent_cmd = ["claude", "--dangerously-skip-permissions", "-p", prompt]
-        ollama_env = ["-e", f"MAX_FEATURES_PER_RUN={effective_max_features}"]
-        claude_mount = ["-v", f"{CLAUDE_DIR}:/root/.claude:ro"]
+        ollama_env = [
+            "-e", f"MAX_FEATURES_PER_RUN={effective_max_features}",
+            "-e", f"CLAUDE_MODEL={claude_model}",
+        ]
 
     cmd = [
         "docker", "run", "--rm",
@@ -277,6 +329,13 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     except Exception as e:
         log.exception(f"docker run failed: {e}")
         exit_code = 1
+    finally:
+        # Clean up temp credentials copy if we created one
+        if _tmp_claude_dir:
+            try:
+                shutil.rmtree(_tmp_claude_dir, ignore_errors=True)
+            except Exception:
+                pass
 
     # Record session end
     if session_id is not None:

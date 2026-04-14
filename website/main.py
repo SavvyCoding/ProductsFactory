@@ -149,6 +149,9 @@ _CFG_DEFAULTS = {
     "ollama_timeout":   300,
     "bash_timeout":     180,
     "max_turns":        80,
+    # Claude profile
+    "claude_model":           "claude-sonnet-4-6",
+    "claude_credentials_dir": "C:/Users/digvi/.claude",
 }
 
 
@@ -572,6 +575,8 @@ async def admin_save_poller_settings(
     config.ollama_timeout              = _int("ollama_timeout")
     config.bash_timeout                = _int("bash_timeout")
     config.max_turns                   = _int("max_turns")
+    config.claude_model                = _str("claude_model")
+    config.claude_credentials_dir      = _str("claude_credentials_dir")
     await db.flush()
     return RedirectResponse("/admin?saved=true", status_code=303)
 
