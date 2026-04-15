@@ -522,6 +522,88 @@
     color: var(--text3); font-size: 12px;
   }
 
+  /* ── WORKFLOW DETAIL ── */
+  .wf-phases { display: flex; flex-direction: column; gap: 0; }
+  .wf-phase {
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 16px;
+    padding: 28px 32px; position: relative; overflow: hidden;
+  }
+  .wf-phase-header {
+    display: flex; align-items: center; gap: 14px; margin-bottom: 20px;
+  }
+  .wf-phase-icon {
+    width: 44px; height: 44px; border-radius: 10px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; font-size: 22px;
+  }
+  .wf-phase-title { font-size: 15px; font-weight: 800; letter-spacing: -0.3px; }
+  .wf-phase-sub { font-size: 12px; color: var(--text3); margin-top: 2px; }
+  .wf-phase-stripe {
+    position: absolute; top: 0; left: 0; right: 0; height: 3px; border-radius: 16px 16px 0 0;
+  }
+  .wf-steps { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px,1fr)); gap: 12px; }
+  .wf-step {
+    background: var(--bg3); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .wf-step-num {
+    font-size: 10px; font-weight: 800; font-family: 'JetBrains Mono', monospace;
+    color: var(--text3); margin-bottom: 6px; letter-spacing: 0.5px;
+  }
+  .wf-step-title { font-size: 12px; font-weight: 700; margin-bottom: 4px; }
+  .wf-step-desc { font-size: 11px; color: var(--text2); line-height: 1.6; }
+  .wf-step-code {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--blue2);
+    background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.15);
+    border-radius: 4px; padding: 4px 8px; margin-top: 6px; display: block;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .wf-phase-connector {
+    display: flex; align-items: center; justify-content: center;
+    gap: 8px; padding: 10px 0;
+    font-size: 11px; color: var(--text3); font-weight: 600;
+  }
+  .wf-phase-connector::before, .wf-phase-connector::after {
+    content: ''; flex: 1; height: 1px;
+    background: linear-gradient(90deg, transparent, var(--border2), transparent);
+  }
+  .wf-dual { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .wf-dual-pane {
+    background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+  }
+  .wf-dual-label {
+    font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+    margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border);
+  }
+  .wf-bullet { font-size: 11px; color: var(--text2); line-height: 1.8; }
+  .wf-bullet li { display: flex; gap: 6px; align-items: flex-start; }
+  .wf-bullet li::before { content: '→'; color: var(--blue2); font-weight: 700; flex-shrink: 0; }
+  .wf-tag {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 10px; font-weight: 700; padding: 2px 8px;
+    border-radius: 4px; letter-spacing: 0.3px;
+  }
+  .wf-ndjson {
+    background: var(--bg3); border: 1px solid rgba(6,182,212,0.2); border-radius: 10px;
+    padding: 16px; margin-top: 12px;
+  }
+  .wf-ndjson-title { font-size: 10px; font-weight: 700; color: var(--cyan); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 10px; }
+  .wf-ndjson pre {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text2);
+    line-height: 1.8; white-space: pre-wrap; word-break: break-all;
+  }
+  .wf-gate-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 20px; }
+  .wf-gate-box {
+    background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+  }
+  .wf-gate-label { font-size: 11px; font-weight: 700; margin-bottom: 8px; }
+  .wf-gate-desc { font-size: 11px; color: var(--text2); line-height: 1.7; }
+  .wf-gate-code {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    color: var(--green2); background: rgba(16,185,129,0.08);
+    border: 1px solid rgba(16,185,129,0.2); border-radius: 4px;
+    padding: 4px 8px; margin-top: 6px; display: block;
+  }
+
   /* ── SCROLLBAR ── */
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: var(--bg); }
@@ -551,6 +633,7 @@
   <div class="nav-links">
     <a href="#overview">Overview</a>
     <a href="#poller">Poller</a>
+    <a href="#workflow">Workflow</a>
     <a href="#personas">Personas</a>
     <a href="#lifecycle">Lifecycle</a>
     <a href="#postcoder">Post-Coder</a>
@@ -559,7 +642,7 @@
     <a href="#security">Security</a>
     <a href="#env">Config</a>
   </div>
-  <span class="nav-badge">v2.0 — 10 Personas</span>
+  <span class="nav-badge">v2.1 — Poller-Driven</span>
 </nav>
 
 <!-- HERO -->
@@ -620,7 +703,7 @@
 <section id="poller">
   <div class="section-label">Orchestration</div>
   <h2>Poller Cycle</h2>
-  <p class="section-sub">Every 60 seconds (5s between products), the poller executes a 13-step cycle to decide what to run and launch the right persona.</p>
+  <p class="section-sub">Every 60 seconds (5s between products), the poller executes a 13-step cycle — pre-fetching and claiming features before Docker launch so the agent is a pure executor.</p>
 
   <div class="cycle-grid">
     <div class="cycle-steps">
@@ -691,9 +774,9 @@
       <div class="cycle-step">
         <div class="step-num">⑦c</div>
         <div class="step-body">
-          <div class="step-title">Persona Determination</div>
-          <div class="step-desc">Queries <code>/api/features/next-for-persona</code> to pick designer or coder. Falls back to maintenance rotation (Documenter → Analytics → Refactorer → DevOps), then Planner.</div>
-          <span class="step-tag tag-priority">ROUTING</span>
+          <div class="step-title">Persona Determination + Feature Pre-fetch</div>
+          <div class="step-desc">Queries <code>/api/features/next-for-persona</code> to pick designer or coder. Then <strong>fetches assigned features from PM API</strong> and <strong>PATCHes them to Implementing/Designing</strong> (claim-before-launch) so no other poller instance can double-claim. Injects <code>{assigned_features}</code> and <code>{prev_session_summary}</code> into the agent prompt.</div>
+          <span class="step-tag tag-priority">ROUTING + CLAIM</span>
         </div>
       </div>
       <div class="cycle-step">
@@ -731,17 +814,17 @@
       <div class="cycle-step">
         <div class="step-num">⑫</div>
         <div class="step-body">
-          <div class="step-title">Launch Docker Session</div>
-          <div class="step-desc">Runs <code>docker run --rm productfactory-agent</code> with isolated bridge network, read-only OAuth + deploy key mounts. Streams logs to PM API. Blocks until exit.</div>
-          <span class="step-tag tag-run">RUN</span>
+          <div class="step-title">Launch Docker Session + Live Poll</div>
+          <div class="step-desc">Runs <code>docker run --rm productfactory-agent</code> with isolated bridge network, read-only OAuth + deploy key mounts. Streams logs to PM API. A <strong>background thread polls <code>session_result.json</code> every 30 s</strong> and applies each NDJSON line to the DB in real-time as the agent completes phases.</div>
+          <span class="step-tag tag-run">RUN + LIVE POLL</span>
         </div>
       </div>
       <div class="cycle-step">
         <div class="step-num">⑬</div>
         <div class="step-body">
-          <div class="step-title">Update last_run_at</div>
-          <div class="step-desc">Only updates the round-robin pointer on clean exit (code 0). Failed sessions don't advance the queue — the product will be picked again immediately.</div>
-          <span class="step-tag tag-run">BOOKKEEPING</span>
+          <div class="step-title">Reconcile + Auto-merge + Update last_run_at</div>
+          <div class="step-desc">After Docker exits: final NDJSON reconcile for any lines the live-poll thread missed. Rolls back features with no entry and no open PR. Triggers auto-merge for high-confidence reviewer approvals. Only updates round-robin pointer on clean exit (code 0).</div>
+          <span class="step-tag tag-run">RECONCILE</span>
         </div>
       </div>
     </div>
@@ -825,6 +908,237 @@
         <line x1="140" y1="568" x2="140" y2="588" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#arr)"/>
         <text x="140" y="604" text-anchor="middle" fill="#64748b" font-size="11">sleep 5s → repeat</text>
       </svg>
+    </div>
+  </div>
+</section>
+
+<!-- POLLER WORKFLOW DETAIL -->
+<section id="workflow">
+  <div class="section-label">Detailed Internals</div>
+  <h2>Poller Session Workflow</h2>
+  <p class="section-sub">A deep dive into what happens during one product session — from feature selection through real-time DB updates to post-container cleanup.</p>
+
+  <div class="wf-phases">
+
+    <!-- Phase 1: Pre-Docker -->
+    <div class="wf-phase">
+      <div class="wf-phase-stripe" style="background:linear-gradient(90deg,#3b82f6,#06b6d4)"></div>
+      <div class="wf-phase-header">
+        <div class="wf-phase-icon" style="background:rgba(59,130,246,0.15)">🔄</div>
+        <div>
+          <div class="wf-phase-title">Phase 1 — Pre-Docker (Poller, on host)</div>
+          <div class="wf-phase-sub">Everything the poller does <em>before</em> launching the container. The agent receives pre-claimed features; it never self-selects work.</div>
+        </div>
+      </div>
+      <div class="wf-steps">
+        <div class="wf-step">
+          <div class="wf-step-num">STEP 1</div>
+          <div class="wf-step-title">Fetch sys_cfg</div>
+          <div class="wf-step-desc">Reads <code>auto_merge_enabled</code> and global config from the PM API <em>before</em> building the prompt — fixes a previous bug where <code>{auto_merge_enabled}</code> always rendered as False.</div>
+          <code class="wf-step-code">GET /api/system/config</code>
+        </div>
+        <div class="wf-step">
+          <div class="wf-step-num">STEP 2</div>
+          <div class="wf-step-title">Fetch Assigned Features</div>
+          <div class="wf-step-desc">Persona-specific API call. Coder: <code>/api/features/approved</code>. Designer/Reviewer: <code>/api/products/{id}/features</code> filtered client-side. Limits to <code>max_features_per_run</code>.</div>
+          <code class="wf-step-code">_fetch_assigned_features(product_id, persona)</code>
+        </div>
+        <div class="wf-step">
+          <div class="wf-step-num">STEP 3</div>
+          <div class="wf-step-title">Claim Features (PATCH)</div>
+          <div class="wf-step-desc">PATCHes each feature to <code>Implementing</code> (coder) or <code>Designing</code> (designer) <em>before</em> Docker starts. Prevents double-claiming if the poller polls again mid-session.</div>
+          <code class="wf-step-code">_claim_features(features, persona)</code>
+        </div>
+        <div class="wf-step">
+          <div class="wf-step-num">STEP 4</div>
+          <div class="wf-step-title">Read Session Summary</div>
+          <div class="wf-step-desc">Reads <code>session_summary.md</code> from the product workspace for session continuity. Falls back to last 50 lines of <code>progress.md</code> if summary doesn't exist. Truncated at 2000 chars.</div>
+          <code class="wf-step-code">_read_session_summary(working_dir)</code>
+        </div>
+        <div class="wf-step">
+          <div class="wf-step-num">STEP 5</div>
+          <div class="wf-step-title">Build Prompt</div>
+          <div class="wf-step-desc">Renders the persona-specific Markdown prompt with all substitutions now ready: <code>{assigned_features}</code>, <code>{prev_session_summary}</code>, <code>{auto_merge_enabled}</code>, <code>{tech_stack}</code>, <code>{session_uid}</code>.</div>
+          <code class="wf-step-code">build_prompt(product, session_uid, persona)</code>
+        </div>
+        <div class="wf-step">
+          <div class="wf-step-num">STEP 6</div>
+          <div class="wf-step-title">Launch Container</div>
+          <div class="wf-step-desc">Starts <code>docker run --rm</code> with the rendered prompt as <code>-p</code> arg. Simultaneously starts a <strong>live-poll background thread</strong> and a log-streaming thread. Blocks until container exits.</div>
+          <code class="wf-step-code">docker run … claude -p "{prompt}"</code>
+        </div>
+      </div>
+    </div>
+
+    <div class="wf-phase-connector">▼ Docker container running ▼</div>
+
+    <!-- Phase 2: During Docker -->
+    <div class="wf-phase">
+      <div class="wf-phase-stripe" style="background:linear-gradient(90deg,#8b5cf6,#ec4899)"></div>
+      <div class="wf-phase-header">
+        <div class="wf-phase-icon" style="background:rgba(139,92,246,0.15)">⚡</div>
+        <div>
+          <div class="wf-phase-title">Phase 2 — During Docker (Agent + Poller, parallel)</div>
+          <div class="wf-phase-sub">The agent implements features while the poller's background thread applies DB updates in real-time — no waiting until container exit.</div>
+        </div>
+      </div>
+      <div class="wf-dual">
+        <div class="wf-dual-pane">
+          <div class="wf-dual-label" style="color:var(--violet2)">🤖 Agent (inside container)</div>
+          <ul class="wf-bullet">
+            <li>Reads <code>AGENT_WORKFLOW.md</code>, <code>ARCHITECTURE.md</code>, <code>CLAUDE.md</code></li>
+            <li>Receives pre-assigned features in prompt — no API self-discovery</li>
+            <li>Implements each feature in order</li>
+            <li>Appends one NDJSON line to <code>session_result.json</code> after each phase completes</li>
+            <li>Writes <code>session_summary.md</code> incrementally throughout (not just at end)</li>
+            <li>Opens PR → appends <code>"status":"Reviewing"</code> line</li>
+            <li>Never calls <code>PATCH /api/features/{id}</code> directly (Option B)</li>
+          </ul>
+        </div>
+        <div class="wf-dual-pane">
+          <div class="wf-dual-label" style="color:var(--cyan)">🔄 Live-Poll Thread (on host, every 30s)</div>
+          <ul class="wf-bullet">
+            <li>Runs in background alongside log-stream thread</li>
+            <li>Tracks <code>applied_up_to</code> line index — never reprocesses a line</li>
+            <li>Reads <code>session_result.json</code> on each tick</li>
+            <li>Applies any new NDJSON lines to DB via PM API immediately</li>
+            <li>On <code>status: Reviewing</code>: stores PR number + URL in DB</li>
+            <li>On <code>status: Reviewed</code> + <code>confidence: high</code>: schedules auto-merge</li>
+            <li>Stopped via <code>threading.Event</code> after Docker exits</li>
+          </ul>
+        </div>
+      </div>
+      <div class="wf-ndjson">
+        <div class="wf-ndjson-title">session_result.json — NDJSON format (one object per line, append-only)</div>
+        <pre>{"id": 42, "status": "Implementing"}
+{"id": 42, "status": "Reviewing", "pr_number": 17, "pr_url": "https://github.com/…"}
+{"id": 43, "status": "Blocked", "blocked_reason": "baseline tests dropped from 47 to 39"}
+{"id": 44, "status": "Reviewed", "review_outcome": "approved", "confidence": "high"}
+{"id": 44, "status": "Designed", "design_doc_path": "docs/feature_044_design.md"}</pre>
+      </div>
+    </div>
+
+    <div class="wf-phase-connector">▼ Container exits (code 0 or non-zero) ▼</div>
+
+    <!-- Phase 3: Post-Docker -->
+    <div class="wf-phase">
+      <div class="wf-phase-stripe" style="background:linear-gradient(90deg,#10b981,#06b6d4)"></div>
+      <div class="wf-phase-header">
+        <div class="wf-phase-icon" style="background:rgba(16,185,129,0.15)">✅</div>
+        <div>
+          <div class="wf-phase-title">Phase 3 — Post-Docker (Poller, on host)</div>
+          <div class="wf-phase-sub">Cleanup, final reconcile, auto-merge, and optionally the post-coder chain.</div>
+        </div>
+      </div>
+      <div class="wf-steps">
+        <div class="wf-step">
+          <div class="wf-step-num">STEP 7</div>
+          <div class="wf-step-title">Stop Live-Poll Thread</div>
+          <div class="wf-step-desc">Sets the stop <code>threading.Event</code>. Waits up to 5 seconds for the thread to join cleanly before proceeding to final reconcile.</div>
+          <code class="wf-step-code">_poll_stop.set(); poll_thread.join(5)</code>
+        </div>
+        <div class="wf-step">
+          <div class="wf-step-num">STEP 8</div>
+          <div class="wf-step-title">Final NDJSON Reconcile</div>
+          <div class="wf-step-desc">Reads all remaining lines in <code>session_result.json</code> not yet applied by the live-poll thread (using the same <code>applied_up_to</code> pointer). Applies them to the DB. Idempotent — safe to re-apply already-seen lines.</div>
+          <code class="wf-step-code">_reconcile_session_result(working_dir)</code>
+        </div>
+        <div class="wf-step">
+          <div class="wf-step-num">STEP 9</div>
+          <div class="wf-step-title">Rollback Stuck Features</div>
+          <div class="wf-step-desc">Any claimed feature (Implementing/Designing) that has no entry in <code>session_result.json</code> and no open PR is reset to <code>Approved</code>. Prevents features stuck in limbo after a crashed session.</div>
+          <code class="wf-step-code">_rollback_uncompleted(claimed, results)</code>
+        </div>
+        <div class="wf-step">
+          <div class="wf-step-num">STEP 10</div>
+          <div class="wf-step-title">Auto-Merge</div>
+          <div class="wf-step-desc">If <code>auto_merge_enabled</code> and any feature was reviewed with <code>confidence: high</code>, merges the PR via <code>gh pr merge --squash</code> and sets status to <code>Pushed</code>. Low-confidence approvals are left for human merge.</div>
+          <code class="wf-step-code">gh pr merge {pr_number} --squash</code>
+        </div>
+        <div class="wf-step">
+          <div class="wf-step-num">STEP 11</div>
+          <div class="wf-step-title">Post-Coder Chain</div>
+          <div class="wf-step-desc">On coder clean exit: runs QA Tester → Security Auditor → Video Builder → Recommender (with backlog gate). Each is a separate <code>docker run</code> in sequence. Failures don't block the chain.</div>
+          <code class="wf-step-code">_run_post_coder_chain(product, session_uid)</code>
+        </div>
+        <div class="wf-step">
+          <div class="wf-step-num">STEP 12</div>
+          <div class="wf-step-title">Update last_run_at</div>
+          <div class="wf-step-desc">Only updates the round-robin pointer if Docker exited with code 0. Failed sessions don't advance the queue — the product is immediately eligible for re-selection in the next poll cycle.</div>
+          <code class="wf-step-code">PATCH /api/products/{id} last_run_at=now()</code>
+        </div>
+      </div>
+    </div>
+
+    <div class="wf-phase-connector">▼ Recommender Gate (two-layer defence) ▼</div>
+
+    <!-- Phase 4: Recommender Gate -->
+    <div class="wf-phase">
+      <div class="wf-phase-stripe" style="background:linear-gradient(90deg,#ec4899,#f59e0b)"></div>
+      <div class="wf-phase-header">
+        <div class="wf-phase-icon" style="background:rgba(236,72,153,0.15)">🛡️</div>
+        <div>
+          <div class="wf-phase-title">Recommender Runaway Defence</div>
+          <div class="wf-phase-sub">Two independent gates prevent the recommender from running when the backlog already has plenty of Pending features.</div>
+        </div>
+      </div>
+      <div class="wf-gate-grid">
+        <div class="wf-gate-box">
+          <div class="wf-gate-label" style="color:var(--blue2)">🔒 Gate 1 — Poller (Python code)</div>
+          <div class="wf-gate-desc">
+            Before launching the recommender container, the poller counts Pending features for this product.
+            If <code>pending_count ≥ rec_threshold</code> (default: 15), the recommender is skipped.
+            <br><br>
+            <strong>Fail-safe:</strong> If the PM API returns an error, <code>pending_count</code> is set to
+            <code>max(rec_threshold, 1)</code> — <em>fail closed</em>. Previously it defaulted to 0,
+            making <code>0 ≥ 15</code> always False → recommender always launched on any API error.
+          </div>
+          <code class="wf-gate-code">_pending_count = max(_rec_threshold, 1)  # on API error</code>
+        </div>
+        <div class="wf-gate-box">
+          <div class="wf-gate-label" style="color:var(--amber2)">🤖 Gate 2 — Agent (recommender.md Step 0)</div>
+          <div class="wf-gate-desc">
+            Even if the poller launches the recommender container, Step 0 of <code>recommender.md</code>
+            instructs the agent to immediately check the backlog count before doing any web research.
+            If count ≥ 10, it exits immediately with "Backlog already full — skipping."
+            <br><br>
+            This second layer catches edge cases where the poller's count was stale (race condition
+            between two products' sessions).
+          </div>
+          <code class="wf-gate-code">GET /api/features/count?product_id=X&amp;status=Pending → exit if ≥10</code>
+        </div>
+      </div>
+    </div>
+
+    <div class="wf-phase-connector">▼ Session complete — next poll cycle begins in 5s ▼</div>
+
+  </div>
+
+  <!-- Session Continuity callout -->
+  <div style="margin-top:20px;display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;">
+    <div style="background:var(--bg2);border:1px solid rgba(139,92,246,0.25);border-radius:10px;padding:16px;font-size:12px;">
+      <strong style="color:var(--violet2)">Session Continuity via session_summary.md</strong>
+      <div style="color:var(--text2);margin-top:8px;line-height:1.7">
+        Agents write <code style="font-family:'JetBrains Mono',monospace">session_summary.md</code> <em>incrementally</em> throughout their run — startup, key decisions, completions, blockers. The next session receives this as <code style="font-family:'JetBrains Mono',monospace">{prev_session_summary}</code> in the prompt. Fallback: last 50 lines of <code style="font-family:'JetBrains Mono',monospace">progress.md</code>.
+      </div>
+    </div>
+    <div style="background:var(--bg2);border:1px solid rgba(6,182,212,0.25);border-radius:10px;padding:16px;font-size:12px;">
+      <strong style="color:var(--cyan)">Option B — Full Poller DB Ownership</strong>
+      <div style="color:var(--text2);margin-top:8px;line-height:1.7">
+        Agents <strong>never</strong> call <code style="font-family:'JetBrains Mono',monospace">PATCH /api/features/{id}</code> directly. All DB updates flow through <code style="font-family:'JetBrains Mono',monospace">session_result.json</code> → poller <code style="font-family:'JetBrains Mono',monospace">_reconcile_session_result()</code>. The poller is the single source of truth for feature state transitions.
+      </div>
+    </div>
+    <div style="background:var(--bg2);border:1px solid rgba(16,185,129,0.25);border-radius:10px;padding:16px;font-size:12px;">
+      <strong style="color:var(--green2)">Claim-Before-Launch</strong>
+      <div style="color:var(--text2);margin-top:8px;line-height:1.7">
+        Features are PATCHed to <code style="font-family:'JetBrains Mono',monospace">Implementing</code> / <code style="font-family:'JetBrains Mono',monospace">Designing</code> by the poller <em>before</em> <code style="font-family:'JetBrains Mono',monospace">docker run</code>. If the poller polls again while the container is still running, those features are already claimed and won't be double-assigned.
+      </div>
+    </div>
+    <div style="background:var(--bg2);border:1px solid rgba(245,158,11,0.25);border-radius:10px;padding:16px;font-size:12px;">
+      <strong style="color:var(--amber2)">Live DB Updates Every 30s</strong>
+      <div style="color:var(--text2);margin-top:8px;line-height:1.7">
+        A background thread on the host polls <code style="font-family:'JetBrains Mono',monospace">session_result.json</code> every 30 seconds. The PM dashboard shows real-time feature state changes mid-session — not just a batch update when the container exits.
+      </div>
     </div>
   </div>
 </section>
