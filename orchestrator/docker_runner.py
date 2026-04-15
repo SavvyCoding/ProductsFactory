@@ -180,7 +180,7 @@ def _apply_session_entry(client: httpx.Client, entry: dict) -> bool:
         return False
 
 
-def _live_poll_session_result(working_dir: str, stop_event: threading.Event) -> None:
+def _live_poll_session_result(working_dir: str, stop_event: threading.Event, persona: str = "") -> None:
     """
     Background thread: polls session_result.json every 30 s while the container runs.
     Applies new NDJSON lines to the DB in real-time as the agent writes phase transitions.
@@ -211,7 +211,12 @@ def _live_poll_session_result(working_dir: str, stop_event: threading.Event) -> 
                         continue
                     try:
                         entry = _json.loads(line)
-                        _apply_session_entry(client, entry)
+                        # Reviewer is not allowed to set status back to Reviewing —
+                        # these are pre-claim entries that must never overwrite Pushed.
+                        if persona == "reviewer" and entry.get("status") == "Reviewing":
+                            log.debug(f"[live-poll] Skipping reviewer Reviewing entry for feature #{entry.get('id')}")
+                        else:
+                            _apply_session_entry(client, entry)
                     except Exception:
                         pass  # malformed line — skip, don't block the rest
                     applied_up_to += 1
@@ -220,7 +225,7 @@ def _live_poll_session_result(working_dir: str, stop_event: threading.Event) -> 
 
 
 def _reconcile_session_result(working_dir: str, product_id: int, exit_code: int,
-                               features: list[dict] | None = None) -> None:
+                               features: list[dict] | None = None, persona: str = "") -> None:
     """
     Final reconcile after container exits: re-applies all entries in session_result.json.
     Idempotent — safe to re-apply entries the live-poll thread already sent.
@@ -228,6 +233,19 @@ def _reconcile_session_result(working_dir: str, product_id: int, exit_code: int,
     """
     if features is None:
         features = _read_session_result(working_dir)
+
+    if not features:
+        _delete_session_result(working_dir)
+        return
+
+    # Reviewer is not allowed to set features back to Reviewing —
+    # filter out any pre-claim entries before applying.
+    if persona == "reviewer":
+        before = len(features)
+        features = [e for e in features if e.get("status") != "Reviewing"]
+        skipped = before - len(features)
+        if skipped:
+            log.info(f"[reconcile] Filtered out {skipped} reviewer Reviewing entries (pre-claim artifacts)")
 
     if not features:
         _delete_session_result(working_dir)
@@ -919,7 +937,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         _poll_stop = threading.Event()
         poll_thread = threading.Thread(
             target=_live_poll_session_result,
-            args=(working_dir, _poll_stop),
+            args=(working_dir, _poll_stop, persona),
             daemon=True,
         )
         poll_thread.start()
@@ -969,7 +987,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         _session_features = _auto_merge_approved(product, _session_features)
 
     # 3. Apply status updates (deletes session_result.json at end).
-    _reconcile_session_result(working_dir, product["id"], exit_code, features=_session_features)
+    _reconcile_session_result(working_dir, product["id"], exit_code, features=_session_features, persona=persona)
 
     # 4. Record session end in DB.
     if session_id is not None:
