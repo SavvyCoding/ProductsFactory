@@ -311,8 +311,34 @@
         <button type="submit">Save poller &amp; agent settings</button>
       </div>
     </form>
+
+    <div style="margin-top:1.5rem;padding-top:1.5rem;border-top:1px solid var(--border)">
+      <div class="settings-card-title" style="margin-bottom:.75rem">
+        <span class="title-icon">🔓</span> Poller Lock
+      </div>
+      <p class="muted" style="font-size:13px;margin-bottom:.75rem">
+        If the poller process crashed without releasing its lock, use this to forcefully clear it before restarting.
+      </p>
+      <button type="button" class="btn btn-danger btn-sm" onclick="forceUnlockPoller()">Force-clear poller lock</button>
+      <span id="unlock-msg" style="margin-left:.75rem;font-size:13px"></span>
+    </div>
   </div>
 </div>
+
+<script>
+function forceUnlockPoller() {
+  fetch('/api/poller/force-unlock', {method:'POST'})
+    .then(r => r.json())
+    .then(d => {
+      document.getElementById('unlock-msg').textContent = d.message || 'Done';
+      document.getElementById('unlock-msg').style.color = 'var(--success, green)';
+    })
+    .catch(() => {
+      document.getElementById('unlock-msg').textContent = 'Request failed';
+      document.getElementById('unlock-msg').style.color = 'var(--danger, red)';
+    });
+}
+</script>
 
 <!-- ── TAB: PM ACCOUNTS ─────────────────────────────────────── -->
 <div id="atab-pms" class="admin-tab-panel hidden">

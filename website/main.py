@@ -1480,6 +1480,22 @@ async def api_release_poller_lock(
     return {"ok": True}
 
 
+@app.post("/api/poller/force-unlock")
+async def api_force_unlock_poller(db: AsyncSession = Depends(get_db)):
+    """Force-clear a stale poller lock regardless of pid/host. Admin use only."""
+    await db.execute(
+        text("""
+            UPDATE system_config
+               SET poller_pid          = NULL,
+                   poller_host         = NULL,
+                   poller_locked_at    = NULL,
+                   poller_heartbeat_at = NULL
+             WHERE id = 1
+        """)
+    )
+    return {"ok": True, "message": "Poller lock forcefully cleared"}
+
+
 # REST API — Misc
 # ══════════════════════════════════════════════════════════════════════════════
 
