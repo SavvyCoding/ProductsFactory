@@ -937,22 +937,13 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     if exit_code == 2:
         return 2
 
-    # After a successful coder session: QA → Security → video → recommender
+    # After a successful coder session: QA → Security → Recommender
     if exit_code == 0 and persona == "coder":
         log.info(f"Coder succeeded — launching QA Tester for {product['name']}")
         run_claude_in_docker(product, persona="qa_tester")
 
         log.info(f"Launching Security Auditor for {product['name']}")
         run_claude_in_docker(product, persona="security_auditor")
-
-        from orchestrator.video_builder import build_product_video, commit_and_push_output
-        working_dir = Path(product["working_dir"])
-        video_path  = build_product_video(product, working_dir)
-        if video_path:
-            log.info(f"Product video built: {video_path}")
-            commit_and_push_output(working_dir, deploy_key=_get_deploy_key_path(product, effective_ssh_dir))
-        else:
-            log.warning("Product video generation skipped or failed — continuing to recommender")
         # Skip recommender if the Pending backlog is at or above the configured threshold.
         # Threshold is read from system_config (recommender_pending_threshold, default 15).
         # Set to 0 to always run the recommender.

@@ -48,6 +48,7 @@ class Product(Base):
     config:             Mapped[Optional[dict]] = mapped_column(JSONB)
     last_run_at:        Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     run_now:            Mapped[bool]           = mapped_column(Boolean, nullable=False, default=False)
+    run_trainer_now:    Mapped[bool]           = mapped_column(Boolean, nullable=False, default=False)
     custom_prompt:      Mapped[Optional[str]]  = mapped_column(Text)
     quiet_hours_start:  Mapped[Optional[int]]  = mapped_column(Integer)
     quiet_hours_end:    Mapped[Optional[int]]  = mapped_column(Integer)

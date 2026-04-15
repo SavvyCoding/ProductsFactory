@@ -701,6 +701,18 @@ async def run_now(
     return RedirectResponse(f"/product/{product_id}", status_code=303)
 
 
+@app.post("/product/{product_id}/run-trainer")
+async def run_trainer(
+    product_id: int,
+    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
+):
+    """Queue a Product Trainer (showcase video) session on the next poller cycle."""
+    product = await _get_product_or_404(product_id, db)
+    product.run_trainer_now = True
+    await db.flush()
+    return RedirectResponse(f"/product/{product_id}", status_code=303)
+
+
 @app.post("/product/{product_id}/schedule")
 async def save_schedule(
     product_id: int,

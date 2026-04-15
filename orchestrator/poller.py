@@ -240,10 +240,10 @@ def get_next_reviewer_product(products: list[dict]) -> tuple[dict | None, str | 
 
 # Maintenance persona schedule: persona → interval in days
 _MAINTENANCE_SCHEDULE = [
-    ("documenter",       3),
-    ("analytics",        7),
-    ("refactorer",       7),
-    ("devops",          14),
+    ("documenter",   3),
+    ("analytics",    7),
+    ("refactorer",   7),
+    ("devops",      14),
 ]
 
 
@@ -339,6 +339,15 @@ def clear_run_now(product_id: int):
             client.patch(f"/api/products/{product_id}", json={"run_now": False})
     except Exception as e:
         log.warning(f"Failed to clear run_now: {e}")
+
+
+def clear_run_trainer_now(product_id: int):
+    """Clear the run_trainer_now flag after queuing the trainer session."""
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            client.patch(f"/api/products/{product_id}", json={"run_trainer_now": False})
+    except Exception as e:
+        log.warning(f"Failed to clear run_trainer_now: {e}")
 
 
 _LOCK_PID  = os.getpid()
@@ -539,6 +548,12 @@ def main():
             if reviewer_product:
                 product = reviewer_product
                 log.info(f"Reviewer session for: {product['name']} (id={product['id']})")
+            elif any(p.get("run_trainer_now") for p in products if p["status"] == "ready"):
+                # ⑦a2 On-demand trainer: a PM requested a showcase video
+                product = next(p for p in products if p["status"] == "ready" and p.get("run_trainer_now"))
+                persona = "product_trainer"
+                clear_run_trainer_now(product["id"])
+                log.info(f"On-demand Product Trainer for: {product['name']} (id={product['id']})")
             else:
                 # ⑦b Normal round-robin for designer/coder work
                 product = get_next_product(products)

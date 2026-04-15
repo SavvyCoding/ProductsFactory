@@ -34,6 +34,8 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None) ->
         template_name = "devops"
     elif persona == "analytics":
         template_name = "analytics"
+    elif persona == "product_trainer":
+        template_name = "product_trainer"
     elif product.get("analysis_status") == "running":
         template_name = "analysis_run"
     elif product.get("type") == "brownfield":

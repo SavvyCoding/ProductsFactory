@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential libssl-dev zlib1g-dev libbz2-dev libreadline-dev \
     libsqlite3-dev libncursesw5-dev xz-utils tk-dev libxml2-dev \
     libxmlsec1-dev libffi-dev liblzma-dev \
+    ffmpeg \
     jq unzip \
     && rm -rf /var/lib/apt/lists/*
 
@@ -56,14 +57,16 @@ RUN pyenv global 3.12.4 && \
         pip-audit \
         pytest pytest-cov pytest-json-report pytest-asyncio \
         httpx requests \
-        pydantic && \
+        pydantic \
+        Pillow moviepy edge-tts && \
     pyenv global 3.11.9 && \
     pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir \
         pip-audit \
         pytest pytest-cov pytest-json-report pytest-asyncio \
         httpx requests \
-        pydantic && \
+        pydantic \
+        Pillow moviepy edge-tts && \
     pyenv global 3.12.4
 
 # ── Layer 5: Node.js 20 LTS + n ──────────────────────────────────────────────
