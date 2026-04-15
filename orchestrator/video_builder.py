@@ -20,6 +20,7 @@ import os
 import subprocess
 import tempfile
 import textwrap
+from datetime import datetime
 
 from pathlib import Path
 from typing import Optional
@@ -185,7 +186,8 @@ def build_product_video(product: dict, working_dir: Path) -> Optional[Path]:
     output_dir = working_dir / "output"
     output_dir.mkdir(exist_ok=True)
 
-    video_path = output_dir / "product_video.mp4"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    video_path = output_dir / f"product_video_{timestamp}.mp4"
 
     log.info(f"Building product video for '{product_name}' ({len(shipped)} shipped features) -> {video_path}")
 
