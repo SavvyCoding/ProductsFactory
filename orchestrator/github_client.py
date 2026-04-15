@@ -72,8 +72,11 @@ def count_open_prs(product: dict) -> int:
 
 def reconcile_merged_prs(product: dict):
     """
-    Fetch recently merged PRs from GitHub and sync feature status → Pushed in DB.
-    Prevents stale DB state where feature is still Implementing but PR is merged.
+    Fetch recently closed PRs from GitHub and sync feature status in DB.
+    - Merged PRs   → feature status Pushed
+    - Closed (not merged) PRs → feature reset to Approved/Implementing so coder retries
+
+    Also handles features where pr_number is null but pr_url contains the PR link.
     """
     slug = _parse_repo_slug(product)
     if not slug:
@@ -94,22 +97,34 @@ def reconcile_merged_prs(product: dict):
         if not isinstance(prs_data, list):
             log.warning("reconcile_merged_prs: unexpected response shape from GitHub")
             return
-        merged_prs = [pr for pr in prs_data if pr.get("merged_at")]
 
-        if not merged_prs:
+        merged_numbers  = {pr["number"] for pr in prs_data if pr.get("merged_at")}
+        closed_numbers  = {pr["number"] for pr in prs_data if not pr.get("merged_at")}
+
+        if not merged_numbers and not closed_numbers:
             return
 
-        merged_numbers = [pr["number"] for pr in merged_prs]
-        log.info(f"Reconciling merged PRs: {merged_numbers}")
+        if merged_numbers:
+            log.info(f"Reconciling merged PRs: {sorted(merged_numbers)}")
+        if closed_numbers:
+            log.info(f"Reconciling closed (unmerged) PRs: {sorted(closed_numbers)}")
 
-        # Fetch all features for this product and find any with merged PR numbers
-        # (features can be in Reviewing, Reviewed, or Implementing when PR merges)
+        import re as _re
+
+        def _pr_number_for(feature: dict) -> int | None:
+            """Return the PR number from pr_number column or parsed from pr_url."""
+            n = feature.get("pr_number")
+            if n:
+                return int(n)
+            url = feature.get("pr_url") or ""
+            m = _re.search(r"/pull/(\d+)", url)
+            return int(m.group(1)) if m else None
+
         with httpx.Client(base_url=PM_API_URL) as client:
             all_features = client.get(
-                "/api/products/{product_id}/features".format(product_id=product["id"]),
+                f"/api/products/{product['id']}/features",
             )
             if all_features.status_code != 200:
-                # Fallback: use the approved endpoint if the all-features endpoint isn't available
                 fallback = client.get(
                     "/api/features/approved",
                     params={"product_id": product["id"]},
@@ -118,17 +133,37 @@ def reconcile_merged_prs(product: dict):
                 features_data = fallback.json()
             else:
                 features_data = all_features.json()
+
             if not isinstance(features_data, list):
                 log.warning("reconcile_merged_prs: unexpected features response shape")
                 return
 
+            terminal = {"Pushed", "Rejected", "Reverted"}
+
             for feature in features_data:
-                if feature.get("pr_number") in merged_numbers and feature.get("status") not in ("Pushed", "Rejected", "Reverted"):
+                if feature.get("status") in terminal:
+                    continue
+                pr_n = _pr_number_for(feature)
+                if pr_n is None:
+                    continue
+
+                if pr_n in merged_numbers:
                     client.patch(
                         f"/api/features/{feature['id']}",
-                        json={"status": "Pushed"},
+                        json={"status": "Pushed", "pr_number": None},
                     )
-                    log.info(f"Reconciled feature {feature['id']} → Pushed (PR #{feature['pr_number']} merged)")
+                    log.info(f"Reconciled feature {feature['id']} → Pushed (PR #{pr_n} merged)")
+
+                elif pr_n in closed_numbers:
+                    # PR closed without merging — reset so coder can retry
+                    reset_status = "Approved"
+                    if feature.get("status") == "Reviewing":
+                        reset_status = "Implementing"  # keep coder loop, not restart from scratch
+                    client.patch(
+                        f"/api/features/{feature['id']}",
+                        json={"status": reset_status, "pr_number": None, "pr_url": None, "branch_name": None},
+                    )
+                    log.info(f"Reconciled feature {feature['id']} → {reset_status} (PR #{pr_n} closed without merge)")
 
     except Exception as e:
         log.warning(f"reconcile_merged_prs failed: {e}")
