@@ -98,37 +98,40 @@ def _rollback_stuck_features(product_id: int, persona: str | None) -> None:
         log.warning(f"Could not rollback stuck features: {e}")
 
 
-def _reconcile_session_result(working_dir: str, product_id: int, exit_code: int) -> None:
-    """
-    Read session_result.json written by the agent and apply all status updates
-    via the PM API. This runs AFTER the container exits — status authority lives
-    here, not inside the container, so kills/crashes can't leave status wrong.
-
-    File format (agent writes this incrementally after each feature):
-      {
-        "features": [
-          {"id": 21, "status": "Reviewing", "pr_number": 5, "pr_url": "https://..."},
-          {"id": 22, "status": "Designed",  "design_doc_path": "docs/feature_022_design.md"},
-          {"id": 25, "status": "Blocked",   "blocked_reason": "tests failing"}
-        ]
-      }
-
-    After applying, the file is deleted so it doesn't affect the next session.
-    """
+def _read_session_result(working_dir: str) -> list[dict]:
+    """Read and parse session_result.json. Returns feature list (empty if missing/invalid)."""
+    import json as _json
     result_file = Path(working_dir) / "session_result.json"
     if not result_file.exists():
-        return
-
-    import json as _json
+        return []
     try:
         data = _json.loads(result_file.read_text(encoding="utf-8"))
+        return data.get("features", [])
     except Exception as e:
         log.warning(f"Could not read session_result.json: {e}")
-        return
+        return []
 
-    features = data.get("features", [])
+
+def _delete_session_result(working_dir: str) -> None:
+    try:
+        (Path(working_dir) / "session_result.json").unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _reconcile_session_result(working_dir: str, product_id: int, exit_code: int,
+                               features: list[dict] | None = None) -> None:
+    """
+    Apply status updates from session_result.json (or pre-read features list) via the PM API.
+    Runs AFTER the container exits — status authority lives here, not inside the container.
+    If `features` is provided, uses that data instead of re-reading the file.
+    After applying, deletes session_result.json.
+    """
+    if features is None:
+        features = _read_session_result(working_dir)
+
     if not features:
-        result_file.unlink(missing_ok=True)
+        _delete_session_result(working_dir)
         return
 
     applied = 0
@@ -138,110 +141,139 @@ def _reconcile_session_result(working_dir: str, product_id: int, exit_code: int)
                 fid = entry.get("id")
                 if not fid:
                     continue
-                patch_body = {k: v for k, v in entry.items() if k != "id"}
+                patch_body = {k: v for k, v in entry.items() if k not in ("id", "confidence")}
                 try:
                     client.patch(f"/api/features/{fid}", json=patch_body)
-                    log.info(f"[reconcile] Feature #{fid} → {patch_body.get('status', '?')}")
+                    log.info(f"[reconcile] Feature #{fid} -> {patch_body.get('status', '?')}")
                     applied += 1
                 except Exception as fe:
                     log.warning(f"[reconcile] Could not update feature #{fid}: {fe}")
     except Exception as e:
         log.warning(f"[reconcile] PM API error: {e}")
 
-    log.info(f"[reconcile] Applied {applied}/{len(features)} feature updates from session_result.json")
-    try:
-        result_file.unlink(missing_ok=True)
-    except Exception:
-        pass
+    log.info(f"[reconcile] Applied {applied}/{len(features)} feature updates")
+    _delete_session_result(working_dir)
 
 
-def _auto_merge_approved(product: dict, working_dir: str) -> None:
+def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
     """
-    After a reviewer session, read session_result.json and merge any features
-    that were approved with high confidence. Called only when auto_merge_enabled=True.
-    """
-    import json as _json
-    result_file = Path(working_dir) / "session_result.json"
-    if not result_file.exists():
-        return
-    try:
-        data = _json.loads(result_file.read_text(encoding="utf-8"))
-    except Exception as e:
-        log.warning(f"[auto-merge] Could not read session_result.json: {e}")
-        return
+    For reviewer sessions with auto_merge_enabled: process approved features.
+    - High confidence: attempt GitHub merge → update entry to Pushed
+    - PR closed/conflicted: close PR, update entry to Implementing (clears pr_number)
+    - Low confidence: leave entry unchanged (stays Reviewed for human sign-off)
 
+    Takes the session features list, modifies entries in-place, and returns it
+    so reconcile applies the final authoritative state.
+    """
     gh_token = _get_gh_token()
     if not gh_token:
         log.warning("[auto-merge] No GitHub PAT configured — skipping auto-merge")
-        return
+        return features
 
     github_repo = product.get("github_repo", "")
     if not github_repo:
         log.warning("[auto-merge] Product has no github_repo — skipping auto-merge")
-        return
+        return features
 
-    for entry in data.get("features", []):
+    repo_slug = _parse_repo_slug(github_repo)
+    gh_headers = {"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"}
+
+    for entry in features:
         if entry.get("review_outcome") != "approved":
             continue
-        if entry.get("confidence", "low") != "high":
-            log.info(f"[auto-merge] Feature #{entry.get('id')} approved but low-confidence — skipping merge")
-            continue
 
-        # Look up the PR number for this feature
         fid = entry.get("id")
-        try:
-            with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-                feat = client.get(f"/api/features/{fid}").json()
-                pr_number = feat.get("pr_number")
-        except Exception as e:
-            log.warning(f"[auto-merge] Could not fetch feature #{fid}: {e}")
-            continue
+        pr_number = entry.get("pr_number")
+
+        if not pr_number:
+            # Fetch pr_number from DB if not in session entry
+            try:
+                with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                    feat = client.get(f"/api/features/{fid}").json()
+                    pr_number = feat.get("pr_number")
+                    entry["pr_number"] = pr_number
+            except Exception as e:
+                log.warning(f"[auto-merge] Could not fetch feature #{fid}: {e}")
+                continue
 
         if not pr_number:
             log.warning(f"[auto-merge] Feature #{fid} has no PR number — skipping")
             continue
 
-        log.info(f"[auto-merge] Merging PR #{pr_number} for feature #{fid} (high-confidence approval)")
+        # Check current PR state on GitHub before doing anything
+        try:
+            pr_resp = httpx.get(
+                f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}",
+                headers=gh_headers, timeout=10,
+            )
+            if pr_resp.status_code == 200:
+                pr_data = pr_resp.json()
+                pr_state = pr_data.get("state")   # "open" | "closed"
+                merged_at = pr_data.get("merged_at")  # None if not merged
+            else:
+                pr_state, merged_at = None, None
+        except Exception as e:
+            log.warning(f"[auto-merge] Could not check PR #{pr_number} state: {e}")
+            pr_state, merged_at = None, None
+
+        # Already merged on GitHub — just mark Pushed
+        if merged_at:
+            log.info(f"[auto-merge] PR #{pr_number} already merged — marking feature #{fid} Pushed")
+            entry.update({"status": "Pushed", "pr_number": None})
+            continue
+
+        # PR closed but not merged — re-queue to Implementing
+        if pr_state == "closed":
+            log.info(f"[auto-merge] PR #{pr_number} closed (not merged) — re-queuing feature #{fid} to Implementing")
+            entry.update({
+                "status": "Implementing",
+                "pr_number": None,
+                "review_outcome": None,
+                "review_notes": f"PR #{pr_number} was closed without merging — coder will rebase and reopen.",
+            })
+            continue
+
+        # Low confidence — leave as Reviewed for human sign-off
+        if entry.get("confidence", "low") != "high":
+            log.info(f"[auto-merge] Feature #{fid} approved but low-confidence — leaving for human review")
+            continue
+
+        # PR is open + high confidence — attempt merge
+        log.info(f"[auto-merge] Merging PR #{pr_number} for feature #{fid} (high-confidence)")
         try:
             resp = httpx.put(
-                f"https://api.github.com/repos/{_parse_repo_slug(github_repo)}/pulls/{pr_number}/merge",
+                f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}/merge",
                 json={"merge_method": "squash", "commit_title": f"feat: auto-merge PR #{pr_number} [ProductFactory]"},
-                headers={"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"},
-                timeout=15,
+                headers=gh_headers, timeout=15,
             )
             if resp.status_code in (200, 201):
                 log.info(f"[auto-merge] PR #{pr_number} merged successfully")
-                with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-                    client.patch(f"/api/features/{fid}", json={"status": "Pushed"})
+                entry.update({"status": "Pushed", "pr_number": None})
             else:
                 body = resp.json() if "application/json" in resp.headers.get("content-type", "") else {}
                 gh_msg = body.get("message", resp.text[:120])
                 log.warning(f"[auto-merge] GitHub {resp.status_code} for PR #{pr_number}: {gh_msg}")
-                # Not mergeable = conflicts; re-queue for coder to rebase
                 if resp.status_code == 405 or "not mergeable" in gh_msg.lower():
-                    log.info(f"[auto-merge] PR #{pr_number} has conflicts — closing PR and re-queuing feature #{fid} to Implementing")
-                    # Close the PR on GitHub so the open-PR gate clears immediately
+                    # Conflicts — close PR and re-queue
                     httpx.patch(
-                        f"https://api.github.com/repos/{_parse_repo_slug(github_repo)}/pulls/{pr_number}",
-                        json={"state": "closed"},
-                        headers={"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"},
-                        timeout=10,
+                        f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}",
+                        json={"state": "closed"}, headers=gh_headers, timeout=10,
                     )
                     httpx.post(
-                        f"https://api.github.com/repos/{_parse_repo_slug(github_repo)}/issues/{pr_number}/comments",
+                        f"https://api.github.com/repos/{repo_slug}/issues/{pr_number}/comments",
                         json={"body": "Closing due to merge conflicts — ProductFactory will rebase and reopen."},
-                        headers={"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"},
-                        timeout=10,
+                        headers=gh_headers, timeout=10,
                     )
-                    with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-                        client.patch(f"/api/features/{fid}", json={
-                            "status": "Implementing",
-                            "pr_number": None,
-                            "review_outcome": None,
-                            "review_notes": f"Auto-merge failed: PR has conflicts (GitHub {resp.status_code}). Coder must rebase.",
-                        })
+                    entry.update({
+                        "status": "Implementing",
+                        "pr_number": None,
+                        "review_outcome": None,
+                        "review_notes": f"Merge failed: conflicts (GitHub {resp.status_code}). Coder must rebase.",
+                    })
         except Exception as e:
             log.warning(f"[auto-merge] Error merging PR #{pr_number}: {e}")
+
+    return features
 
 
 def _parse_repo_slug(github_repo: str) -> str:
@@ -617,12 +649,18 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 pass
 
     # ── Post-exit reconciliation (runs regardless of exit code) ─────────────────
-    # 1. Apply status updates from session_result.json (written by agent incrementally).
-    #    This is the authoritative status update — runs outside the container so it
-    #    can never be skipped by a kill/crash.
-    _reconcile_session_result(working_dir, product["id"], exit_code)
+    # 1. Read session_result.json ONCE — shared between auto_merge and reconcile so
+    #    the file isn't deleted before auto_merge can act on it.
+    _session_features = _read_session_result(working_dir)
 
-    # 2. Record session end in DB.
+    # 2. Auto-merge BEFORE reconcile so merge/re-queue decisions override raw agent state.
+    if exit_code == 0 and persona == "reviewer" and product.get("_auto_merge_enabled"):
+        _session_features = _auto_merge_approved(product, _session_features)
+
+    # 3. Apply status updates (deletes session_result.json at end).
+    _reconcile_session_result(working_dir, product["id"], exit_code, features=_session_features)
+
+    # 4. Record session end in DB.
     if session_id is not None:
         try:
             with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
@@ -633,7 +671,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         except Exception as e:
             log.warning(f"Could not update session record: {e}")
 
-    # 3. Roll back any intermediate-state features with no PR evidence.
+    # 5. Roll back any intermediate-state features with no PR evidence.
     #    Covers cases where agent claimed a feature but never finished it.
     #    (Features with pr_number are left alone — they're already Reviewing.)
     if exit_code != 0:
@@ -642,10 +680,6 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     if exit_code == 2:
         return 2
-
-    # After a successful reviewer session: auto-merge high-confidence approvals if enabled
-    if exit_code == 0 and persona == "reviewer" and product.get("_auto_merge_enabled"):
-        _auto_merge_approved(product, working_dir)
 
     # After a successful coder session: QA → Security → video → recommender
     if exit_code == 0 and persona == "coder":

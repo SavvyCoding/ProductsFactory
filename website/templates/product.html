@@ -160,7 +160,7 @@ const PRODUCT_ID = {{ product.id }};
     <button onclick="clearSelection()" class="btn btn-outline" style="padding:5px 12px">✗ Clear</button>
   </div>
 
-  <!-- KANBAN -->
+  <!-- PHASE TABS -->
   {% set columns = [
     ('Pending',      's-pending',      'Awaiting PM review'),
     ('Approved',     's-approved',     'Queued for Claude'),
@@ -173,55 +173,84 @@ const PRODUCT_ID = {{ product.id }};
     ('Pushed',       's-pushed',       'Merged to main'),
   ] %}
 
-  <div class="kanban" id="kanban">
+  <div class="phase-tab-bar" id="phase-tab-bar">
+    {% for col_status, col_class, col_hint in columns %}
+    {% set cnt = features | selectattr('status', 'equalto', col_status) | list | length %}
+    <button class="phase-tab {{ col_class }}" data-phase="{{ col_status }}"
+            onclick="switchPhase('{{ col_status }}')" title="{{ col_hint }}">
+      {{ col_status }}
+      {% if cnt > 0 %}<span class="phase-count">{{ cnt }}</span>{% endif %}
+    </button>
+    {% endfor %}
+  </div>
+
+  <div id="phase-panels">
     {% for col_status, col_class, col_hint in columns %}
     {% set col_features = features | selectattr('status', 'equalto', col_status) | list %}
-    {% set col_empty = col_features | length == 0 %}
-    <div class="kanban-col {% if col_empty %}col-empty{% endif %}"
-         data-status="{{ col_status }}"
-         ondragover="onDragOver(event, this)"
-         ondragleave="onDragLeave(this)"
-         ondrop="onDrop(event, this)"
-         {% if col_empty %}onclick="expandCol(this)" title="Click to expand · {{ col_hint }}"{% endif %}>
-      <div class="kanban-header {{ col_class }}" title="{{ col_hint }}"
-           onclick="toggleColCollapse(this.closest('.kanban-col'))">
-        <span class="col-label">{{ col_status }}</span>
-        <span class="col-count" id="count-{{ col_status }}">
-          {{ col_features | length }}
-        </span>
-        <span class="col-toggle">{% if col_empty %}▶{% else %}▼{% endif %}</span>
-      </div>
+    <div class="phase-panel" id="phase-{{ col_status }}" style="display:none">
 
-      {% for f in col_features %}
-      <div class="feature-card {% if f.source == 'ai' %}fc-ai{% endif %}"
-           draggable="true"
-           data-feature-id="{{ f.id }}"
-           data-status="{{ f.status }}"
-           onclick="event.stopPropagation(); this.classList.toggle('expanded')"
-           ondragstart="onDragStart(event, this)"
-           ondragend="onDragEnd(this)">
-        {% if f.status == 'Pending' %}
-        <input type="checkbox" class="feature-checkbox"
-               onchange="toggleSelect({{ f.id }}, this)"
-               onclick="event.stopPropagation()">
-        {% endif %}
-        <div class="feature-name">{{ f.name }}</div>
-        {% if f.feature_type == 'bug' %}<span class="type-badge type-bug">🐛 Bug</span>
-        {% elif f.feature_type == 'chore' %}<span class="type-badge type-chore">🔧 Chore</span>{% endif %}
-        {% if f.source == 'ai' %}<span class="ai-badge">🤖 AI</span>{% endif %}
-        {% if f.skip_design %}<span class="skip-design-badge">⚡ Skip design</span>{% endif %}
-        {% if f.description %}<div class="feature-desc">{{ f.description }}</div>{% endif %}
-        {% if f.design_doc_path %}<div class="design-doc-link">📄 <a href="/workspace/{{ f.design_doc_path }}" title="Design doc" onclick="event.stopPropagation()">design doc</a></div>{% endif %}
-        {% if f.pr_url %}<a href="{{ f.pr_url }}" target="_blank" class="pr-link" onclick="event.stopPropagation()">PR #{{ f.pr_number }} ↗</a>{% endif %}
-        {% if f.review_outcome == 'approved' %}<div class="review-outcome review-ok">✓ Reviewer approved</div>{% endif %}
-        {% if f.review_outcome == 'changes_requested' %}<div class="review-outcome review-changes">↩ Changes requested</div>{% endif %}
-        {% if f.review_notes and f.review_outcome == 'changes_requested' %}<div class="feature-desc" style="font-size:11px;color:var(--text-muted)">{{ f.review_notes[:120] }}{% if f.review_notes|length > 120 %}…{% endif %}</div>{% endif %}
-        {% if f.blocked_reason %}<div class="blocked-reason">⚠ {{ f.blocked_reason }}</div>{% endif %}
-        {% if f.fix_attempts > 0 %}<div class="fix-attempts">{{ f.fix_attempts }}/3 attempts used</div>{% endif %}
+      {% if col_status == 'Pending' %}
+      <div class="phase-actions-bar">
+        <form method="post" action="/product/{{ product.id }}/features/bulk-approve" id="bulk-form">
+          <input type="hidden" name="feature_ids" id="bulk-ids">
+          <button type="submit" class="btn btn-green btn-sm">✓ Approve selected</button>
+        </form>
+        <span id="bulk-count" class="muted" style="font-size:12px">0 selected</span>
+        <button onclick="clearSelection()" class="btn btn-outline btn-sm">✗ Clear</button>
+      </div>
+      {% endif %}
+
+      {% if col_features %}
+      <div class="phase-list">
+        {% for f in col_features %}
+        <div class="phase-card {% if f.source == 'ai' %}fc-ai{% endif %}" data-feature-id="{{ f.id }}">
+          <div class="phase-card-left">
+            {% if col_status == 'Pending' %}
+            <input type="checkbox" class="feature-checkbox"
+                   onchange="toggleSelect({{ f.id }}, this)"
+                   onclick="event.stopPropagation()">
+            {% endif %}
+            <div>
+              <div class="phase-card-name">{{ f.name }}</div>
+              {% if f.description %}<div class="phase-card-desc">{{ f.description[:200] }}{% if f.description|length > 200 %}…{% endif %}</div>{% endif %}
+              <div class="phase-card-meta">
+                {% if f.feature_type == 'bug' %}<span class="type-badge type-bug">🐛 Bug</span>{% endif %}
+                {% if f.feature_type == 'chore' %}<span class="type-badge type-chore">🔧 Chore</span>{% endif %}
+                {% if f.source == 'ai' %}<span class="ai-badge">🤖 AI</span>{% endif %}
+                {% if f.skip_design %}<span class="skip-design-badge">⚡ Skip design</span>{% endif %}
+                {% if f.blocked_reason %}<span class="blocked-reason">⚠ {{ f.blocked_reason }}</span>{% endif %}
+                {% if f.fix_attempts > 0 %}<span class="fix-attempts">{{ f.fix_attempts }}/3 fix attempts</span>{% endif %}
+                {% if f.review_outcome == 'approved' %}<span class="review-outcome review-ok">✓ Approved</span>{% endif %}
+                {% if f.review_outcome == 'changes_requested' %}<span class="review-outcome review-changes">↩ Changes requested</span>{% endif %}
+                {% if f.review_notes and f.review_outcome == 'changes_requested' %}<span class="muted" style="font-size:11px">{{ f.review_notes[:100] }}{% if f.review_notes|length > 100 %}…{% endif %}</span>{% endif %}
+              </div>
+            </div>
+          </div>
+          <div class="phase-card-right">
+            {% if f.pr_url %}<a href="{{ f.pr_url }}" target="_blank" class="btn btn-sm btn-outline">PR #{{ f.pr_number }} ↗</a>{% endif %}
+            {% if f.design_doc_path %}<a href="/workspace/{{ f.design_doc_path }}" class="btn btn-sm btn-outline">📄 Design</a>{% endif %}
+            {% if col_status == 'Pending' %}
+            <form method="post" action="/product/{{ product.id }}/features/{{ f.id }}/status" style="display:inline">
+              <button name="status" value="Approved" class="btn btn-sm btn-green">✓ Approve</button>
+            </form>
+            {% elif col_status == 'Reviewed' %}
+            {% for pr in open_prs_list if pr.number == f.pr_number %}
+            <form method="post" action="/product/{{ product.id }}/merge-pr/{{ f.pr_number }}" style="display:inline">
+              <button class="btn btn-sm btn-green">⇡ Merge</button>
+            </form>
+            {% endfor %}
+            {% endif %}
+          </div>
+        </div>
+        {% endfor %}
       </div>
       {% else %}
-      <div class="kanban-empty" id="empty-{{ col_status }}">Drop here</div>
-      {% endfor %}
+      <div class="phase-empty">
+        <div class="phase-empty-icon">{{ {'Pending':'📋','Approved':'✅','Designing':'✏️','Designed':'📐','Implementing':'💻','Reviewing':'👁','Reviewed':'✓','Blocked':'🚧','Pushed':'🚀'}.get(col_status,'•') }}</div>
+        <div>No features in <strong>{{ col_status }}</strong></div>
+        <div class="muted" style="font-size:12px;margin-top:4px">{{ col_hint }}</div>
+      </div>
+      {% endif %}
     </div>
     {% endfor %}
   </div>
@@ -529,6 +558,29 @@ function switchTab(name, btn) {
   if (tab !== 'board') switchTab(tab, btn);
 })();
 
+
+// ── PHASE TABS ─────────────────────────────────────────────
+function switchPhase(phase) {
+  document.querySelectorAll('.phase-panel').forEach(p => p.style.display = 'none');
+  document.querySelectorAll('.phase-tab').forEach(t => t.classList.remove('active'));
+  const panel = document.getElementById('phase-' + phase);
+  if (panel) panel.style.display = '';
+  const btn = document.querySelector(`.phase-tab[data-phase="${phase}"]`);
+  if (btn) btn.classList.add('active');
+  localStorage.setItem('pf-phase', phase);
+}
+
+// Restore last phase or default to first with features
+(function() {
+  const saved = localStorage.getItem('pf-phase');
+  const phases = ['Pending','Approved','Designing','Designed','Implementing','Reviewing','Reviewed','Blocked','Pushed'];
+  // Pick saved phase if valid, else first phase that has features, else Pending
+  let active = saved && phases.includes(saved) ? saved : null;
+  if (!active) {
+    active = phases.find(p => document.getElementById('phase-' + p)?.querySelector('.phase-card')) || 'Pending';
+  }
+  switchPhase(active);
+})();
 
 // ── DRAG AND DROP ─────────────────────────────────────────
 let dragFeatureId = null;
