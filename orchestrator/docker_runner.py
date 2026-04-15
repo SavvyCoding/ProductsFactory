@@ -119,6 +119,11 @@ def _read_session_result(working_dir: str) -> list[dict]:
     """
     Read and parse session_result.json (newline-delimited JSON — one entry per line).
     Returns list of feature dicts. Skips blank or malformed lines.
+
+    Also handles the wrapped format where an agent writes a single JSON object with a
+    top-level "features" array instead of one object per line, e.g.:
+        {"features": [{"id": 42, "status": "Reviewed", ...}, ...]}
+    Such entries are unpacked into individual feature dicts.
     """
     import json as _json
     result_file = Path(working_dir) / "session_result.json"
@@ -131,7 +136,13 @@ def _read_session_result(working_dir: str) -> list[dict]:
             if not line:
                 continue
             try:
-                entries.append(_json.loads(line))
+                obj = _json.loads(line)
+                # Unwrap {"features": [...]} format written by some agent versions
+                if isinstance(obj, dict) and "features" in obj and isinstance(obj["features"], list) and "id" not in obj:
+                    log.warning(f"[session_result] Unwrapping nested 'features' array ({len(obj['features'])} entries)")
+                    entries.extend(obj["features"])
+                else:
+                    entries.append(obj)
             except Exception:
                 pass  # skip malformed lines (e.g. partial write mid-line)
     except Exception as e:
@@ -444,20 +455,34 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
             if persona == "coder":
                 resp = client.get("/api/features/approved", params={"product_id": product_id})
-            else:
-                # designer + reviewer: get all features for product and filter client-side
+                resp.raise_for_status()
+                all_features = resp.json()
+                features = all_features if isinstance(all_features, list) else []
+            elif persona == "reviewer":
+                # Use the same server-side filter as get_next_reviewer_product.
+                # Fetching all features and filtering client-side can drift if a feature
+                # moves between the poller's trigger check and this assignment call.
                 resp = client.get(f"/api/products/{product_id}/features")
-            resp.raise_for_status()
-            all_features = resp.json()
-
-        if persona == "designer":
-            features = [f for f in all_features
-                        if f.get("status") == "Approved" and not f.get("skip_design")]
-        elif persona == "reviewer":
-            features = [f for f in all_features
-                        if f.get("status") == "Reviewing" and f.get("pr_number")]
-        else:
-            features = all_features  # coder: already filtered by /approved endpoint
+                resp.raise_for_status()
+                all_features = resp.json()
+                features = [f for f in (all_features if isinstance(all_features, list) else [])
+                            if f.get("status") == "Reviewing" and f.get("pr_number")]
+                if not features:
+                    # Cross-check with the endpoint that triggered this session
+                    nfp = client.get("/api/features/next-for-persona",
+                                     params={"persona": "reviewer", "product_id": product_id})
+                    if nfp.status_code == 200 and nfp.json():
+                        log.warning(f"[assign] product features endpoint returned 0 Reviewing features "
+                                    f"but next-for-persona found #{nfp.json()['id']} — using it directly")
+                        features = [nfp.json()]
+            elif persona == "designer":
+                resp = client.get(f"/api/products/{product_id}/features")
+                resp.raise_for_status()
+                all_features = resp.json()
+                features = [f for f in (all_features if isinstance(all_features, list) else [])
+                            if f.get("status") == "Approved" and not f.get("skip_design")]
+            else:
+                features = []
 
         selected = features[:max_count]
         log.info(f"[assign] persona={persona} assigned {len(selected)}/{len(features)} features")

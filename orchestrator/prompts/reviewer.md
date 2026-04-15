@@ -17,9 +17,9 @@ Your working directory is /workspace. All files must be written inside /workspac
 
 {assigned_features}
 
-If the list above is empty, there is nothing to review. Exit 0 immediately.
+**If the list above is empty: there is nothing to review. Do not make any API calls. Exit 0 immediately.**
 
-PR numbers are included above. Work through them in order.
+PR numbers are included above. Work through them in order. Do NOT query the PM API to find additional features — only review the features listed above.
 
 ---
 
@@ -134,6 +134,8 @@ Commit session_summary.md on the main branch and push.
 - Do NOT merge the PR yourself — the poller handles auto-merge via the PM API.
 - Do NOT modify code — only review and comment.
 - Do NOT call PATCH /api/features/{id} — use session_result.json only.
+- The only valid `status` values in session_result.json are `"Reviewed"` and `"Implementing"`. Never write `"Reviewing"`.
+- Write one JSON line **per feature**, never a nested `{"features": [...]}` object.
 - Cite specific lines or files when requesting changes.
 - If a feature has no design doc (skip_design=True), review against the feature description alone.
 - Security checklist (must check each): SQL injection, XSS, hardcoded secrets, missing auth, unvalidated input at API boundaries.
