@@ -659,7 +659,7 @@
   </p>
   <div class="hero-stats">
     <div>
-      <div class="hero-stat-val">10</div>
+      <div class="hero-stat-val">11</div>
       <div class="hero-stat-lbl">AI Personas</div>
     </div>
     <div>
@@ -1058,7 +1058,7 @@
         <div class="wf-step">
           <div class="wf-step-num">STEP 11</div>
           <div class="wf-step-title">Post-Coder Chain</div>
-          <div class="wf-step-desc">On coder clean exit: runs QA Tester → Security Auditor → Video Builder → Recommender (with backlog gate). Each is a separate <code>docker run</code> in sequence. Failures don't block the chain.</div>
+          <div class="wf-step-desc">On coder clean exit: runs QA Tester → Security Auditor → Recommender (with backlog gate). Each is a separate <code>docker run</code> in sequence. Failures don't block the chain.</div>
           <code class="wf-step-code">_run_post_coder_chain(product, session_uid)</code>
         </div>
         <div class="wf-step">
@@ -1146,8 +1146,8 @@
 <!-- PERSONAS -->
 <section id="personas">
   <div class="section-label">Multi-Agent System</div>
-  <h2>10 AI Personas</h2>
-  <p class="section-sub">Each persona is a separate Docker session with a specialized prompt. They run in priority order — delivery pipeline first, then maintenance, then planning.</p>
+  <h2>11 AI Personas</h2>
+  <p class="section-sub">Each persona is a separate Docker session with a specialized prompt. They run in priority order — delivery pipeline first, then maintenance, then planning. Two additional personas are on-demand only.</p>
 
   <div class="persona-section">
 
@@ -1359,6 +1359,46 @@
       </div>
     </div>
 
+    <!-- On-demand -->
+    <div>
+      <div class="persona-group-label">On-Demand / Special Triggers — bypass round-robin, run immediately when flagged</div>
+      <div class="persona-cards" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr))">
+
+        <div class="persona-card">
+          <div class="persona-card-accent" style="background:linear-gradient(90deg,#f59e0b,#ec4899)"></div>
+          <div class="persona-header">
+            <div class="persona-emoji">🎬</div>
+            <div>
+              <div class="persona-name">Product Trainer</div>
+              <div class="persona-trigger">Trigger: product.run_trainer_now = true (set via PM dashboard)</div>
+            </div>
+          </div>
+          <div class="persona-desc">Generates a narrated MP4 showcase video of all shipped features using Edge TTS (Aria Neural voice) and Pillow + moviepy. Slides: title → one per shipped feature → outro. Video is committed to <code style="font-family:'JetBrains Mono',monospace;font-size:11px">output/</code> and pushed to GitHub. Flag is cleared after launch so it only runs once per trigger.</div>
+          <div class="persona-io">
+            <div class="io-row"><span class="io-label io-in">IN</span><span class="io-val">Shipped features list (status: Pushed/Reviewed/Reviewing)</span></div>
+            <div class="io-row"><span class="io-label io-out">OUT</span><span class="io-val">output/product_video_&lt;timestamp&gt;.mp4 committed + pushed</span></div>
+          </div>
+        </div>
+
+        <div class="persona-card">
+          <div class="persona-card-accent" style="background:linear-gradient(90deg,#06b6d4,#3b82f6)"></div>
+          <div class="persona-header">
+            <div class="persona-emoji">🔬</div>
+            <div>
+              <div class="persona-name">Analysis Run</div>
+              <div class="persona-trigger">Trigger: POST /api/products/{id}/trigger_analysis from PM dashboard</div>
+            </div>
+          </div>
+          <div class="persona-desc">Deep brownfield codebase analysis — maps architecture, identifies technical debt, catalogues existing APIs and data models. Produces a structured report in docs/ for the PM to review before feature planning begins.</div>
+          <div class="persona-io">
+            <div class="io-row"><span class="io-label io-in">IN</span><span class="io-val">Full repository source tree</span></div>
+            <div class="io-row"><span class="io-label io-out">OUT</span><span class="io-val">docs/analysis_*.md + analysis_status: completed</span></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
   </div>
 </section>
 
@@ -1455,7 +1495,7 @@
 <section id="postcoder">
   <div class="section-label">Automation Chain</div>
   <h2>Post-Coder Pipeline</h2>
-  <p class="section-sub">After every successful coder session, four additional agents run automatically in sequence — no human intervention required.</p>
+  <p class="section-sub">After every successful coder session, three additional agents run automatically in sequence — no human intervention required.</p>
 
   <div class="chain-flow">
     <div class="chain-node">
@@ -1492,18 +1532,6 @@
 
     <div class="chain-arrow">
       <svg viewBox="0 0 32 12"><path d="M0,6 L26,6" stroke="#f43f5e" stroke-width="1.5" marker-end="url(#arrc)"/><defs><marker id="arrc" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L0,6 L6,3 z" fill="#f43f5e"/></marker></defs></svg>
-    </div>
-
-    <div class="chain-node">
-      <div class="chain-circle cc-video">
-        <div class="chain-emoji">🎬</div>
-        <div style="font-size:10px">Video</div>
-      </div>
-      <div class="chain-label">Generates showcase MP4</div>
-    </div>
-
-    <div class="chain-arrow">
-      <svg viewBox="0 0 32 12"><path d="M0,6 L26,6" stroke="#8b5cf6" stroke-width="1.5" marker-end="url(#arrd)"/><defs><marker id="arrd" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L0,6 L6,3 z" fill="#8b5cf6"/></marker></defs></svg>
     </div>
 
     <div class="chain-node">
@@ -1673,6 +1701,18 @@
           <td style="padding:10px 20px;font-size:12px;color:var(--green2)">📋 Planner</td>
           <td style="padding:10px 20px;font-size:12px;color:var(--text2)">No in-flight features exist for this product</td>
           <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">fallback — always runs if above fail</td>
+        </tr>
+        <tr style="border-top:1px solid var(--border);background:rgba(245,158,11,0.04)">
+          <td style="padding:10px 20px;font-size:12px;font-weight:700;color:var(--amber2)">on-demand</td>
+          <td style="padding:10px 20px;font-size:12px;color:var(--amber2)">🎬 Product Trainer</td>
+          <td style="padding:10px 20px;font-size:12px;color:var(--text2)">product.run_trainer_now = true (set from PM dashboard)</td>
+          <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">bypasses round-robin; flag cleared after launch</td>
+        </tr>
+        <tr style="border-top:1px solid var(--border);background:rgba(6,182,212,0.04)">
+          <td style="padding:10px 20px;font-size:12px;font-weight:700;color:var(--cyan)">on-demand</td>
+          <td style="padding:10px 20px;font-size:12px;color:var(--cyan)">🔬 Analysis Run</td>
+          <td style="padding:10px 20px;font-size:12px;color:var(--text2)">POST /api/products/{id}/trigger_analysis from dashboard</td>
+          <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">sets analysis_status: running; one-shot brownfield analysis</td>
         </tr>
       </tbody>
     </table>
@@ -2024,7 +2064,7 @@
   <div style="display:flex;align-items:center;justify-content:center;gap:16px;flex-wrap:wrap">
     <span style="font-weight:800;letter-spacing:-0.5px;color:var(--text2)">⚙ ProductFactory</span>
     <span style="color:var(--border2)">·</span>
-    <span>10 Personas · Continuous Delivery · Zero Human PRs</span>
+    <span>11 Personas · Continuous Delivery · Zero Human PRs</span>
     <span style="color:var(--border2)">·</span>
     <span style="font-family:'JetBrains Mono',monospace;font-size:11px">orchestrator/ · website/ · deploy/</span>
   </div>
