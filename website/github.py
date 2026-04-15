@@ -34,7 +34,7 @@ def parse_repo_slug(github_repo: str) -> tuple[str, str] | None:
     return None
 
 
-def fetch_progress_md(github_repo: str) -> str | None:
+def fetch_progress_md(github_repo: str, token: str | None = None) -> str | None:
     """
     Fetch the raw content of progress.md from the default branch.
     Returns None if the repo has no github_repo set or the file doesn't exist yet.
@@ -46,11 +46,10 @@ def fetch_progress_md(github_repo: str) -> str | None:
     try:
         resp = httpx.get(
             f"https://api.github.com/repos/{owner}/{repo}/contents/progress.md",
-            headers=_headers(),
+            headers=_headers(token),
             timeout=_TIMEOUT,
         )
         if resp.status_code == 200:
-            # Raw content returned when Accept: application/vnd.github.raw+json
             return resp.text
         if resp.status_code == 404:
             return None  # file doesn't exist yet — session hasn't started
@@ -62,7 +61,7 @@ def fetch_progress_md(github_repo: str) -> str | None:
     return None
 
 
-def fetch_architecture_md(github_repo: str) -> str | None:
+def fetch_architecture_md(github_repo: str, token: str | None = None) -> str | None:
     """Fetch ARCHITECTURE.md from the default branch, same pattern as progress.md."""
     slug = parse_repo_slug(github_repo)
     if not slug:
@@ -71,7 +70,7 @@ def fetch_architecture_md(github_repo: str) -> str | None:
     try:
         resp = httpx.get(
             f"https://api.github.com/repos/{owner}/{repo}/contents/ARCHITECTURE.md",
-            headers=_headers(),
+            headers=_headers(token),
             timeout=_TIMEOUT,
         )
         return resp.text if resp.status_code == 200 else None
@@ -128,6 +127,33 @@ def merge_pr(github_repo: str, pr_number: int, token: str) -> tuple[bool, str]:
     except Exception as e:
         log.warning(f"merge_pr error: {e}")
         return False, str(e)
+
+
+def close_pr(github_repo: str, pr_number: int, token: str, reason: str = "") -> bool:
+    """Close a PR without merging. Returns True on success."""
+    slug = parse_repo_slug(github_repo)
+    if not slug:
+        return False
+    owner, repo = slug
+    h = {**_headers(token), "Accept": "application/vnd.github+json"}
+    try:
+        # Post a comment explaining why
+        if reason:
+            httpx.post(
+                f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments",
+                json={"body": reason}, headers=h, timeout=_TIMEOUT,
+            )
+        resp = httpx.patch(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
+            json={"state": "closed"}, headers=h, timeout=_TIMEOUT,
+        )
+        if resp.status_code == 200:
+            log.info(f"close_pr: closed PR #{pr_number} in {owner}/{repo}")
+            return True
+        log.warning(f"close_pr: GitHub {resp.status_code} for {owner}/{repo} PR#{pr_number}")
+    except Exception as e:
+        log.warning(f"close_pr error: {e}")
+    return False
 
 
 def count_open_prs(github_repo: str) -> int:

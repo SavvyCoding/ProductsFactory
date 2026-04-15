@@ -24,6 +24,7 @@ import httpx
 
 from orchestrator.prompts import build_prompt
 from orchestrator.alerts import send_alert
+from templates.renderer import install_templates
 
 log = logging.getLogger("poller.docker")
 
@@ -210,12 +211,35 @@ def _auto_merge_approved(product: dict, working_dir: str) -> None:
             )
             if resp.status_code in (200, 201):
                 log.info(f"[auto-merge] PR #{pr_number} merged successfully")
-                # Update feature status to Pushed
                 with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
                     client.patch(f"/api/features/{fid}", json={"status": "Pushed"})
             else:
                 body = resp.json() if "application/json" in resp.headers.get("content-type", "") else {}
-                log.warning(f"[auto-merge] GitHub {resp.status_code} for PR #{pr_number}: {body.get('message', resp.text[:100])}")
+                gh_msg = body.get("message", resp.text[:120])
+                log.warning(f"[auto-merge] GitHub {resp.status_code} for PR #{pr_number}: {gh_msg}")
+                # Not mergeable = conflicts; re-queue for coder to rebase
+                if resp.status_code == 405 or "not mergeable" in gh_msg.lower():
+                    log.info(f"[auto-merge] PR #{pr_number} has conflicts — closing PR and re-queuing feature #{fid} to Implementing")
+                    # Close the PR on GitHub so the open-PR gate clears immediately
+                    httpx.patch(
+                        f"https://api.github.com/repos/{_parse_repo_slug(github_repo)}/pulls/{pr_number}",
+                        json={"state": "closed"},
+                        headers={"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"},
+                        timeout=10,
+                    )
+                    httpx.post(
+                        f"https://api.github.com/repos/{_parse_repo_slug(github_repo)}/issues/{pr_number}/comments",
+                        json={"body": "Closing due to merge conflicts — ProductFactory will rebase and reopen."},
+                        headers={"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"},
+                        timeout=10,
+                    )
+                    with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                        client.patch(f"/api/features/{fid}", json={
+                            "status": "Implementing",
+                            "pr_number": None,
+                            "review_outcome": None,
+                            "review_notes": f"Auto-merge failed: PR has conflicts (GitHub {resp.status_code}). Coder must rebase.",
+                        })
         except Exception as e:
             log.warning(f"[auto-merge] Error merging PR #{pr_number}: {e}")
 
@@ -315,6 +339,13 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # Always reset workspace to clean main before starting a new session.
     # This discards any half-baked code from failed/incomplete previous sessions.
     _reset_workspace(working_dir, product.get("name", str(working_dir)))
+
+    # Re-install templates after reset — git clean may have removed untracked template files.
+    # force=False ensures we never overwrite files the agent has customised and committed.
+    try:
+        install_templates(product, PM_API_URL, force=False)
+    except Exception as _te:
+        log.warning(f"Could not re-install templates for {product.get('name')}: {_te}")
 
     # Ensure standard agent-writable directories exist on the host.
     # Permissions are fixed inside the container via docker exec -u 0 after startup

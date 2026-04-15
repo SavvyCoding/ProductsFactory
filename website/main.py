@@ -63,7 +63,7 @@ from website.database import get_db
 from website.models import Product, Feature, FeatureReview, Session as DBSession, Alert, SystemConfig, PMUser
 from website.auth import require_auth
 from website import schemas
-from website.github import fetch_progress_md, fetch_architecture_md, count_open_prs, list_open_prs, merge_pr
+from website.github import fetch_progress_md, fetch_architecture_md, count_open_prs, list_open_prs, merge_pr, close_pr
 from website.schemas import PM_ALLOWED_TRANSITIONS
 
 app = FastAPI(title="ProductFactory PM", docs_url=None, redoc_url=None)
@@ -327,7 +327,9 @@ async def architecture_view(
     """Renders ARCHITECTURE.md from GitHub."""
     product = await _get_product_or_404(product_id, db)
     alert_count = await _unread_alert_count(db)
-    raw_md = fetch_architecture_md(product.github_repo or "") if product.github_repo else None
+    _sys_cfg = await _get_system_config(db)
+    _gh_pat = _sys_cfg.github_pat if _sys_cfg else None
+    raw_md = fetch_architecture_md(product.github_repo or "", token=_gh_pat) if product.github_repo else None
     html_content = _md(raw_md) if raw_md else None
     return templates.TemplateResponse("progress.html", {
         "request": request,
@@ -348,8 +350,9 @@ async def progress_view(
     """Fetches progress.md from GitHub and renders as HTML."""
     product = await _get_product_or_404(product_id, db)
     alert_count = await _unread_alert_count(db)
-
-    raw_md = fetch_progress_md(product.github_repo or "") if product.github_repo else None
+    _sys_cfg = await _get_system_config(db)
+    _gh_pat = _sys_cfg.github_pat if _sys_cfg else None
+    raw_md = fetch_progress_md(product.github_repo or "", token=_gh_pat) if product.github_repo else None
     html_content = _md(raw_md) if raw_md else None
 
     return templates.TemplateResponse("progress.html", {
@@ -476,6 +479,17 @@ async def change_feature_status_form(
     feature.status = status
     if status == "Approved" and feature.fix_attempts > 0:
         feature.fix_attempts = 0
+    return RedirectResponse(f"/product/{product_id}", status_code=303)
+
+
+@app.post("/product/{product_id}/approve")
+async def approve_product(
+    product_id: int,
+    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
+):
+    product = await _get_product_or_404(product_id, db)
+    if product.status == "discovered":
+        product.status = "ready"
     return RedirectResponse(f"/product/{product_id}", status_code=303)
 
 
@@ -730,6 +744,23 @@ async def merge_pr_action(
         raise HTTPException(422, "GitHub PAT not configured — set it in Admin")
     ok, err = merge_pr(product.github_repo or "", pr_number, token)
     if not ok:
+        # Not mergeable = conflicts; close PR on GitHub, re-queue feature to Implementing
+        if "not mergeable" in err.lower() or "405" in err:
+            close_pr(
+                product.github_repo or "", pr_number, token,
+                reason="Closing due to merge conflicts — ProductFactory will rebase and reopen.",
+            )
+            result = await db.execute(
+                select(Feature).where(Feature.product_id == product_id, Feature.pr_number == pr_number)
+            )
+            feature = result.scalar_one_or_none()
+            if feature:
+                feature.status = "Implementing"
+                feature.pr_number = None
+                feature.review_outcome = None
+                feature.review_notes = f"Merge failed: PR has conflicts — coder must rebase. ({err})"
+                await db.commit()
+            raise HTTPException(409, f"PR has merge conflicts — closed PR #{pr_number} and re-queued for coder to rebase.")
         raise HTTPException(502, f"GitHub merge failed: {err}")
     # Mark matching feature as Pushed
     result = await db.execute(

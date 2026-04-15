@@ -92,6 +92,13 @@ PATCH {PM_API_URL}/api/features/{id}  {"status": "Implementing"}
 git checkout -b feature/{feature_name}
 ```
 
+**If an open PR already exists for this feature** (re-queued due to merge conflicts):
+```
+gh pr close <pr_number> --comment "Closing to rebase and reopen — merge conflict detected."
+git push origin --delete feature/{feature_name} 2>/dev/null || true
+git checkout -b feature/{feature_name}
+```
+
 - Update `progress.md`: `resume_step: 3, resume_feature_id: {id}` → commit + push (heartbeat)
 
 ### Step 4 — Implement

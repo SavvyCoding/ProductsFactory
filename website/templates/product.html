@@ -27,7 +27,11 @@
     <a href="/product/{{ product.id }}/progress" class="btn btn-outline">📄 progress.md</a>
     <a href="/product/{{ product.id }}/architecture" class="btn btn-outline">🏗 arch</a>
 
-    {% if product.status == 'ready' %}
+    {% if product.status == 'discovered' %}
+    <form method="post" action="/product/{{ product.id }}/approve" style="display:inline">
+      <button class="btn btn-green">✓ Approve → Ready</button>
+    </form>
+    {% elif product.status == 'ready' %}
     <form method="post" action="/product/{{ product.id }}/pause" style="display:inline">
       <button class="btn btn-outline">⏸ Pause</button>
     </form>

@@ -47,7 +47,7 @@ def scaffold_greenfield(product: dict, system_config: dict, pm_api_url: str, ssh
     try:
         # ① Create GitHub repo
         log.info(f"Scaffold [{product_name}]: creating GitHub repo {org}/{github_repo_name}")
-        ssh_url = _create_github_repo(org, github_repo_name, pat)
+        ssh_url, actual_owner = _create_github_repo(org, github_repo_name, pat)
 
         # ② Generate deploy key on host
         key_slug = github_repo_name.lower().replace("-", "_").replace(".", "_")
@@ -55,9 +55,9 @@ def scaffold_greenfield(product: dict, system_config: dict, pm_api_url: str, ssh
         log.info(f"Scaffold [{product_name}]: generating deploy key → {key_path}")
         public_key = _generate_deploy_key(key_path)
 
-        # ③ Upload public key to GitHub
-        log.info(f"Scaffold [{product_name}]: uploading deploy key to GitHub")
-        _add_deploy_key(org, github_repo_name, pat, public_key,
+        # ③ Upload public key to GitHub (use actual_owner in case we fell back to user account)
+        log.info(f"Scaffold [{product_name}]: uploading deploy key to GitHub ({actual_owner}/{github_repo_name})")
+        _add_deploy_key(actual_owner, github_repo_name, pat, public_key,
                         f"{ssh_key_name}-{key_slug}")
 
         # ④ Create local folder
@@ -87,7 +87,7 @@ def scaffold_greenfield(product: dict, system_config: dict, pm_api_url: str, ssh
         # ⑧ Update product → registered (poller discovery takes over next cycle)
         _patch_product(pm_api_url, product["id"], {
             "status": "registered",
-            "github_repo": f"https://github.com/{org}/{github_repo_name}",
+            "github_repo": f"https://github.com/{actual_owner}/{github_repo_name}",
             "tech_stack": [preferred_stack],
         })
         log.info(f"Scaffold [{product_name}]: complete — {working_dir}")
@@ -105,8 +105,11 @@ def scaffold_greenfield(product: dict, system_config: dict, pm_api_url: str, ssh
 
 # ── GitHub API helpers ────────────────────────────────────────────────────────
 
-def _create_github_repo(org: str, repo_name: str, pat: str) -> str:
-    """Create a private GitHub repo. Returns SSH clone URL."""
+def _create_github_repo(org: str, repo_name: str, pat: str) -> tuple[str, str]:
+    """
+    Create a private GitHub repo under the org (falls back to personal account).
+    Returns (ssh_clone_url, actual_owner).
+    """
     headers = {
         "Authorization": f"token {pat}",
         "Accept": "application/vnd.github.v3+json",
@@ -114,23 +117,26 @@ def _create_github_repo(org: str, repo_name: str, pat: str) -> str:
     payload = {"name": repo_name, "private": True, "auto_init": False}
 
     with httpx.Client(timeout=30) as client:
-        # Try org endpoint first — falls back to personal account if org returns 404/403
+        # Try org endpoint first
         resp = client.post(
             f"https://api.github.com/orgs/{org}/repos",
             headers=headers, json=payload,
         )
-        if resp.status_code in (404, 403, 422):
-            # Org not found / no access / not an org → fall back to user repos
-            if "already exists" not in resp.text:
-                resp = client.post(
-                    "https://api.github.com/user/repos",
-                    headers=headers, json=payload,
-                )
+        if resp.status_code in (404, 403, 422) and "already exists" not in resp.text:
+            # Org not found / no access → fall back to personal account
+            log.warning(f"Org repo creation failed ({resp.status_code}) — falling back to user repos")
+            resp = client.post(
+                "https://api.github.com/user/repos",
+                headers=headers, json=payload,
+            )
         if resp.status_code == 422 and "already exists" in resp.text:
             log.warning(f"Repo {org}/{repo_name} already exists on GitHub — reusing it")
-            return f"git@github.com:{org}/{repo_name}.git"
+            return f"git@github.com:{org}/{repo_name}.git", org
         resp.raise_for_status()
-        return resp.json()["ssh_url"]
+        data = resp.json()
+        actual_owner = data["owner"]["login"]
+        log.info(f"Created GitHub repo: {actual_owner}/{repo_name}")
+        return data["ssh_url"], actual_owner
 
 
 def _add_deploy_key(org: str, repo_name: str, pat: str, public_key: str, label: str):
