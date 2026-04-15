@@ -108,20 +108,19 @@ For each assigned feature (in order):
 
 ---
 
-## Before exiting — write /workspace/session_summary.md
+## session_summary.md — append throughout the session
 
-```markdown
----
-session_uid: {session_uid}
-persona: reviewer
-timestamp: <current ISO timestamp>
----
-## Reviewed
-<each PR: feature name, ID, PR number, outcome (approved/changes_requested), confidence>
-## Patterns noticed
-<recurring issues or quality signals the coder should address>
-## Recommended next steps
-<any follow-up needed before merge, or notes for the next reviewer>
+Write the header once at startup (if the file doesn't exist):
+```
+echo "# Session {session_uid} | persona=reviewer" >> /workspace/session_summary.md
+echo "Started: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /workspace/session_summary.md
+```
+
+Append a line after each review decision:
+```
+echo "Approved #<id> PR#<n> confidence=high — <one line reason>" >> /workspace/session_summary.md
+echo "Changes requested #<id> PR#<n> — <issue summary>" >> /workspace/session_summary.md
+echo "Pattern: <recurring issue the coder should fix going forward>" >> /workspace/session_summary.md
 ```
 
 Commit session_summary.md on the main branch and push.

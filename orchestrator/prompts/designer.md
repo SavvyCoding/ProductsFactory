@@ -94,22 +94,20 @@ For each assigned feature (in order):
 
 ---
 
-## Before exiting — write /workspace/session_summary.md
+## session_summary.md — append throughout the session
 
-```markdown
----
-session_uid: {session_uid}
-persona: designer
-timestamp: <current ISO timestamp>
----
-## Designed
-<each feature: name, ID, design doc path>
-## Not designed (why)
-<features not completed and reason>
-## Key design decisions
-<architecture choices the coder should know before implementing>
-## Recommended coder approach
-<any hints, gotchas, or ordering advice for the coder session>
+Write the header once at startup (if the file doesn't exist):
+```
+echo "# Session {session_uid} | persona=designer" >> /workspace/session_summary.md
+echo "Started: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /workspace/session_summary.md
+```
+
+Append a line after each significant step:
+```
+echo "Designed #<id> <name> — doc at docs/feature_<NNN>_design.md" >> /workspace/session_summary.md
+echo "Design decision: <choice> because <reason>" >> /workspace/session_summary.md
+echo "Blocked #<id> — spec too vague: <detail>" >> /workspace/session_summary.md
+echo "Coder note: implement <X> before <Y> — dependency order matters" >> /workspace/session_summary.md
 ```
 
 ---

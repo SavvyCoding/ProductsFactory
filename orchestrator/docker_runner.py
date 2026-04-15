@@ -361,18 +361,43 @@ def _get_system_config_sync() -> dict:
 
 
 def _read_session_summary(working_dir: str) -> str:
-    """Read session_summary.md written by the previous agent session."""
-    f = Path(working_dir) / "session_summary.md"
-    if not f.exists():
-        return ""
-    try:
-        content = f.read_text(encoding="utf-8")
-        if len(content) > 2000:
-            content = content[:1950] + "\n...[truncated]"
-        return content
-    except Exception as e:
-        log.warning(f"Could not read session_summary.md: {e}")
-        return ""
+    """
+    Read context from the previous agent session.
+    Primary: session_summary.md (incremental log written throughout the session).
+    Fallback: last 50 lines of progress.md if summary is absent (first session, or crash
+    before any summary lines were written).
+    Returns empty string if neither file exists.
+    """
+    summary_file = Path(working_dir) / "session_summary.md"
+    progress_file = Path(working_dir) / "progress.md"
+
+    def _read_truncated(path: Path, max_chars: int = 2000) -> str:
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+            if len(content) > max_chars:
+                content = content[:max_chars - 50] + "\n...[truncated]"
+            return content
+        except Exception as e:
+            log.warning(f"Could not read {path.name}: {e}")
+            return ""
+
+    if summary_file.exists():
+        content = _read_truncated(summary_file)
+        if content:
+            return content
+
+    # Fallback: last 50 lines of progress.md (already written incrementally by coder)
+    if progress_file.exists():
+        try:
+            lines = progress_file.read_text(encoding="utf-8").splitlines()
+            tail = "\n".join(lines[-50:])
+            if tail.strip():
+                log.info("[context] session_summary.md absent — falling back to progress.md tail")
+                return f"[From progress.md — last session]\n\n{tail}"
+        except Exception as e:
+            log.warning(f"Could not read progress.md fallback: {e}")
+
+    return ""
 
 
 def _fetch_assigned_features(product_id: int, persona: str | None, max_count: int) -> list[dict]:

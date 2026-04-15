@@ -63,28 +63,27 @@ On blocked (baseline tests drop, push fails, or 3 test failures):
 
 Each line is one complete JSON object. Use `echo '{"id":...}' >> /workspace/session_result.json`. The poller polls this file every 30 s and applies each new line to the DB in real-time. Never call `PATCH /api/features/{id}` directly.
 
-**After all features:** Write session_summary.md (see below) and exit. Do NOT run competitor research — the recommender runs as a separate agent after this session.
+**After all features:** Exit cleanly. Do NOT run competitor research — the recommender runs as a separate agent.
 
 ---
 
-## Before exiting — write /workspace/session_summary.md
+## session_summary.md — append throughout the session
 
-```markdown
----
-session_uid: {session_uid}
-persona: coder
-timestamp: <current ISO timestamp>
----
-## Completed
-<each feature: name, ID, PR number>
-## Not completed (why)
-<assigned features not finished and why>
-## Key decisions
-<architecture or tech choices future sessions should know>
-## Blockers
-<anything that blocked work>
-## Recommended next steps
-<what reviewer or next coder session should prioritise>
+Append to `/workspace/session_summary.md` at each significant moment — do not wait until the end.
+
+Write the header once at startup (if the file doesn't exist):
+```
+echo "# Session {session_uid} | persona=coder" >> /workspace/session_summary.md
+echo "Started: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /workspace/session_summary.md
+```
+
+Append a plain-text line at each key moment:
+```
+echo "Reading codebase — <key finding>" >> /workspace/session_summary.md
+echo "Decision: chose <X> over <Y> because <reason>" >> /workspace/session_summary.md
+echo "Completed #<id> <name> — PR #<n>" >> /workspace/session_summary.md
+echo "Blocked #<id> — <reason>" >> /workspace/session_summary.md
+echo "Next session should: <recommendation>" >> /workspace/session_summary.md
 ```
 
 Commit and push session_summary.md with your final push to main.
