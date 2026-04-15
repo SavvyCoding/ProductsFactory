@@ -142,7 +142,7 @@ _CFG_DEFAULTS = {
     "auth_check_timeout":          30,
     "max_open_prs":                1,
     "pr_gate_sleep":               300,
-    "stuck_feature_timeout_hours": 0.33,  # ~20 minutes — fast rollback for local dev
+    "stuck_feature_timeout_hours": 0.75,  # 45 minutes — matches stale session threshold
     "max_features_per_run":        1,
     "brownfield_file_threshold":   10,
     "recommender_pending_threshold": 15,
@@ -567,7 +567,7 @@ _POLLER_INT_BOUNDS: dict[str, tuple[int, int]] = {
     "auth_check_timeout":          (5,    120),
     "max_open_prs":                (1,     20),
     "pr_gate_sleep":               (60,  3600),
-    "stuck_feature_timeout_hours": (1,     48),
+    "stuck_feature_timeout_hours": (0.25,  48),
     "max_features_per_run":        (1,     10),
     "brownfield_file_threshold":   (1,    100),
     "recommender_pending_threshold": (0,   500),
@@ -599,6 +599,20 @@ async def admin_save_poller_settings(
             val = max(lo, min(hi, val))
         return val
 
+    def _float(key: str) -> float | None:
+        v = form.get(key, "").strip()
+        if not v:
+            return None
+        try:
+            val = float(v)
+        except ValueError:
+            return None
+        bounds = _POLLER_INT_BOUNDS.get(key)
+        if bounds:
+            lo, hi = bounds
+            val = max(float(lo), min(float(hi), val))
+        return val
+
     def _str(key: str) -> str | None:
         v = form.get(key, "").strip()
         return v or None
@@ -614,7 +628,7 @@ async def admin_save_poller_settings(
     config.auth_check_timeout          = _int("auth_check_timeout")
     config.max_open_prs                = _int("max_open_prs")
     config.pr_gate_sleep               = _int("pr_gate_sleep")
-    config.stuck_feature_timeout_hours = _int("stuck_feature_timeout_hours")
+    config.stuck_feature_timeout_hours = _float("stuck_feature_timeout_hours")
     config.max_features_per_run        = _int("max_features_per_run")
     config.brownfield_file_threshold       = _int("brownfield_file_threshold")
     config.recommender_pending_threshold   = _int("recommender_pending_threshold")

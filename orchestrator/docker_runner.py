@@ -163,6 +163,21 @@ def _apply_session_entry(client: httpx.Client, entry: dict) -> bool:
     if not fid:
         log.warning(f"[progress] Skipping session_result entry with no feature id: {entry}")
         return False
+    # Guard: Reviewing entries MUST carry pr_number — without it the feature will
+    # get stuck (auto-merge can't find the PR, reconcile_merged_prs can't find it).
+    # Fall back to parsing pr_number from pr_url if the agent forgot to include it.
+    if entry.get("status") == "Reviewing" and not entry.get("pr_number"):
+        pr_url = entry.get("pr_url", "")
+        import re as _re
+        m = _re.search(r"/pull/(\d+)", pr_url)
+        if m:
+            entry = dict(entry, pr_number=int(m.group(1)))
+            log.info(f"[progress] Feature #{fid}: extracted pr_number={entry['pr_number']} from pr_url")
+        else:
+            log.warning(
+                f"[progress] Feature #{fid} transitioning to Reviewing without pr_number — "
+                "feature may get stuck. Agent should include pr_number in session_result.json."
+            )
     patch_body = {k: v for k, v in entry.items() if k not in ("id", "confidence")}
     try:
         resp = client.patch(f"/api/features/{fid}", json=patch_body)

@@ -2,8 +2,9 @@
 GitHub API client — used by the poller for PR management.
 
 Handles:
-  - count_open_prs()       PR count gate (pause if ≥3 open)
-  - reconcile_merged_prs() sync merged PRs → DB feature status = Pushed
+  - count_open_prs()            PR count gate (pause if ≥3 open)
+  - reconcile_merged_prs()      sync merged/closed PRs → DB feature status
+  - reconcile_in_flight_prs()   check every in-flight feature's PR against GitHub
 """
 
 import os
@@ -167,3 +168,89 @@ def reconcile_merged_prs(product: dict):
 
     except Exception as e:
         log.warning(f"reconcile_merged_prs failed: {e}")
+
+
+def reconcile_in_flight_prs(product: dict):
+    """
+    For every in-flight feature (Implementing/Reviewing/Reviewed) that has a
+    pr_url or pr_number, check the actual PR state on GitHub and fix any
+    DB/GitHub mismatch immediately — without waiting for reset_stuck timeout.
+
+    Called every poller cycle (coder path) so stuck features self-heal within
+    one poll interval (~60s) instead of waiting up to 2 hours.
+    """
+    slug = _parse_repo_slug(product)
+    if not slug:
+        return
+    owner, repo = slug
+
+    import re as _re
+
+    IN_FLIGHT = {"Implementing", "Reviewing", "Reviewed"}
+    TERMINAL  = {"Pushed", "Rejected", "Reverted", "Pending", "Approved",
+                 "Designed", "Designing", "Deferred", "Blocked"}
+
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=15) as client:
+            resp = client.get(f"/api/products/{product['id']}/features")
+            if resp.status_code != 200:
+                return
+            features_data = resp.json()
+            if not isinstance(features_data, list):
+                return
+
+            # Collect features that have a PR reference
+            candidates = []
+            for f in features_data:
+                if f.get("status") not in IN_FLIGHT:
+                    continue
+                pr_n = f.get("pr_number")
+                if not pr_n:
+                    url = f.get("pr_url") or ""
+                    m = _re.search(r"/pull/(\d+)", url)
+                    if m:
+                        pr_n = int(m.group(1))
+                if pr_n:
+                    candidates.append((f, int(pr_n)))
+
+            if not candidates:
+                return
+
+            gh_headers = _github_headers()
+            for feature, pr_n in candidates:
+                fid = feature["id"]
+                try:
+                    pr_resp = httpx.get(
+                        f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_n}",
+                        headers=gh_headers, timeout=10,
+                    )
+                    if pr_resp.status_code != 200:
+                        continue
+                    pr = pr_resp.json()
+                    if not isinstance(pr, dict):
+                        continue
+                except Exception as e:
+                    log.debug(f"[in-flight] Could not fetch PR #{pr_n}: {e}")
+                    continue
+
+                state     = pr.get("state")      # "open" | "closed"
+                merged_at = pr.get("merged_at")  # None if not merged
+
+                if merged_at and feature.get("status") not in ("Pushed",):
+                    client.patch(f"/api/features/{fid}",
+                                 json={"status": "Pushed", "pr_number": None})
+                    log.info(f"[in-flight] Feature #{fid} → Pushed (PR #{pr_n} already merged)")
+
+                elif state == "closed" and not merged_at:
+                    reset = "Approved"
+                    if feature.get("status") == "Reviewing":
+                        reset = "Implementing"
+                    client.patch(f"/api/features/{fid}",
+                                 json={"status": reset, "pr_number": None,
+                                       "pr_url": None, "branch_name": None})
+                    log.info(f"[in-flight] Feature #{fid} → {reset} (PR #{pr_n} closed without merge)")
+
+                # PR is open — nothing to do, agent is still working
+
+    except Exception as e:
+        log.warning(f"reconcile_in_flight_prs failed: {e}")

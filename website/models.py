@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Optional, List
 from sqlalchemy import (
     Integer, String, Text, DateTime, Boolean, ARRAY,
-    ForeignKey, func, CheckConstraint, event, Numeric
+    ForeignKey, func, CheckConstraint, event, Numeric, Float
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -161,7 +161,7 @@ class SystemConfig(Base):
     auth_check_timeout:         Mapped[Optional[int]] = mapped_column(Integer)  # default 30s
     max_open_prs:               Mapped[Optional[int]] = mapped_column(Integer)  # default 3
     pr_gate_sleep:              Mapped[Optional[int]] = mapped_column(Integer)  # default 300s
-    stuck_feature_timeout_hours:Mapped[Optional[int]] = mapped_column(Integer)  # default 2h
+    stuck_feature_timeout_hours:Mapped[Optional[float]] = mapped_column(Float)  # default 0.75h (45 min)
     max_features_per_run:       Mapped[Optional[int]] = mapped_column(Integer)  # default 1
     brownfield_file_threshold:  Mapped[Optional[int]] = mapped_column(Integer)  # default 10
     recommender_pending_threshold: Mapped[Optional[int]] = mapped_column(Integer)  # default 15
