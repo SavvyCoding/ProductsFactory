@@ -92,12 +92,14 @@ def _load_runtime_cfg():
         log.warning(f"Could not load runtime config from DB — using env defaults: {e}")
 
 import sys as _sys
+import io as _io
+_stdout_utf8 = _io.TextIOWrapper(_sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True) if hasattr(_sys.stdout, "buffer") else _sys.stdout
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler("orchestrator/poller.log", encoding="utf-8"),
-        logging.StreamHandler(stream=open(_sys.stdout.fileno(), mode="w", encoding="utf-8", buffering=1, closefd=False)),
+        logging.StreamHandler(stream=_stdout_utf8),
     ],
 )
 log = logging.getLogger("poller")
