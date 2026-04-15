@@ -72,11 +72,13 @@ Every `POLL_INTERVAL` seconds (default 60s), the poller:
 2. Auto-discovers new products in `PRODUCTS_BASE_DIR` via `setup_product.py`
 3. Kills stale Docker containers via heartbeat check (progress.md not pushed in >45 min)
 4. Checks globally for reviewer work (Reviewing+PR) — runs reviewer session first if found
-5. Otherwise, selects next product: `ORDER BY last_run_at ASC` (round-robin)
-6. Determines persona (designer vs coder) via `/api/features/next-for-persona`
-7. Coder: skips if ≥3 open PRs; syncs merged PRs from GitHub → Pushed
-8. Launches `docker run --rm productfactory-agent claude -p {prompt} -e AGENT_PERSONA={persona}`
-9. After Docker exits: reads `session_result.json` from the product working dir and applies all recorded status updates (see Agent Contract below)
+5. Checks for `run_trainer_now` products — runs Product Trainer if flagged
+6. Otherwise, selects next product: `run_now=True` products have priority, then `ORDER BY last_run_at ASC` (round-robin)
+7. Determines persona (designer vs coder) via `/api/features/next-for-persona`
+8. Coder: skips if ≥3 open PRs; syncs merged PRs from GitHub → Pushed
+9. Launches `docker run --rm productfactory-agent claude -p {prompt} -e AGENT_PERSONA={persona}`
+10. A background thread live-polls `session_result.json` every 30 s while the container runs, applying DB updates in real-time
+11. After Docker exits: final reconcile of `session_result.json`; if `auto_merge_enabled` (system_config), high-confidence reviewed PRs are merged automatically before the file is deleted (see Agent Contract below)
 
    Alternatively, when `USE_OLLAMA=1` is set, step 8 instead runs `orchestrator/ollama_agent.py` inside the container — a self-contained tool-use loop against Ollama's OpenAI-compatible API (no Claude API key required). Model selection: `DESIGNER_MODEL` (default `gemma3:27b`) for designer/reviewer, `CODER_MODEL` (default `qwen3-coder:30b`) for coder.
 
@@ -93,7 +95,7 @@ For brownfield products (existing repos), `setup_product.py` only installs templ
 
 ### Multi-Agent Personas
 
-Ten personas run as separate Docker sessions, in priority order:
+Eleven personas run as separate Docker sessions, in priority order:
 
 **Feature delivery pipeline** (triggered by feature backlog state):
 - **Designer** (`designer.md`): Picks `Approved` features (skip_design=False), writes `docs/feature_NNN_design.md`, sets `Designed`
@@ -114,6 +116,10 @@ Ten personas run as separate Docker sessions, in priority order:
 **Backlog generation** (last resort when nothing else to do):
 - **Planner** (`planner.md`): Reads codebase context, creates new `Pending` features for PM approval
 
+**On-demand / special triggers**:
+- **Product Trainer** (`product_trainer.md`): Generates a showcase MP4 of shipped features; triggered by `product.run_trainer_now = True` (set via the PM website). Runs immediately when the flag is set, bypassing round-robin scheduling.
+- **Analysis Run** (`analysis_run.md`): Brownfield codebase analysis; triggered via `POST /product/{id}/trigger_analysis` from the PM website.
+
 Scheduling state for maintenance personas is stored in `product.config` as `last_{persona}_at` (ISO timestamp). The agent writes its own completion timestamp via `PATCH /api/products/{id}`.
 
 ### Product Lifecycle
@@ -128,12 +134,18 @@ Feature states: `Pending → Approved → [Designing → Designed →] Implement
 
 ### Agent Contract (session_result.json)
 
-Agents write `{working_dir}/session_result.json` **incrementally** as they complete each feature — one JSON object per line (newline-delimited). After the Docker container exits, `docker_runner.py` reads this file and applies all status updates via the PM API. Features with no entry in `session_result.json` and no open PR are **rolled back to `Approved`** to avoid stuck states — this handles crashes mid-session.
+Agents write `{working_dir}/session_result.json` **incrementally** as they complete each feature — one JSON object per line (newline-delimited). The poller applies updates in two passes:
+1. **Live poll** (background thread, every 30 s while container runs) — applies new lines in real-time
+2. **Final reconcile** (after container exits) — re-applies all entries idempotently, then deletes the file
+
+Features with no entry in `session_result.json` and no open PR are **rolled back to `Approved`** to avoid stuck states — this handles crashes mid-session.
 
 Each line format:
 ```json
-{"feature_id": 42, "status": "Reviewing", "pr_number": 7}
+{"id": 42, "status": "Reviewing", "pr_number": 7}
 ```
+
+When `auto_merge_enabled` is set in `system_config`, reviewer sessions with high-confidence approvals trigger automatic GitHub PR merges before the final reconcile runs. PRs with conflicts are closed instead; the feature is set back to `Implementing` (clears `pr_number`).
 
 ### Per-Product Configuration
 
@@ -200,6 +212,7 @@ Agent containers run as non-root user `agent` (UID 1001), with no `--privileged`
 - **No hardcoded config**: everything from env vars (`.env.example` is the canonical reference)
 - **Idempotent operations**: `setup_product.py` discovery is safe to run multiple times; templates only written if missing
 - **last_run_at only updated on success**: poller sets `last_run_at` only when Docker exits with code 0, ensuring failed runs don't advance the round-robin pointer
+- **Model changes require a migration**: add the column to `website/models.py` AND create a new `db/migrations/versions/NNN_*.py` file — Alembic does not auto-generate these
 
 ## Environment Variables
 

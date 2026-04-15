@@ -7,16 +7,20 @@ Failures are logged; never raise to caller.
 import os
 import time
 import logging
+import threading
 import httpx
 
 log = logging.getLogger("poller.alerts")
 
 ALERT_WEBHOOK_URL    = os.environ.get("ALERT_WEBHOOK_URL", "")
 PM_API_URL           = os.environ.get("PM_API_URL", "")
-WEBHOOK_FAIL_COUNTER = 0
 WEBHOOK_FAIL_MAX     = 3
 # After this many seconds the suppression resets and delivery is retried once
 WEBHOOK_FAIL_RESET_INTERVAL = 900  # 15 minutes
+
+# Thread-safe counter state
+_webhook_lock: threading.Lock = threading.Lock()
+_webhook_fail_counter: int = 0
 _webhook_suppressed_since: float = 0.0
 
 _cached_webhook_url: str | None = None
@@ -30,10 +34,11 @@ def _get_webhook_url() -> str:
     if PM_API_URL:
         try:
             resp = httpx.get(f"{PM_API_URL}/api/system-config", timeout=5)
-            url = resp.json().get("slack_webhook_url") or ""
-            if url:
-                _cached_webhook_url = url
-                return url
+            if "application/json" in resp.headers.get("content-type", ""):
+                url = resp.json().get("slack_webhook_url") or ""
+                if url:
+                    _cached_webhook_url = url
+                    return url
         except Exception:
             pass
     _cached_webhook_url = ALERT_WEBHOOK_URL
@@ -50,8 +55,9 @@ def send_alert(level: str, message: str, product_name: str = ""):
     """
     level: info | warning | error | critical
     Logs always. Delivers to Slack webhook if configured.
+    Thread-safe: counter/suppression state is protected by _webhook_lock.
     """
-    global WEBHOOK_FAIL_COUNTER
+    global _webhook_fail_counter, _webhook_suppressed_since
 
     prefix = {"info": "ℹ️", "warning": "⚠️", "error": "🔴", "critical": "🚨"}.get(level, "📢")
     if product_name:
@@ -65,14 +71,15 @@ def send_alert(level: str, message: str, product_name: str = ""):
     if not webhook_url:
         return
 
-    if WEBHOOK_FAIL_COUNTER >= WEBHOOK_FAIL_MAX:
-        # Auto-reset after cooldown so delivery is retried once the webhook recovers
-        if time.time() - _webhook_suppressed_since >= WEBHOOK_FAIL_RESET_INTERVAL:
-            log.info("Webhook suppression cooldown expired — retrying delivery")
-            WEBHOOK_FAIL_COUNTER = 0
-        else:
-            log.warning("Webhook failing repeatedly — suppressing delivery until cooldown expires")
-            return
+    with _webhook_lock:
+        if _webhook_fail_counter >= WEBHOOK_FAIL_MAX:
+            # Auto-reset after cooldown so delivery is retried once the webhook recovers
+            if time.time() - _webhook_suppressed_since >= WEBHOOK_FAIL_RESET_INTERVAL:
+                log.info("Webhook suppression cooldown expired — retrying delivery")
+                _webhook_fail_counter = 0
+            else:
+                log.warning("Webhook failing repeatedly — suppressing delivery until cooldown expires")
+                return
 
     try:
         resp = httpx.post(
@@ -80,15 +87,17 @@ def send_alert(level: str, message: str, product_name: str = ""):
             json={"text": full_message},
             timeout=10,
         )
-        if resp.status_code not in (200, 201, 202, 204):
-            WEBHOOK_FAIL_COUNTER += 1
-            if WEBHOOK_FAIL_COUNTER == 1:
-                _webhook_suppressed_since = time.time()
-            log.warning(f"Webhook delivery failed ({resp.status_code}) — fail count: {WEBHOOK_FAIL_COUNTER}")
-        else:
-            WEBHOOK_FAIL_COUNTER = 0
+        with _webhook_lock:
+            if resp.status_code not in (200, 201, 202, 204):
+                _webhook_fail_counter += 1
+                if _webhook_fail_counter == 1:
+                    _webhook_suppressed_since = time.time()
+                log.warning(f"Webhook delivery failed ({resp.status_code}) — fail count: {_webhook_fail_counter}")
+            else:
+                _webhook_fail_counter = 0
     except Exception as e:
-        WEBHOOK_FAIL_COUNTER += 1
-        if WEBHOOK_FAIL_COUNTER == 1:
-            _webhook_suppressed_since = time.time()
-        log.warning(f"Webhook exception: {e} — fail count: {WEBHOOK_FAIL_COUNTER}")
+        with _webhook_lock:
+            _webhook_fail_counter += 1
+            if _webhook_fail_counter == 1:
+                _webhook_suppressed_since = time.time()
+        log.warning(f"Webhook exception: {e} — fail count: {_webhook_fail_counter}")

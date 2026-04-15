@@ -52,9 +52,11 @@ def _get_progress_last_push(product: dict) -> datetime | None:
             headers=_github_headers(),
             timeout=15,
         )
-        if resp.status_code == 200 and resp.json():
-            date_str = resp.json()[0]["commit"]["author"]["date"]
-            return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        if resp.status_code == 200:
+            commits = resp.json()
+            if isinstance(commits, list) and commits:
+                date_str = commits[0]["commit"]["author"]["date"]
+                return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
     except Exception as e:
         log.warning(f"_get_progress_last_push failed: {e}")
     return None

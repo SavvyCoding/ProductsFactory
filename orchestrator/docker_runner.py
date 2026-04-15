@@ -81,6 +81,8 @@ def _rollback_stuck_features(product_id: int, persona: str | None) -> None:
     Roll back features that were claimed by a session that never completed.
     Only resets features with NO evidence of completion (no PR, not in session_result.json).
     Features that have pr_number set are left alone — they're already in Reviewing.
+
+    Each feature is patched individually so a single API failure does not block the rest.
     """
     stuck_statuses = {
         "designer": ["Designing"],
@@ -92,13 +94,25 @@ def _rollback_stuck_features(product_id: int, persona: str | None) -> None:
         return
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-            feats = client.get(f"/api/products/{product_id}/features").json()
+            resp = client.get(f"/api/products/{product_id}/features")
+            resp.raise_for_status()
+            feats = resp.json()
+            if not isinstance(feats, list):
+                log.warning(f"Unexpected response fetching features for product {product_id}")
+                return
+            rolled_back = 0
             for f in feats:
                 if f["status"] in rollback_from and not f.get("pr_number"):
-                    client.patch(f"/api/features/{f['id']}", json={"status": "Approved"})
-                    log.info(f"Rolled back feature #{f['id']} '{f['name']}' {f['status']} -> Approved")
+                    try:
+                        client.patch(f"/api/features/{f['id']}", json={"status": "Approved"})
+                        log.info(f"Rolled back feature #{f['id']} '{f['name']}' {f['status']} -> Approved")
+                        rolled_back += 1
+                    except Exception as fe:
+                        log.warning(f"Could not roll back feature #{f['id']}: {fe}")
+            if rolled_back:
+                log.info(f"Rolled back {rolled_back} feature(s) for product {product_id}")
     except Exception as e:
-        log.warning(f"Could not rollback stuck features: {e}")
+        log.warning(f"Could not rollback stuck features for product {product_id}: {e}")
 
 
 def _read_session_result(working_dir: str) -> list[dict]:
@@ -308,8 +322,11 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
                 log.info(f"[auto-merge] PR #{pr_number} merged successfully")
                 entry.update({"status": "Pushed", "pr_number": None})
             else:
-                body = resp.json() if "application/json" in resp.headers.get("content-type", "") else {}
-                gh_msg = body.get("message", resp.text[:120])
+                if "application/json" in resp.headers.get("content-type", ""):
+                    body = resp.json()
+                    gh_msg = body.get("message", resp.text[:120]) if isinstance(body, dict) else resp.text[:120]
+                else:
+                    gh_msg = resp.text[:120]
                 log.warning(f"[auto-merge] GitHub {resp.status_code} for PR #{pr_number}: {gh_msg}")
                 if resp.status_code == 405 or "not mergeable" in gh_msg.lower():
                     # Conflicts — close PR and re-queue
@@ -346,7 +363,11 @@ def _get_gh_token() -> str | None:
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
             resp = client.get("/api/system-config")
-            return resp.json().get("github_pat") or None
+            resp.raise_for_status()
+            if "application/json" not in resp.headers.get("content-type", ""):
+                return None
+            data = resp.json()
+            return data.get("github_pat") or None if isinstance(data, dict) else None
     except Exception:
         return None
 
@@ -882,7 +903,11 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         finally:
             _poll_stop.set()       # signal live-poll thread to stop
             log_thread.join(timeout=10)
+            if log_thread.is_alive():
+                log.warning(f"[{product.get('name')}] log_thread did not exit after 10s — orphaned (daemon)")
             poll_thread.join(timeout=5)
+            if poll_thread.is_alive():
+                log.warning(f"[{product.get('name')}] poll_thread did not exit after 5s — orphaned (daemon)")
 
     except FileNotFoundError:
         log.error("'docker' not found in PATH — is Docker installed and on PATH?")

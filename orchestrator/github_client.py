@@ -20,6 +20,9 @@ def _get_pat() -> str:
     """Fetch GitHub PAT fresh from system_config each call — no caching so DB changes apply immediately."""
     try:
         resp = httpx.get(f"{PM_API_URL}/api/system-config", timeout=5)
+        resp.raise_for_status()
+        if "application/json" not in resp.headers.get("content-type", ""):
+            return ""
         return resp.json().get("github_pat") or ""
     except Exception:
         return ""
@@ -60,7 +63,8 @@ def count_open_prs(product: dict) -> int:
             timeout=15,
         )
         if resp.status_code == 200:
-            return len(resp.json())
+            data = resp.json()
+            return len(data) if isinstance(data, list) else 0
     except Exception as e:
         log.warning(f"count_open_prs failed: {e}")
     return 0
@@ -86,7 +90,11 @@ def reconcile_merged_prs(product: dict):
         if resp.status_code != 200:
             return
 
-        merged_prs = [pr for pr in resp.json() if pr.get("merged_at")]
+        prs_data = resp.json()
+        if not isinstance(prs_data, list):
+            log.warning("reconcile_merged_prs: unexpected response shape from GitHub")
+            return
+        merged_prs = [pr for pr in prs_data if pr.get("merged_at")]
 
         if not merged_prs:
             return
@@ -102,12 +110,17 @@ def reconcile_merged_prs(product: dict):
             )
             if all_features.status_code != 200:
                 # Fallback: use the approved endpoint if the all-features endpoint isn't available
-                features_data = client.get(
+                fallback = client.get(
                     "/api/features/approved",
                     params={"product_id": product["id"]},
-                ).json()
+                )
+                fallback.raise_for_status()
+                features_data = fallback.json()
             else:
                 features_data = all_features.json()
+            if not isinstance(features_data, list):
+                log.warning("reconcile_merged_prs: unexpected features response shape")
+                return
 
             for feature in features_data:
                 if feature.get("pr_number") in merged_numbers and feature.get("status") not in ("Pushed", "Rejected", "Reverted"):

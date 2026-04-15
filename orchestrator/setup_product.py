@@ -150,6 +150,13 @@ def _load_product_config(working_dir: Path) -> dict | None:
     return None
 
 
-def _update_product(product_id: int, updates: dict):
-    with httpx.Client(base_url=PM_API_URL) as client:
-        client.patch(f"/api/products/{product_id}", json=updates)
+def _update_product(product_id: int, updates: dict) -> bool:
+    """PATCH product fields. Returns True on success, False on failure."""
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            resp = client.patch(f"/api/products/{product_id}", json=updates)
+            resp.raise_for_status()
+            return True
+    except Exception as e:
+        log.error(f"Failed to update product {product_id} with {list(updates.keys())}: {e}")
+        return False
