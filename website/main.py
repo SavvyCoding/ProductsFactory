@@ -158,6 +158,7 @@ _CFG_DEFAULTS = {
     # Claude profile
     "claude_model":           "claude-sonnet-4-6",
     "claude_credentials_dir": "C:/Users/digvi/.claude",
+    "ssh_keys_dir":           "",
 }
 
 
@@ -627,6 +628,7 @@ async def admin_save_poller_settings(
     config.max_turns                   = _int("max_turns")
     config.claude_model                = _str("claude_model")
     config.claude_credentials_dir      = _str("claude_credentials_dir")
+    config.ssh_keys_dir = _str("ssh_keys_dir")
     await db.flush()
     return RedirectResponse("/admin?saved=true", status_code=303)
 

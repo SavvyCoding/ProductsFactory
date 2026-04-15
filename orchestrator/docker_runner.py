@@ -28,8 +28,8 @@ from templates.renderer import install_templates
 
 log = logging.getLogger("poller.docker")
 
-CLAUDE_DIR  = Path(os.environ.get("CLAUDE_DIR",  "C:/Users/digvi/.claude"))
-SSH_DIR     = Path(os.environ.get("SSH_DIR",     "C:/Users/digvi/.ssh"))
+CLAUDE_DIR  = Path(os.environ.get("CLAUDE_DIR",  ""))   # configurable via system_config.claude_credentials_dir
+SSH_DIR     = Path(os.environ.get("SSH_DIR",     ""))   # configurable via system_config.ssh_keys_dir
 AGENT_IMAGE = os.environ.get("AGENT_IMAGE", "productfactory-agent")
 PM_API_URL  = os.environ["PM_API_URL"]
 # Inside the agent container, pm-api is reachable via --add-host as http://pm-api:8080
@@ -54,19 +54,22 @@ CODER_MODEL          = os.environ.get("CODER_MODEL",          "qwen3-coder:30b")
 MAX_FEATURES_PER_RUN = int(os.environ.get("MAX_FEATURES_PER_RUN", "1"))
 
 
-def _get_deploy_key_path(product: dict) -> Path | None:
+def _get_deploy_key_path(product: dict, ssh_dir: Path | None = None) -> Path | None:
     """
     Returns the deploy key path for this product, falling back to the default key.
     Mounting only the key file (not the whole .ssh dir) preserves the
     known_hosts baked into the image.
+    ssh_dir: resolved from sys_cfg.ssh_keys_dir → SSH_DIR env var — passed at call site.
     """
-    # Per-product key: id_ed25519_{product_name_snake}
+    resolved_ssh_dir = ssh_dir or SSH_DIR
+    if not resolved_ssh_dir or not resolved_ssh_dir.exists():
+        log.warning(f"SSH keys directory not configured or missing: {resolved_ssh_dir}")
+        return None
     name_slug = (product.get("name") or "").lower().replace(" ", "_").replace("-", "_")
-    per_product = SSH_DIR / f"id_ed25519_{name_slug}"
+    per_product = resolved_ssh_dir / f"id_ed25519_{name_slug}"
     if per_product.exists():
         return per_product
-    # Fall back to the default ProductFactory deploy key
-    default_key = SSH_DIR / DEPLOY_KEY_FILENAME
+    default_key = resolved_ssh_dir / DEPLOY_KEY_FILENAME
     if default_key.exists():
         return default_key
     log.warning(f"No deploy key found for product '{product.get('name')}' — git push may fail")
@@ -500,11 +503,9 @@ def _get_claude_profile(sys_cfg: dict) -> tuple[str, str]:
 
 def _reset_workspace(working_dir: str, product_name: str) -> None:
     """
-    Reset the product workspace to a clean state before each session:
-    1. Checkout main (abandon any half-baked feature branch)
-    2. Pull latest from origin/main
-    3. Delete stale local feature branches
-    4. Remove untracked files left by previous sessions
+    Sync the product workspace to the latest state on origin/main before each session.
+    Uses git fetch + reset --hard (not pull --ff-only) so it succeeds even if local
+    has diverged from remote (e.g. partial commits from a crashed previous session).
     """
     wd = Path(working_dir)
     if not (wd / ".git").exists():
@@ -513,32 +514,64 @@ def _reset_workspace(working_dir: str, product_name: str) -> None:
     def _run(cmd: list[str]) -> subprocess.CompletedProcess:
         return subprocess.run(cmd, cwd=str(wd), capture_output=True, text=True)
 
-    # 1. Switch to main (or master)
+    # 1. Fetch latest from origin (updates remote-tracking refs, prunes deleted branches)
+    r = _run(["git", "fetch", "origin", "--prune"])
+    if r.returncode != 0:
+        log.warning(f"[{product_name}] git fetch failed: {r.stderr.strip()[:200]}")
+
+    # 2. Switch to main (or master) — abandon any half-baked feature branch
+    main_branch: str | None = None
     for branch in ("main", "master"):
         r = _run(["git", "checkout", branch])
         if r.returncode == 0:
+            main_branch = branch
             break
-    else:
+    if not main_branch:
         log.warning(f"[{product_name}] Could not checkout main/master — workspace reset skipped")
         return
 
-    # 2. Pull latest (soft fail — repo may not have a remote yet)
-    r = _run(["git", "pull", "--ff-only", "origin", "main"])
+    # 3. Hard-reset to origin — discards any local commits or staged changes
+    r = _run(["git", "reset", "--hard", f"origin/{main_branch}"])
     if r.returncode != 0:
-        _run(["git", "pull", "--ff-only", "origin", "master"])
+        log.warning(f"[{product_name}] git reset --hard failed: {r.stderr.strip()[:200]}")
 
-    # 3. Delete stale local feature branches (not main/master)
+    # 4. Remove untracked and ignored files (session artifacts, .pyc, etc.)
+    #    Preserve output/ and Results/ which may contain artefacts the PM cares about.
+    _run(["git", "clean", "-fdx", "--exclude=output/", "--exclude=Results/", "--exclude=Temp/"])
+
+    # 5. Delete stale local feature branches (not main/master)
     r = _run(["git", "branch"])
     for line in r.stdout.splitlines():
         branch = line.strip().lstrip("* ")
         if branch and branch not in ("main", "master"):
             _run(["git", "branch", "-D", branch])
-            log.info(f"[{product_name}] Deleted stale branch: {branch}")
+            log.info(f"[{product_name}] Deleted stale local branch: {branch}")
 
-    # 4. Remove untracked files/dirs (junk left by previous sessions)
-    _run(["git", "clean", "-fd", "--exclude=output/", "--exclude=Results/"])
+    log.info(f"[{product_name}] Workspace synced to origin/{main_branch} (hard reset)")
 
-    log.info(f"[{product_name}] Workspace reset to clean main")
+
+def _cleanup_workspace_post_session(working_dir: str, product_name: str) -> None:
+    """
+    Post-exit cleanup: return to main branch and remove uncommitted session artifacts.
+    Runs after container exits (success or failure) so the next session starts clean.
+    Does NOT delete the working directory — git history and pushed branches are preserved.
+    """
+    wd = Path(working_dir)
+    if not (wd / ".git").exists():
+        return
+
+    def _run(cmd: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(cmd, cwd=str(wd), capture_output=True, text=True)
+
+    # Return to main branch (agent may have left us on a feature branch)
+    for branch in ("main", "master"):
+        if _run(["git", "checkout", branch]).returncode == 0:
+            break
+
+    # Remove any files the agent created but didn't commit/push
+    # Keep docs/, Results/, Temp/ — those may contain artefacts the PM cares about
+    _run(["git", "clean", "-fd", "--exclude=docs/", "--exclude=Results/", "--exclude=Temp/"])
+    log.info(f"[{product_name}] Post-session workspace cleanup complete")
 
 
 def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
@@ -573,6 +606,17 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     effective_backend = (sys_cfg.get("agent_backend") or AGENT_BACKEND)
     session_timeout_seconds = int(sys_cfg.get("session_timeout_minutes") or 0) * 60 or _DEFAULT_SESSION_TIMEOUT_SECONDS
     effective_max_features = product.get("max_features_per_run") or int(sys_cfg.get("max_features_per_run") or MAX_FEATURES_PER_RUN)
+
+    # Read all runtime settings from sys_cfg (DB → env var → built-in default).
+    # Never rely on module-level constants after this point.
+    effective_ollama_host    = sys_cfg.get("ollama_host")    or OLLAMA_HOST    or "http://host.docker.internal:11434"
+    effective_designer_model = sys_cfg.get("designer_model") or DESIGNER_MODEL or "gemma3:27b"
+    effective_coder_model    = sys_cfg.get("coder_model")    or CODER_MODEL    or "qwen3-coder:30b"
+    effective_ollama_timeout = int(sys_cfg.get("ollama_timeout") or os.environ.get("OLLAMA_TIMEOUT", "600"))
+    effective_max_turns      = int(sys_cfg.get("max_turns")      or os.environ.get("MAX_TURNS",      "80"))
+    effective_bash_timeout   = int(sys_cfg.get("bash_timeout")   or os.environ.get("BASH_TIMEOUT",   "180"))
+    _raw_ssh_dir = sys_cfg.get("ssh_keys_dir") or str(SSH_DIR)
+    effective_ssh_dir = Path(_raw_ssh_dir) if _raw_ssh_dir else None
 
     # Enrich product dict with all computed values before building the prompt.
     product = dict(product)
@@ -638,7 +682,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     # Mount only the deploy key, not the whole .ssh directory.
     # This preserves the known_hosts baked into the image.
-    deploy_key = _get_deploy_key_path(product)
+    deploy_key = _get_deploy_key_path(product, effective_ssh_dir)
     ssh_mount = []
     if deploy_key:
         ssh_mount = ["-v", f"{deploy_key}:/home/agent/.ssh/id_ed25519:ro"]
@@ -654,15 +698,17 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     if effective_backend == "ollama":
         agent_cmd = ["python", "//app/ollama_agent.py", "-p", prompt]
         ollama_env = [
-            "-e", f"OLLAMA_HOST={OLLAMA_HOST}",
-            "-e", f"DESIGNER_MODEL={DESIGNER_MODEL}",
-            "-e", f"CODER_MODEL={CODER_MODEL}",
+            "-e", f"OLLAMA_HOST={effective_ollama_host}",
+            "-e", f"DESIGNER_MODEL={effective_designer_model}",
+            "-e", f"CODER_MODEL={effective_coder_model}",
             "-e", f"MAX_FEATURES_PER_RUN={effective_max_features}",
-            "-e", f"OLLAMA_TIMEOUT={os.environ.get('OLLAMA_TIMEOUT', '600')}",
+            "-e", f"OLLAMA_TIMEOUT={effective_ollama_timeout}",
+            "-e", f"MAX_TURNS={effective_max_turns}",
+            "-e", f"BASH_TIMEOUT={effective_bash_timeout}",
         ]
         # Ollama backend: no Claude OAuth mount needed
         claude_mount = []
-        log.info(f"Using Ollama backend — host={OLLAMA_HOST} persona={persona}")
+        log.info(f"Using Ollama backend — host={effective_ollama_host} persona={persona}")
     else:
         # Claude backend: copy credentials to a temp dir and mount the copy
         creds_src, claude_model = _get_claude_profile(sys_cfg)
@@ -724,6 +770,8 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         ollama_env = [
             "-e", f"MAX_FEATURES_PER_RUN={effective_max_features}",
             "-e", f"CLAUDE_MODEL={claude_model}",
+            "-e", f"MAX_TURNS={effective_max_turns}",
+            "-e", f"BASH_TIMEOUT={effective_bash_timeout}",
         ]
 
     cmd = [
@@ -883,6 +931,9 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         log.warning(f"Non-zero exit ({exit_code}) for {product['name']} — rolling back incomplete features")
         _rollback_stuck_features(product["id"], persona)
 
+    # Post-session cleanup: return workspace to clean main so next session starts fresh
+    _cleanup_workspace_post_session(working_dir, product.get("name", str(working_dir)))
+
     if exit_code == 2:
         return 2
 
@@ -899,7 +950,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         video_path  = build_product_video(product, working_dir)
         if video_path:
             log.info(f"Product video built: {video_path}")
-            commit_and_push_output(working_dir, deploy_key=_get_deploy_key_path(product))
+            commit_and_push_output(working_dir, deploy_key=_get_deploy_key_path(product, effective_ssh_dir))
         else:
             log.warning("Product video generation skipped or failed — continuing to recommender")
         # Skip recommender if the Pending backlog is at or above the configured threshold.
