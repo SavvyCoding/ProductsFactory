@@ -36,8 +36,8 @@ PM_API_URL  = os.environ["PM_API_URL"]
 # The host-side PM_API_URL (localhost:8080) doesn't work inside Docker.
 PM_API_URL_CONTAINER = os.environ.get("PM_API_URL_CONTAINER", "http://pm-api:8080")
 
-# Timeout: kill container if it runs longer than this (minutes → seconds)
-SESSION_TIMEOUT_SECONDS = int(os.environ.get("SESSION_TIMEOUT_MINUTES", "90")) * 60
+# Timeout default — overridden at runtime by system_config.session_timeout_minutes
+_DEFAULT_SESSION_TIMEOUT_SECONDS = int(os.environ.get("SESSION_TIMEOUT_MINUTES", "90")) * 60
 
 # Deploy key filename inside SSH_DIR.
 # Each product repo has its own key: id_ed25519_{product_name}
@@ -352,13 +352,15 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # (Windows NTFS bind-mounts appear as root-owned inside Docker; host chmod is a no-op).
     for _agent_dir in ("docs", "Results", "Temp"):
         Path(working_dir, _agent_dir).mkdir(exist_ok=True)
-    # Per-product override takes precedence over global env default
-    effective_max_features = product.get("max_features_per_run") or MAX_FEATURES_PER_RUN
     prompt = build_prompt(product, session_uid, persona=persona)
 
     # Read backend from DB config (overrides env var)
     sys_cfg = _get_system_config_sync()
     effective_backend = (sys_cfg.get("agent_backend") or AGENT_BACKEND)
+    # Session timeout from DB config, fallback to env default
+    session_timeout_seconds = int(sys_cfg.get("session_timeout_minutes") or 0) * 60 or _DEFAULT_SESSION_TIMEOUT_SECONDS
+    # Max features from DB config, fallback to env default
+    effective_max_features = product.get("max_features_per_run") or int(sys_cfg.get("max_features_per_run") or MAX_FEATURES_PER_RUN)
     # Pass auto_merge setting into prompt via product dict (prompt builder reads _auto_merge_enabled)
     product = dict(product)
     product["_auto_merge_enabled"] = bool(sys_cfg.get("auto_merge_enabled", False))
@@ -586,11 +588,11 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         log_thread.start()
 
         try:
-            process.wait(timeout=SESSION_TIMEOUT_SECONDS)
+            process.wait(timeout=session_timeout_seconds)
         except subprocess.TimeoutExpired:
-            log.error(f"Session timed out after {SESSION_TIMEOUT_SECONDS}s — killing container")
+            log.error(f"Session timed out after {session_timeout_seconds}s — killing container")
             subprocess.run(["docker", "kill", f"pf-{product['id']}-{session_uid}"], capture_output=True)
-            send_alert("error", f"{product['name']}: session timed out after {SESSION_TIMEOUT_SECONDS//60}m")
+            send_alert("error", f"{product['name']}: session timed out after {session_timeout_seconds//60}m")
             exit_code = 1
         else:
             exit_code = process.returncode

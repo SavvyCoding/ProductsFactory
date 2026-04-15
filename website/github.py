@@ -10,15 +10,13 @@ import httpx
 
 log = logging.getLogger("website.github")
 
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 _TIMEOUT = 10
 
 
 def _headers(token: str | None = None) -> dict:
     h = {"Accept": "application/vnd.github.raw+json", "X-GitHub-Api-Version": "2022-11-28"}
-    effective_token = token or GITHUB_TOKEN
-    if effective_token:
-        h["Authorization"] = f"Bearer {effective_token}"
+    if token:
+        h["Authorization"] = f"Bearer {token}"
     return h
 
 
@@ -156,7 +154,7 @@ def close_pr(github_repo: str, pr_number: int, token: str, reason: str = "") -> 
     return False
 
 
-def count_open_prs(github_repo: str) -> int:
+def count_open_prs(github_repo: str, token: str | None = None) -> int:
     """Returns the number of open PRs. Returns 0 on any error."""
     slug = parse_repo_slug(github_repo)
     if not slug:
@@ -166,7 +164,7 @@ def count_open_prs(github_repo: str) -> int:
         resp = httpx.get(
             f"https://api.github.com/repos/{owner}/{repo}/pulls",
             params={"state": "open", "per_page": 10},
-            headers={**_headers(), "Accept": "application/vnd.github+json"},
+            headers={**_headers(token), "Accept": "application/vnd.github+json"},
             timeout=_TIMEOUT,
         )
         if resp.status_code == 200:

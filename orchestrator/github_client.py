@@ -14,8 +14,15 @@ import httpx
 
 log = logging.getLogger("poller.github")
 
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")  # optional: use for higher rate limits
-PM_API_URL   = os.environ["PM_API_URL"]
+PM_API_URL = os.environ["PM_API_URL"]
+
+def _get_pat() -> str:
+    """Fetch GitHub PAT fresh from system_config each call — no caching so DB changes apply immediately."""
+    try:
+        resp = httpx.get(f"{PM_API_URL}/api/system-config", timeout=5)
+        return resp.json().get("github_pat") or ""
+    except Exception:
+        return ""
 
 
 def _parse_repo_slug(product: dict) -> tuple[str, str] | None:
@@ -23,7 +30,6 @@ def _parse_repo_slug(product: dict) -> tuple[str, str] | None:
     github_repo = product.get("github_repo", "")
     if not github_repo:
         return None
-    # Handles: https://github.com/owner/repo.git  and  git@github.com:owner/repo.git
     import re
     match = re.search(r"[:/]([^/]+/[^/]+?)(?:\.git)?$", github_repo)
     if match:
@@ -34,8 +40,9 @@ def _parse_repo_slug(product: dict) -> tuple[str, str] | None:
 
 def _github_headers() -> dict:
     headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    pat = _get_pat()
+    if pat:
+        headers["Authorization"] = f"Bearer {pat}"
     return headers
 
 

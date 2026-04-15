@@ -739,7 +739,9 @@ async def merge_pr_action(
     """Merge a GitHub PR via the API."""
     product = await _get_product_or_404(product_id, db)
     config = await _get_system_config(db)
-    token = (config.github_pat if config else None) or os.environ.get("GITHUB_TOKEN", "")
+    token = config.github_pat if config else None
+    if not token:
+        raise HTTPException(422, "GitHub PAT not configured — set it in Admin → Settings")
     if not token:
         raise HTTPException(422, "GitHub PAT not configured — set it in Admin")
     ok, err = merge_pr(product.github_repo or "", pr_number, token)
@@ -1485,7 +1487,9 @@ async def api_release_poller_lock(
 async def api_open_pr_count(product_id: int, db: AsyncSession = Depends(get_db)):
     """Poller PR count gate. Fetches live from GitHub."""
     product = await _get_product_or_404(product_id, db)
-    count = count_open_prs(product.github_repo or "") if product.github_repo else 0
+    _cfg = await _get_system_config(db)
+    _pat = _cfg.github_pat if _cfg else None
+    count = count_open_prs(product.github_repo, token=_pat) if product.github_repo else 0
     return {"product_id": product_id, "count": count}
 
 
