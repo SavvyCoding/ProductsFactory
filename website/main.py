@@ -936,12 +936,6 @@ async def api_create_feature(body: schemas.FeatureCreate, db: AsyncSession = Dep
     return feature
 
 
-@app.get("/api/features/{feature_id}", response_model=schemas.FeatureOut)
-async def api_get_feature(feature_id: int, db: AsyncSession = Depends(get_db)):
-    """Fetch a single feature by ID (used by auto-merge to resolve pr_number)."""
-    return await _get_feature_or_404(feature_id, db)
-
-
 @app.patch("/api/features/{feature_id}", response_model=schemas.FeatureOut)
 async def api_update_feature(
     feature_id: int, body: schemas.FeatureUpdate,
@@ -1077,6 +1071,12 @@ async def api_next_feature_for_persona(
 
     result = await db.execute(q)
     return result.scalar_one_or_none()
+
+
+@app.get("/api/features/{feature_id}", response_model=schemas.FeatureOut)
+async def api_get_feature(feature_id: int, db: AsyncSession = Depends(get_db)):
+    """Fetch a single feature by ID (used by auto-merge to resolve pr_number)."""
+    return await _get_feature_or_404(feature_id, db)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
