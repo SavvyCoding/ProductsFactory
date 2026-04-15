@@ -91,12 +91,13 @@ def _load_runtime_cfg():
     except Exception as e:
         log.warning(f"Could not load runtime config from DB — using env defaults: {e}")
 
+import sys as _sys
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("orchestrator/poller.log"),
-        logging.StreamHandler(),
+        logging.FileHandler("orchestrator/poller.log", encoding="utf-8"),
+        logging.StreamHandler(stream=open(_sys.stdout.fileno(), mode="w", encoding="utf-8", buffering=1, closefd=False)),
     ],
 )
 log = logging.getLogger("poller")
@@ -187,7 +188,7 @@ def reset_stuck_features():
         resp.raise_for_status()
         count = resp.json().get("reset_count", 0)
         if count:
-            log.info(f"Reset {count} stuck feature(s) from Implementing → Approved")
+            log.info(f"Reset {count} stuck feature(s) from Implementing -> Approved")
     except httpx.HTTPError as e:
         log.error(f"reset_stuck_features failed: {e}")
 
@@ -598,7 +599,7 @@ def main():
 
             # ⑬ Update last_run_at ONLY on clean exit
             if exit_code == 0:
-                with httpx.Client(base_url=PM_API_URL) as client:
+                with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
                     client.patch(
                         f"/api/products/{product['id']}",
                         json={"last_run_at": datetime.now(timezone.utc).isoformat()},
