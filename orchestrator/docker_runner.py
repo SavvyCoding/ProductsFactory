@@ -298,8 +298,17 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
             # Fetch pr_number from DB if not in session entry
             try:
                 with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-                    feat = client.get(f"/api/features/{fid}").json()
+                    resp = client.get(f"/api/features/{fid}")
+                    resp.raise_for_status()
+                    feat = resp.json()
                     pr_number = feat.get("pr_number")
+                    # Fallback: parse from pr_url if pr_number column is null
+                    if not pr_number and feat.get("pr_url"):
+                        import re as _re
+                        m = _re.search(r"/pull/(\d+)", feat["pr_url"])
+                        if m:
+                            pr_number = int(m.group(1))
+                            log.info(f"[auto-merge] Feature #{fid}: resolved pr_number={pr_number} from pr_url")
                     entry["pr_number"] = pr_number
             except Exception as e:
                 log.warning(f"[auto-merge] Could not fetch feature #{fid}: {e}")
