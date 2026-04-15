@@ -150,12 +150,20 @@ def _apply_session_entry(client: httpx.Client, entry: dict) -> bool:
     """PATCH a single session_result entry to the PM API. Returns True on success."""
     fid = entry.get("id")
     if not fid:
+        log.warning(f"[progress] Skipping session_result entry with no feature id: {entry}")
         return False
     patch_body = {k: v for k, v in entry.items() if k not in ("id", "confidence")}
     try:
-        client.patch(f"/api/features/{fid}", json=patch_body)
+        resp = client.patch(f"/api/features/{fid}", json=patch_body)
+        resp.raise_for_status()
         log.info(f"[progress] Feature #{fid} -> {patch_body.get('status', '?')}")
         return True
+    except httpx.HTTPStatusError as e:
+        log.warning(
+            f"[progress] PM API rejected feature #{fid} update "
+            f"({e.response.status_code}): {e.response.text[:200]}"
+        )
+        return False
     except Exception as e:
         log.warning(f"[progress] Could not update feature #{fid}: {e}")
         return False
