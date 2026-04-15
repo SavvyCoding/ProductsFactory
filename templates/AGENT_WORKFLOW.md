@@ -130,9 +130,9 @@ Save output → `Results/{feature_name}_results.json`
 
 **Fix loop:** on failure, fix the implementation and re-run. Max **3 attempts** total.
 
-After 3 failures, append to `/workspace/session_result.json` (create if missing, read/parse/append/write if it exists):
-```json
-{"features": [{"id": <feature_id>, "status": "Blocked", "blocked_reason": "<reason>"}]}
+After 3 failures, append **one JSON line** to `/workspace/session_result.json`:
+```
+{"id": <feature_id>, "status": "Blocked", "blocked_reason": "<reason>"}
 ```
 Write the reason to `progress.md`. Push. Move on to the next feature in the batch.
 
@@ -165,11 +165,11 @@ gh pr create --title "feat: {description}" --base main
 
 **Push failure** → `PATCH status → Blocked`, write reason to `progress.md`, never exit 0 silently.
 
-On success, append to `/workspace/session_result.json` (create if missing, read/parse/append/write if it exists):
-```json
-{"features": [{"id": <feature_id>, "status": "Reviewing", "pr_number": <n>, "pr_url": "<url>"}]}
+On success, append **one JSON line** to `/workspace/session_result.json`:
 ```
-Do NOT call `PATCH /api/features/{id}` — the poller reads session_result.json after the session ends and applies all updates.
+{"id": <feature_id>, "status": "Reviewing", "pr_number": <n>, "pr_url": "<url>"}
+```
+Use `echo '{"id":...}' >> /workspace/session_result.json`. The poller polls this file every 30 s and applies each new line to the DB in real-time. Do NOT call `PATCH /api/features/{id}`.
 
 On main branch: update `features.md` — mark feature as 🔍 Reviewing. Commit + push.
 

@@ -78,25 +78,24 @@ For each assigned feature (in order):
    gh pr review <pr_number> --request-changes --body "Issues found:\n- <issue_1>\n- <issue_2>\nReviewed by Reviewer agent [{session_uid}]."
    ```
 
-6. **Append to `/workspace/session_result.json`** after each review decision.
-   This is the sole status update mechanism — do NOT call PATCH /api/features/{id} directly.
-   Include `confidence` field on approvals so the poller can decide whether to auto-merge.
-   Read/parse/append/write if the file already exists. Create it if not.
+6. **Append one JSON line to `/workspace/session_result.json`** immediately after each review decision.
+   The poller polls this file every 30 s and updates the DB in real-time. Do NOT call PATCH /api/features/{id}.
+   Include `confidence` on approvals so the poller knows whether to auto-merge.
 
    High-confidence approval:
-   ```json
-   {"features": [{"id": <feature_id>, "status": "Reviewed", "review_outcome": "approved", "confidence": "high"}]}
    ```
-
+   {"id": <feature_id>, "status": "Reviewed", "review_outcome": "approved", "confidence": "high"}
+   ```
    Low-confidence approval:
-   ```json
-   {"features": [{"id": <feature_id>, "status": "Reviewed", "review_outcome": "approved", "confidence": "low"}]}
+   ```
+   {"id": <feature_id>, "status": "Reviewed", "review_outcome": "approved", "confidence": "low"}
+   ```
+   Changes requested:
+   ```
+   {"id": <feature_id>, "status": "Implementing", "review_outcome": "changes_requested", "confidence": "low"}
    ```
 
-   Changes requested:
-   ```json
-   {"features": [{"id": <feature_id>, "status": "Implementing", "review_outcome": "changes_requested", "confidence": "low"}]}
-   ```
+   Use `echo '{"id":...}' >> /workspace/session_result.json` or write the line from a tool call.
 
 7. **Return to main branch:**
    ```

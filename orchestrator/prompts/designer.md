@@ -67,16 +67,19 @@ For each assigned feature (in order):
    - Any fixtures needed
    ```
 
-3. **Append to `/workspace/session_result.json`** after each feature's design doc is written.
-   This is the sole status update mechanism — do NOT call PATCH /api/features/{id} directly.
-   Create if missing; read/parse/append/write if it exists:
-   ```json
-   {"features": [{"id": <feature_id>, "status": "Designed", "design_doc_path": "docs/feature_<NNN>_design.md"}]}
+3. **Append one JSON line to `/workspace/session_result.json`** as soon as the design doc is written.
+   The poller polls this file every 30 s and updates the DB in real-time. Do NOT call PATCH /api/features/{id}.
+
+   Design complete:
    ```
-   If a feature description is too vague to design, write to session_result.json as Blocked:
-   ```json
-   {"features": [{"id": <feature_id>, "status": "Blocked", "blocked_reason": "Insufficient specification — <detail>"}]}
+   {"id": <feature_id>, "status": "Designed", "design_doc_path": "docs/feature_<NNN>_design.md"}
    ```
+   Too vague to design:
+   ```
+   {"id": <feature_id>, "status": "Blocked", "blocked_reason": "Insufficient specification — <detail>"}
+   ```
+
+   Use `echo '{"id":...}' >> /workspace/session_result.json` or write the line from a tool call.
 
 4. **Repeat** steps 1–3 for each assigned feature (up to {max_features_per_run} total).
 

@@ -49,19 +49,19 @@ Same startup, heartbeat, and exit rules as greenfield apply.
 
 If the feature has a design doc at docs/feature_{id:03d}_design.md, read it before implementing.
 
-**Status updates — session_result.json ONLY (do NOT call PATCH /api/features/{id}):**
-The poller has already set your features to Implementing. After each feature completes, append to `/workspace/session_result.json` (create if missing, read/parse/append/write if it exists):
+**Status updates — append a JSON line to `/workspace/session_result.json` at each phase transition:**
+The poller has already set your features to Implementing. As you complete each phase, append one line to `session_result.json`:
 
 On PR opened:
-```json
-{"features": [{"id": <feature_id>, "status": "Reviewing", "pr_number": <n>, "pr_url": "<url>"}]}
+```
+{"id": <feature_id>, "status": "Reviewing", "pr_number": <n>, "pr_url": "<url>"}
 ```
 On blocked (baseline tests drop, push fails, or 3 test failures):
-```json
-{"features": [{"id": <feature_id>, "status": "Blocked", "blocked_reason": "<reason>"}]}
+```
+{"id": <feature_id>, "status": "Blocked", "blocked_reason": "<reason>"}
 ```
 
-The poller reads session_result.json after the session ends and applies all updates. Never call `PATCH /api/features/{id}` directly.
+Each line is one complete JSON object. Use `echo '{"id":...}' >> /workspace/session_result.json`. The poller polls this file every 30 s and applies each new line to the DB in real-time. Never call `PATCH /api/features/{id}` directly.
 
 **After all features:** Write session_summary.md (see below) and exit. Do NOT run competitor research — the recommender runs as a separate agent after this session.
 

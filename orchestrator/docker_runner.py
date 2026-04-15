@@ -99,17 +99,27 @@ def _rollback_stuck_features(product_id: int, persona: str | None) -> None:
 
 
 def _read_session_result(working_dir: str) -> list[dict]:
-    """Read and parse session_result.json. Returns feature list (empty if missing/invalid)."""
+    """
+    Read and parse session_result.json (newline-delimited JSON — one entry per line).
+    Returns list of feature dicts. Skips blank or malformed lines.
+    """
     import json as _json
     result_file = Path(working_dir) / "session_result.json"
     if not result_file.exists():
         return []
+    entries = []
     try:
-        data = _json.loads(result_file.read_text(encoding="utf-8"))
-        return data.get("features", [])
+        for line in result_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(_json.loads(line))
+            except Exception:
+                pass  # skip malformed lines (e.g. partial write mid-line)
     except Exception as e:
         log.warning(f"Could not read session_result.json: {e}")
-        return []
+    return entries
 
 
 def _delete_session_result(working_dir: str) -> None:
@@ -119,13 +129,66 @@ def _delete_session_result(working_dir: str) -> None:
         pass
 
 
+def _apply_session_entry(client: httpx.Client, entry: dict) -> bool:
+    """PATCH a single session_result entry to the PM API. Returns True on success."""
+    fid = entry.get("id")
+    if not fid:
+        return False
+    patch_body = {k: v for k, v in entry.items() if k not in ("id", "confidence")}
+    try:
+        client.patch(f"/api/features/{fid}", json=patch_body)
+        log.info(f"[progress] Feature #{fid} -> {patch_body.get('status', '?')}")
+        return True
+    except Exception as e:
+        log.warning(f"[progress] Could not update feature #{fid}: {e}")
+        return False
+
+
+def _live_poll_session_result(working_dir: str, stop_event: threading.Event) -> None:
+    """
+    Background thread: polls session_result.json every 30 s while the container runs.
+    Applies new NDJSON lines to the DB in real-time as the agent writes phase transitions.
+    Tracks applied lines by index so each entry is applied exactly once.
+    """
+    import json as _json
+    result_file = Path(working_dir) / "session_result.json"
+    applied_up_to = 0  # number of lines already applied this session
+
+    while not stop_event.wait(30):  # poll every 30 s; exits when stop_event is set
+        if not result_file.exists():
+            continue
+        try:
+            lines = result_file.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            continue
+
+        new_lines = lines[applied_up_to:]
+        if not new_lines:
+            continue
+
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                for line in new_lines:
+                    line = line.strip()
+                    if not line:
+                        applied_up_to += 1
+                        continue
+                    try:
+                        entry = _json.loads(line)
+                        _apply_session_entry(client, entry)
+                    except Exception:
+                        pass  # malformed line — skip, don't block the rest
+                    applied_up_to += 1
+        except Exception as e:
+            log.debug(f"[live-poll] PM API error: {e}")
+
+
 def _reconcile_session_result(working_dir: str, product_id: int, exit_code: int,
                                features: list[dict] | None = None) -> None:
     """
-    Apply status updates from session_result.json (or pre-read features list) via the PM API.
-    Runs AFTER the container exits — status authority lives here, not inside the container.
-    If `features` is provided, uses that data instead of re-reading the file.
-    After applying, deletes session_result.json.
+    Final reconcile after container exits: re-applies all entries in session_result.json.
+    Idempotent — safe to re-apply entries the live-poll thread already sent.
+    Handles auto-merge decisions (passed in via features) and then deletes the file.
     """
     if features is None:
         features = _read_session_result(working_dir)
@@ -138,20 +201,12 @@ def _reconcile_session_result(working_dir: str, product_id: int, exit_code: int,
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
             for entry in features:
-                fid = entry.get("id")
-                if not fid:
-                    continue
-                patch_body = {k: v for k, v in entry.items() if k not in ("id", "confidence")}
-                try:
-                    client.patch(f"/api/features/{fid}", json=patch_body)
-                    log.info(f"[reconcile] Feature #{fid} -> {patch_body.get('status', '?')}")
+                if _apply_session_entry(client, entry):
                     applied += 1
-                except Exception as fe:
-                    log.warning(f"[reconcile] Could not update feature #{fid}: {fe}")
     except Exception as e:
         log.warning(f"[reconcile] PM API error: {e}")
 
-    log.info(f"[reconcile] Applied {applied}/{len(features)} feature updates")
+    log.info(f"[reconcile] Final reconcile: {applied}/{len(features)} feature updates applied")
     _delete_session_result(working_dir)
 
 
@@ -732,6 +787,16 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         log_thread = threading.Thread(target=_stream_logs, daemon=True)
         log_thread.start()
 
+        # Live-poll session_result.json while container runs — applies DB updates in real-time
+        # as the agent writes phase transitions (Implementing → Reviewing, Blocked, etc.).
+        _poll_stop = threading.Event()
+        poll_thread = threading.Thread(
+            target=_live_poll_session_result,
+            args=(working_dir, _poll_stop),
+            daemon=True,
+        )
+        poll_thread.start()
+
         try:
             process.wait(timeout=session_timeout_seconds)
         except subprocess.TimeoutExpired:
@@ -742,7 +807,9 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         else:
             exit_code = process.returncode
         finally:
+            _poll_stop.set()       # signal live-poll thread to stop
             log_thread.join(timeout=10)
+            poll_thread.join(timeout=5)
 
     except FileNotFoundError:
         log.error("'docker' not found in PATH — is Docker installed and on PATH?")
