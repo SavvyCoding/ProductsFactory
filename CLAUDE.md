@@ -53,6 +53,14 @@ python scripts/test_run.py \
     --persona coder
 ```
 
+### Windows Service Deployment
+
+The poller runs persistently on the Windows host via two options:
+- **Task Scheduler** (recommended): `deploy/windows/install_task.ps1` registers it as a system task that auto-starts on login
+- **Startup folder**: `deploy/install.sh` places a shortcut in the Windows startup folder
+
+The wrapper script `deploy/windows/start_poller.ps1` loads `.env`, then runs the poller in a crash-restart loop. The agent Docker image is built with `deploy/docker/build.sh`, which also creates the `productfactory-net` external bridge network.
+
 ## Architecture
 
 ### Orchestration Loop (poller.py)
@@ -71,6 +79,17 @@ Every `POLL_INTERVAL` seconds (default 60s), the poller:
 9. After Docker exits: reads `session_result.json` from the product working dir and applies all recorded status updates (see Agent Contract below)
 
    Alternatively, when `USE_OLLAMA=1` is set, step 8 instead runs `orchestrator/ollama_agent.py` inside the container — a self-contained tool-use loop against Ollama's OpenAI-compatible API (no Claude API key required). Model selection: `DESIGNER_MODEL` (default `gemma3:27b`) for designer/reviewer, `CODER_MODEL` (default `qwen3-coder:30b`) for coder.
+
+### Greenfield Scaffolding
+
+When `setup_product.py` discovers a new product directory with fewer than `BROWNFIELD_FILE_THRESHOLD` (default: 10) source files, it is classified as **greenfield**. `greenfield_scaffold.py` then:
+1. Creates a GitHub repo via the GitHub API (using `system_config.github_pat`)
+2. Generates a per-product Ed25519 SSH deploy key (`id_ed25519_{product_name}`) in `SSH_DIR`
+3. Uploads the public key to GitHub as a deploy key with write access
+4. Initializes the local git repo, commits templates, and pushes to GitHub
+5. Stores the repo URL in `product.github_repo`
+
+For brownfield products (existing repos), `setup_product.py` only installs templates and registers in the DB. Deploy keys fall back to `id_ed25519_productfactory` if no per-product key exists.
 
 ### Multi-Agent Personas
 
@@ -105,14 +124,29 @@ registered → discovered → ready → [running] → (repeats)
 
 Feature states: `Pending → Approved → [Designing → Designed →] Implementing → Reviewing → [Reviewed →] Pushed` (also: `Deferred`, `Blocked`, `Rejected`, `Reverted`)
 
+**Status transition authority**: PMs (via the website) are restricted to a whitelist in `website/schemas.py` (`PM_ALLOWED_TRANSITIONS`). Agents calling the internal REST API bypass this gate entirely and can move features to any valid state.
+
 ### Agent Contract (session_result.json)
 
-Agents write `{working_dir}/session_result.json` **incrementally** as they complete each feature — one JSON object per line (newline-delimited). After the Docker container exits, `docker_runner.py` reads this file and applies all status updates via the PM API. Features with no entry in `session_result.json` and no open PR are rolled back to avoid stuck states.
+Agents write `{working_dir}/session_result.json` **incrementally** as they complete each feature — one JSON object per line (newline-delimited). After the Docker container exits, `docker_runner.py` reads this file and applies all status updates via the PM API. Features with no entry in `session_result.json` and no open PR are **rolled back to `Approved`** to avoid stuck states — this handles crashes mid-session.
 
 Each line format:
 ```json
 {"feature_id": 42, "status": "Reviewing", "pr_number": 7}
 ```
+
+### Per-Product Configuration
+
+`product.config` (JSONB column) stores per-product runtime state and overrides:
+- `last_{persona}_at` — ISO timestamp used to gate scheduled maintenance personas
+- `quiet_hours_start` / `quiet_hours_end` — Hour of day (0–23) to suppress sessions
+- `daily_session_cap` — Max sessions per day for this product
+- `max_features_per_run` — Per-product override for the global `MAX_FEATURES_PER_RUN`
+
+Additionally, a `product_config.json` file in the product working directory (read by `setup_product.py` on discovery) can seed:
+- `preferred_stack` — Selects which `templates/stacks/` variant to install
+- `vision` — High-level product description passed to agents
+- `suggested_features` — Initial feature list auto-created on discovery
 
 ### Database
 
@@ -122,6 +156,14 @@ Each line format:
 - Key tables: `products`, `features`, `sessions`, `alerts`, `feature_reviews`
 - Notable columns: `features.skip_design`, `features.design_doc`, `features.design_doc_path`, `features.review_outcome`, `features.review_notes`, `features.feature_type` (`feature | bug | chore`); `sessions.persona`, `sessions.container_id`; `system_config.poller_pid/host/locked_at/heartbeat_at`
 - Tests use real PostgreSQL (not mocks) — each test runs inside a rolled-back transaction for isolation; requires `TEST_DATABASE_URL`
+
+### Docker Network Model
+
+Two networks serve different purposes:
+- **`pf-internal`** — compose-internal only (PostgreSQL ↔ PM website); never exposed outside compose
+- **`productfactory-net`** — external bridge created by `deploy/docker/build.sh`; both the PM website container and agent containers attach to this, so agents can reach `http://pm-api:8080`
+
+Agent containers run as non-root user `agent` (UID 1001), with no `--privileged` flag and no host network access. The PM website is reachable from agents via `--add-host pm-api:host-gateway` set in `docker_runner.py`.
 
 ### Templates
 
@@ -144,11 +186,12 @@ Each line format:
 
 ### Auth & Security
 
-- PM website uses HTTP Basic Auth (`secrets.compare_digest` — timing-safe)
+- PM website uses HTTP Basic Auth (`secrets.compare_digest` — timing-safe); falls back to env-var credentials if no `pm_users` rows exist
 - REST API (`/api/...`) has no auth (internal use by the poller)
 - OAuth tokens (`~/.claude`) mounted read-only into agent containers
-- SSH deploy key mounted read-only; not the full `~/.ssh` directory
+- SSH deploy keys in `SSH_DIR`: per-product key `id_ed25519_{product_name}` with fallback to `id_ed25519_productfactory`; mounted read-only (not the full `~/.ssh` directory)
 - Agent containers run on an isolated bridge network, not `--network host`, no `--privileged`
+- GitHub PAT stored in `system_config.github_pat` (DB), not an env var — fetched fresh each API call so live updates take effect without restarting the poller
 
 ## Key Conventions
 
@@ -168,6 +211,9 @@ See `.env.example` for all variables. Critical ones:
 - `CLAUDE_DIR` / `SSH_DIR` — Host paths for OAuth tokens and deploy key mounts
 - `SESSION_TIMEOUT_MINUTES` — Kill Docker container after N minutes (default: 90)
 - `STALE_THRESHOLD_MINUTES` — Alert if progress.md not pushed in N minutes (default: 45)
+- `BROWNFIELD_FILE_THRESHOLD` — Source file count above which a product is treated as brownfield (default: 10)
+- `MAX_FEATURES_PER_RUN` — Max features an agent attempts per session (default: 1; per-product override in DB)
+- `MAX_OPEN_PRS` — Coder skips the product if open PR count meets or exceeds this (default: 3)
 - `OLLAMA_HOST` — Ollama base URL (default: `http://host.docker.internal:11434` inside Docker, `http://localhost:11434` for local runs)
 - `DESIGNER_MODEL` / `CODER_MODEL` — Ollama model names (defaults: `gemma3:27b` / `qwen3-coder:30b`)
 - `MAX_TURNS` — Hard cap on Ollama agent turns per session (default: 80)
