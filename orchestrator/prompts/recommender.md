@@ -8,6 +8,17 @@ Work through these steps ONE AT A TIME. Do not combine steps.
 
 ---
 
+## Step 0 — Check backlog size first
+
+Call:
+```
+GET {pm_api_url}/api/features/count?product_id={product_id}&status=Pending
+```
+Read the `count` value from the response.
+If `count` >= 10, respond with "Backlog already full ({count} Pending features) — skipping recommendations." and exit immediately. Do NOT create any features.
+
+---
+
 ## Step 1 — Get existing features
 
 Call:

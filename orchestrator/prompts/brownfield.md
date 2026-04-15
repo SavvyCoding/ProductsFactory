@@ -6,7 +6,9 @@ Tech stack: {tech_stack}
 
 Your working directory is /workspace. All files must be written inside /workspace.
 
-> **Tool note:** Use the **Bash** tool with `curl` for ALL PM API calls — WebFetch cannot reach internal Docker hostnames like `pm-api:8080`. Example: `curl -s -X PATCH http://pm-api:8080/api/features/42 -H "Content-Type: application/json" -d '{"status":"Designed"}'`
+> **Tool note:** Use the **Bash** tool with `curl` for ALL PM API calls — WebFetch cannot reach internal Docker hostnames like `pm-api:8080`. Example: `curl -s http://pm-api:8080/api/features/{product_id}`
+
+{prev_session_summary}
 
 ---
 
@@ -14,6 +16,16 @@ Your working directory is /workspace. All files must be written inside /workspac
 
 Read /workspace/AGENT_WORKFLOW.md NOW before doing anything else.
 Follow it exactly — especially the brownfield-specific rules.
+
+---
+
+## Assigned features for this session
+
+{assigned_features}
+
+> If the list above is empty, there is nothing to do this session. Exit 0 immediately.
+>
+> **Override AGENT_WORKFLOW.md step 2:** Your batch is pre-assigned above — do NOT call `GET /api/features/approved`. Go directly to step 3 (implement) for each assigned feature.
 
 ---
 
@@ -27,7 +39,7 @@ Follow it exactly — especially the brownfield-specific rules.
    Log any existing-file touch in progress.md under "Touched existing files".
 
 3. **Baseline test gate:** Run the full test suite. ALL previously-passing tests must still pass.
-   If baseline count drops → do not proceed → set feature Blocked with reason.
+   If baseline count drops → do not proceed → set feature Blocked (see status updates below).
 
 4. **Dependency constraint:** Add to existing lock file. Do NOT regenerate it.
 
@@ -35,13 +47,44 @@ Follow it exactly — especially the brownfield-specific rules.
 
 Same startup, heartbeat, and exit rules as greenfield apply.
 
-**After opening PR:** PATCH the feature status to `Reviewing` with pr_number and pr_url set.
-If the feature has a design doc at docs/feature_{{id:03d}}_design.md, read it before implementing.
+If the feature has a design doc at docs/feature_{id:03d}_design.md, read it before implementing.
 
-**After each feature reaches Reviewing or Blocked:** append to `/workspace/session_result.json`
-(create if missing — read/parse/append/write if it exists):
+**Status updates — session_result.json ONLY (do NOT call PATCH /api/features/{id}):**
+The poller has already set your features to Implementing. After each feature completes, append to `/workspace/session_result.json` (create if missing, read/parse/append/write if it exists):
+
+On PR opened:
 ```json
 {"features": [{"id": <feature_id>, "status": "Reviewing", "pr_number": <n>, "pr_url": "<url>"}]}
 ```
-This is the authoritative status record — the poller reads it after the session ends to apply
-status updates even if the container is killed before task_done.
+On blocked (baseline tests drop, push fails, or 3 test failures):
+```json
+{"features": [{"id": <feature_id>, "status": "Blocked", "blocked_reason": "<reason>"}]}
+```
+
+The poller reads session_result.json after the session ends and applies all updates. Never call `PATCH /api/features/{id}` directly.
+
+**After all features:** Write session_summary.md (see below) and exit. Do NOT run competitor research — the recommender runs as a separate agent after this session.
+
+---
+
+## Before exiting — write /workspace/session_summary.md
+
+```markdown
+---
+session_uid: {session_uid}
+persona: coder
+timestamp: <current ISO timestamp>
+---
+## Completed
+<each feature: name, ID, PR number>
+## Not completed (why)
+<assigned features not finished and why>
+## Key decisions
+<architecture or tech choices future sessions should know>
+## Blockers
+<anything that blocked work>
+## Recommended next steps
+<what reviewer or next coder session should prioritise>
+```
+
+Commit and push session_summary.md with your final push to main.

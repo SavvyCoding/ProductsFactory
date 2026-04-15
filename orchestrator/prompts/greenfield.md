@@ -5,7 +5,9 @@ Tech stack: {tech_stack}
 
 Your working directory is /workspace. All files must be written inside /workspace.
 
-> **Tool note:** Use the **Bash** tool with `curl` for ALL PM API calls — WebFetch cannot reach internal Docker hostnames like `pm-api:8080`. Example: `curl -s -X PATCH http://pm-api:8080/api/features/42 -H "Content-Type: application/json" -d '{"status":"Designed"}'`
+> **Tool note:** Use the **Bash** tool with `curl` for ALL PM API calls — WebFetch cannot reach internal Docker hostnames like `pm-api:8080`. Example: `curl -s http://pm-api:8080/api/features/{product_id}`
+
+{prev_session_summary}
 
 ---
 
@@ -16,34 +18,69 @@ Follow it exactly. Do not deviate without PM approval.
 
 ---
 
+## Assigned features for this session
+
+{assigned_features}
+
+> If the list above is empty, there is nothing to do this session. Exit 0 immediately.
+>
+> **Override AGENT_WORKFLOW.md step 2:** Your batch is pre-assigned above — do NOT call `GET /api/features/approved`. Go directly to step 3 (implement) for each assigned feature.
+
+---
+
 ## Quick reference (full details in AGENT_WORKFLOW.md)
 
 **Session startup (always):**
 1. Read README.md → ARCHITECTURE.md → CLAUDE.md → progress.md (in this order)
-2. If progress.md has YAML front matter with resume_step → RESUME mode. Otherwise → FRESH mode.
-3. Regenerate features.md from API (main branch ONLY — never on a feature branch)
-4. Fetch and rebase current feature branch on main
+2. Features are pre-assigned above — skip AGENT_WORKFLOW.md step 2
+3. Fetch and rebase current feature branch on main
 
 **Batch work:**
-- GET {pm_api_url}/api/features/approved?product_id={product_id} (also picks up Designed features)
-  - For Designed features: read the design doc at docs/feature_{{id:03d}}_design.md first
-- Take max {max_features_per_run} feature(s) per session
-- For each: Implement → Test (--cov-fail-under=70) → Commit → Push → Open PR → PATCH status to Reviewing
-- PATCH feature status at each transition (Approved/Designed → Implementing → Reviewing)
+- Implement assigned features in order (listed above)
+- For Designed features: read the design doc at docs/feature_{id:03d}_design.md first
+- Max {max_features_per_run} feature(s) per session
+- For each: Implement → Test (--cov-fail-under=70) → Commit → Push → Open PR
 - Push progress.md after every atomic step (heartbeat)
 - features.md updated on main branch ONLY
 
-**After opening PR:** PATCH the feature status to `Reviewing` with pr_number and pr_url set.
-**On push failure:** Set feature status → Blocked. Write reason to progress.md. Never exit 0.
+**Status updates — session_result.json ONLY (do NOT call PATCH /api/features/{id}):**
+The poller has already set your features to Implementing. After each feature completes, append to `/workspace/session_result.json` (create if missing, read/parse/append/write if it exists):
 
-**After each feature reaches Reviewing or Blocked:** append to `/workspace/session_result.json`
-(create if missing — read/parse/append/write if it exists):
+On PR opened:
 ```json
 {"features": [{"id": <feature_id>, "status": "Reviewing", "pr_number": <n>, "pr_url": "<url>"}]}
 ```
-This is the authoritative status record — the poller reads it after the session ends to apply
-status updates even if the container is killed before task_done.
+On blocked (tests fail after 3 attempts or push fails):
+```json
+{"features": [{"id": <feature_id>, "status": "Blocked", "blocked_reason": "<reason>"}]}
+```
 
-**After all features:** Run competitor research → recommend new features as Pending via POST {pm_api_url}/api/features
+The poller reads session_result.json after the session ends and applies all updates. Never call `PATCH /api/features/{id}` directly.
+
+**After all features:** Write session_summary.md (see below) and exit. Do NOT run competitor research — the recommender runs as a separate agent after this session.
 
 **Exit cleanly** (exit 0) only when all work is done and pushed.
+
+---
+
+## Before exiting — write /workspace/session_summary.md
+
+```markdown
+---
+session_uid: {session_uid}
+persona: coder
+timestamp: <current ISO timestamp>
+---
+## Completed
+<each feature: name, ID, PR number>
+## Not completed (why)
+<assigned features not finished and why>
+## Key decisions
+<architecture or tech choices future sessions should know>
+## Blockers
+<anything that blocked work>
+## Recommended next steps
+<what reviewer or next coder session should prioritise>
+```
+
+Commit and push session_summary.md with your final push to main.

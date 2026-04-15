@@ -54,11 +54,10 @@ After reading context:
 
 ## 2. Batch planning (FRESH mode only)
 
-```
-GET {PM_API_URL}/api/features/approved?product_id={PRODUCT_ID}
-```
+Your batch is **pre-assigned** — features are listed in the `-p` prompt you were launched with.
+Do NOT call `GET /api/features/approved`. Use the assigned list from the prompt directly.
 
-- Sort results by `priority ASC`, then by `depends_on` (dependencies first)
+- Sort assigned features by `priority ASC`, then by `depends_on` (dependencies first)
 - Take max **{MAX_BATCH_SIZE}** feature(s) — never exceed this
 - Write `Temp/batch_{date}_plan.md` — one paragraph per feature: what, why, approach
 - Initialise `progress.md`:
@@ -85,10 +84,12 @@ Last heartbeat: {datetime} UTC
 
 ## 3. Per-feature loop (repeat for each feature in batch)
 
-### Step 3 — Claim + branch
+### Step 3 — Branch
+
+The poller has already set your features to `Implementing` before launching this session.
+Do NOT call `PATCH /api/features/{id}` to claim — go straight to creating the branch:
 
 ```
-PATCH {PM_API_URL}/api/features/{id}  {"status": "Implementing"}
 git checkout -b feature/{feature_name}
 ```
 
@@ -129,9 +130,9 @@ Save output → `Results/{feature_name}_results.json`
 
 **Fix loop:** on failure, fix the implementation and re-run. Max **3 attempts** total.
 
-After 3 failures:
-```
-PATCH {PM_API_URL}/api/features/{id}  {"status": "Blocked", "fix_attempts": 3, "blocked_reason": "..."}
+After 3 failures, append to `/workspace/session_result.json` (create if missing, read/parse/append/write if it exists):
+```json
+{"features": [{"id": <feature_id>, "status": "Blocked", "blocked_reason": "<reason>"}]}
 ```
 Write the reason to `progress.md`. Push. Move on to the next feature in the batch.
 
@@ -164,10 +165,11 @@ gh pr create --title "feat: {description}" --base main
 
 **Push failure** → `PATCH status → Blocked`, write reason to `progress.md`, never exit 0 silently.
 
-On success:
+On success, append to `/workspace/session_result.json` (create if missing, read/parse/append/write if it exists):
+```json
+{"features": [{"id": <feature_id>, "status": "Reviewing", "pr_number": <n>, "pr_url": "<url>"}]}
 ```
-PATCH {PM_API_URL}/api/features/{id}  {"status": "Reviewing", "pr_url": "...", "pr_number": ...}
-```
+Do NOT call `PATCH /api/features/{id}` — the poller reads session_result.json after the session ends and applies all updates.
 
 On main branch: update `features.md` — mark feature as 🔍 Reviewing. Commit + push.
 
@@ -182,17 +184,11 @@ Update `progress.md`: `resume_step: 6` → commit + push (heartbeat)
 
 After all features in the batch are done:
 
-- Research the top 3 competitors of this product (web search)
-- Identify 3–5 feature gaps → POST each as Pending:
-
-```
-POST {PM_API_URL}/api/features
-{"product_id": {PRODUCT_ID}, "name": "...", "description": "...", "source": "ai", "priority": 60}
-```
-
 - Update `progress.md`: session complete, clear `resume_step` (remove from front matter)
-- Commit + push `progress.md` to main
+- Commit + push `progress.md` and `session_summary.md` to main
 - Exit cleanly (exit 0)
+
+> **Note:** Do NOT run competitor research or POST new features here. The recommender agent runs as a separate Docker session after this one completes — it has its own backlog-size gate.
 
 ---
 

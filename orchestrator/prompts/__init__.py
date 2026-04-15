@@ -46,6 +46,7 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None) ->
 
     # Use explicit replacement instead of str.format() so that JSON examples
     # like {"status": "..."} in the templates are not misinterpreted as placeholders.
+    prev = product.get("_prev_session_summary", "")
     replacements = {
         "{product_id}": str(product["id"]),
         "{product_name}": str(product.get("name", product["working_dir"])),
@@ -56,6 +57,11 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None) ->
             product.get("max_features_per_run") or int(os.environ.get("MAX_FEATURES_PER_RUN", "1"))
         ),
         "{auto_merge_enabled}": str(product.get("_auto_merge_enabled", False)),
+        "{assigned_features}": product.get("_assigned_features_md", ""),
+        "{assigned_feature_count}": str(len(product.get("_assigned_features", []))),
+        "{prev_session_summary}": (
+            f"## Previous session context\n\n{prev}\n\n---\n" if prev else ""
+        ),
     }
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)

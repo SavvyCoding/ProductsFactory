@@ -305,6 +305,108 @@ def _get_system_config_sync() -> dict:
         return {}
 
 
+def _read_session_summary(working_dir: str) -> str:
+    """Read session_summary.md written by the previous agent session."""
+    f = Path(working_dir) / "session_summary.md"
+    if not f.exists():
+        return ""
+    try:
+        content = f.read_text(encoding="utf-8")
+        if len(content) > 2000:
+            content = content[:1950] + "\n...[truncated]"
+        return content
+    except Exception as e:
+        log.warning(f"Could not read session_summary.md: {e}")
+        return ""
+
+
+def _fetch_assigned_features(product_id: int, persona: str | None, max_count: int) -> list[dict]:
+    """
+    Pre-fetch features the agent should work on this session.
+    Poller selects features — agent no longer self-discovers via API.
+    Returns [] for personas that manage their own work (qa_tester, recommender, etc.).
+    """
+    if persona not in ("coder", "designer", "reviewer"):
+        return []
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            if persona == "coder":
+                resp = client.get("/api/features/approved", params={"product_id": product_id})
+            else:
+                # designer + reviewer: get all features for product and filter client-side
+                resp = client.get(f"/api/products/{product_id}/features")
+            resp.raise_for_status()
+            all_features = resp.json()
+
+        if persona == "designer":
+            features = [f for f in all_features
+                        if f.get("status") == "Approved" and not f.get("skip_design")]
+        elif persona == "reviewer":
+            features = [f for f in all_features
+                        if f.get("status") == "Reviewing" and f.get("pr_number")]
+        else:
+            features = all_features  # coder: already filtered by /approved endpoint
+
+        selected = features[:max_count]
+        log.info(f"[assign] persona={persona} assigned {len(selected)}/{len(features)} features")
+        return [
+            {
+                "id": f["id"],
+                "name": f["name"],
+                "description": f.get("description", ""),
+                "status": f["status"],
+                "skip_design": f.get("skip_design", False),
+                "design_doc_path": f.get("design_doc_path"),
+                "pr_number": f.get("pr_number"),
+                "pr_url": f.get("pr_url"),
+            }
+            for f in selected
+        ]
+    except Exception as e:
+        log.warning(f"[assign] Could not pre-fetch features for {persona}: {e} — agent will get empty list")
+        return []
+
+
+def _format_assigned_features(features: list[dict], persona: str | None) -> str:
+    """Render the assigned feature list as Markdown for injection into the prompt."""
+    if not features:
+        return ""
+    lines = [f"### Assigned features for this session ({len(features)} total)\n"]
+    for i, f in enumerate(features, 1):
+        lines.append(f"{i}. **[#{f['id']}] {f['name']}**")
+        if f.get("description"):
+            lines.append(f"   - {f['description']}")
+        if persona == "coder" and f.get("design_doc_path"):
+            lines.append(f"   - Design doc: /workspace/{f['design_doc_path']}")
+        if persona == "reviewer" and f.get("pr_number"):
+            lines.append(f"   - PR: #{f['pr_number']}" + (f" ({f['pr_url']})" if f.get("pr_url") else ""))
+        lines.append("")
+    lines.append("Work through these features IN ORDER. Do not query the features API for additional work.")
+    return "\n".join(lines)
+
+
+def _claim_features(features: list[dict], persona: str | None) -> None:
+    """
+    Mark assigned features as in-progress before launching Docker.
+    Prevents double-claiming if the poller runs again before the container finishes.
+    Reviewer features stay in 'Reviewing' — no claim needed.
+    """
+    status_map = {"designer": "Designing", "coder": "Implementing"}
+    target_status = status_map.get(persona or "")
+    if not target_status or not features:
+        return
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            for f in features:
+                try:
+                    client.patch(f"/api/features/{f['id']}", json={"status": target_status})
+                    log.info(f"[claim] Feature #{f['id']} '{f['name']}' → {target_status}")
+                except Exception as fe:
+                    log.warning(f"[claim] Could not claim feature #{f['id']}: {fe}")
+    except Exception as e:
+        log.warning(f"[claim] Could not connect to PM API: {e}")
+
+
 def _get_claude_profile(sys_cfg: dict) -> tuple[str, str]:
     """
     Returns (credentials_dir, claude_model) from system config with sensible defaults.
@@ -384,18 +486,29 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # (Windows NTFS bind-mounts appear as root-owned inside Docker; host chmod is a no-op).
     for _agent_dir in ("docs", "Results", "Temp"):
         Path(working_dir, _agent_dir).mkdir(exist_ok=True)
-    prompt = build_prompt(product, session_uid, persona=persona)
 
-    # Read backend from DB config (overrides env var)
+    # ── Fetch sys_cfg FIRST — must happen before build_prompt so all substitution
+    #    vars (auto_merge_enabled, assigned_features, prev_session_summary) are ready.
     sys_cfg = _get_system_config_sync()
     effective_backend = (sys_cfg.get("agent_backend") or AGENT_BACKEND)
-    # Session timeout from DB config, fallback to env default
     session_timeout_seconds = int(sys_cfg.get("session_timeout_minutes") or 0) * 60 or _DEFAULT_SESSION_TIMEOUT_SECONDS
-    # Max features from DB config, fallback to env default
     effective_max_features = product.get("max_features_per_run") or int(sys_cfg.get("max_features_per_run") or MAX_FEATURES_PER_RUN)
-    # Pass auto_merge setting into prompt via product dict (prompt builder reads _auto_merge_enabled)
+
+    # Enrich product dict with all computed values before building the prompt.
     product = dict(product)
     product["_auto_merge_enabled"] = bool(sys_cfg.get("auto_merge_enabled", False))
+
+    # Poller-driven feature assignment: pre-fetch and claim features before launch.
+    # Agent receives an explicit task list — no self-discovery inside the container.
+    assigned_features = _fetch_assigned_features(product["id"], persona, effective_max_features)
+    _claim_features(assigned_features, persona)
+    product["_assigned_features"] = assigned_features
+    product["_assigned_features_md"] = _format_assigned_features(assigned_features, persona)
+
+    # Inject previous session summary for continuity.
+    product["_prev_session_summary"] = _read_session_summary(working_dir)
+
+    prompt = build_prompt(product, session_uid, persona=persona)
 
     # Guard: check DB for an already-running session for this product.
     # Cross-check with docker ps — if the container is gone, auto-close the stale DB record.
@@ -710,8 +823,8 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 )
                 _pending_count = _resp.json().get("count", 0)
         except Exception as _e:
-            log.warning(f"Could not count pending features: {_e} — running recommender anyway")
-            _pending_count = 0
+            log.warning(f"Could not count pending features: {_e} — skipping recommender (fail-safe)")
+            _pending_count = max(_rec_threshold, 1)  # Fail closed: skip rather than runaway
 
         if _rec_threshold > 0 and _pending_count >= _rec_threshold:
             log.info(
