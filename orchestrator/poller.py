@@ -507,6 +507,61 @@ def _startup_sync_features():
             log.warning(f"Startup sync failed for product {product.get('name', product['id'])}: {e}")
 
 
+def _post_session_comments(product: dict, persona: str, session_uid: str, features_updated: list[int]):
+    """
+    After a session completes, post the session summary as a comment on each
+    feature that was updated. Author = persona name (e.g. 'coder', 'reviewer').
+    Fault-tolerant — never raises.
+    """
+    if not features_updated:
+        return
+    working_dir = product.get("working_dir", "")
+    body = f"{persona} session {session_uid} completed."
+    if working_dir:
+        summary_path = Path(working_dir) / "session_summary.md"
+        try:
+            if summary_path.exists():
+                raw = summary_path.read_text(encoding="utf-8", errors="replace")
+                body = raw[:500].strip() or body
+        except Exception:
+            pass
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            for fid in features_updated:
+                try:
+                    client.post(f"/api/features/{fid}/comments", json={"author": persona, "body": body})
+                except Exception:
+                    pass
+    except Exception as e:
+        log.warning(f"_post_session_comments: could not post comments: {e}")
+
+
+def _check_due_date_alerts():
+    """
+    Post a comment and send a Slack alert for features past their due_date.
+    Called once per poller cycle. Fault-tolerant — never raises.
+    """
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            resp = client.get("/api/features/overdue")
+            if resp.status_code != 200:
+                return
+            overdue = resp.json()
+            for f in overdue:
+                fid  = f["id"]
+                name = f.get("name", f"Feature #{fid}")
+                due  = f.get("due_date", "?")
+                stat = f.get("status", "?")
+                msg  = f"⚠️ Overdue: '{name}' was due {due} — current status: {stat}"
+                try:
+                    client.post(f"/api/features/{fid}/comments", json={"author": "poller", "body": msg})
+                except Exception:
+                    pass
+                send_alert("warning", msg)
+    except Exception as e:
+        log.warning(f"_check_due_date_alerts: {e}")
+
+
 def main():
     if not _acquire_db_lock():
         return
@@ -582,6 +637,9 @@ def main():
             # ⑤ Reset stuck features
             reset_stuck_features()
 
+            # ⑤b Due-date alerts
+            _check_due_date_alerts()
+
             # ⑥ Deliver PM messages
             for product in products:
                 if (product.get("config") or {}).get("pm_messages"):
@@ -646,6 +704,8 @@ def main():
 
             # ⑫ Run Claude session
             log.info(f"Launching {persona} session for: {product['name']}")
+            _session_start = datetime.now(timezone.utc)
+            session_uid = f"{product['id']}-{int(_session_start.timestamp())}"
             exit_code = run_claude_in_docker(product, persona=persona)
             log.info(f"Session ended — exit_code={exit_code} persona={persona}")
 
@@ -654,6 +714,18 @@ def main():
                 log.info(f"Session skipped (already running) for {product['name']} — will retry next cycle")
                 time.sleep(30)  # Short sleep so we re-check soon
                 continue
+
+            # Post session summary as comments on features updated during this session
+            try:
+                with httpx.Client(base_url=PM_API_URL, timeout=10) as _cc:
+                    _feats = _cc.get(f"/api/products/{product['id']}/features").json()
+                    _updated_ids = [
+                        f["id"] for f in _feats
+                        if f.get("updated_at") and f["updated_at"] >= _session_start.isoformat()
+                    ]
+            except Exception:
+                _updated_ids = []
+            _post_session_comments(product, persona, session_uid, _updated_ids)
 
             # Track daily count (reviewers exempt)
             if persona != "reviewer":

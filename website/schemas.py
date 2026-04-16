@@ -3,7 +3,7 @@ Pydantic schemas — request/response shapes for the REST API.
 Separate from ORM models so the API contract is explicit.
 """
 
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional, List, Literal
 from pydantic import BaseModel, field_validator
 
@@ -83,6 +83,9 @@ class FeatureCreate(BaseModel):
     source:       str = "pm"
     feature_type: str = "feature"
     skip_design:  bool = False
+    sprint_id:    Optional[int] = None
+    story_points: Optional[int] = None
+    due_date:     Optional[date] = None
 
     @field_validator("priority")
     @classmethod
@@ -158,6 +161,9 @@ class FeatureOut(BaseModel):
     design_doc_path: Optional[str] = None
     review_outcome:  Optional[str] = None
     review_notes:    Optional[str] = None
+    sprint_id:       Optional[int] = None
+    story_points:    Optional[int] = None
+    due_date:        Optional[date] = None
     created_at:      datetime
     updated_at:      datetime
 
@@ -315,3 +321,102 @@ class ArticulateRequest(BaseModel):
 
 class ResetStuckResult(BaseModel):
     reset_count: int
+
+
+# ── JIRA-like tracking schemas ─────────────────────────────────────────────────
+
+class FeatureCommentCreate(BaseModel):
+    author: str = "pm"
+    body:   str
+
+
+class FeatureCommentOut(BaseModel):
+    id:         int
+    feature_id: int
+    author:     str
+    body:       str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ChangelogEntryOut(BaseModel):
+    id:         int
+    feature_id: int
+    field:      str
+    old_value:  Optional[str]
+    new_value:  Optional[str]
+    changed_by: str
+    changed_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class LabelCreate(BaseModel):
+    product_id: int
+    name:       str
+    color:      str = "#6366f1"
+
+
+class LabelOut(BaseModel):
+    id:         int
+    product_id: int
+    name:       str
+    color:      str
+
+    model_config = {"from_attributes": True}
+
+
+class FeatureLabelAdd(BaseModel):
+    label_id: int
+
+
+class SprintCreate(BaseModel):
+    product_id: int
+    name:       str
+    goal:       Optional[str] = None
+    start_date: Optional[date] = None
+    end_date:   Optional[date] = None
+    status:     str = "active"
+
+
+class SprintUpdate(BaseModel):
+    name:       Optional[str]  = None
+    goal:       Optional[str]  = None
+    start_date: Optional[date] = None
+    end_date:   Optional[date] = None
+    status:     Optional[str]  = None
+
+
+class SprintOut(BaseModel):
+    id:         int
+    product_id: int
+    name:       str
+    goal:       Optional[str]
+    start_date: Optional[date]
+    end_date:   Optional[date]
+    status:     str
+
+    model_config = {"from_attributes": True}
+
+
+class FeatureLinkCreate(BaseModel):
+    target_id: int
+    link_type: str
+
+    @field_validator("link_type")
+    @classmethod
+    def link_type_valid(cls, v: str) -> str:
+        if v not in ("blocks", "is_blocked_by", "relates_to", "duplicates"):
+            raise ValueError("link_type must be blocks, is_blocked_by, relates_to, or duplicates")
+        return v
+
+
+class FeatureLinkOut(BaseModel):
+    id:         int
+    source_id:  int
+    target_id:  int
+    link_type:  str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}

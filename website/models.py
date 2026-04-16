@@ -3,11 +3,11 @@ SQLAlchemy ORM models — mirrors db/schema.sql exactly.
 Add columns here + create an Alembic migration to apply to live DB.
 """
 
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional, List
 from sqlalchemy import (
-    Integer, String, Text, DateTime, Boolean, ARRAY,
-    ForeignKey, func, CheckConstraint, event, Numeric, Float
+    Integer, String, Text, DateTime, Boolean, ARRAY, Date,
+    ForeignKey, func, CheckConstraint, event, Numeric, Float, UniqueConstraint
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -94,8 +94,17 @@ class Feature(Base):
     created_at:     Mapped[datetime]       = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at:     Mapped[datetime]       = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    product: Mapped["Product"] = relationship("Product", back_populates="features")
-    reviews: Mapped[List["FeatureReview"]] = relationship("FeatureReview", back_populates="feature", cascade="all, delete")
+    sprint_id:    Mapped[Optional[int]]  = mapped_column(Integer, ForeignKey("sprints.id", ondelete="SET NULL"), nullable=True)
+    story_points: Mapped[Optional[int]]  = mapped_column(Integer, nullable=True)
+    due_date:     Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+
+    product:   Mapped["Product"]              = relationship("Product", back_populates="features")
+    reviews:   Mapped[List["FeatureReview"]]  = relationship("FeatureReview", back_populates="feature", cascade="all, delete")
+    comments:  Mapped[List["FeatureComment"]] = relationship("FeatureComment", back_populates="feature", cascade="all, delete")
+    changelog: Mapped[List["FeatureChangelog"]] = relationship("FeatureChangelog", back_populates="feature", cascade="all, delete")
+    labels:    Mapped[List["FeatureLabel"]]   = relationship("FeatureLabel", back_populates="feature", cascade="all, delete")
+    links_out: Mapped[List["FeatureLink"]]    = relationship("FeatureLink", foreign_keys="FeatureLink.source_id", back_populates="source", cascade="all, delete")
+    links_in:  Mapped[List["FeatureLink"]]    = relationship("FeatureLink", foreign_keys="FeatureLink.target_id", back_populates="target", cascade="all, delete")
 
 
 class FeatureReview(Base):
@@ -219,3 +228,99 @@ class Alert(Base):
     delivered:   Mapped[bool]          = mapped_column(Boolean, nullable=False, default=False)
     retry_count: Mapped[int]           = mapped_column(Integer, nullable=False, default=0)
     created_at:  Mapped[datetime]      = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# ── JIRA-like tracking models ──────────────────────────────────────────────────
+
+class FeatureComment(Base):
+    """Per-feature discussion thread. Written by PM, poller, or agents."""
+    __tablename__ = "feature_comments"
+
+    id:         Mapped[int]           = mapped_column(Integer, primary_key=True)
+    feature_id: Mapped[int]           = mapped_column(Integer, ForeignKey("features.id", ondelete="CASCADE"), nullable=False, index=True)
+    author:     Mapped[str]           = mapped_column(Text, nullable=False, default="pm")
+    body:       Mapped[str]           = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime]      = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    feature: Mapped["Feature"] = relationship("Feature", back_populates="comments")
+
+
+class FeatureChangelog(Base):
+    """Field-level audit trail — auto-populated on every PATCH /api/features/{id}."""
+    __tablename__ = "feature_changelog"
+
+    id:         Mapped[int]           = mapped_column(Integer, primary_key=True)
+    feature_id: Mapped[int]           = mapped_column(Integer, ForeignKey("features.id", ondelete="CASCADE"), nullable=False, index=True)
+    field:      Mapped[str]           = mapped_column(Text, nullable=False)
+    old_value:  Mapped[Optional[str]] = mapped_column(Text)
+    new_value:  Mapped[Optional[str]] = mapped_column(Text)
+    changed_by: Mapped[str]           = mapped_column(Text, nullable=False, default="poller")
+    changed_at: Mapped[datetime]      = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    feature: Mapped["Feature"] = relationship("Feature", back_populates="changelog")
+
+
+class Label(Base):
+    """User-defined label per product. Re-usable across features."""
+    __tablename__ = "labels"
+    __table_args__ = (
+        UniqueConstraint("product_id", "name", name="uq_labels_product_name"),
+    )
+
+    id:         Mapped[int]  = mapped_column(Integer, primary_key=True)
+    product_id: Mapped[int]  = mapped_column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+    name:       Mapped[str]  = mapped_column(Text, nullable=False)
+    color:      Mapped[str]  = mapped_column(Text, nullable=False, default="#6366f1")
+
+    features: Mapped[List["FeatureLabel"]] = relationship("FeatureLabel", back_populates="label", cascade="all, delete")
+
+
+class FeatureLabel(Base):
+    """Many-to-many join table: features ↔ labels."""
+    __tablename__ = "feature_labels"
+    __table_args__ = (
+        {"extend_existing": True},
+    )
+
+    feature_id: Mapped[int] = mapped_column(Integer, ForeignKey("features.id", ondelete="CASCADE"), primary_key=True)
+    label_id:   Mapped[int] = mapped_column(Integer, ForeignKey("labels.id", ondelete="CASCADE"), primary_key=True)
+
+    feature: Mapped["Feature"] = relationship("Feature", back_populates="labels")
+    label:   Mapped["Label"]   = relationship("Label", back_populates="features")
+
+
+class Sprint(Base):
+    """Time-boxed batch of features per product."""
+    __tablename__ = "sprints"
+    __table_args__ = (
+        CheckConstraint("status IN ('planned', 'active', 'completed')", name="ck_sprints_status"),
+    )
+
+    id:         Mapped[int]           = mapped_column(Integer, primary_key=True)
+    product_id: Mapped[int]           = mapped_column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+    name:       Mapped[str]           = mapped_column(Text, nullable=False)
+    goal:       Mapped[Optional[str]] = mapped_column(Text)
+    start_date: Mapped[Optional[date]] = mapped_column(Date)
+    end_date:   Mapped[Optional[date]] = mapped_column(Date)
+    status:     Mapped[str]           = mapped_column(Text, nullable=False, default="active")
+
+
+class FeatureLink(Base):
+    """Directed relationship edge between two features."""
+    __tablename__ = "feature_links"
+    __table_args__ = (
+        UniqueConstraint("source_id", "target_id", "link_type", name="uq_feature_links"),
+        CheckConstraint(
+            "link_type IN ('blocks', 'is_blocked_by', 'relates_to', 'duplicates')",
+            name="ck_feature_links_type",
+        ),
+    )
+
+    id:         Mapped[int]      = mapped_column(Integer, primary_key=True)
+    source_id:  Mapped[int]      = mapped_column(Integer, ForeignKey("features.id", ondelete="CASCADE"), nullable=False, index=True)
+    target_id:  Mapped[int]      = mapped_column(Integer, ForeignKey("features.id", ondelete="CASCADE"), nullable=False, index=True)
+    link_type:  Mapped[str]      = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    source: Mapped["Feature"] = relationship("Feature", foreign_keys=[source_id], back_populates="links_out")
+    target: Mapped["Feature"] = relationship("Feature", foreign_keys=[target_id], back_populates="links_in")
