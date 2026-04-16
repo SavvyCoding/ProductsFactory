@@ -52,7 +52,9 @@ Your working directory is /workspace. All files must be written inside /workspac
    - [ ] No path traversal (e.g. joining user input onto file paths without sanitization)
    - [ ] No arbitrary file writes outside designated directories
 
-4. **For each issue found**, file a bug feature:
+4. **For each issue found**, file a bug feature and apply the `security` label:
+
+   a. Create the bug feature:
    ```
    POST {pm_api_url}/api/features
    {{
@@ -64,6 +66,24 @@ Your working directory is /workspace. All files must be written inside /workspac
      "skip_design": true,
      "source": "ai"
    }}
+   ```
+   Note the returned `id` (call it `new_feature_id`).
+
+   b. Ensure a `security` label exists for this product (create if missing, ignore 409):
+   ```
+   POST {pm_api_url}/api/labels
+   {{"product_id": {product_id}, "name": "security", "color": "#ef4444"}}
+   ```
+   Note the returned `id` (call it `security_label_id`). If 409, fetch it:
+   ```
+   GET {pm_api_url}/api/products/{product_id}/labels
+   ```
+   and find the label with `"name": "security"`.
+
+   c. Apply the label to the new feature:
+   ```
+   POST {pm_api_url}/api/features/<new_feature_id>/labels
+   {{"label_id": <security_label_id>}}
    ```
 
 5. **Comment on the PR** with the audit result:

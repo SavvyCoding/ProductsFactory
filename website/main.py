@@ -27,9 +27,26 @@ REST API (used by poller — no auth on poller-only routes):
   POST /api/features                   — create feature (PM or AI)
   PATCH /api/features/{id}             — update feature status (Claude)
   GET  /api/features/{id}/reviews      — full review history for a feature
+  GET  /api/features/{id}/comments     — feature comments (pm, poller, agents)
+  POST /api/features/{id}/comments     — add comment
+  GET  /api/features/{id}/changelog    — field-level audit trail
+  GET  /api/features/{id}/labels       — labels on a feature
+  POST /api/features/{id}/labels       — apply label to feature
+  DELETE /api/features/{id}/labels/{id} — remove label
+  POST /api/features/{id}/links        — link two features
+  GET  /api/features/{id}/links        — list feature links
+  DELETE /api/features/{id}/links/{id} — remove link
+  GET  /api/features/search            — full-text search (q, product_id)
+  GET  /api/features/overdue           — features past due_date
   PATCH /api/features/{id}/pm-status   — PM status change with transition validation
   DELETE /api/features/{id}            — delete a Rejected feature (PM only)
   POST /api/features/reset_stuck       — reset Implementing→Approved if >2h (poller)
+  POST /api/labels                     — create label
+  GET  /api/products/{id}/labels       — list labels for product
+  POST /api/sprints                    — create sprint
+  GET  /api/products/{id}/sprints      — list sprints
+  GET  /api/products/{id}/sprints/active — active sprint
+  PATCH /api/sprints/{id}              — update sprint
   GET  /api/products/{id}/open_pr_count — PR count gate (poller)
   GET  /api/system-config              — system config for poller (no auth)
   POST /api/recommend/features         — LLM-generated feature suggestions
@@ -60,7 +77,10 @@ from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from website.database import get_db
-from website.models import Product, Feature, FeatureReview, Session as DBSession, Alert, SystemConfig, PMUser
+from website.models import (
+    Product, Feature, FeatureReview, Session as DBSession, Alert, SystemConfig, PMUser,
+    FeatureComment, FeatureChangelog, Label, FeatureLabel, Sprint, FeatureLink,
+)
 from website.auth import require_auth
 from website import schemas
 from website.github import fetch_progress_md, fetch_architecture_md, count_open_prs, list_open_prs, merge_pr, close_pr
@@ -1128,6 +1148,22 @@ async def api_update_feature(
     # Increment version on every write so callers can detect concurrent updates.
     feature.version = (feature.version or 0) + 1
 
+    # Auto-record changelog for tracked fields before applying the update
+    _CHANGELOG_FIELDS = frozenset({"status", "priority", "pr_number", "blocked_reason", "sprint_id", "story_points", "due_date"})
+    changed_by = updates.pop("changed_by", "agent")
+    for field in _CHANGELOG_FIELDS:
+        if field in updates:
+            old_val = getattr(feature, field, None)
+            new_val = updates[field]
+            if str(old_val) != str(new_val):
+                db.add(FeatureChangelog(
+                    feature_id=feature_id,
+                    field=field,
+                    old_value=str(old_val) if old_val is not None else None,
+                    new_value=str(new_val) if new_val is not None else None,
+                    changed_by=changed_by,
+                ))
+
     # session_uid is review metadata — not a column on features
     feature_fields = {k: v for k, v in updates.items() if k not in ("session_uid",)}
     for field, value in feature_fields.items():
@@ -1168,9 +1204,18 @@ async def api_pm_status_update(
             status_code=422,
             detail=f"Transition {feature.status!r} → {body.status!r} not allowed for PM",
         )
+    old_status = feature.status
     feature.status = body.status
     if body.status == "Approved" and feature.fix_attempts > 0:
         feature.fix_attempts = 0
+    if old_status != body.status:
+        db.add(FeatureChangelog(
+            feature_id=feature_id,
+            field="status",
+            old_value=old_status,
+            new_value=body.status,
+            changed_by="pm",
+        ))
     return feature
 
 
@@ -1255,6 +1300,37 @@ async def api_next_feature_for_persona(
 
     result = await db.execute(q)
     return result.scalar_one_or_none()
+
+
+@app.get("/api/features/search", response_model=list[schemas.FeatureOut])
+async def api_search_features(
+    q: str,
+    product_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Full-text search features by name and description (PostgreSQL tsvector GIN index)."""
+    query = select(Feature).where(
+        text("to_tsvector('english', coalesce(features.name,'') || ' ' || coalesce(features.description,'')) @@ plainto_tsquery('english', :q)")
+    ).params(q=q).order_by(Feature.priority, Feature.created_at)
+    if product_id is not None:
+        query = query.where(Feature.product_id == product_id)
+    result = await db.execute(query)
+    return result.scalars().all()
+
+
+@app.get("/api/features/overdue", response_model=list[schemas.FeatureOut])
+async def api_overdue_features(product_id: Optional[int] = None, db: AsyncSession = Depends(get_db)):
+    """Return features with a due_date in the past that are not yet Pushed, Rejected, or Deferred."""
+    from datetime import date as _date
+    today = _date.today()
+    q = select(Feature).where(
+        Feature.due_date < today,
+        Feature.status.notin_(["Pushed", "Rejected", "Deferred"]),
+    )
+    if product_id is not None:
+        q = q.where(Feature.product_id == product_id)
+    result = await db.execute(q)
+    return result.scalars().all()
 
 
 @app.get("/api/features/{feature_id}", response_model=schemas.FeatureOut)
@@ -1355,6 +1431,191 @@ async def articulate_vision(
         return {"vision": message.content[0].text.strip()}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"LLM error: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# REST API — Comments, Changelog, Labels, Sprints, Links, Search
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/features/{feature_id}/comments", response_model=schemas.FeatureCommentOut, status_code=201)
+async def api_add_comment(feature_id: int, body: schemas.FeatureCommentCreate, db: AsyncSession = Depends(get_db)):
+    """Add a comment to a feature. Author can be 'pm', 'poller', or a persona name."""
+    await _get_feature_or_404(feature_id, db)
+    comment = FeatureComment(feature_id=feature_id, author=body.author, body=body.body)
+    db.add(comment)
+    await db.flush()
+    return comment
+
+
+@app.get("/api/features/{feature_id}/comments", response_model=list[schemas.FeatureCommentOut])
+async def api_list_comments(feature_id: int, db: AsyncSession = Depends(get_db)):
+    """List all comments for a feature, newest first."""
+    await _get_feature_or_404(feature_id, db)
+    result = await db.execute(
+        select(FeatureComment)
+        .where(FeatureComment.feature_id == feature_id)
+        .order_by(FeatureComment.created_at.desc())
+    )
+    return result.scalars().all()
+
+
+@app.get("/api/features/{feature_id}/changelog", response_model=list[schemas.ChangelogEntryOut])
+async def api_feature_changelog(feature_id: int, db: AsyncSession = Depends(get_db)):
+    """Full field-level audit trail for a feature, newest first."""
+    await _get_feature_or_404(feature_id, db)
+    result = await db.execute(
+        select(FeatureChangelog)
+        .where(FeatureChangelog.feature_id == feature_id)
+        .order_by(FeatureChangelog.changed_at.desc())
+    )
+    return result.scalars().all()
+
+
+@app.post("/api/labels", response_model=schemas.LabelOut, status_code=201)
+async def api_create_label(body: schemas.LabelCreate, db: AsyncSession = Depends(get_db)):
+    """Create a label for a product. Name must be unique within the product."""
+    await _get_product_or_404(body.product_id, db)
+    label = Label(product_id=body.product_id, name=body.name.lower().strip(), color=body.color)
+    db.add(label)
+    try:
+        await db.flush()
+    except Exception:
+        raise HTTPException(status_code=409, detail=f"Label '{body.name}' already exists for this product")
+    return label
+
+
+@app.get("/api/products/{product_id}/labels", response_model=list[schemas.LabelOut])
+async def api_list_labels(product_id: int, db: AsyncSession = Depends(get_db)):
+    """List all labels for a product."""
+    await _get_product_or_404(product_id, db)
+    result = await db.execute(
+        select(Label).where(Label.product_id == product_id).order_by(Label.name)
+    )
+    return result.scalars().all()
+
+
+@app.post("/api/features/{feature_id}/labels", status_code=201)
+async def api_add_label_to_feature(
+    feature_id: int, body: schemas.FeatureLabelAdd, db: AsyncSession = Depends(get_db)
+):
+    """Apply a label to a feature."""
+    await _get_feature_or_404(feature_id, db)
+    label = await db.get(Label, body.label_id)
+    if not label:
+        raise HTTPException(status_code=404, detail="Label not found")
+    assoc = FeatureLabel(feature_id=feature_id, label_id=body.label_id)
+    db.add(assoc)
+    try:
+        await db.flush()
+    except Exception:
+        pass  # Already applied — idempotent
+    return {"feature_id": feature_id, "label_id": body.label_id}
+
+
+@app.delete("/api/features/{feature_id}/labels/{label_id}", status_code=204)
+async def api_remove_label_from_feature(feature_id: int, label_id: int, db: AsyncSession = Depends(get_db)):
+    """Remove a label from a feature."""
+    result = await db.execute(
+        select(FeatureLabel).where(
+            FeatureLabel.feature_id == feature_id,
+            FeatureLabel.label_id == label_id,
+        )
+    )
+    assoc = result.scalar_one_or_none()
+    if assoc:
+        await db.delete(assoc)
+
+
+@app.get("/api/features/{feature_id}/labels", response_model=list[schemas.LabelOut])
+async def api_feature_labels(feature_id: int, db: AsyncSession = Depends(get_db)):
+    """List all labels applied to a feature."""
+    await _get_feature_or_404(feature_id, db)
+    result = await db.execute(
+        select(Label)
+        .join(FeatureLabel, FeatureLabel.label_id == Label.id)
+        .where(FeatureLabel.feature_id == feature_id)
+        .order_by(Label.name)
+    )
+    return result.scalars().all()
+
+
+@app.post("/api/sprints", response_model=schemas.SprintOut, status_code=201)
+async def api_create_sprint(body: schemas.SprintCreate, db: AsyncSession = Depends(get_db)):
+    """Create a sprint for a product."""
+    await _get_product_or_404(body.product_id, db)
+    sprint = Sprint(**body.model_dump())
+    db.add(sprint)
+    await db.flush()
+    return sprint
+
+
+@app.get("/api/products/{product_id}/sprints", response_model=list[schemas.SprintOut])
+async def api_list_sprints(product_id: int, db: AsyncSession = Depends(get_db)):
+    """List all sprints for a product (active first, then by id)."""
+    await _get_product_or_404(product_id, db)
+    result = await db.execute(
+        select(Sprint)
+        .where(Sprint.product_id == product_id)
+        .order_by(Sprint.status == "active", Sprint.id.desc())
+    )
+    return result.scalars().all()
+
+
+@app.get("/api/products/{product_id}/sprints/active", response_model=schemas.SprintOut | None)
+async def api_active_sprint(product_id: int, db: AsyncSession = Depends(get_db)):
+    """Return the active sprint for a product, or null if none."""
+    result = await db.execute(
+        select(Sprint).where(Sprint.product_id == product_id, Sprint.status == "active").limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+@app.patch("/api/sprints/{sprint_id}", response_model=schemas.SprintOut)
+async def api_update_sprint(sprint_id: int, body: schemas.SprintUpdate, db: AsyncSession = Depends(get_db)):
+    """Update sprint fields (name, goal, dates, status)."""
+    sprint = await db.get(Sprint, sprint_id)
+    if not sprint:
+        raise HTTPException(status_code=404, detail="Sprint not found")
+    for field, value in body.model_dump(exclude_unset=True).items():
+        setattr(sprint, field, value)
+    await db.flush()
+    return sprint
+
+
+@app.post("/api/features/{feature_id}/links", response_model=schemas.FeatureLinkOut, status_code=201)
+async def api_add_feature_link(
+    feature_id: int, body: schemas.FeatureLinkCreate, db: AsyncSession = Depends(get_db)
+):
+    """Link two features with a typed relationship (blocks, relates_to, duplicates)."""
+    await _get_feature_or_404(feature_id, db)
+    await _get_feature_or_404(body.target_id, db)
+    link = FeatureLink(source_id=feature_id, target_id=body.target_id, link_type=body.link_type)
+    db.add(link)
+    try:
+        await db.flush()
+    except Exception:
+        raise HTTPException(status_code=409, detail="Link already exists")
+    return link
+
+
+@app.get("/api/features/{feature_id}/links", response_model=list[schemas.FeatureLinkOut])
+async def api_feature_links(feature_id: int, db: AsyncSession = Depends(get_db)):
+    """List all links for a feature (both outgoing and incoming)."""
+    await _get_feature_or_404(feature_id, db)
+    result = await db.execute(
+        select(FeatureLink).where(
+            (FeatureLink.source_id == feature_id) | (FeatureLink.target_id == feature_id)
+        )
+    )
+    return result.scalars().all()
+
+
+@app.delete("/api/features/{feature_id}/links/{link_id}", status_code=204)
+async def api_remove_feature_link(feature_id: int, link_id: int, db: AsyncSession = Depends(get_db)):
+    """Remove a feature link."""
+    link = await db.get(FeatureLink, link_id)
+    if link and (link.source_id == feature_id or link.target_id == feature_id):
+        await db.delete(link)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
