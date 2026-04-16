@@ -68,6 +68,9 @@ const PRODUCT_ID = {{ product.id }};
 <!-- TABS -->
 <div class="product-tabs">
   <button class="product-tab {% if active_tab == 'board' %}active{% endif %}" onclick="switchTab('board', this)">Board</button>
+  <button class="product-tab {% if active_tab == 'sprints' %}active{% endif %}" onclick="switchTab('sprints', this)">
+    Sprints{% if active_sprint %} <span class="col-count" style="margin-left:4px;background:var(--green)">●</span>{% endif %}
+  </button>
   <button class="product-tab {% if active_tab == 'prs' %}active{% endif %}" onclick="switchTab('prs', this)">
     Pull Requests{% if open_prs %} <span class="col-count" style="margin-left:4px">{{ open_prs }}</span>{% endif %}
   </button>
@@ -291,6 +294,170 @@ const PRODUCT_ID = {{ product.id }};
   {% endif %}
 
 </div><!-- /tab-board -->
+
+
+<!-- ══ TAB: SPRINTS ══════════════════════════════════════════ -->
+<div class="tab-content" id="tab-sprints" {% if active_tab != 'sprints' %}style="display:none"{% endif %}>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start">
+
+    <!-- LEFT: Active sprint + backlog -->
+    <div>
+
+      {% if active_sprint %}
+      <!-- Active Sprint Card -->
+      <div class="card" style="margin-bottom:16px;border-left:3px solid var(--green)">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
+          <div>
+            <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--green);font-weight:600;margin-bottom:3px">Active Sprint</div>
+            <div style="font-size:16px;font-weight:600;color:var(--text)">{{ active_sprint.name }}</div>
+            {% if active_sprint.goal %}<div style="font-size:13px;color:var(--text-muted);margin-top:3px">{{ active_sprint.goal }}</div>{% endif %}
+          </div>
+          <form method="post" action="/product/{{ product.id }}/sprints/{{ active_sprint.id }}/complete" style="display:inline">
+            <button class="btn btn-sm btn-outline" onclick="return confirm('Mark sprint as completed?')">✓ Complete</button>
+          </form>
+        </div>
+
+        {% if active_sprint.start_date or active_sprint.end_date %}
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">
+          {% if active_sprint.start_date %}📅 {{ active_sprint.start_date }}{% endif %}
+          {% if active_sprint.start_date and active_sprint.end_date %} → {% endif %}
+          {% if active_sprint.end_date %}{{ active_sprint.end_date }}{% endif %}
+        </div>
+        {% endif %}
+
+        <!-- Sprint progress bar -->
+        {% set sprint_features = features | selectattr('sprint_id', 'equalto', active_sprint.id) | list %}
+        {% set sprint_pushed   = sprint_features | selectattr('status', 'equalto', 'Pushed') | list %}
+        {% set sprint_total    = sprint_features | length %}
+        {% if sprint_total > 0 %}
+        <div style="margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text-muted);margin-bottom:4px">
+            <span>Progress</span>
+            <span>{{ sprint_pushed | length }}/{{ sprint_total }} shipped</span>
+          </div>
+          <div style="background:var(--border);border-radius:4px;height:6px;overflow:hidden">
+            <div style="background:var(--green);height:100%;width:{{ ((sprint_pushed | length / sprint_total) * 100) | int }}%;transition:width .3s"></div>
+          </div>
+        </div>
+
+        <!-- Sprint feature list -->
+        <div style="display:flex;flex-direction:column;gap:6px">
+          {% for f in sprint_features %}
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;background:var(--surface);border-radius:6px;border:1px solid var(--border)">
+            <div style="min-width:0">
+              <div style="font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                {% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
+              </div>
+              {% if f.story_points %}<div style="font-size:11px;color:var(--text-muted)">{{ f.story_points }} pt{% if f.story_points != 1 %}s{% endif %}</div>{% endif %}
+            </div>
+            <span class="badge badge-status-{{ f.status | lower }}" style="font-size:10px;flex-shrink:0;margin-left:8px">{{ f.status }}</span>
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <div style="color:var(--text-muted);font-size:13px;text-align:center;padding:16px 0">No features assigned to this sprint yet.</div>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      <!-- Backlog (Pending not in any sprint) -->
+      {% set backlog = features | selectattr('status', 'equalto', 'Pending') | selectattr('sprint_id', 'none') | list %}
+      <div class="card">
+        <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px">
+          📋 Backlog
+          <span style="color:var(--text-muted);font-weight:400;margin-left:6px">({{ backlog | length }} pending, unassigned)</span>
+        </div>
+        {% if backlog %}
+        <div style="display:flex;flex-direction:column;gap:5px">
+          {% for f in backlog | sort(attribute='priority') %}
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;background:var(--surface);border-radius:6px;border:1px solid var(--border)">
+            <div style="min-width:0;flex:1">
+              <div style="font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                {% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
+              </div>
+              <div style="font-size:11px;color:var(--text-muted)">p{{ f.priority }}{% if f.story_points %} · {{ f.story_points }}pts{% endif %}{% if f.due_date %} · due {{ f.due_date }}{% endif %}</div>
+            </div>
+            {% if active_sprint %}
+            <form method="post" action="/product/{{ product.id }}/features/{{ f.id }}/assign-sprint" style="display:inline;margin-left:8px">
+              <input type="hidden" name="sprint_id" value="{{ active_sprint.id }}">
+              <button class="btn btn-sm btn-outline" style="font-size:11px;padding:2px 8px">+ Sprint</button>
+            </form>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <div style="color:var(--text-muted);font-size:13px;text-align:center;padding:16px 0">No pending features outside a sprint.</div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- RIGHT: Create sprint + past sprints + labels -->
+    <div>
+
+      <!-- Create Sprint -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="settings-card-title" style="margin-bottom:12px">
+          <span class="title-icon" style="background:var(--purple-lt)">🏃</span>
+          New Sprint
+        </div>
+        <form method="post" action="/product/{{ product.id }}/sprints/create">
+          <div class="form-group" style="margin-bottom:8px">
+            <input type="text" name="name" placeholder="Sprint name (e.g. Sprint 2)" required style="width:100%">
+          </div>
+          <div class="form-group" style="margin-bottom:8px">
+            <input type="text" name="goal" placeholder="Sprint goal (optional)" style="width:100%">
+          </div>
+          <div style="display:flex;gap:8px;margin-bottom:8px">
+            <input type="date" name="start_date" style="flex:1" title="Start date">
+            <input type="date" name="end_date" style="flex:1" title="End date">
+          </div>
+          <button type="submit" class="btn btn-green" style="width:100%">Create Sprint</button>
+        </form>
+      </div>
+
+      <!-- Labels -->
+      {% if labels %}
+      <div class="card" style="margin-bottom:16px">
+        <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px">🏷 Labels</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">
+          {% for lbl in labels %}
+          <span style="background:{{ lbl.color }}22;border:1px solid {{ lbl.color }}55;color:{{ lbl.color }};font-size:11px;padding:2px 8px;border-radius:10px;font-weight:500">{{ lbl.name }}</span>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Past Sprints -->
+      {% set past_sprints = sprints | selectattr('status', 'equalto', 'completed') | list %}
+      {% if past_sprints %}
+      <div class="card">
+        <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px">🏁 Completed Sprints</div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          {% for s in past_sprints %}
+          {% set s_feats   = features | selectattr('sprint_id', 'equalto', s.id) | list %}
+          {% set s_pushed  = s_feats  | selectattr('status', 'equalto', 'Pushed') | list %}
+          <div style="padding:8px 10px;background:var(--surface);border-radius:6px;border:1px solid var(--border)">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span style="font-size:13px;font-weight:500;color:var(--text)">{{ s.name }}</span>
+              <span style="font-size:11px;color:var(--text-muted)">{{ s_pushed | length }}/{{ s_feats | length }} shipped</span>
+            </div>
+            {% if s.goal %}<div style="font-size:11px;color:var(--text-muted);margin-top:2px">{{ s.goal }}</div>{% endif %}
+            {% if s.start_date or s.end_date %}
+            <div style="font-size:11px;color:var(--text-muted);margin-top:2px">
+              {% if s.start_date %}{{ s.start_date }}{% endif %}{% if s.end_date %} → {{ s.end_date }}{% endif %}
+            </div>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+    </div>
+  </div>
+</div>
 
 
 <!-- ══ TAB: PULL REQUESTS ══════════════════════════════════ -->
@@ -548,7 +715,7 @@ function escHtmlGlobal(s) {
 }
 
 // ── TAB SWITCHING ─────────────────────────────────────────
-const TAB_IDS = ['board','prs','history','videos','live','settings'];
+const TAB_IDS = ['board','sprints','prs','history','videos','live','settings'];
 
 function switchTab(name, btn) {
   TAB_IDS.forEach(id => {

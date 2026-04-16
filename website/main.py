@@ -323,6 +323,19 @@ async def product_detail(
     _gh_pat = _sys_cfg.github_pat if _sys_cfg else None
     open_prs_list = list_open_prs(product.github_repo or "", token=_gh_pat) if product.github_repo else []
     open_prs = len(open_prs_list)
+
+    # Sprint + label data for the Sprints tab
+    sprint_result = await db.execute(
+        select(Sprint).where(Sprint.product_id == product_id).order_by(Sprint.id.desc())
+    )
+    sprints = sprint_result.scalars().all()
+    active_sprint = next((s for s in sprints if s.status == "active"), None)
+
+    label_result = await db.execute(
+        select(Label).where(Label.product_id == product_id).order_by(Label.name)
+    )
+    labels = label_result.scalars().all()
+
     tab = request.query_params.get("tab", "board")
     return templates.TemplateResponse("product.html", {
         "request": request,
@@ -336,6 +349,9 @@ async def product_detail(
         "current_pm": current_pm,
         "active_tab": tab,
         "max_features_default": _cfg(await _get_system_config(db), "max_features_per_run"),
+        "sprints": sprints,
+        "active_sprint": active_sprint,
+        "labels": labels,
     })
 
 
@@ -764,6 +780,56 @@ async def save_schedule(
     product.max_features_per_run = int(max_features_per_run) if max_features_per_run.strip().isdigit() else None
     await db.flush()
     return RedirectResponse(f"/product/{product_id}?tab=settings", status_code=303)
+
+
+@app.post("/product/{product_id}/sprints/create")
+async def create_sprint_form(
+    product_id: int,
+    name:       str = Form(...),
+    goal:       str = Form(""),
+    start_date: str = Form(""),
+    end_date:   str = Form(""),
+    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
+):
+    """Create a sprint from the Sprints tab form."""
+    from datetime import date as _date
+    await _get_product_or_404(product_id, db)
+    sprint = Sprint(
+        product_id=product_id,
+        name=name.strip(),
+        goal=goal.strip() or None,
+        start_date=_date.fromisoformat(start_date) if start_date else None,
+        end_date=_date.fromisoformat(end_date) if end_date else None,
+        status="active",
+    )
+    db.add(sprint)
+    await db.flush()
+    return RedirectResponse(f"/product/{product_id}?tab=sprints", status_code=303)
+
+
+@app.post("/product/{product_id}/sprints/{sprint_id}/complete")
+async def complete_sprint_form(
+    product_id: int, sprint_id: int,
+    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
+):
+    sprint = await db.get(Sprint, sprint_id)
+    if sprint and sprint.product_id == product_id:
+        sprint.status = "completed"
+        await db.flush()
+    return RedirectResponse(f"/product/{product_id}?tab=sprints", status_code=303)
+
+
+@app.post("/product/{product_id}/features/{feature_id}/assign-sprint")
+async def assign_sprint_form(
+    product_id: int, feature_id: int,
+    sprint_id: str = Form(""),
+    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
+):
+    """Assign or remove a feature from a sprint."""
+    feature = await _get_feature_or_404(feature_id, db)
+    feature.sprint_id = int(sprint_id) if sprint_id.isdigit() else None
+    await db.flush()
+    return RedirectResponse(f"/product/{product_id}?tab=sprints", status_code=303)
 
 
 @app.post("/product/{product_id}/prompt")
