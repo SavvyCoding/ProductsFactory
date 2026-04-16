@@ -9,11 +9,40 @@ Handles:
 
 import os
 import logging
+import time
 from pathlib import Path
 
 import httpx
 
 log = logging.getLogger("poller.github")
+
+
+def _gh_get(url: str, headers: dict, params: dict | None = None, timeout: int = 15) -> httpx.Response | None:
+    """
+    GET from the GitHub API with automatic retry on 429/403 rate-limit responses.
+    Returns the response on success (2xx), None on permanent failure.
+    Retries up to 3 times with exponential back-off honouring Retry-After when present.
+    """
+    for attempt in range(3):
+        try:
+            resp = httpx.get(url, params=params, headers=headers, timeout=timeout)
+        except Exception as e:
+            log.warning(f"GitHub GET {url} attempt {attempt + 1} failed: {e}")
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+            continue
+
+        if resp.status_code in (429, 403):
+            retry_after = int(resp.headers.get("Retry-After", 0))
+            wait = retry_after if retry_after > 0 else (2 ** attempt * 5)
+            log.warning(f"GitHub rate-limited ({resp.status_code}) — waiting {wait}s before retry {attempt + 1}/3")
+            time.sleep(wait)
+            continue
+
+        return resp
+
+    log.warning(f"GitHub GET {url} failed after 3 attempts (rate-limited)")
+    return None
 
 PM_API_URL = os.environ["PM_API_URL"]
 
@@ -57,13 +86,12 @@ def count_open_prs(product: dict) -> int:
         return 0
     owner, repo = slug
     try:
-        resp = httpx.get(
+        resp = _gh_get(
             f"https://api.github.com/repos/{owner}/{repo}/pulls",
             params={"state": "open", "per_page": 10},
             headers=_github_headers(),
-            timeout=15,
         )
-        if resp.status_code == 200:
+        if resp is not None and resp.status_code == 200:
             data = resp.json()
             return len(data) if isinstance(data, list) else 0
     except Exception as e:
@@ -85,13 +113,12 @@ def reconcile_merged_prs(product: dict):
     owner, repo = slug
 
     try:
-        resp = httpx.get(
+        resp = _gh_get(
             f"https://api.github.com/repos/{owner}/{repo}/pulls",
             params={"state": "closed", "per_page": 20},
             headers=_github_headers(),
-            timeout=15,
         )
-        if resp.status_code != 200:
+        if resp is None or resp.status_code != 200:
             return
 
         prs_data = resp.json()
@@ -220,11 +247,11 @@ def reconcile_in_flight_prs(product: dict):
             for feature, pr_n in candidates:
                 fid = feature["id"]
                 try:
-                    pr_resp = httpx.get(
+                    pr_resp = _gh_get(
                         f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_n}",
-                        headers=gh_headers, timeout=10,
+                        headers=gh_headers,
                     )
-                    if pr_resp.status_code != 200:
+                    if pr_resp is None or pr_resp.status_code != 200:
                         continue
                     pr = pr_resp.json()
                     if not isinstance(pr, dict):

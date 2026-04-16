@@ -93,15 +93,19 @@ def _load_runtime_cfg():
 
 import sys as _sys
 import io as _io
+from logging.handlers import RotatingFileHandler as _RotatingFileHandler
 _stdout_utf8 = _io.TextIOWrapper(_sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True) if hasattr(_sys.stdout, "buffer") else _sys.stdout
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler("orchestrator/poller.log", encoding="utf-8"),
-        logging.StreamHandler(stream=_stdout_utf8),
-    ],
+_log_fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+_file_handler = _RotatingFileHandler(
+    "orchestrator/poller.log",
+    maxBytes=10 * 1024 * 1024,  # 10 MB per file
+    backupCount=5,               # keep poller.log + 5 rotated copies
+    encoding="utf-8",
 )
+_file_handler.setFormatter(_log_fmt)
+_stream_handler = logging.StreamHandler(stream=_stdout_utf8)
+_stream_handler.setFormatter(_log_fmt)
+logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _stream_handler])
 log = logging.getLogger("poller")
 
 # Track sessions launched today per product: {product_id: count}
@@ -358,6 +362,7 @@ _HEARTBEAT_INTERVAL = 15   # seconds between heartbeat updates
 _LOCK_TTL           = 30   # seconds — stale lock threshold (must match server)
 
 _hb_stop: threading.Event | None = None
+_hb_lock_stolen = threading.Event()  # set by heartbeat thread when lock is stolen/expired
 
 
 def _acquire_db_lock() -> bool:
@@ -405,14 +410,16 @@ def _release_db_lock():
 def _heartbeat_loop(stop_event: threading.Event):
     """
     Background thread: refreshes the DB lock heartbeat every 15s.
-    If the API returns 404, the lock was stolen (another poller took over) — log it.
+    If the API returns 404, the lock was stolen (another poller took over) — signal the
+    main thread to abort the current cycle and re-acquire the lock or exit.
     """
     while not stop_event.wait(_HEARTBEAT_INTERVAL):
         try:
             with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
                 resp = client.post("/api/poller/heartbeat", json={"pid": _LOCK_PID, "host": _LOCK_HOST})
             if resp.status_code == 404:
-                log.critical("Heartbeat 404 — lock was stolen or expired. A duplicate poller may start.")
+                log.critical("Heartbeat 404 — lock was stolen or expired. Signalling main thread to abort cycle.")
+                _hb_lock_stolen.set()
             elif resp.status_code != 200:
                 log.warning(f"Heartbeat unexpected status: {resp.status_code}")
         except Exception as e:
@@ -489,6 +496,11 @@ def main():
 
     while True:
         try:
+            # Abort if the heartbeat thread detected our lock was stolen
+            if _hb_lock_stolen.is_set():
+                log.critical("Lock stolen detected — exiting poller to prevent duplicate runs")
+                break
+
             # Refresh runtime config from DB at start of each cycle
             _load_runtime_cfg()
 

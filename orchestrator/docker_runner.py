@@ -38,6 +38,8 @@ PM_API_URL_CONTAINER = os.environ.get("PM_API_URL_CONTAINER", "http://pm-api:808
 
 # Timeout default — overridden at runtime by system_config.session_timeout_minutes
 _DEFAULT_SESSION_TIMEOUT_SECONDS = int(os.environ.get("SESSION_TIMEOUT_MINUTES", "90")) * 60
+# Alias used by tests and legacy callers
+SESSION_TIMEOUT_SECONDS = _DEFAULT_SESSION_TIMEOUT_SECONDS
 
 # Deploy key filename inside SSH_DIR.
 # Each product repo has its own key: id_ed25519_{product_name}
@@ -157,11 +159,26 @@ def _delete_session_result(working_dir: str) -> None:
         pass
 
 
+_VALID_FEATURE_STATUSES = frozenset({
+    "Pending", "Approved",
+    "Designing", "Designed",
+    "Implementing", "Implemented",
+    "Reviewing", "Reviewed",
+    "Testing", "Committed", "Pushed",
+    "Blocked", "Rejected", "Reverted", "Deferred",
+})
+
+
 def _apply_session_entry(client: httpx.Client, entry: dict) -> bool:
     """PATCH a single session_result entry to the PM API. Returns True on success."""
     fid = entry.get("id")
     if not fid:
         log.warning(f"[progress] Skipping session_result entry with no feature id: {entry}")
+        return False
+    # Guard: reject unknown status values before they hit the DB constraint
+    status = entry.get("status")
+    if status is not None and status not in _VALID_FEATURE_STATUSES:
+        log.warning(f"[progress] Skipping feature #{fid} entry with unknown status '{status}' — agent bug?")
         return False
     # Guard: Reviewing entries MUST carry pr_number — without it the feature will
     # get stuck (auto-merge can't find the PR, reconcile_merged_prs can't find it).
@@ -829,6 +846,8 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 log.warning(f"Claude credentials dir not found: {creds_src} — container may fail auth")
         except Exception as e:
             log.warning(f"Could not copy Claude credentials: {e} — falling back to direct mount")
+            if _tmp_claude_dir:
+                shutil.rmtree(_tmp_claude_dir, ignore_errors=True)
             _tmp_claude_dir = None
 
         mount_dir = _tmp_claude_dir or creds_src
@@ -970,7 +989,13 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             process.wait(timeout=session_timeout_seconds)
         except subprocess.TimeoutExpired:
             log.error(f"Session timed out after {session_timeout_seconds}s — killing container")
-            subprocess.run(["docker", "kill", f"pf-{product['id']}-{session_uid}"], capture_output=True)
+            try:
+                subprocess.run(
+                    ["docker", "kill", f"pf-{product['id']}-{session_uid}"],
+                    capture_output=True, timeout=30,
+                )
+            except subprocess.TimeoutExpired:
+                log.error(f"docker kill timed out — container may still be running: pf-{product['id']}-{session_uid}")
             send_alert("error", f"{product['name']}: session timed out after {session_timeout_seconds//60}m")
             exit_code = 1
         else:

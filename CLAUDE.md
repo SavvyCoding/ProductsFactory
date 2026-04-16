@@ -51,6 +51,9 @@ python scripts/test_run.py \
     --feature "Add hello endpoint" \
     --desc "GET /hello returns {message: hello}" \
     --persona coder
+
+# Generate ProductFactory showcase video (requires Pillow, edge-tts, moviepy, playwright)
+python scripts/build_pf_video.py
 ```
 
 ### Windows Service Deployment
@@ -75,12 +78,22 @@ Every `POLL_INTERVAL` seconds (default 60s), the poller:
 5. Checks for `run_trainer_now` products — runs Product Trainer if flagged
 6. Otherwise, selects next product: `run_now=True` products have priority, then `ORDER BY last_run_at ASC` (round-robin)
 7. Determines persona (designer vs coder) via `/api/features/next-for-persona`
-8. Coder: skips if ≥3 open PRs; syncs merged PRs from GitHub → Pushed
-9. Launches `docker run --rm productfactory-agent claude -p {prompt} -e AGENT_PERSONA={persona}`
-10. A background thread live-polls `session_result.json` every 30 s while the container runs, applying DB updates in real-time
-11. After Docker exits: final reconcile of `session_result.json`; if `auto_merge_enabled` (system_config), high-confidence reviewed PRs are merged automatically before the file is deleted (see Agent Contract below)
+8. Coder: skips if ≥ MAX_OPEN_PRS open PRs; syncs merged/closed PRs from GitHub
+9. Reconciles in-flight PRs against GitHub (`reconcile_in_flight_prs`) — self-heals stuck features every cycle
+10. Launches `docker run --rm productfactory-agent claude -p {prompt} -e AGENT_PERSONA={persona}`
+11. A background thread live-polls `session_result.json` every 30 s while the container runs, applying DB updates in real-time
+12. After Docker exits: final reconcile of `session_result.json`; if `auto_merge_enabled` (system_config), high-confidence reviewed PRs are merged automatically before the file is deleted (see Agent Contract below)
 
-   Alternatively, when `USE_OLLAMA=1` is set, step 8 instead runs `orchestrator/ollama_agent.py` inside the container — a self-contained tool-use loop against Ollama's OpenAI-compatible API (no Claude API key required). Model selection: `DESIGNER_MODEL` (default `gemma3:27b`) for designer/reviewer, `CODER_MODEL` (default `qwen3-coder:30b`) for coder.
+   Alternatively, when `USE_OLLAMA=1` is set, step 10 instead runs `orchestrator/ollama_agent.py` inside the container — a self-contained tool-use loop against Ollama's OpenAI-compatible API (no Claude API key required). Model selection: `DESIGNER_MODEL` (default `gemma3:27b`) for designer/reviewer, `CODER_MODEL` (default `qwen3-coder:30b`) for coder.
+
+### Stuck Feature Self-Healing
+
+Four layers prevent features from getting stuck:
+
+1. **`_apply_session_entry` (real-time)**: When an agent writes a `Reviewing` entry without `pr_number`, the poller extracts it from `pr_url` automatically. Reviewer `Reviewing` entries are filtered out entirely (reviewers must not set features back to `Reviewing`).
+2. **`reconcile_in_flight_prs` (every cycle)**: Checks ALL in-flight features (Implementing/Reviewing/Reviewed) with a PR reference against GitHub. Merged → Pushed immediately. Closed-unmerged → reset to Approved.
+3. **`reconcile_merged_prs` (every cycle)**: Batch-reconciles the 20 most recently closed PRs. Handles both merged and closed-unmerged PRs. Parses `pr_number` from `pr_url` as fallback.
+4. **`reset_stuck` (time-gated)**: Features stuck in agent states (Implementing/Designing/Reviewing) for longer than `stuck_feature_timeout_hours` (default 0.75h / 45 min, configurable as float) are reset to their prior ready state.
 
 ### Greenfield Scaffolding
 
@@ -102,10 +115,10 @@ Eleven personas run as separate Docker sessions, in priority order:
 - **Coder** (`greenfield.md` / `brownfield.md`): Picks `Designed` or `skip_design Approved` features, implements, opens PR, sets `Reviewing`
 - **Reviewer** (`reviewer.md`): Picks `Reviewing` features with PR numbers, reviews diff, approves or requests changes, sets `Reviewed`
 
-**Post-coder chain** (run automatically after every successful coder session):
+**Post-coder chain** (run automatically in `docker_runner.py` after every successful coder session):
 - **QA Tester** (`qa_tester.md`): Adds automated tests to the open PR branch, commits and pushes
 - **Security Auditor** (`security_auditor.md`): Audits PR diff for OWASP issues, files `bug` features for any found
-- **Recommender** (`recommender.md`): Searches competitors, POSTs new feature ideas with `source: "ai"`
+- **Recommender** (`recommender.md`): Searches competitors, POSTs new feature ideas with `source: "ai"` (gated by pending feature count)
 
 **Scheduled maintenance** (run by `determine_persona()` when no feature work exists, on a schedule stored in `product.config`):
 - **Documenter** (`documenter.md`): Updates README, CHANGELOG, ARCHITECTURE; every 3 days
@@ -117,7 +130,7 @@ Eleven personas run as separate Docker sessions, in priority order:
 - **Planner** (`planner.md`): Reads codebase context, creates new `Pending` features for PM approval
 
 **On-demand / special triggers**:
-- **Product Trainer** (`product_trainer.md`): Generates a showcase MP4 of shipped features; triggered by `product.run_trainer_now = True` (set via the PM website). Runs immediately when the flag is set, bypassing round-robin scheduling.
+- **Product Trainer** (`product_trainer.md`): Generates a showcase MP4 of shipped features; triggered by `product.run_trainer_now = True` (set via the PM website). Runs immediately when the flag is set, bypassing round-robin scheduling. Flag auto-cleared after launch.
 - **Analysis Run** (`analysis_run.md`): Brownfield codebase analysis; triggered via `POST /product/{id}/trigger_analysis` from the PM website.
 
 Scheduling state for maintenance personas is stored in `product.config` as `last_{persona}_at` (ISO timestamp). The agent writes its own completion timestamp via `PATCH /api/products/{id}`.
@@ -145,7 +158,11 @@ Each line format:
 {"id": 42, "status": "Reviewing", "pr_number": 7}
 ```
 
-When `auto_merge_enabled` is set in `system_config`, reviewer sessions with high-confidence approvals trigger automatic GitHub PR merges before the final reconcile runs. PRs with conflicts are closed instead; the feature is set back to `Implementing` (clears `pr_number`).
+Important behaviours:
+- The poller unwraps nested `{"features": [...]}` format if an agent writes it, but this is non-standard
+- Reviewer entries with `status: "Reviewing"` are filtered out (reviewers must only write `Reviewed` or `Implementing`)
+- `Reviewing` entries without `pr_number` trigger a fallback: `pr_number` is extracted from `pr_url` if present
+- When `auto_merge_enabled` is set in `system_config`, reviewer sessions with high-confidence approvals trigger automatic GitHub PR merges before the final reconcile runs. PRs with conflicts are closed instead; the feature is set back to `Implementing` (clears `pr_number`).
 
 ### Per-Product Configuration
 
@@ -166,7 +183,7 @@ Additionally, a `product_config.json` file in the product working directory (rea
 - **Alembic migrations** use psycopg2 (sync) — driver is swapped in `db/migrations/env.py`
 - PostgreSQL runs in Docker (`docker-compose.yml`); PM website connects via `productfactory-net` bridge network
 - Key tables: `products`, `features`, `sessions`, `alerts`, `feature_reviews`
-- Notable columns: `features.skip_design`, `features.design_doc`, `features.design_doc_path`, `features.review_outcome`, `features.review_notes`, `features.feature_type` (`feature | bug | chore`); `sessions.persona`, `sessions.container_id`; `system_config.poller_pid/host/locked_at/heartbeat_at`
+- Notable columns: `features.skip_design`, `features.design_doc`, `features.design_doc_path`, `features.review_outcome`, `features.review_notes`, `features.feature_type` (`feature | bug | chore`); `sessions.persona`, `sessions.container_id`; `system_config.poller_pid/host/locked_at/heartbeat_at`; `system_config.stuck_feature_timeout_hours` (Float, default 0.75h)
 - Tests use real PostgreSQL (not mocks) — each test runs inside a rolled-back transaction for isolation; requires `TEST_DATABASE_URL`
 
 ### Docker Network Model
@@ -196,6 +213,16 @@ Agent containers run as non-root user `agent` (UID 1001), with no `--privileged`
 
 `orchestrator/ollama_agent.py` also has a standalone mode: `python orchestrator/ollama_agent.py -p "prompt"`.
 
+### Video Generation
+
+Two video builders exist:
+- **`orchestrator/video_builder.py`** — Per-product showcase video (called only from `scripts/test_run.py` during local dev). Generates slides with Pillow + TTS narration. Output: `output/product_video_<timestamp>.mp4`
+- **`scripts/build_pf_video.py`** — ProductFactory itself showcase video with web-quality slides rendered by Playwright/Chromium + Edge TTS narration. Output: `output/productfactory_story_<timestamp>.mp4`. Run manually.
+
+### REST API Route Ordering
+
+FastAPI evaluates routes in definition order. The parameterized `GET /api/features/{feature_id}` must be defined **after** all literal routes like `/api/features/next-for-persona`, `/api/features/approved`, `/api/features/count`, and `/api/features/reset_stuck` — otherwise it shadows them (FastAPI tries to parse e.g. `"next-for-persona"` as an integer and returns 422).
+
 ### Auth & Security
 
 - PM website uses HTTP Basic Auth (`secrets.compare_digest` — timing-safe); falls back to env-var credentials if no `pm_users` rows exist
@@ -213,6 +240,8 @@ Agent containers run as non-root user `agent` (UID 1001), with no `--privileged`
 - **Idempotent operations**: `setup_product.py` discovery is safe to run multiple times; templates only written if missing
 - **last_run_at only updated on success**: poller sets `last_run_at` only when Docker exits with code 0, ensuring failed runs don't advance the round-robin pointer
 - **Model changes require a migration**: add the column to `website/models.py` AND create a new `db/migrations/versions/NNN_*.py` file — Alembic does not auto-generate these
+- **Route ordering matters**: in `website/main.py`, parameterized routes (`/api/features/{id}`) must come after all static routes at the same path prefix to avoid shadowing
+- **Thread safety in orchestrator**: `orchestrator/alerts.py` uses a `threading.Lock` for the webhook fail counter; the poller spawns daemon threads for log streaming and live-polling `session_result.json`
 
 ## Environment Variables
 

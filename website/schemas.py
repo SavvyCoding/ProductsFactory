@@ -121,6 +121,7 @@ class FeatureUpdate(BaseModel):
     review_notes:    Optional[str]  = None
     session_uid:     Optional[str]  = None  # review authorship — stored in feature_reviews, not on feature
     skip_design:     Optional[bool] = None  # PM may override design requirement
+    expected_version: Optional[int] = None  # optimistic lock — if provided, update is rejected on mismatch
 
 
 class FeatureStatusUpdate(BaseModel):
@@ -152,6 +153,7 @@ class FeatureOut(BaseModel):
     pr_number:       Optional[int]
     blocked_reason:  Optional[str]
     skip_design:     bool = False
+    version:         int = 0
     design_doc:      Optional[str] = None
     design_doc_path: Optional[str] = None
     review_outcome:  Optional[str] = None

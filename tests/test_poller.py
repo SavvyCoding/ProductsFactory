@@ -294,11 +294,11 @@ class TestReconcileMergedPrs:
                 patch_calls.append((path, json))
                 return MagicMock()
 
-        with patch("httpx.get", side_effect=github_responses):
+        with patch("orchestrator.github_client._gh_get", side_effect=github_responses):
             with patch("httpx.Client", return_value=MockPMClient()):
                 reconcile_merged_prs(product)
 
-        assert any("feat-1" in p[0] and p[1] == {"status": "Pushed"} for p in patch_calls)
+        assert any("feat-1" in p[0] and p[1].get("status") == "Pushed" for p in patch_calls)
         assert not any("feat-2" in p[0] for p in patch_calls), "Only merged PR's feature should update"
 
     def test_skips_when_no_merged_prs(self):

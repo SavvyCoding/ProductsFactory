@@ -958,8 +958,26 @@ async def api_update_feature(
     """Claude updates feature status during implementation."""
     feature = await _get_feature_or_404(feature_id, db)
     updates = body.model_dump(exclude_unset=True)
+
+    # Optimistic locking: if the caller supplies expected_version, reject the update
+    # if the DB version has already been incremented by a concurrent write.
+    expected_version = updates.pop("expected_version", None)
+    if expected_version is not None and feature.version != expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "version_conflict",
+                "expected": expected_version,
+                "actual": feature.version,
+                "message": f"Feature #{feature_id} was modified concurrently — re-fetch and retry.",
+            },
+        )
+
+    # Increment version on every write so callers can detect concurrent updates.
+    feature.version = (feature.version or 0) + 1
+
     # session_uid is review metadata — not a column on features
-    feature_fields = {k: v for k, v in updates.items() if k != "session_uid"}
+    feature_fields = {k: v for k, v in updates.items() if k not in ("session_uid",)}
     for field, value in feature_fields.items():
         setattr(feature, field, value)
     # Auto-record review history whenever the reviewer sets an outcome

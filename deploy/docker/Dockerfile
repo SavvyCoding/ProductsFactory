@@ -78,7 +78,10 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     n 20
 
 # ── Layer 6: Claude Code CLI ──────────────────────────────────────────────────
-RUN npm install -g @anthropic-ai/claude-code
+# Pin to a specific version so agent behaviour is reproducible across builds.
+# To upgrade: update the version tag here and rebuild with deploy/docker/build.sh.
+# Check latest version at: https://www.npmjs.com/package/@anthropic-ai/claude-code
+RUN npm install -g @anthropic-ai/claude-code@1.0.24
 
 # ── Layer 7: Go 1.22 ─────────────────────────────────────────────────────────
 ENV GOVERSION=1.22.4
@@ -139,6 +142,7 @@ RUN python3 --version && \
     git --version && \
     pip-audit --version && \
     (govulncheck -version 2>&1 || true) && \
+    claude --version && \
     python3 /app/ollama_agent.py --help
 
 # ── Switch to non-root agent user ────────────────────────────────────────────
