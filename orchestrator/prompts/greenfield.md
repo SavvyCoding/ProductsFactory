@@ -8,7 +8,7 @@ Your working directory is /workspace. All files must be written inside /workspac
 > **Tool note:** Use the **Bash** tool with `curl` for ALL PM API calls — WebFetch cannot reach internal Docker hostnames like `pm-api:8080`. Example: `curl -s http://pm-api:8080/api/features/{product_id}`
 
 {prev_session_summary}
-
+{product_memory}
 ---
 
 ## Your standing operating procedure is in AGENT_WORKFLOW.md
@@ -57,6 +57,14 @@ On blocked (tests fail after 3 attempts or push fails):
 
 Each line is one complete JSON object. Use `echo '{"id":...}' >> /workspace/session_result.json` or write the line from a tool call. The poller polls this file every 30 s and applies each new line to the DB in real-time. Never call `PATCH /api/features/{id}` directly.
 
+⚠️ **Strict rules — violations cause features to get permanently stuck:**
+- Each entry MUST be one self-contained JSON object on a single line
+- NEVER wrap entries in `{"features": [...]}` — one object per line only
+- `"status"` MUST be exactly one of: `"Reviewing"`, `"Blocked"`, `"Implemented"`, `"Pushed"`
+- A `"Reviewing"` entry MUST include `"pr_number"` (integer) — without it the poller cannot find the PR
+- Do NOT write `"reviewing"` (lowercase) or `"InReview"` or any other variant
+- Do NOT call `PATCH /api/features/{id}` directly — session_result.json ONLY
+
 **After all features:** Exit cleanly. Do NOT run competitor research — the recommender runs as a separate agent.
 
 **Exit cleanly** (exit 0) only when all work is done and pushed.
@@ -83,3 +91,19 @@ echo "Next session should: <recommendation>" >> /workspace/session_summary.md
 ```
 
 Commit and push session_summary.md with your final push to main.
+
+---
+
+## product_memory.md — append cross-session findings
+
+If you discover something that future agents should know about this codebase — a gotcha, a pattern, a pitfall, a library quirk — append it to `/workspace/product_memory.md`:
+
+```
+echo "### [$(date -u +%Y-%m-%d)] coder — <topic>" >> /workspace/product_memory.md
+echo "<concise finding — 1-3 sentences max>" >> /workspace/product_memory.md
+echo "" >> /workspace/product_memory.md
+```
+
+Good entries: "Redis cache key format changed in v2 — always use prefix `pf:`", "Test suite requires DB_URL env var — set it in conftest.py", "auth middleware rejects X-Forwarded-For — use real IP only".
+Bad entries: session-specific status updates, things already in CLAUDE.md, obvious stuff.
+Commit product_memory.md with your final push to main.
