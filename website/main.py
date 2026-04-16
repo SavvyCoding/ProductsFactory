@@ -897,6 +897,158 @@ async def api_update_product(
     return product
 
 
+@app.post("/api/products/{product_id}/sync-features")
+async def api_sync_features(product_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Read {working_dir}/features.md and sync feature statuses into the DB.
+    Self-heals after a DB wipe. Returns {"changes": N, "details": [...]}.
+
+    Status mapping (features.md raw → DB status):
+      Pushed/Approved/Reviewed/Designed/Pending/Deferred/Rejected → same
+      Reviewing/Designing/Implementing/Implemented → Approved  (reset stale in-flight)
+      Blocked → Pending  (unblock)
+      Reverted → Pending
+    """
+    import re as _re
+
+    _STATUS_MAP_SYNC: dict[str, str] = {
+        "Pushed":        "Pushed",
+        "Approved":      "Approved",
+        "Reviewing":     "Approved",
+        "Reviewed":      "Reviewed",
+        "Designed":      "Designed",
+        "Designing":     "Approved",
+        "Implemented":   "Approved",
+        "Implementing":  "Approved",
+        "Pending":       "Pending",
+        "Blocked":       "Pending",
+        "Deferred":      "Deferred",
+        "Rejected":      "Rejected",
+        "Reverted":      "Pending",
+        "Testing":       "Approved",
+        "Committed":     "Pushed",
+    }
+
+    def _strip_emoji(cell: str) -> str:
+        return _re.sub(r"[^\x00-\x7F]", "", cell).strip()
+
+    product = await _get_product_or_404(product_id, db)
+    working_dir = product.working_dir or ""
+
+    if not working_dir:
+        return {"changes": 0, "details": [], "error": "product has no working_dir"}
+
+    features_md_path = Path(working_dir) / "features.md"
+    if not features_md_path.exists():
+        return {"changes": 0, "details": [], "error": f"features.md not found at {features_md_path}"}
+
+    try:
+        content = features_md_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Could not read features.md: {e}")
+
+    # Parse markdown table
+    header_cols: list[str] | None = None
+    parsed_rows: list[dict] = []
+
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.split("|") if c.strip()]
+        if not cells:
+            continue
+        if all(_re.fullmatch(r":?-+:?", c) for c in cells):
+            continue
+        lowered = [c.lower() for c in cells]
+        if "id" in lowered:
+            header_cols = lowered
+            continue
+        if header_cols is None:
+            continue
+
+        def _get(col_name: str) -> str:
+            try:
+                idx = header_cols.index(col_name)
+                return cells[idx] if idx < len(cells) else ""
+            except ValueError:
+                return ""
+
+        raw_id = _get("id")
+        try:
+            fid = int(raw_id)
+        except (ValueError, TypeError):
+            continue
+
+        raw_status = _strip_emoji(_get("status"))
+        raw_name   = _get("name").strip() or f"Feature {fid}"
+        try:
+            priority = max(1, min(100, int(_get("priority"))))
+        except (ValueError, TypeError):
+            priority = 50
+        ftype_raw = _strip_emoji(_get("type")).lower()
+        ftype = ftype_raw if ftype_raw in ("feature", "bug", "chore") else "feature"
+
+        parsed_rows.append({
+            "id": fid, "name": raw_name, "status": raw_status,
+            "priority": priority, "feature_type": ftype,
+        })
+
+    if not parsed_rows:
+        return {"changes": 0, "details": [], "error": "no feature rows found in features.md"}
+
+    changes = 0
+    details: list[dict] = []
+
+    for row in parsed_rows:
+        fid          = row["id"]
+        md_status    = row["status"]
+        target_status = _STATUS_MAP_SYNC.get(md_status)
+
+        if target_status is None:
+            details.append({"id": fid, "action": "skipped", "reason": f"unknown status {md_status!r}"})
+            continue
+
+        # Look up feature by ID — must belong to this product
+        db_feature = await db.get(Feature, fid)
+
+        if db_feature is not None:
+            if db_feature.product_id != product_id:
+                details.append({"id": fid, "action": "skipped", "reason": "belongs to different product"})
+                continue
+            if db_feature.status == target_status:
+                details.append({"id": fid, "action": "no-op", "status": target_status})
+                continue
+            old_status = db_feature.status
+            db_feature.status  = target_status
+            db_feature.version = (db_feature.version or 0) + 1
+            details.append({
+                "id": fid, "action": "updated",
+                "from": old_status, "to": target_status,
+            })
+            changes += 1
+        else:
+            # Feature not in DB — create it
+            new_f = Feature(
+                product_id=product_id,
+                name=row["name"],
+                status=target_status,
+                priority=row["priority"],
+                feature_type=row["feature_type"],
+                source="pm",
+            )
+            db.add(new_f)
+            await db.flush()  # get new_f.id
+            details.append({
+                "id": fid, "action": "created",
+                "new_db_id": new_f.id, "status": target_status,
+            })
+            changes += 1
+
+    await db.flush()
+    return {"changes": changes, "details": details}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # REST API — Features
 # ══════════════════════════════════════════════════════════════════════════════
