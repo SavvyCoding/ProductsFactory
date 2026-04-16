@@ -475,6 +475,38 @@ def _close_orphaned_sessions():
         log.warning(f"Could not close orphaned sessions: {e}")
 
 
+def _startup_sync_features():
+    """
+    On startup: sync features.md → DB for every product that has a features.md file.
+    Self-heals feature state after a DB wipe or manual edit.
+    Fault-tolerant: logs warnings and continues if anything fails.
+    """
+    from orchestrator.features_sync import sync_features_from_md
+
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            resp = client.get("/api/products")
+            resp.raise_for_status()
+            products = resp.json()
+    except Exception as e:
+        log.warning(f"_startup_sync_features: could not fetch products — skipping: {e}")
+        return
+
+    for product in products:
+        working_dir = product.get("working_dir", "")
+        if not working_dir:
+            continue
+        features_md = Path(working_dir) / "features.md"
+        if not features_md.exists():
+            continue
+        try:
+            changes = sync_features_from_md(product, PM_API_URL)
+            if changes:
+                log.info(f"Startup sync: {product.get('name', product['id'])} — {changes} feature(s) synced from features.md")
+        except Exception as e:
+            log.warning(f"Startup sync failed for product {product.get('name', product['id'])}: {e}")
+
+
 def main():
     if not _acquire_db_lock():
         return
@@ -493,6 +525,7 @@ def main():
 
     log.info("ProductFactory Poller starting...")
     _close_orphaned_sessions()
+    _startup_sync_features()
 
     while True:
         try:
