@@ -26,8 +26,8 @@ COPY db/        db/
 COPY alembic.ini .
 
 # Run Alembic migrations then start the server.
-# Using a shell entrypoint so migrations run on every container start —
-# safe because Alembic is idempotent (skips already-applied migrations).
-CMD ["sh", "-c", \
-     "alembic upgrade head && \
-      uvicorn website.main:app --host 0.0.0.0 --port 8080 --workers 2"]
+# startup.sh: self-heals stale alembic_version (tables gone but version row
+# exists after a volume wipe), then runs alembic upgrade head + uvicorn.
+COPY deploy/docker/startup.sh /startup.sh
+RUN chmod +x /startup.sh
+CMD ["/startup.sh"]
