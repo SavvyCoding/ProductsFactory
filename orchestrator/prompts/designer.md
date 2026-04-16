@@ -11,7 +11,7 @@ Your working directory is /workspace. All files must be written inside /workspac
 > **IMPORTANT:** The workspace contains an `AGENT_WORKFLOW.md` file — that is the **Coder** workflow. **Do NOT read or follow it.** Follow only the instructions below.
 
 {prev_session_summary}
-
+{product_memory}
 ---
 
 ## Assigned features for this session
@@ -81,6 +81,11 @@ For each assigned feature (in order):
 
    Use `echo '{"id":...}' >> /workspace/session_result.json` or write the line from a tool call.
 
+   ⚠️ **Strict rules:**
+   - `"status"` must be exactly `"Designed"` or `"Blocked"` — nothing else
+   - NEVER wrap entries in `{"features": [...]}`
+   - One JSON object per line
+
 4. **Repeat** steps 1–3 for each assigned feature (up to {max_features_per_run} total).
 
 5. **Push progress** — commit the design docs and session_result.json and push:
@@ -109,6 +114,22 @@ echo "Design decision: <choice> because <reason>" >> /workspace/session_summary.
 echo "Blocked #<id> — spec too vague: <detail>" >> /workspace/session_summary.md
 echo "Coder note: implement <X> before <Y> — dependency order matters" >> /workspace/session_summary.md
 ```
+
+---
+
+## product_memory.md — append cross-session findings
+
+If you discover something that future agents should know about this codebase — a gotcha, a pattern, a pitfall, a library quirk — append it to `/workspace/product_memory.md`:
+
+```
+echo "### [$(date -u +%Y-%m-%d)] designer — <topic>" >> /workspace/product_memory.md
+echo "<concise finding — 1-3 sentences max>" >> /workspace/product_memory.md
+echo "" >> /workspace/product_memory.md
+```
+
+Good entries: "Redis cache key format changed in v2 — always use prefix `pf:`", "Test suite requires DB_URL env var — set it in conftest.py", "auth middleware rejects X-Forwarded-For — use real IP only".
+Bad entries: session-specific status updates, things already in CLAUDE.md, obvious stuff.
+Commit product_memory.md with your final push to main.
 
 ---
 

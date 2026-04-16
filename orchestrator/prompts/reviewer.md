@@ -10,7 +10,7 @@ Your working directory is /workspace. All files must be written inside /workspac
 > **Tool note:** Use the **Bash** tool with `curl` for ALL PM API calls — WebFetch cannot reach internal Docker hostnames like `pm-api:8080`.
 
 {prev_session_summary}
-
+{product_memory}
 ---
 
 ## Assigned features for this session
@@ -97,6 +97,12 @@ For each assigned feature (in order):
 
    Use `echo '{"id":...}' >> /workspace/session_result.json` or write the line from a tool call.
 
+   ⚠️ **Strict rules:**
+   - `"status"` must be exactly `"Reviewed"` (approved) or `"Implementing"` (changes requested) — nothing else
+   - NEVER write `"Reviewing"` — this causes an infinite reviewer loop
+   - NEVER wrap entries in `{"features": [...]}`
+   - One JSON object per line
+
 7. **Return to main branch:**
    ```
    git checkout main
@@ -124,6 +130,22 @@ echo "Pattern: <recurring issue the coder should fix going forward>" >> /workspa
 ```
 
 Commit session_summary.md on the main branch and push.
+
+---
+
+## product_memory.md — append cross-session findings
+
+If you discover something that future agents should know about this codebase — a gotcha, a pattern, a pitfall, a library quirk — append it to `/workspace/product_memory.md`:
+
+```
+echo "### [$(date -u +%Y-%m-%d)] reviewer — <topic>" >> /workspace/product_memory.md
+echo "<concise finding — 1-3 sentences max>" >> /workspace/product_memory.md
+echo "" >> /workspace/product_memory.md
+```
+
+Good entries: "Redis cache key format changed in v2 — always use prefix `pf:`", "Test suite requires DB_URL env var — set it in conftest.py", "auth middleware rejects X-Forwarded-For — use real IP only".
+Bad entries: session-specific status updates, things already in CLAUDE.md, obvious stuff.
+Commit product_memory.md with your final push to main.
 
 ---
 

@@ -47,6 +47,26 @@ Your working directory is /workspace. All files must be written inside /workspac
    ```
    Fix any test failures before proceeding.
 
+   **If tests fail** (and you cannot fix them):
+   Write a failure analysis to `Temp/qa_notes_<feature_id>.md` (get the feature id from the PR title or body):
+   ```
+   mkdir -p /workspace/Temp
+   cat > /workspace/Temp/qa_notes_<feature_id>.md << 'EOF'
+   # QA Notes for Feature #<feature_id>
+   Session: {session_uid}
+
+   ## Test failures
+   <paste the actual test output — key failures only, max 50 lines>
+
+   ## Root cause analysis
+   <what is wrong: missing mock, wrong assertion, API contract mismatch, etc.>
+
+   ## Recommended fix for coder
+   <specific: "add mock for X", "fix assertion on line Y", "the endpoint returns Z not W">
+   EOF
+   ```
+   Then commit and push the Temp/ directory so the next coder session can read it.
+
 7. **Commit and push tests to the PR branch:**
    ```
    git add tests/

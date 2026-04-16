@@ -555,6 +555,8 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                 "design_doc_path": f.get("design_doc_path"),
                 "pr_number": f.get("pr_number"),
                 "pr_url": f.get("pr_url"),
+                "fix_attempts": f.get("fix_attempts", 0),
+                "blocked_reason": f.get("blocked_reason"),
             }
             for f in selected
         ]
@@ -576,6 +578,11 @@ def _format_assigned_features(features: list[dict], persona: str | None) -> str:
             lines.append(f"   - Design doc: /workspace/{f['design_doc_path']}")
         if persona == "reviewer" and f.get("pr_number"):
             lines.append(f"   - PR: #{f['pr_number']}" + (f" ({f['pr_url']})" if f.get("pr_url") else ""))
+        if f.get("fix_attempts", 0) > 0:
+            lines.append(f"   - ⚠️ **RETRY #{f['fix_attempts']}** — this feature failed previously.")
+            if f.get("blocked_reason"):
+                lines.append(f"     Last failure: {f['blocked_reason']}")
+            lines.append(f"     Check `Temp/qa_notes_{f['id']}.md` (if it exists) for detailed test failure analysis.")
         lines.append("")
     lines.append("Work through these features IN ORDER. Do not query the features API for additional work.")
     return "\n".join(lines)
