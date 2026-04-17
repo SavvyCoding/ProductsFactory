@@ -1,84 +1,132 @@
 {% extends "base.html" %}
 {% block title %}{{ product.name or product.working_dir }} — ProductFactory{% endblock %}
+{% block page_class %}pf-page--full{% endblock %}
+
+{% block breadcrumb %}
+<div class="pf-breadcrumb" style="padding:8px 32px;background:var(--color-canvas-subtle);border-bottom:1px solid var(--color-border-default)">
+  <a href="/">Products</a>
+  <span class="breadcrumb-sep">/</span>
+  <span>{{ product.name or product.working_dir }}</span>
+</div>
+{% endblock %}
+
 {% block content %}
 
-<!-- Header -->
-<div class="page-header">
-  <div class="product-header-title">
-    <div>
-      <div class="breadcrumb"><a href="/">← Products</a></div>
-      <h1>{{ product.name or product.working_dir }}</h1>
-    </div>
-    <div class="product-meta" style="margin-top:6px">
-      <span class="badge badge-{{ product.type }}">{{ product.type }}</span>
-      <span class="badge badge-status-{{ product.status }}">{{ product.status }}</span>
+<div class="pf-layout-sidebar">
+  <aside class="pf-sidebar collapsed" id="pf-sidebar">
+    <nav style="padding-top:8px">
+      <a class="pf-sidebar-item {% if active_tab == 'board' %}active{% endif %}" onclick="switchTab('board', this)" href="javascript:void(0)" title="Board">
+        <span class="pf-sidebar-icon">&#9638;</span>
+        <span class="pf-sidebar-label">Board</span>
+        {% set feat_count = features | length %}
+        {% if feat_count %}<span class="pf-sidebar-badge">{{ feat_count }}</span>{% endif %}
+      </a>
+      <a class="pf-sidebar-item {% if active_tab == 'sprints' %}active{% endif %}" onclick="switchTab('sprints', this)" href="javascript:void(0)" title="Sprints">
+        <span class="pf-sidebar-icon">&#9654;</span>
+        <span class="pf-sidebar-label">Sprints</span>
+        {% if active_sprint %}<span class="pf-sidebar-badge" style="background:var(--green-lt);color:var(--green)">Active</span>{% endif %}
+      </a>
+      <a class="pf-sidebar-item {% if active_tab == 'prs' %}active{% endif %}" onclick="switchTab('prs', this)" href="javascript:void(0)" title="Pull Requests">
+        <span class="pf-sidebar-icon">&#8693;</span>
+        <span class="pf-sidebar-label">Pull Requests</span>
+        {% if open_prs %}<span class="pf-sidebar-badge">{{ open_prs }}</span>{% endif %}
+      </a>
+      <a class="pf-sidebar-item {% if active_tab == 'history' %}active{% endif %}" onclick="switchTab('history', this)" href="javascript:void(0)" title="History">
+        <span class="pf-sidebar-icon">&#8986;</span>
+        <span class="pf-sidebar-label">History</span>
+      </a>
+      <a class="pf-sidebar-item {% if active_tab == 'videos' %}active{% endif %}" onclick="switchTab('videos', this); loadVideos()" href="javascript:void(0)" title="Videos">
+        <span class="pf-sidebar-icon">&#9654;&#9646;</span>
+        <span class="pf-sidebar-label">Videos</span>
+      </a>
+      <a class="pf-sidebar-item {% if active_tab == 'live' %}active{% endif %}" onclick="switchTab('live', this)" href="javascript:void(0)" title="Live Session">
+        <span class="pf-sidebar-icon">&#9679;</span>
+        <span class="pf-sidebar-label">Live Session</span>
+      </a>
+      <a class="pf-sidebar-item {% if active_tab == 'settings' %}active{% endif %}" onclick="switchTab('settings', this)" href="javascript:void(0)" title="Settings">
+        <span class="pf-sidebar-icon">&#9881;</span>
+        <span class="pf-sidebar-label">Settings</span>
+      </a>
+    </nav>
+    <div class="pf-sidebar-footer">
       {% if product.github_repo %}
-      <a href="{{ product.github_repo }}" target="_blank" class="gh-link">GitHub ↗</a>
-      {% endif %}
-      {% if open_prs > 0 %}
-      <span class="badge badge-prs {% if open_prs >= 3 %}badge-prs-warn{% endif %}">
-        {{ open_prs }} open PR{{ 's' if open_prs != 1 }}{% if open_prs >= 3 %} ⚠{% endif %}
-      </span>
+      <a href="{{ product.github_repo }}" target="_blank" title="GitHub">
+        <span class="pf-sidebar-icon">&#8663;</span>
+        <span class="pf-sidebar-label">GitHub</span>
+      </a>
       {% endif %}
     </div>
-  </div>
-
-  <div class="actions">
-    <a href="/product/{{ product.id }}/progress" class="btn btn-outline">📄 progress.md</a>
-    <a href="/product/{{ product.id }}/architecture" class="btn btn-outline">🏗 arch</a>
-
-    {% if product.status == 'discovered' %}
-    <form method="post" action="/product/{{ product.id }}/approve" style="display:inline">
-      <button class="btn btn-green">✓ Approve → Ready</button>
-    </form>
-    {% elif product.status == 'ready' %}
-    <form method="post" action="/product/{{ product.id }}/pause" style="display:inline">
-      <button class="btn btn-outline">⏸ Pause</button>
-    </form>
-    {% elif product.status == 'paused' %}
-    <form method="post" action="/product/{{ product.id }}/resume" style="display:inline">
-      <button class="btn btn-green">▶ Resume</button>
-    </form>
-    {% endif %}
-
-    <form method="post" action="/product/{{ product.id }}/run-now" style="display:inline">
-      <button class="btn btn-outline" title="Queue this product to run on the next poller cycle">⚡ Run now</button>
-    </form>
-    <form method="post" action="/product/{{ product.id }}/run-trainer" style="display:inline">
-      <button class="btn btn-outline" title="Generate a product showcase video on the next poller cycle"
-        {% if product.run_trainer_now %}disabled{% endif %}>
-        {% if product.run_trainer_now %}🎬 Showcase queued{% else %}🎬 Generate Showcase{% endif %}
-      </button>
-    </form>
-
-    {% if product.type == 'brownfield' and product.analysis_status != 'running' and product.analysis_status != 'done' %}
-    <form method="post" action="/product/{{ product.id }}/trigger_analysis" style="display:inline">
-      <button class="btn btn-orange">🔬 Run Analysis</button>
-    </form>
-    {% endif %}
-  </div>
-</div>
-
-{# JS data #}
-<script>
-const PM_TRANSITIONS = {{ pm_transitions | tojson }};
-const PRODUCT_ID = {{ product.id }};
-</script>
-
-<!-- TABS -->
-<div class="product-tabs">
-  <button class="product-tab {% if active_tab == 'board' %}active{% endif %}" onclick="switchTab('board', this)">Board</button>
-  <button class="product-tab {% if active_tab == 'sprints' %}active{% endif %}" onclick="switchTab('sprints', this)">
-    Sprints{% if active_sprint %} <span class="col-count" style="margin-left:4px;background:var(--green)">●</span>{% endif %}
+  </aside>
+  <button class="pf-sidebar-toggle" id="sidebar-toggle" title="Toggle sidebar" aria-label="Toggle sidebar">
+    <span id="sidebar-toggle-icon">&#9654;</span>
   </button>
-  <button class="product-tab {% if active_tab == 'prs' %}active{% endif %}" onclick="switchTab('prs', this)">
-    Pull Requests{% if open_prs %} <span class="col-count" style="margin-left:4px">{{ open_prs }}</span>{% endif %}
-  </button>
-  <button class="product-tab {% if active_tab == 'history' %}active{% endif %}" onclick="switchTab('history', this)">History</button>
-  <button class="product-tab {% if active_tab == 'videos' %}active{% endif %}" onclick="switchTab('videos', this); loadVideos()">Videos</button>
-  <button class="product-tab {% if active_tab == 'live' %}active{% endif %}" onclick="switchTab('live', this)">Live Session</button>
-  <button class="product-tab {% if active_tab == 'settings' %}active{% endif %}" onclick="switchTab('settings', this)">Settings</button>
-</div>
+  <script>
+  (function() {
+    var btn = document.getElementById('sidebar-toggle');
+    var sidebar = document.getElementById('pf-sidebar');
+    function toggle() {
+      sidebar.classList.toggle('collapsed');
+      var c = sidebar.classList.contains('collapsed');
+      document.getElementById('sidebar-toggle-icon').innerHTML = c ? '&#9654;' : '&#9664;';
+      btn.style.left = c ? '0px' : '200px';
+      localStorage.setItem('pf-sidebar', c ? 'collapsed' : 'expanded');
+    }
+    btn.addEventListener('click', toggle);
+    if (localStorage.getItem('pf-sidebar') === 'expanded') {
+      sidebar.classList.remove('collapsed');
+      document.getElementById('sidebar-toggle-icon').innerHTML = '&#9664;';
+      btn.style.left = '200px';
+    }
+  })();
+  </script>
+  <div class="pf-content">
+    <!-- Page header -->
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;flex-wrap:wrap;gap:12px">
+      <div>
+        <h1 style="font-size:20px;font-weight:600">{{ product.name or product.working_dir }}</h1>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:4px">
+          {% if open_prs >= 3 %}
+          <span class="badge badge-prs-warn">{{ open_prs }} open PRs ⚠</span>
+          {% endif %}
+        </div>
+      </div>
+      <div class="actions" style="display:flex;gap:6px;flex-wrap:wrap">
+        <a href="/product/{{ product.id }}/progress" class="btn btn-outline btn-sm">progress.md</a>
+        <a href="/product/{{ product.id }}/architecture" class="btn btn-outline btn-sm">arch</a>
+        {% if product.status == 'discovered' %}
+        <form method="post" action="/product/{{ product.id }}/approve" style="display:inline">
+          <button class="btn btn-green btn-sm">Approve</button>
+        </form>
+        {% elif product.status == 'ready' %}
+        <form method="post" action="/product/{{ product.id }}/pause" style="display:inline">
+          <button class="btn btn-outline btn-sm">Pause</button>
+        </form>
+        {% elif product.status == 'paused' %}
+        <form method="post" action="/product/{{ product.id }}/resume" style="display:inline">
+          <button class="btn btn-green btn-sm">Resume</button>
+        </form>
+        {% endif %}
+        <form method="post" action="/product/{{ product.id }}/run-now" style="display:inline">
+          <button class="btn btn-outline btn-sm" title="Queue for next cycle">Run now</button>
+        </form>
+        <form method="post" action="/product/{{ product.id }}/run-trainer" style="display:inline">
+          <button class="btn btn-outline btn-sm" {% if product.run_trainer_now %}disabled{% endif %}>
+            {% if product.run_trainer_now %}Showcase queued{% else %}Generate Showcase{% endif %}
+          </button>
+        </form>
+        {% if product.type == 'brownfield' and product.analysis_status != 'running' and product.analysis_status != 'done' %}
+        <form method="post" action="/product/{{ product.id }}/trigger_analysis" style="display:inline">
+          <button class="btn btn-orange btn-sm">Run Analysis</button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+
+    {# JS data #}
+    <script>
+    const PM_TRANSITIONS = {{ pm_transitions | tojson }};
+    const PRODUCT_ID = {{ product.id }};
+    </script>
 
 
 <!-- ══ TAB: BOARD ══════════════════════════════════════════ -->
@@ -106,6 +154,8 @@ const PRODUCT_ID = {{ product.id }};
     {% if product.github_repo %}<a href="{{ product.github_repo }}/pulls" target="_blank">Review PRs ↗</a>{% endif %}
   </div>
   {% endif %}
+
+  {% set pending_features = features | selectattr('status', 'equalto', 'Pending') | list %}
 
   <!-- Add Feature -->
   <div class="card" style="margin-bottom:20px">
@@ -162,110 +212,92 @@ const PRODUCT_ID = {{ product.id }};
     </div>
   </div>
 
-  <!-- Bulk approve bar -->
-  <div class="bulk-bar" id="bulk-bar">
-    <span id="bulk-count">0 selected</span>
-    <form method="post" action="/product/{{ product.id }}/features/bulk-approve" id="bulk-form">
-      <input type="hidden" name="feature_ids" id="bulk-ids">
-      <button type="submit" class="btn btn-green" style="padding:5px 14px">✓ Approve selected</button>
-    </form>
-    <button onclick="clearSelection()" class="btn btn-outline" style="padding:5px 12px">✗ Clear</button>
-  </div>
-
-  <!-- PHASE TABS -->
-  {% set columns = [
-    ('Pending',      's-pending',      'Awaiting PM review'),
-    ('Approved',     's-approved',     'Queued for Claude'),
-    ('Designing',    's-designing',    'Designer agent writing spec'),
-    ('Designed',     's-designed',     'Design doc ready — awaiting coder'),
-    ('Implementing', 's-implementing', 'Coder agent working on it'),
-    ('Reviewing',    's-reviewing',    'PR open — awaiting reviewer'),
-    ('Reviewed',     's-reviewed',     'Review done — awaiting merge'),
-    ('Blocked',      's-blocked',      'Needs PM attention'),
-    ('Pushed',       's-pushed',       'Merged to main'),
-  ] %}
-
-  <div class="phase-tab-bar" id="phase-tab-bar">
-    {% for col_status, col_class, col_hint in columns %}
-    {% set cnt = features | selectattr('status', 'equalto', col_status) | list | length %}
-    <button class="phase-tab {{ col_class }}" data-phase="{{ col_status }}"
-            onclick="switchPhase('{{ col_status }}')" title="{{ col_hint }}">
-      {{ col_status }}
-      {% if cnt > 0 %}<span class="phase-count">{{ cnt }}</span>{% endif %}
-    </button>
-    {% endfor %}
-  </div>
-
-  <div id="phase-panels">
-    {% for col_status, col_class, col_hint in columns %}
-    {% set col_features = features | selectattr('status', 'equalto', col_status) | list %}
-    <div class="phase-panel" id="phase-{{ col_status }}" style="display:none">
-
-      {% if col_status == 'Pending' %}
-      <div class="phase-actions-bar">
-        <form method="post" action="/product/{{ product.id }}/features/bulk-approve" id="bulk-form">
+  <!-- Pending features needing approval -->
+  {% if pending_features %}
+  <div class="card" style="margin-bottom:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:600;color:var(--dark)">📋 Pending Review ({{ pending_features | length }})</div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <button onclick="selectAllPending()" class="btn btn-outline btn-sm" id="select-all-btn">☐ Select All</button>
+        <button onclick="clearSelection()" class="btn btn-outline btn-sm" id="clear-sel-btn">✗ Clear</button>
+        <form method="post" action="/product/{{ product.id }}/features/bulk-approve" id="bulk-form" style="display:inline">
           <input type="hidden" name="feature_ids" id="bulk-ids">
-          <button type="submit" class="btn btn-green btn-sm">✓ Approve selected</button>
+          <button type="submit" class="btn btn-green btn-sm" id="bulk-approve-btn" disabled>✓ Approve selected</button>
+        </form>
+        <form method="post" action="/product/{{ product.id }}/features/bulk-reject" id="bulk-reject-form" style="display:inline">
+          <input type="hidden" name="feature_ids" id="bulk-reject-ids">
+          <button type="submit" class="btn btn-sm" style="background:#fef2f2;color:#dc2626;border:1px solid #fecaca" id="bulk-reject-btn" disabled>✗ Reject selected</button>
+        </form>
+        <form method="post" action="/product/{{ product.id }}/features/bulk-approve-all" style="display:inline" onsubmit="return confirm('Approve all {{ pending_features | length }} pending features?')">
+          <button type="submit" class="btn btn-green btn-sm">✓✓ Approve All</button>
         </form>
         <span id="bulk-count" class="muted" style="font-size:12px">0 selected</span>
-        <button onclick="clearSelection()" class="btn btn-outline btn-sm">✗ Clear</button>
       </div>
-      {% endif %}
-
-      {% if col_features %}
-      <div class="phase-list">
-        {% for f in col_features %}
-        <div class="phase-card {% if f.source == 'ai' %}fc-ai{% endif %}" data-feature-id="{{ f.id }}">
-          <div class="phase-card-left">
-            {% if col_status == 'Pending' %}
-            <input type="checkbox" class="feature-checkbox"
-                   onchange="toggleSelect({{ f.id }}, this)"
-                   onclick="event.stopPropagation()">
-            {% endif %}
-            <div>
-              <div class="phase-card-name">{{ f.name }}</div>
-              {% if f.description %}<div class="phase-card-desc">{{ f.description[:200] }}{% if f.description|length > 200 %}…{% endif %}</div>{% endif %}
-              <div class="phase-card-meta">
-                {% if f.feature_type == 'bug' %}<span class="type-badge type-bug">🐛 Bug</span>{% endif %}
-                {% if f.feature_type == 'chore' %}<span class="type-badge type-chore">🔧 Chore</span>{% endif %}
-                {% if f.source == 'ai' %}<span class="ai-badge">🤖 AI</span>{% endif %}
-                {% if f.skip_design %}<span class="skip-design-badge">⚡ Skip design</span>{% endif %}
-                {% if f.blocked_reason %}<span class="blocked-reason">⚠ {{ f.blocked_reason }}</span>{% endif %}
-                {% if f.fix_attempts > 0 %}<span class="fix-attempts">{{ f.fix_attempts }}/3 fix attempts</span>{% endif %}
-                {% if f.review_outcome == 'approved' %}<span class="review-outcome review-ok">✓ Approved</span>{% endif %}
-                {% if f.review_outcome == 'changes_requested' %}<span class="review-outcome review-changes">↩ Changes requested</span>{% endif %}
-                {% if f.review_notes and f.review_outcome == 'changes_requested' %}<span class="muted" style="font-size:11px">{{ f.review_notes[:100] }}{% if f.review_notes|length > 100 %}…{% endif %}</span>{% endif %}
-              </div>
+    </div>
+    <div class="phase-list">
+      {% for f in pending_features %}
+      <div class="phase-card {% if f.source == 'ai' %}fc-ai{% endif %}" data-feature-id="{{ f.id }}">
+        <div class="phase-card-left">
+          <input type="checkbox" class="feature-checkbox"
+                 onchange="toggleSelect({{ f.id }}, this)"
+                 onclick="event.stopPropagation()">
+          <div>
+            <div class="phase-card-name">{{ f.name }}</div>
+            {% if f.description %}<div class="phase-card-desc">{{ f.description[:200] }}{% if f.description|length > 200 %}…{% endif %}</div>{% endif %}
+            <div class="phase-card-meta">
+              {% if f.feature_type == 'bug' %}<span class="type-badge type-bug">🐛 Bug</span>{% endif %}
+              {% if f.feature_type == 'chore' %}<span class="type-badge type-chore">🔧 Chore</span>{% endif %}
+              {% if f.source == 'ai' %}<span class="ai-badge">🤖 AI</span>{% endif %}
             </div>
           </div>
-          <div class="phase-card-right">
-            {% if f.pr_url %}<a href="{{ f.pr_url }}" target="_blank" class="btn btn-sm btn-outline">PR #{{ f.pr_number }} ↗</a>{% endif %}
-            {% if f.design_doc_path %}<a href="/workspace/{{ f.design_doc_path }}" class="btn btn-sm btn-outline">📄 Design</a>{% endif %}
-            {% if col_status == 'Pending' %}
-            <form method="post" action="/product/{{ product.id }}/features/{{ f.id }}/status" style="display:inline">
-              <button name="status" value="Approved" class="btn btn-sm btn-green">✓ Approve</button>
-            </form>
-            {% elif col_status == 'Reviewed' %}
-            {% for pr in open_prs_list if pr.number == f.pr_number %}
-            <form method="post" action="/product/{{ product.id }}/merge-pr/{{ f.pr_number }}" style="display:inline">
-              <button class="btn btn-sm btn-green">⇡ Merge</button>
-            </form>
-            {% endfor %}
-            {% endif %}
+        </div>
+        <div class="phase-card-right">
+          <form method="post" action="/product/{{ product.id }}/features/{{ f.id }}/status" style="display:inline">
+            <button name="status" value="Approved" class="btn btn-sm btn-green">✓ Approve</button>
+          </form>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- All features flat list -->
+  {% set all_features = features | rejectattr('status', 'in', ['Pending', 'Rejected', 'Reverted']) | list %}
+  {% if all_features %}
+  <div class="card">
+    <div style="font-size:13px;font-weight:600;color:var(--dark);margin-bottom:12px">All Features ({{ all_features | length }})</div>
+    <div class="phase-list">
+      {% for f in all_features %}
+      <div class="phase-card {% if f.source == 'ai' %}fc-ai{% endif %}" data-feature-id="{{ f.id }}">
+        <div class="phase-card-left">
+          <div>
+            <div class="phase-card-name">{{ f.name }}</div>
+            <div class="phase-card-meta">
+              <span class="badge badge-status-{{ f.status | lower }}" style="font-size:10px">{{ f.status }}</span>
+              {% if f.feature_type == 'bug' %}<span class="type-badge type-bug">🐛 Bug</span>{% endif %}
+              {% if f.feature_type == 'chore' %}<span class="type-badge type-chore">🔧 Chore</span>{% endif %}
+              {% if f.source == 'ai' %}<span class="ai-badge">🤖 AI</span>{% endif %}
+              {% if f.blocked_reason %}<span class="blocked-reason">⚠ {{ f.blocked_reason }}</span>{% endif %}
+              {% if f.review_outcome == 'approved' %}<span class="review-outcome review-ok">✓ Approved</span>{% endif %}
+              {% if f.review_outcome == 'changes_requested' %}<span class="review-outcome review-changes">↩ Changes requested</span>{% endif %}
+            </div>
           </div>
         </div>
-        {% endfor %}
+        <div class="phase-card-right">
+          {% if f.pr_url %}<a href="{{ f.pr_url }}" target="_blank" class="btn btn-sm btn-outline">PR #{{ f.pr_number }} ↗</a>{% endif %}
+        </div>
       </div>
-      {% else %}
-      <div class="phase-empty">
-        <div class="phase-empty-icon">{{ {'Pending':'📋','Approved':'✅','Designing':'✏️','Designed':'📐','Implementing':'💻','Reviewing':'👁','Reviewed':'✓','Blocked':'🚧','Pushed':'🚀'}.get(col_status,'•') }}</div>
-        <div>No features in <strong>{{ col_status }}</strong></div>
-        <div class="muted" style="font-size:12px;margin-top:4px">{{ col_hint }}</div>
-      </div>
-      {% endif %}
+      {% endfor %}
     </div>
-    {% endfor %}
   </div>
+  {% elif not pending_features %}
+  <div class="empty-state" style="margin-top:20px">
+    <div class="empty-icon">📦</div>
+    <h2>No features yet</h2>
+    <p>Add features above or let the AI generate a backlog from the product vision.</p>
+  </div>
+  {% endif %}
 
   <!-- Archived -->
   {% set archived = features | selectattr('status', 'in', ['Rejected', 'Reverted']) | list %}
@@ -299,123 +331,162 @@ const PRODUCT_ID = {{ product.id }};
 <!-- ══ TAB: SPRINTS ══════════════════════════════════════════ -->
 <div class="tab-content" id="tab-sprints" {% if active_tab != 'sprints' %}style="display:none"{% endif %}>
 
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start">
+  {% set approved_features = features | selectattr('status', 'equalto', 'Approved') | list %}
+  {% if approved_features | length > 0 and not phases %}
+  <div class="notice notice-blue" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+    <span>🤖 <strong>{{ approved_features | length }} approved feature{{ 's' if approved_features | length != 1 else '' }} ready to plan.</strong>
+    Let the AI organise them into phases and sprints automatically.</span>
+    <form method="post" action="/product/{{ product.id }}/plan-sprints" style="display:inline">
+      <button class="btn btn-sm" style="background:#1d4ed8;color:#fff;border:none">🤖 Auto-Plan Phases</button>
+    </form>
+  </div>
+  {% endif %}
 
-    <!-- LEFT: Active sprint + backlog -->
+  <div style="display:grid;grid-template-columns:1fr 340px;gap:20px;align-items:start">
+
+    <!-- LEFT: Phases → Sprints roadmap -->
     <div>
 
-      {% if active_sprint %}
-      <!-- Active Sprint Card -->
-      <div class="card" style="margin-bottom:16px;border-left:3px solid var(--green)">
+      {% if phases %}
+      <!-- Phasewise Roadmap -->
+      {% for phase in phases %}
+      {% set phase_sprints = sprints | selectattr('phase_id', 'equalto', phase.id) | list %}
+      {% set phase_feats   = [] %}
+      {% for s in phase_sprints %}{% set _ = phase_feats.extend(features | selectattr('sprint_id', 'equalto', s.id) | list) %}{% endfor %}
+      {% set phase_pushed  = phase_feats | selectattr('status', 'equalto', 'Pushed') | list %}
+
+      <div class="card" style="margin-bottom:16px;border-left:4px solid {% if phase.status == 'active' %}var(--green){% elif phase.status == 'completed' %}var(--text-muted){% else %}var(--blue){% endif %}">
+
+        <!-- Phase header -->
         <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
           <div>
-            <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--green);font-weight:600;margin-bottom:3px">Active Sprint</div>
-            <div style="font-size:16px;font-weight:600;color:var(--text)">{{ active_sprint.name }}</div>
-            {% if active_sprint.goal %}<div style="font-size:13px;color:var(--text-muted);margin-top:3px">{{ active_sprint.goal }}</div>{% endif %}
+            <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:2px;color:{% if phase.status == 'active' %}var(--green){% elif phase.status == 'completed' %}var(--text-muted){% else %}#1d4ed8{% endif %}">
+              {{ phase.status | upper }}
+            </div>
+            <div style="font-size:15px;font-weight:700;color:var(--text)">{{ phase.name }}</div>
+            {% if phase.goal %}<div style="font-size:12px;color:var(--text-muted);margin-top:2px">{{ phase.goal }}</div>{% endif %}
           </div>
-          <form method="post" action="/product/{{ product.id }}/sprints/{{ active_sprint.id }}/complete" style="display:inline">
-            <button class="btn btn-sm btn-outline" onclick="return confirm('Mark sprint as completed?')">✓ Complete</button>
-          </form>
-        </div>
-
-        {% if active_sprint.start_date or active_sprint.end_date %}
-        <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">
-          {% if active_sprint.start_date %}📅 {{ active_sprint.start_date }}{% endif %}
-          {% if active_sprint.start_date and active_sprint.end_date %} → {% endif %}
-          {% if active_sprint.end_date %}{{ active_sprint.end_date }}{% endif %}
-        </div>
-        {% endif %}
-
-        <!-- Sprint progress bar -->
-        {% set sprint_features = features | selectattr('sprint_id', 'equalto', active_sprint.id) | list %}
-        {% set sprint_pushed   = sprint_features | selectattr('status', 'equalto', 'Pushed') | list %}
-        {% set sprint_total    = sprint_features | length %}
-        {% if sprint_total > 0 %}
-        <div style="margin-bottom:10px">
-          <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text-muted);margin-bottom:4px">
-            <span>Progress</span>
-            <span>{{ sprint_pushed | length }}/{{ sprint_total }} shipped</span>
-          </div>
-          <div style="background:var(--border);border-radius:4px;height:6px;overflow:hidden">
-            <div style="background:var(--green);height:100%;width:{{ ((sprint_pushed | length / sprint_total) * 100) | int }}%;transition:width .3s"></div>
+          <div style="text-align:right;flex-shrink:0;margin-left:12px">
+            <div style="font-size:12px;color:var(--text-muted)">{{ phase_pushed | length }}/{{ phase_feats | length }} shipped</div>
+            {% if phase_feats | length > 0 %}
+            <div style="background:var(--border);border-radius:4px;height:4px;width:80px;overflow:hidden;margin-top:4px">
+              <div style="background:var(--green);height:100%;width:{{ ((phase_pushed | length / phase_feats | length) * 100) | int }}%;transition:width .3s"></div>
+            </div>
+            {% endif %}
           </div>
         </div>
 
-        <!-- Sprint feature list -->
-        <div style="display:flex;flex-direction:column;gap:6px">
-          {% for f in sprint_features %}
-          <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;background:var(--surface);border-radius:6px;border:1px solid var(--border)">
-            <div style="min-width:0">
-              <div style="font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+        <!-- Sprints within this phase -->
+        {% for sprint in phase_sprints %}
+        {% set sf = features | selectattr('sprint_id', 'equalto', sprint.id) | list %}
+        {% set sp = sf | selectattr('status', 'equalto', 'Pushed') | list %}
+        <div style="margin-left:12px;margin-bottom:10px;padding:10px;background:var(--surface);border-radius:8px;border:1px solid var(--border){% if sprint.status == 'active' %};border-color:var(--green);box-shadow:0 0 0 1px var(--green)33{% endif %}">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:{% if sf %}6px{% else %}0{% endif %}">
+            <div>
+              <span style="font-size:13px;font-weight:600;color:var(--text)">{{ sprint.name }}</span>
+              {% if sprint.status == 'active' %}<span style="font-size:10px;background:var(--green);color:#fff;padding:1px 6px;border-radius:8px;margin-left:6px;font-weight:600">ACTIVE</span>{% endif %}
+              {% if sprint.status == 'completed' %}<span style="font-size:10px;background:var(--surface);color:var(--text-muted);padding:1px 6px;border-radius:8px;margin-left:6px;border:1px solid var(--border)">DONE</span>{% endif %}
+              {% if sprint.goal %}<div style="font-size:11px;color:var(--text-muted);margin-top:1px">{{ sprint.goal }}</div>{% endif %}
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+              <span style="font-size:11px;color:var(--text-muted)">{{ sp | length }}/{{ sf | length }}</span>
+              {% if sprint.status == 'active' %}
+              {% set dod = sprint.dod_status or {} %}
+              {% set sf_count = features | selectattr('sprint_id', 'equalto', sprint.id) | list | length %}
+              {% set sf_terminal = features | selectattr('sprint_id', 'equalto', sprint.id) | selectattr('status', 'in', ['Pushed','Deferred','Rejected']) | list | length %}
+              {% set gate_features = (sf_count == 0 or sf_terminal == sf_count) %}
+              {% set gate_qa       = dod.get('qa_passed', False) %}
+              {% set gate_security = dod.get('security_clean', False) %}
+              {% set gate_retro    = dod.get('retro_done', False) %}
+              {% set all_gates     = gate_features and gate_qa and gate_security and gate_retro %}
+              <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+                <!-- DoD checklist -->
+                <div style="font-size:10px;display:flex;flex-direction:column;gap:2px;text-align:right">
+                  <span style="color:{% if gate_features %}var(--green){% else %}var(--text-muted){% endif %}">{% if gate_features %}✓{% else %}○{% endif %} Features done ({{ sf_terminal }}/{{ sf_count }})</span>
+                  <span style="color:{% if gate_qa %}var(--green){% else %}var(--text-muted){% endif %}">{% if gate_qa %}✓{% else %}○{% endif %} QA signed off</span>
+                  <span style="color:{% if gate_security %}var(--green){% else %}var(--text-muted){% endif %}">{% if gate_security %}✓{% else %}○{% endif %} Security signed off</span>
+                  <span style="color:{% if gate_retro %}var(--green){% else %}var(--text-muted){% endif %}">{% if gate_retro %}✓{% else %}○{% endif %} Retro written</span>
+                </div>
+                {% if all_gates %}
+                <form method="post" action="/product/{{ product.id }}/sprints/{{ sprint.id }}/complete" style="display:inline">
+                  <button class="btn btn-sm btn-green" style="font-size:11px;padding:3px 10px">✓✓ Complete Sprint</button>
+                </form>
+                {% else %}
+                <form method="post" action="/product/{{ product.id }}/sprints/{{ sprint.id }}/complete" style="display:inline">
+                  <button class="btn btn-sm btn-outline" onclick="return confirm('Not all DoD gates have passed. Complete sprint anyway?')" style="font-size:11px;padding:2px 8px;opacity:.7">Override → Done</button>
+                </form>
+                {% endif %}
+              </div>
+              {% endif %}
+            </div>
+          </div>
+          {% if sf %}
+          <!-- Progress bar -->
+          {% if sf | length > 0 %}
+          <div style="background:var(--border);border-radius:3px;height:3px;overflow:hidden;margin-bottom:6px">
+            <div style="background:var(--green);height:100%;width:{{ ((sp | length / sf | length) * 100) | int }}%"></div>
+          </div>
+          {% endif %}
+          <!-- Feature list -->
+          <div style="display:flex;flex-direction:column;gap:4px">
+            {% for f in sf %}
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 6px;border-radius:4px;{% if f.status == 'Pushed' %}opacity:.6{% endif %}">
+              <div style="font-size:12px;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
                 {% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
               </div>
-              {% if f.story_points %}<div style="font-size:11px;color:var(--text-muted)">{{ f.story_points }} pt{% if f.story_points != 1 %}s{% endif %}</div>{% endif %}
+              <span class="badge badge-status-{{ f.status | lower }}" style="font-size:10px;flex-shrink:0;margin-left:6px">{{ f.status }}</span>
             </div>
-            <span class="badge badge-status-{{ f.status | lower }}" style="font-size:10px;flex-shrink:0;margin-left:8px">{{ f.status }}</span>
+            {% endfor %}
           </div>
-          {% endfor %}
+          {% else %}
+          <div style="font-size:11px;color:var(--text-muted);text-align:center;padding:6px 0">No features assigned</div>
+          {% endif %}
+          {% if sprint.release_notes %}
+          <details style="margin-top:8px">
+            <summary style="font-size:11px;color:var(--blue);cursor:pointer;user-select:none">📋 Release Notes</summary>
+            <div style="font-size:11px;color:var(--text);margin-top:6px;padding:8px;background:var(--bg);border-radius:6px;border:1px solid var(--border);white-space:pre-wrap;line-height:1.5">{{ sprint.release_notes }}</div>
+          </details>
+          {% endif %}
         </div>
         {% else %}
-        <div style="color:var(--text-muted);font-size:13px;text-align:center;padding:16px 0">No features assigned to this sprint yet.</div>
-        {% endif %}
-      </div>
-      {% endif %}
+        <div style="margin-left:12px;font-size:12px;color:var(--text-muted);padding:8px 0">No sprints in this phase yet.</div>
+        {% endfor %}
 
-      <!-- Backlog (Pending not in any sprint) -->
+      </div>
+      {% endfor %}
+
+      {% else %}
+      <!-- No phases yet — show backlog -->
       {% set backlog = features | selectattr('status', 'equalto', 'Pending') | selectattr('sprint_id', 'none') | list %}
+      {% set approved_unplanned = features | selectattr('status', 'equalto', 'Approved') | selectattr('sprint_id', 'none') | list %}
+      {% set unplanned = (backlog + approved_unplanned) | sort(attribute='priority', reverse=True) %}
       <div class="card">
         <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px">
-          📋 Backlog
-          <span style="color:var(--text-muted);font-weight:400;margin-left:6px">({{ backlog | length }} pending, unassigned)</span>
+          📋 Unplanned Backlog
+          <span style="color:var(--text-muted);font-weight:400;margin-left:6px">({{ unplanned | length }} features)</span>
         </div>
-        {% if backlog %}
+        {% if unplanned %}
         <div style="display:flex;flex-direction:column;gap:5px">
-          {% for f in backlog | sort(attribute='priority') %}
+          {% for f in unplanned %}
           <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;background:var(--surface);border-radius:6px;border:1px solid var(--border)">
             <div style="min-width:0;flex:1">
               <div style="font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
                 {% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
               </div>
-              <div style="font-size:11px;color:var(--text-muted)">p{{ f.priority }}{% if f.story_points %} · {{ f.story_points }}pts{% endif %}{% if f.due_date %} · due {{ f.due_date }}{% endif %}</div>
+              <div style="font-size:11px;color:var(--text-muted)">{{ f.status }} · p{{ f.priority }}</div>
             </div>
-            {% if active_sprint %}
-            <form method="post" action="/product/{{ product.id }}/features/{{ f.id }}/assign-sprint" style="display:inline;margin-left:8px">
-              <input type="hidden" name="sprint_id" value="{{ active_sprint.id }}">
-              <button class="btn btn-sm btn-outline" style="font-size:11px;padding:2px 8px">+ Sprint</button>
-            </form>
-            {% endif %}
           </div>
           {% endfor %}
         </div>
         {% else %}
-        <div style="color:var(--text-muted);font-size:13px;text-align:center;padding:16px 0">No pending features outside a sprint.</div>
+        <div style="color:var(--text-muted);font-size:13px;text-align:center;padding:16px 0">Backlog is empty.</div>
         {% endif %}
       </div>
+      {% endif %}
     </div>
 
-    <!-- RIGHT: Create sprint + past sprints + labels -->
+    <!-- RIGHT: Labels + manual sprint creation -->
     <div>
-
-      <!-- Create Sprint -->
-      <div class="card" style="margin-bottom:16px">
-        <div class="settings-card-title" style="margin-bottom:12px">
-          <span class="title-icon" style="background:var(--purple-lt)">🏃</span>
-          New Sprint
-        </div>
-        <form method="post" action="/product/{{ product.id }}/sprints/create">
-          <div class="form-group" style="margin-bottom:8px">
-            <input type="text" name="name" placeholder="Sprint name (e.g. Sprint 2)" required style="width:100%">
-          </div>
-          <div class="form-group" style="margin-bottom:8px">
-            <input type="text" name="goal" placeholder="Sprint goal (optional)" style="width:100%">
-          </div>
-          <div style="display:flex;gap:8px;margin-bottom:8px">
-            <input type="date" name="start_date" style="flex:1" title="Start date">
-            <input type="date" name="end_date" style="flex:1" title="End date">
-          </div>
-          <button type="submit" class="btn btn-green" style="width:100%">Create Sprint</button>
-        </form>
-      </div>
 
       <!-- Labels -->
       {% if labels %}
@@ -429,29 +500,14 @@ const PRODUCT_ID = {{ product.id }};
       </div>
       {% endif %}
 
-      <!-- Past Sprints -->
-      {% set past_sprints = sprints | selectattr('status', 'equalto', 'completed') | list %}
-      {% if past_sprints %}
+      <!-- Re-plan sprints -->
+      {% if phases %}
       <div class="card">
-        <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px">🏁 Completed Sprints</div>
-        <div style="display:flex;flex-direction:column;gap:8px">
-          {% for s in past_sprints %}
-          {% set s_feats   = features | selectattr('sprint_id', 'equalto', s.id) | list %}
-          {% set s_pushed  = s_feats  | selectattr('status', 'equalto', 'Pushed') | list %}
-          <div style="padding:8px 10px;background:var(--surface);border-radius:6px;border:1px solid var(--border)">
-            <div style="display:flex;justify-content:space-between;align-items:center">
-              <span style="font-size:13px;font-weight:500;color:var(--text)">{{ s.name }}</span>
-              <span style="font-size:11px;color:var(--text-muted)">{{ s_pushed | length }}/{{ s_feats | length }} shipped</span>
-            </div>
-            {% if s.goal %}<div style="font-size:11px;color:var(--text-muted);margin-top:2px">{{ s.goal }}</div>{% endif %}
-            {% if s.start_date or s.end_date %}
-            <div style="font-size:11px;color:var(--text-muted);margin-top:2px">
-              {% if s.start_date %}{{ s.start_date }}{% endif %}{% if s.end_date %} → {{ s.end_date }}{% endif %}
-            </div>
-            {% endif %}
-          </div>
-          {% endfor %}
-        </div>
+        <div style="font-size:13px;font-weight:600;color:var(--dark);margin-bottom:8px">Re-plan</div>
+        <p style="font-size:12px;color:var(--slate);margin-bottom:10px">Delete existing phases and re-plan from approved features.</p>
+        <form method="post" action="/product/{{ product.id }}/plan-sprints" onsubmit="return confirm('This will delete existing phases/sprints and re-plan. Continue?')">
+          <button class="btn btn-outline" style="width:100%">Re-plan Phases</button>
+        </form>
       </div>
       {% endif %}
 
@@ -535,8 +591,12 @@ const PRODUCT_ID = {{ product.id }};
           <span class="persona-badge persona-devops">⚙ DevOps</span>
         {% elif s.persona == 'analytics' %}
           <span class="persona-badge persona-analytics">📊 Analytics</span>
+        {% elif s.persona == 'product_planner' %}
+          <span class="persona-badge persona-designer">📋 Product Planner</span>
+        {% elif s.persona == 'retrospective' %}
+          <span class="persona-badge persona-planner">🔁 Retrospective</span>
         {% elif s.persona %}
-          <span class="persona-badge persona-coder">⚙ {{ s.persona | capitalize }}</span>
+          <span class="persona-badge persona-coder">⚙ {{ s.persona | replace('_', ' ') | title }}</span>
         {% else %}
           <span class="persona-badge" style="color:var(--slate)">—</span>
         {% endif %}
@@ -674,13 +734,6 @@ const PRODUCT_ID = {{ product.id }};
                  placeholder="e.g. 3" style="width:120px">
           <p class="field-hint">Maximum number of sessions to run per day. Leave blank for unlimited.</p>
         </div>
-        <div class="form-group">
-          <label>Max features per run</label>
-          <input type="number" name="max_features_per_run" min="1" max="20"
-                 value="{{ product.max_features_per_run or '' }}"
-                 placeholder="e.g. 1" style="width:120px">
-          <p class="field-hint">How many features the agent implements in one session. Leave blank to use the global default ({{ max_features_default }}).</p>
-        </div>
         <button type="submit">Save schedule</button>
       </form>
     </div>
@@ -706,482 +759,26 @@ const PRODUCT_ID = {{ product.id }};
 </div>
 
 
-<script>
-// ── GLOBAL HELPERS ────────────────────────────────────────
-function escHtmlGlobal(s) {
-  return String(s)
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-}
+  </div><!-- /pf-content -->
+</div><!-- /pf-layout-sidebar -->
 
-// ── TAB SWITCHING ─────────────────────────────────────────
-const TAB_IDS = ['board','sprints','prs','history','videos','live','settings'];
+<!-- ── Feature Detail Slide-Out Panel ──────────────────────── -->
+<div class="pf-panel-backdrop" id="feature-panel-backdrop" onclick="closeFeaturePanel()"></div>
+<div class="pf-panel" id="feature-panel">
+  <div class="pf-panel__header">
+    <span class="pf-panel__title" id="fp-title">Feature</span>
+    <button class="pf-panel__close" onclick="closeFeaturePanel()" aria-label="Close" title="Close">✕</button>
+  </div>
+  <div class="pf-panel__body" id="fp-body">
+    <!-- Populated by feature-panel.js -->
+  </div>
+</div>
 
-function switchTab(name, btn) {
-  TAB_IDS.forEach(id => {
-    document.getElementById('tab-' + id).style.display = id === name ? '' : 'none';
-  });
-  document.querySelectorAll('.product-tab').forEach(b => b.classList.remove('active'));
-  if (btn) btn.classList.add('active');
-  history.replaceState(null, '', `?tab=${name}`);
-}
-
-// Restore tab from URL on load
-(function() {
-  const params = new URLSearchParams(window.location.search);
-  const tab = params.get('tab') || 'board';
-  const btn = document.querySelector(`.product-tab[onclick*="'${tab}'"]`);
-  if (tab !== 'board') switchTab(tab, btn);
-})();
-
-
-// ── PHASE TABS ─────────────────────────────────────────────
-function switchPhase(phase) {
-  document.querySelectorAll('.phase-panel').forEach(p => p.style.display = 'none');
-  document.querySelectorAll('.phase-tab').forEach(t => t.classList.remove('active'));
-  const panel = document.getElementById('phase-' + phase);
-  if (panel) panel.style.display = '';
-  const btn = document.querySelector(`.phase-tab[data-phase="${phase}"]`);
-  if (btn) btn.classList.add('active');
-  localStorage.setItem('pf-phase', phase);
-}
-
-// Restore last phase or default to first with features
-(function() {
-  const saved = localStorage.getItem('pf-phase');
-  const phases = ['Pending','Approved','Designing','Designed','Implementing','Reviewing','Reviewed','Blocked','Pushed'];
-  // Pick saved phase if valid, else first phase that has features, else Pending
-  let active = saved && phases.includes(saved) ? saved : null;
-  if (!active) {
-    active = phases.find(p => document.getElementById('phase-' + p)?.querySelector('.phase-card')) || 'Pending';
-  }
-  switchPhase(active);
-})();
-
-// ── DRAG AND DROP ─────────────────────────────────────────
-let dragFeatureId = null;
-let dragSourceStatus = null;
-
-function onDragStart(e, card) {
-  dragFeatureId    = card.dataset.featureId;
-  dragSourceStatus = card.dataset.status;
-  card.classList.add('dragging');
-  e.dataTransfer.effectAllowed = 'move';
-}
-
-function onDragEnd(card) {
-  card.classList.remove('dragging');
-  document.querySelectorAll('.kanban-col').forEach(c => c.classList.remove('drag-over','drag-invalid'));
-}
-
-function onDragOver(e, col) {
-  e.preventDefault();
-  const target  = col.dataset.status;
-  const allowed = PM_TRANSITIONS[dragSourceStatus] || [];
-  if (target === dragSourceStatus) return;
-  col.classList.remove('drag-over','drag-invalid');
-  col.classList.add(allowed.includes(target) ? 'drag-over' : 'drag-invalid');
-  e.dataTransfer.dropEffect = allowed.includes(target) ? 'move' : 'none';
-}
-
-function onDragLeave(col) {
-  col.classList.remove('drag-over','drag-invalid');
-}
-
-async function onDrop(e, col) {
-  e.preventDefault();
-  col.classList.remove('drag-over','drag-invalid');
-  const target  = col.dataset.status;
-  if (!dragFeatureId || target === dragSourceStatus) return;
-  const allowed = PM_TRANSITIONS[dragSourceStatus] || [];
-  if (!allowed.includes(target)) return;
-
-  const card = document.querySelector(`[data-feature-id="${dragFeatureId}"]`);
-  const emptyEl = col.querySelector('.kanban-empty');
-  if (emptyEl) emptyEl.remove();
-  card.dataset.status = target;
-  col.appendChild(card);
-  updateCounts();
-
-  const srcCol = document.querySelector(`.kanban-col[data-status="${dragSourceStatus}"]`);
-  if (!srcCol.querySelector('.feature-card')) {
-    const ghost = document.createElement('div');
-    ghost.className = 'kanban-empty';
-    ghost.textContent = 'Drop here';
-    srcCol.appendChild(ghost);
-  }
-  updateCounts();
-
-  try {
-    const r = await fetch(`/product/${PRODUCT_ID}/features/${dragFeatureId}/status`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: `status=${encodeURIComponent(target)}`,
-    });
-    if (!r.ok) throw new Error('rejected');
-    dragSourceStatus = target;
-    showToast('success', `Moved to ${target}.`);
-  } catch {
-    showToast('error', 'Move failed — reloading…');
-    setTimeout(() => location.reload(), 1500);
-  }
-}
-
-function updateCounts() {
-  document.querySelectorAll('.kanban-col').forEach(col => {
-    const n  = col.querySelectorAll('.feature-card').length;
-    const el = document.getElementById('count-' + col.dataset.status);
-    if (el) el.textContent = n;
-    const toggle = col.querySelector('.col-toggle');
-    if (n === 0 && !col.classList.contains('col-empty')) {
-      col.classList.add('col-empty');
-      if (toggle) toggle.textContent = '▶';
-    } else if (n > 0 && col.classList.contains('col-empty')) {
-      col.classList.remove('col-empty');
-      if (toggle) toggle.textContent = '▼';
-    }
-  });
-}
-
-
-// ── BULK APPROVE ──────────────────────────────────────────
-const selectedIds = new Set();
-
-function toggleSelect(id, cb) {
-  cb.checked ? selectedIds.add(id) : selectedIds.delete(id);
-  updateBulkBar();
-}
-
-function updateBulkBar() {
-  const bar = document.getElementById('bulk-bar');
-  document.getElementById('bulk-count').textContent = `${selectedIds.size} selected`;
-  document.getElementById('bulk-ids').value = [...selectedIds].join(',');
-  bar.classList.toggle('visible', selectedIds.size > 0);
-}
-
-function clearSelection() {
-  selectedIds.clear();
-  document.querySelectorAll('.feature-checkbox').forEach(cb => cb.checked = false);
-  updateBulkBar();
-}
-
-
-// ── FEATURE TEMPLATES ─────────────────────────────────────
-function toggleTemplates() {
-  const p = document.getElementById('template-panel');
-  p.style.display = p.style.display === 'none' ? '' : 'none';
-}
-
-function applyTemplate(name, desc) {
-  document.getElementById('feat-name').value = name;
-  document.getElementById('feat-desc').value = desc;
-  document.getElementById('template-panel').style.display = 'none';
-  document.getElementById('feat-name').focus();
-}
-
-
-// ── VIDEOS ────────────────────────────────────────────────
-let _videosLoaded = false;
-
-async function loadVideos() {
-  if (_videosLoaded) return;
-  _videosLoaded = true;
-  const loading = document.getElementById('videos-loading');
-  const grid    = document.getElementById('videos-grid');
-  const empty   = document.getElementById('videos-empty');
-  try {
-    const r = await fetch(`/api/products/${PRODUCT_ID}/videos`);
-    const videos = await r.json();
-    loading.style.display = 'none';
-    if (!videos.length) { empty.style.display = ''; return; }
-    grid.style.display = '';
-    grid.innerHTML = videos.map(v => `
-      <div class="video-card">
-        <video controls preload="metadata" style="width:100%;border-radius:6px;background:#000">
-          <source src="${v.url}" type="video/mp4">
-        </video>
-        <div class="video-meta">
-          <span class="video-name">${v.filename}</span>
-          <span class="video-size">${v.size_mb} MB</span>
-          <a href="${v.url}" download class="btn btn-outline" style="padding:3px 10px;font-size:12px">⬇ Download</a>
-        </div>
-      </div>`).join('');
-  } catch(e) {
-    loading.textContent = 'Failed to load videos.';
-  }
-}
-
-// Auto-load if videos tab is active on page load
-(function() {
-  const params = new URLSearchParams(window.location.search);
-  if (params.get('tab') === 'videos') loadVideos();
-})();
-
-
-// ── SESSION LOG STREAMING ─────────────────────────────────
-let evtSource   = null;
-let sessionStart = null;
-let elapsedTimer = null;
-let thinkingTimer = null;
-let _atBottom = true;
-
-function scrollToBottom() {
-  const t = document.getElementById('session-terminal');
-  t.scrollTop = t.scrollHeight;
-  document.getElementById('new-msg-pill').classList.remove('visible');
-  document.getElementById('scroll-btn').classList.remove('visible');
-  _atBottom = true;
-}
-
-function toggleSession() {
-  if (evtSource) {
-    evtSource.close(); evtSource = null;
-    clearInterval(elapsedTimer); elapsedTimer = null;
-    clearTimeout(thinkingTimer);
-    document.getElementById('session-dot').classList.remove('live');
-    document.getElementById('session-toggle').textContent = 'Connect';
-    document.getElementById('session-elapsed').style.display = 'none';
-    document.getElementById('session-thinking').classList.remove('visible');
-    return;
-  }
-  const terminal = document.getElementById('session-terminal');
-  terminal.innerHTML = '';
-  _atBottom = true;
-  sessionStart = Date.now();
-  evtSource = new EventSource(`/api/products/${PRODUCT_ID}/session/stream`);
-  document.getElementById('session-dot').classList.add('live');
-  document.getElementById('session-toggle').textContent = 'Disconnect';
-
-  // Elapsed timer
-  const elapsedEl = document.getElementById('session-elapsed');
-  elapsedEl.style.display = '';
-  elapsedTimer = setInterval(() => {
-    const s = Math.floor((Date.now() - sessionStart) / 1000);
-    elapsedEl.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
-  }, 1000);
-
-  // Thinking indicator — shows when no output for >3s
-  function resetThinking() {
-    clearTimeout(thinkingTimer);
-    document.getElementById('session-thinking').classList.remove('visible');
-    thinkingTimer = setTimeout(() => {
-      if (evtSource) document.getElementById('session-thinking').classList.add('visible');
-    }, 3000);
-  }
-  resetThinking();
-
-  evtSource.onmessage = (e) => {
-    const line = JSON.parse(e.data);
-    appendLine(terminal, line);
-    resetThinking();
-  };
-  evtSource.onerror = () => {
-    appendLine(terminal, '— connection lost —', 'err');
-    document.getElementById('session-dot').classList.remove('live');
-    document.getElementById('session-thinking').classList.remove('visible');
-  };
-
-  // Scroll tracker
-  terminal.addEventListener('scroll', () => {
-    const atBottom = terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight < 40;
-    _atBottom = atBottom;
-    if (atBottom) {
-      document.getElementById('new-msg-pill').classList.remove('visible');
-      document.getElementById('scroll-btn').classList.remove('visible');
-    } else {
-      document.getElementById('scroll-btn').classList.add('visible');
-    }
-  });
-}
-
-function appendLine(terminal, text, cls) {
-  const empty = terminal.querySelector('.log-empty');
-  if (empty) empty.remove();
-  const el = document.createElement('span');
-  let lineCls = 'log-line';
-  if (cls) lineCls += ' ' + cls;
-  else if (text.startsWith('[PM]')) lineCls += ' pm-msg';
-  else if (/error|failed|exception/i.test(text)) lineCls += ' err';
-  else if (/^\[Tool:/i.test(text)) lineCls += ' tool-call';
-  el.className = lineCls;
-  el.textContent = text;
-  terminal.appendChild(el);
-  terminal.appendChild(document.createElement('br'));
-  if (_atBottom) {
-    terminal.scrollTop = terminal.scrollHeight;
-  } else {
-    document.getElementById('new-msg-pill').classList.add('visible');
-  }
-}
-
-async function sendMessage() {
-  const input = document.getElementById('session-msg');
-  const msg = input.value.trim();
-  if (!msg) return;
-  input.value = '';
-  try {
-    await fetch(`/api/products/${PRODUCT_ID}/session/message`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ message: msg }),
-    });
-    showToast('info', 'Message sent to Claude.');
-  } catch(e) {
-    showToast('error', 'Failed to send message.');
-  }
-}
-
-// ── HISTORY: row expand ──────────────────────────────────
-const _histLoaded = new Set();
-const STATUS_ICONS = {
-  Pushed:'✅', Reviewing:'🔍', Reviewed:'🔍', Designed:'✏️', Designing:'✏️',
-  Implementing:'⚙️', Approved:'👍', Pending:'⏳', Blocked:'🚫',
-  Deferred:'⏸️', Rejected:'❌', Reverted:'↩️',
-};
-async function toggleHistoryRow(row) {
-  const sid = row.dataset.sessionId;
-  const detailRow = document.getElementById('hist-detail-' + sid);
-  const chevron = row.querySelector('.hist-chevron');
-  const open = detailRow.style.display !== 'none';
-  if (open) {
-    detailRow.style.display = 'none';
-    row.classList.remove('hist-open');
-    chevron.textContent = '▶';
-    return;
-  }
-  detailRow.style.display = 'table-row';
-  row.classList.add('hist-open');
-  chevron.textContent = '▼';
-  if (_histLoaded.has(sid)) return;
-  _histLoaded.add(sid);
-  try {
-    const r = await fetch('/api/sessions/' + sid);
-    const d = await r.json();
-    const body = document.getElementById('hist-detail-body-' + sid);
-
-    const fmtDur = s => s == null ? null : `${Math.floor(s/60)}m ${s%60}s`;
-    const fmtTime = s => s ? s.replace('T',' ').slice(0,19) : null;
-
-    // ── Meta strip ──
-    const meta = [
-      ['Persona',   d.persona || '—'],
-      ['Started',   fmtTime(d.started_at) || '—'],
-      ['Ended',     fmtTime(d.ended_at) || 'Still running'],
-      ['Duration',  fmtDur(d.duration_seconds) || '—'],
-      ['Exit code', d.exit_code != null ? (d.exit_code === 0 ? '✓ 0 (OK)' : `✗ ${d.exit_code}`) : '—'],
-      d.tokens_input || d.tokens_output
-        ? ['Tokens', `${(d.tokens_input||0).toLocaleString()} in / ${(d.tokens_output||0).toLocaleString()} out`]
-        : null,
-      d.cost_usd != null ? ['Cost', '$' + d.cost_usd.toFixed(4)] : null,
-      d.notes ? ['Notes', d.notes] : null,
-    ].filter(Boolean);
-
-    const metaHtml = `<div class="hist-meta-strip">` +
-      meta.map(([k,v]) => `<div class="hist-kv"><span>${k}</span><span>${escHtmlGlobal(String(v))}</span></div>`).join('') +
-      `</div>`;
-
-    // ── Activity timeline (features touched during session) ──
-    let actHtml = '';
-    if (d.activities && d.activities.length) {
-      // Merge with reviews by feature name for richer display
-      const reviewMap = {};
-      (d.reviews || []).forEach(rv => { reviewMap[rv.feature_name] = rv; });
-
-      actHtml = `<div class="hist-section-title">Features touched (${d.activities.length})</div>
-        <div class="hist-timeline">` +
-        d.activities.map(a => {
-          const icon = STATUS_ICONS[a.status] || '•';
-          const rv = reviewMap[a.name];
-          const rvBadge = rv
-            ? `<span class="hist-review-outcome ${rv.outcome==='approved'?'rv-ok':'rv-changes'}">${rv.outcome==='approved'?'✓ Approved':'↩ Changes'}</span>`
-            : '';
-          const prLink = a.pr_url
-            ? `<a href="${a.pr_url}" target="_blank" class="pr-link" onclick="event.stopPropagation()">PR #${a.pr_number} ↗</a>`
-            : '';
-          const typeLabel = a.feature_type !== 'feature'
-            ? `<span class="type-badge type-${a.feature_type}">${a.feature_type}</span>` : '';
-          const rvNotes = rv && rv.notes
-            ? `<div class="hist-review-notes">${escHtmlGlobal(rv.notes.slice(0,200))}${rv.notes.length>200?'…':''}</div>` : '';
-          return `<div class="hist-act-row">
-            <span class="hist-act-icon">${icon}</span>
-            <div class="hist-act-body">
-              <span class="hist-act-name">${escHtmlGlobal(a.name)}</span>
-              <span class="badge badge-status-${a.status.toLowerCase()}">${a.status}</span>
-              ${typeLabel}${rvBadge}${prLink}
-              ${rvNotes}
-            </div>
-            <span class="hist-act-time">${fmtTime(a.updated_at).slice(11)}</span>
-          </div>`;
-        }).join('') + `</div>`;
-    } else if (!d.reviews || !d.reviews.length) {
-      actHtml = `<div class="hist-empty-act">No feature activity recorded for this session.</div>`;
-    }
-
-    // ── Standalone reviews (reviewer persona, not in activities) ──
-    const actNames = new Set((d.activities||[]).map(a=>a.name));
-    const extraReviews = (d.reviews||[]).filter(rv => !actNames.has(rv.feature_name));
-    let rvHtml = '';
-    if (extraReviews.length) {
-      rvHtml = `<div class="hist-section-title">Code Reviews</div><div class="hist-reviews">` +
-        extraReviews.map(rv => `<div class="hist-review-item">
-          <span class="hist-review-feature">${escHtmlGlobal(rv.feature_name)}</span>
-          <span class="hist-review-outcome ${rv.outcome==='approved'?'rv-ok':'rv-changes'}">${rv.outcome==='approved'?'✓ Approved':'↩ Changes requested'}</span>
-          ${rv.notes?`<div class="hist-review-notes">${escHtmlGlobal(rv.notes.slice(0,200))}${rv.notes.length>200?'…':''}</div>`:''}
-        </div>`).join('') + `</div>`;
-    }
-
-    body.innerHTML = metaHtml + actHtml + rvHtml;
-  } catch(e) {
-    document.getElementById('hist-detail-body-' + sid).innerHTML =
-      `<span style="color:var(--red)">Failed to load details: ${escHtmlGlobal(String(e))}</span>`;
-  }
-}
-
-async function clearHistory(productId) {
-  if (!confirm('Delete all session history for this product?')) return;
-  try {
-    const r = await fetch(`/api/products/${productId}/sessions`, {method:'DELETE'});
-    const d = await r.json();
-    if (r.ok) {
-      document.querySelector('#tab-history table')?.remove();
-      document.querySelector('#tab-history .btn-danger')?.parentElement?.remove();
-      document.getElementById('tab-history').innerHTML +=
-        '<div class="empty-state"><div class="empty-icon">📂</div><h2>No sessions yet</h2><p>Sessions appear here once the poller runs Claude on this product.</p></div>';
-      showToast('success', `Cleared ${d.deleted} session(s)`);
-    } else {
-      showToast('error', 'Failed to clear history');
-    }
-  } catch(e) { showToast('error', 'Failed to clear history'); }
-}
-
-// ── KANBAN: collapse/expand columns ──────────────────────
-function toggleColCollapse(col) {
-  const isEmpty = col.querySelectorAll('.feature-card').length === 0;
-  const isCollapsed = col.classList.contains('col-empty');
-  if (isCollapsed) {
-    col.classList.remove('col-empty');
-    const toggle = col.querySelector('.col-toggle');
-    if (toggle) toggle.textContent = '▼';
-  } else if (isEmpty) {
-    // Only collapse if no cards
-    col.classList.add('col-empty');
-    const toggle = col.querySelector('.col-toggle');
-    if (toggle) toggle.textContent = '▶';
-  }
-}
-
-function expandCol(col) {
-  col.classList.remove('col-empty');
-  const toggle = col.querySelector('.col-toggle');
-  if (toggle) toggle.textContent = '▼';
-}
-
-// ── TOOL CALL STYLING (add to CSS via JS) ─────────────────
-(function() {
-  const s = document.createElement('style');
-  s.textContent = '.session-terminal .log-line.tool-call { color: #818cf8; }';
-  document.head.appendChild(s);
-})();
-</script>
+{% block scripts %}
+<script src="/static/js/board.js"></script>
+<script src="/static/js/session.js"></script>
+<script src="/static/js/history.js"></script>
+<script src="/static/js/feature-panel.js"></script>
+{% endblock %}
 
 {% endblock %}

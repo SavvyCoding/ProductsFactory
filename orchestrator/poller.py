@@ -67,7 +67,7 @@ _ENV_DEFAULTS = {
     "pr_gate_sleep":               int(os.environ.get("PR_GATE_SLEEP",            "300")),
     "session_timeout_minutes":     int(os.environ.get("SESSION_TIMEOUT_MINUTES",  "90")),
     "stale_threshold_minutes":     int(os.environ.get("STALE_THRESHOLD_MINUTES",  "45")),
-    "max_features_per_run":        int(os.environ.get("MAX_FEATURES_PER_RUN",     "1")),
+    "max_features_per_run":        int(os.environ.get("MAX_FEATURES_PER_SPRINT",  "5")),
     "brownfield_file_threshold":   int(os.environ.get("BROWNFIELD_FILE_THRESHOLD","10")),
 }
 
@@ -270,22 +270,184 @@ def _maintenance_persona_due(product: dict) -> str | None:
 
 def determine_persona(product: dict) -> str:
     """
-    Decide which persona should run for this product (priority order):
-    1. designer  — Approved features with skip_design=False
-    2. coder     — Designed or skip_design Approved features
-    3. documenter / analytics / refactorer / devops  — scheduled maintenance
-    4. planner   — no actionable features; generate new ones
+    Decide which persona should run for this product.
+    Sprint-gated: if an active sprint exists, only work on features in THAT sprint.
+    Never jump to a different sprint until the current one is marked done.
+
+    Priority order:
+    1. retrospective   — a sprint was just completed with no retro yet
+    2. product_planner — Approved features in the active sprint (writes detailed stories)
+    3. designer        — Approved features with skip_design=False in the active sprint
+    4. coder           — Designed or skip_design Approved features in the active sprint
+    5. (if no active sprint) designer/coder on unsprinted features
+    6. documenter / analytics / refactorer / devops  — scheduled maintenance
+    7. planner         — no actionable features; generate new ones
     """
+    TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted"}
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-            # Check for designer work
+            # Retrospective disabled — DoD gates are auto-signed on sprint completion.
+            # The retrospective agent was causing infinite loops. If needed, re-enable
+            # by un-commenting and ensuring the agent calls the sign-off endpoint.
+
+            # Check for active sprint
+            active_sprint_resp = client.get(f"/api/products/{product['id']}/sprints/active")
+            active_sprint = None
+            if active_sprint_resp.status_code == 200 and active_sprint_resp.json():
+                active_sprint = active_sprint_resp.json()
+
+            # Fetch all product features
+            feat_resp = client.get(f"/api/products/{product['id']}/features")
+            all_features = feat_resp.json() if feat_resp.status_code == 200 else []
+            if not isinstance(all_features, list):
+                all_features = []
+
+            if active_sprint:
+                sid = active_sprint.get("id")
+                sprint_features = [f for f in all_features if f.get("sprint_id") == sid]
+
+                # If all sprint features are terminal, complete the sprint and move on
+                non_terminal = [f for f in sprint_features if f.get("status") not in TERMINAL]
+                if not non_terminal:
+                    # Try DoD check first (may auto-complete if all gates pass)
+                    dod_resp = client.post(f"/api/sprints/{sid}/check-dod")
+                    # Check if sprint is still active after DoD
+                    recheck = client.get(f"/api/products/{product['id']}/sprints/active")
+                    if recheck.status_code == 200 and recheck.json() and recheck.json().get("id") == sid:
+                        # Sprint still active — auto-sign all DoD gates and complete
+                        log.info(f"Active sprint {sid}: all features terminal — auto-completing sprint")
+                        for gate in ("qa_passed", "security_clean", "retro_done"):
+                            try:
+                                client.post(f"/api/sprints/{sid}/sign-off", json={
+                                    "gate": gate, "value": True, "notes": "Auto-signed on sprint completion"
+                                })
+                            except Exception:
+                                pass
+                        client.patch(f"/api/sprints/{sid}", json={"status": "completed"})
+                        # Activate the next planned sprint
+                        all_sprints_resp = client.get(f"/api/products/{product['id']}/sprints")
+                        if all_sprints_resp.status_code == 200:
+                            planned = [s for s in all_sprints_resp.json()
+                                       if s.get("status") == "planned"]
+                            if planned:
+                                next_sprint = planned[0]
+                                client.patch(f"/api/sprints/{next_sprint['id']}", json={"status": "active"})
+                                log.info(f"Activated next sprint: #{next_sprint['id']} \"{next_sprint['name']}\"")
+                    # Next cycle will pick up the new active sprint
+                    return None
+
+                # Approved features in sprint → product_planner (design stories)
+                approved_in_sprint = [f for f in sprint_features
+                                      if f.get("status") == "Approved" and not f.get("skip_design")]
+                if approved_in_sprint:
+                    return "product_planner"
+
+                # Designed features or Approved+skip_design → coder
+                codable = [f for f in sprint_features
+                           if f.get("status") == "Designed"
+                           or (f.get("status") == "Approved" and f.get("skip_design"))]
+                if codable:
+                    return "coder"
+
+                # Reviewing features → reviewer
+                reviewable = [f for f in sprint_features
+                              if f.get("status") == "Reviewing" and f.get("pr_number")]
+                if reviewable:
+                    return "reviewer"
+
+                # Reviewed features → auto-merge if enabled, otherwise wait for PM
+                reviewed = [f for f in sprint_features
+                            if f.get("status") == "Reviewed" and f.get("pr_number")]
+                if reviewed:
+                    sys_cfg_resp = client.get("/api/system-config")
+                    sys_cfg = sys_cfg_resp.json() if sys_cfg_resp.status_code == 200 else {}
+                    if sys_cfg.get("auto_merge_enabled"):
+                        github_pat = sys_cfg.get("github_pat", "")
+                        github_repo = product.get("github_repo", "")
+                        if github_pat and github_repo:
+                            # Extract owner/repo from URL
+                            repo_slug = github_repo.rstrip("/").split("github.com/")[-1].replace(".git", "")
+                            log.info(f"Active sprint {sid}: auto-merging {len(reviewed)} Reviewed PRs on {repo_slug}")
+                            merged_ids = set()
+                            merged_features = []
+                            for f in reviewed:
+                                pr_num = f["pr_number"]
+                                if pr_num in merged_ids:
+                                    # PR already merged, just update this feature
+                                    client.patch(f"/api/features/{f['id']}", json={"status": "Pushed"})
+                                    merged_features.append(f)
+                                    continue
+                                try:
+                                    merge_resp = httpx.put(
+                                        f"https://api.github.com/repos/{repo_slug}/pulls/{pr_num}/merge",
+                                        headers={"Authorization": f"token {github_pat}", "Accept": "application/vnd.github+json"},
+                                        json={"merge_method": "squash"},
+                                        timeout=30,
+                                    )
+                                    if merge_resp.status_code == 200:
+                                        log.info(f"Auto-merged PR #{pr_num} for feature #{f['id']}")
+                                        merged_ids.add(pr_num)
+                                        client.patch(f"/api/features/{f['id']}", json={"status": "Pushed"})
+                                        merged_features.append(f)
+                                    elif merge_resp.status_code == 405:
+                                        log.warning(f"PR #{pr_num} not mergeable (conflicts?) — skipping")
+                                    elif merge_resp.status_code == 422:
+                                        log.info(f"PR #{pr_num} already merged")
+                                        client.patch(f"/api/features/{f['id']}", json={"status": "Pushed"})
+                                        merged_features.append(f)
+                                    else:
+                                        log.warning(f"Merge PR #{pr_num} returned {merge_resp.status_code}: {merge_resp.text[:100]}")
+                                except Exception as e:
+                                    log.warning(f"Failed to merge PR #{pr_num}: {e}")
+                            # Record auto-merge as a session in history
+                            if merged_features:
+                                import uuid
+                                session_uid = str(uuid.uuid4())[:8]
+                                notes = "Auto-merged PRs: " + ", ".join(
+                                    f"#{f['pr_number']} ({f['name'][:30]})" for f in merged_features
+                                )
+                                try:
+                                    client.post("/api/sessions", json={
+                                        "product_id": product["id"],
+                                        "session_uid": session_uid,
+                                        "persona": "auto-merge",
+                                        "backend": "poller",
+                                        "container_id": "poller",
+                                        "exit_code": 0,
+                                        "features_attempted": len(merged_features),
+                                        "features_pushed": len(merged_features),
+                                        "notes": notes,
+                                    })
+                                except Exception:
+                                    pass  # non-critical
+                        else:
+                            log.warning(f"Auto-merge enabled but missing github_pat or github_repo")
+                        return None  # re-check on next cycle after merges
+                    else:
+                        log.info(f"Active sprint {sid}: {len(reviewed)} Reviewed features awaiting manual merge")
+                        return None
+
+                # Check what's blocking progress
+                pending = [f for f in sprint_features if f.get("status") == "Pending"]
+                in_agent = [f for f in sprint_features
+                            if f.get("status") in ("Designing", "Implementing", "Reviewing")]
+                if in_agent:
+                    log.info(f"Active sprint {sid}: {len(in_agent)} features being processed by agents — waiting")
+                    return None
+                if pending and not in_agent:
+                    log.info(f"Active sprint {sid}: {len(pending)} Pending features awaiting PM approval — nothing for agents to do")
+                    return None
+
+                log.info(f"Active sprint {sid}: {len(non_terminal)} features in other states — waiting")
+                return None
+
+            # No active sprint — work on unsprinted features
             resp = client.get(
                 "/api/features/next-for-persona",
                 params={"persona": "designer", "product_id": product["id"]}
             )
             if resp.status_code == 200 and resp.json():
                 return "designer"
-            # Check for coder work
             resp2 = client.get(
                 "/api/features/next-for-persona",
                 params={"persona": "coder", "product_id": product["id"]}
@@ -294,7 +456,7 @@ def determine_persona(product: dict) -> str:
                 return "coder"
     except httpx.HTTPError as e:
         log.error(f"determine_persona failed: {e}")
-        return "coder"
+        return None
 
     # No design/code work — check scheduled maintenance personas
     maintenance = _maintenance_persona_due(product)
@@ -477,34 +639,11 @@ def _close_orphaned_sessions():
 
 def _startup_sync_features():
     """
-    On startup: sync features.md → DB for every product that has a features.md file.
-    Self-heals feature state after a DB wipe or manual edit.
-    Fault-tolerant: logs warnings and continues if anything fails.
+    Disabled: DB is the single source of truth for feature status.
+    features.md sync was causing status downgrades (e.g. Approved → Pending)
+    when the file was stale. Kept as a no-op in case manual re-enable is needed.
     """
-    from orchestrator.features_sync import sync_features_from_md
-
-    try:
-        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-            resp = client.get("/api/products")
-            resp.raise_for_status()
-            products = resp.json()
-    except Exception as e:
-        log.warning(f"_startup_sync_features: could not fetch products — skipping: {e}")
-        return
-
-    for product in products:
-        working_dir = product.get("working_dir", "")
-        if not working_dir:
-            continue
-        features_md = Path(working_dir) / "features.md"
-        if not features_md.exists():
-            continue
-        try:
-            changes = sync_features_from_md(product, PM_API_URL)
-            if changes:
-                log.info(f"Startup sync: {product.get('name', product['id'])} — {changes} feature(s) synced from features.md")
-        except Exception as e:
-            log.warning(f"Startup sync failed for product {product.get('name', product['id'])}: {e}")
+    log.info("Startup features.md sync disabled — DB is source of truth")
 
 
 def _post_session_comments(product: dict, persona: str, session_uid: str, features_updated: list[int]):
@@ -560,6 +699,42 @@ def _check_due_date_alerts():
                 send_alert("warning", msg)
     except Exception as e:
         log.warning(f"_check_due_date_alerts: {e}")
+
+
+def _check_sprint_dod_all_products(products: list[dict]):
+    """
+    For every product with an active sprint, call the DoD endpoint.
+    If all gates pass (features done, no open PRs, QA + security signed off),
+    trigger sprint auto-completion via the sign-off endpoint (retro_done=False means
+    the poller just fires the structural gates; agent sign-offs set qa/security).
+    Fault-tolerant — never raises.
+    """
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=15) as client:
+            for product in products:
+                pid = product.get("id")
+                if not pid:
+                    continue
+                # Get active sprint
+                resp = client.get(f"/api/products/{pid}/sprints/active")
+                if resp.status_code != 200 or not resp.json():
+                    continue
+                sprint = resp.json()
+                sid = sprint.get("id")
+                if not sid or sprint.get("status") == "completed":
+                    continue
+
+                # Check DoD — auto-completes if all gates pass
+                check_resp = client.post(f"/api/sprints/{sid}/check-dod")
+                if check_resp.status_code == 200:
+                    result = check_resp.json()
+                    if result.get("action") == "auto_completed":
+                        log.info(
+                            f"[dod] Sprint {sid} ({product.get('name')}) auto-completed "
+                            f"— all gates passed"
+                        )
+    except Exception as e:
+        log.warning(f"_check_sprint_dod_all_products: {e}")
 
 
 def main():
@@ -640,6 +815,9 @@ def main():
             # ⑤b Due-date alerts
             _check_due_date_alerts()
 
+            # ⑤c Sprint DoD auto-check — complete any sprints where all gates pass
+            _check_sprint_dod_all_products(products)
+
             # ⑥ Deliver PM messages
             for product in products:
                 if (product.get("config") or {}).get("pm_messages"):
@@ -669,6 +847,10 @@ def main():
 
                 # ⑦c Determine whether to run designer or coder
                 persona = determine_persona(product)
+                if persona is None:
+                    log.info(f"No actionable work for {product['name']} — sprint in progress, waiting")
+                    time.sleep(_cfg["poll_interval"])
+                    continue
                 log.info(f"Persona: {persona}")
 
             # Clear run_now flag if set

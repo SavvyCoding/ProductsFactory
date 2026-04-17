@@ -289,8 +289,25 @@ class FeatureLabel(Base):
     label:   Mapped["Label"]   = relationship("Label", back_populates="features")
 
 
+class Phase(Base):
+    """Top-level planning container grouping sprints under a named phase."""
+    __tablename__ = "phases"
+    __table_args__ = (
+        CheckConstraint("status IN ('planned', 'active', 'completed')", name="ck_phases_status"),
+    )
+
+    id:         Mapped[int]           = mapped_column(Integer, primary_key=True)
+    product_id: Mapped[int]           = mapped_column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+    name:       Mapped[str]           = mapped_column(Text, nullable=False)
+    goal:       Mapped[Optional[str]] = mapped_column(Text)
+    order:      Mapped[int]           = mapped_column(Integer, nullable=False, default=0)
+    status:     Mapped[str]           = mapped_column(Text, nullable=False, default="planned")
+
+    sprints: Mapped[list["Sprint"]] = relationship("Sprint", back_populates="phase", order_by="Sprint.id")
+
+
 class Sprint(Base):
-    """Time-boxed batch of features per product."""
+    """Time-boxed batch of features per product, optionally grouped under a Phase."""
     __tablename__ = "sprints"
     __table_args__ = (
         CheckConstraint("status IN ('planned', 'active', 'completed')", name="ck_sprints_status"),
@@ -298,11 +315,18 @@ class Sprint(Base):
 
     id:         Mapped[int]           = mapped_column(Integer, primary_key=True)
     product_id: Mapped[int]           = mapped_column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+    phase_id:   Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("phases.id", ondelete="SET NULL"), nullable=True, index=True)
     name:       Mapped[str]           = mapped_column(Text, nullable=False)
     goal:       Mapped[Optional[str]] = mapped_column(Text)
     start_date: Mapped[Optional[date]] = mapped_column(Date)
     end_date:   Mapped[Optional[date]] = mapped_column(Date)
-    status:     Mapped[str]           = mapped_column(Text, nullable=False, default="active")
+    status:         Mapped[str]            = mapped_column(Text, nullable=False, default="active")
+    release_notes:  Mapped[Optional[str]]  = mapped_column(Text, nullable=True)
+    dod_status:     Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True, default=dict)
+    retro_doc_path: Mapped[Optional[str]]  = mapped_column(Text, nullable=True)
+    completed_at:   Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    phase: Mapped[Optional["Phase"]] = relationship("Phase", back_populates="sprints")
 
 
 class FeatureLink(Base):

@@ -77,7 +77,7 @@ Every `POLL_INTERVAL` seconds (default 60s), the poller:
 4. Checks globally for reviewer work (Reviewing+PR) — runs reviewer session first if found
 5. Checks for `run_trainer_now` products — runs Product Trainer if flagged
 6. Otherwise, selects next product: `run_now=True` products have priority, then `ORDER BY last_run_at ASC` (round-robin)
-7. Determines persona (designer vs coder) via `/api/features/next-for-persona`
+7. Determines persona via `/api/features/next-for-persona`; sprint-aware: checks for retrospective (completed sprint, no retro) → product_planner (active sprint, Approved features) → designer → coder → reviewer
 8. Coder: skips if ≥ MAX_OPEN_PRS open PRs; syncs merged/closed PRs from GitHub
 9. Reconciles in-flight PRs against GitHub (`reconcile_in_flight_prs`) — self-heals stuck features every cycle
 10. Launches `docker run --rm productfactory-agent claude -p {prompt} -e AGENT_PERSONA={persona}`
@@ -108,7 +108,11 @@ For brownfield products (existing repos), `setup_product.py` only installs templ
 
 ### Multi-Agent Personas
 
-Eleven personas run as separate Docker sessions, in priority order:
+Thirteen personas run as separate Docker sessions, in priority order:
+
+**Sprint-driven** (checked first when a sprint is active):
+- **Product Planner** (`product_planner.md`): Writes detailed user story docs (`docs/story_{NNN}.md`) for `Approved` features in the active sprint; sets `Designed`. Triggered when an active sprint has Approved features with no design doc.
+- **Retrospective** (`retrospective.md`): Runs after sprint completion — writes `docs/retro_sprint_{ID}.md`, files chore features for action items, calls `POST /api/sprints/{id}/sign-off` with `gate=retro_done`. Triggered when a sprint is `completed` but has no `retro_doc_path`.
 
 **Feature delivery pipeline** (triggered by feature backlog state):
 - **Designer** (`designer.md`): Picks `Approved` features (skip_design=False), writes `docs/feature_NNN_design.md`, sets `Designed`
@@ -116,8 +120,8 @@ Eleven personas run as separate Docker sessions, in priority order:
 - **Reviewer** (`reviewer.md`): Picks `Reviewing` features with PR numbers, reviews diff, approves or requests changes, sets `Reviewed`
 
 **Post-coder chain** (run automatically in `docker_runner.py` after every successful coder session):
-- **QA Tester** (`qa_tester.md`): Adds automated tests to the open PR branch, commits and pushes
-- **Security Auditor** (`security_auditor.md`): Audits PR diff for OWASP issues, files `bug` features for any found
+- **QA Tester** (`qa_tester.md`): Adds automated tests to the open PR branch, commits and pushes; calls sign-off `gate=qa_passed` on the sprint
+- **Security Auditor** (`security_auditor.md`): Audits PR diff for OWASP issues, files `bug` features for any found; calls sign-off `gate=security_clean` on the sprint
 - **Recommender** (`recommender.md`): Searches competitors, POSTs new feature ideas with `source: "ai"` (gated by pending feature count)
 
 **Scheduled maintenance** (run by `determine_persona()` when no feature work exists, on a schedule stored in `product.config`):
@@ -144,6 +148,20 @@ registered → discovered → ready → [running] → (repeats)
 Feature states: `Pending → Approved → [Designing → Designed →] Implementing → Reviewing → [Reviewed →] Pushed` (also: `Deferred`, `Blocked`, `Rejected`, `Reverted`)
 
 **Status transition authority**: PMs (via the website) are restricted to a whitelist in `website/schemas.py` (`PM_ALLOWED_TRANSITIONS`). Agents calling the internal REST API bypass this gate entirely and can move features to any valid state.
+
+### Sprint Lifecycle
+
+**Phases** (optional) group sprints for large products. Sprints contain features and have a **Definition of Done (DoD)** with 5 gates:
+
+1. **all_features_done** — All sprint features are Pushed/Deferred/Rejected (auto-computed)
+2. **no_open_prs** — No open PRs against sprint features (auto-computed)
+3. **qa_passed** — QA Tester calls `POST /api/sprints/{id}/sign-off` with `gate=qa_passed`
+4. **security_clean** — Security Auditor calls sign-off with `gate=security_clean`
+5. **retro_done** — Retrospective agent calls sign-off with `gate=retro_done` + `retro_doc_path`
+
+When all gates pass (`POST /api/sprints/{id}/check-dod`): sprint marked `completed`, `completed_at` set, release notes auto-generated into `sprints.release_notes`, and the next planned sprint in the phase is activated. A phase is marked completed when it has no more planned/active sprints.
+
+`POST /api/products/{id}/plan-sprints` — LLM auto-plans phases + sprints from Approved features.
 
 ### Agent Contract (session_result.json)
 
@@ -182,9 +200,19 @@ Additionally, a `product_config.json` file in the product working directory (rea
 - **Website runtime** uses async SQLAlchemy + asyncpg
 - **Alembic migrations** use psycopg2 (sync) — driver is swapped in `db/migrations/env.py`
 - PostgreSQL runs in Docker (`docker-compose.yml`); PM website connects via `productfactory-net` bridge network
-- Key tables: `products`, `features`, `sessions`, `alerts`, `feature_reviews`
-- Notable columns: `features.skip_design`, `features.design_doc`, `features.design_doc_path`, `features.review_outcome`, `features.review_notes`, `features.feature_type` (`feature | bug | chore`); `sessions.persona`, `sessions.container_id`; `system_config.poller_pid/host/locked_at/heartbeat_at`; `system_config.stuck_feature_timeout_hours` (Float, default 0.75h)
+- Key tables: `products`, `features`, `sessions`, `alerts`, `feature_reviews`, `sprints`, `phases`
+- JIRA-like tracking tables: `feature_comments` (per-feature discussion, author=pm/poller/persona), `feature_changelog` (auto-tracked field-level audit trail), `labels` + `feature_labels` (product-scoped color tags, many-to-many), `feature_links` (directed relationships: blocks/is_blocked_by/relates_to/duplicates)
+- Notable columns: `features.skip_design`, `features.design_doc`, `features.design_doc_path`, `features.review_outcome`, `features.review_notes`, `features.feature_type` (`feature | bug | chore`), `features.due_date`, `features.story_points`; `sessions.persona`, `sessions.container_id`; `system_config.poller_pid/host/locked_at/heartbeat_at`; `system_config.stuck_feature_timeout_hours` (Float, default 0.75h); `sprints.dod_status` (JSONB — gate booleans + agent notes), `sprints.phase_id`, `sprints.release_notes`, `sprints.completed_at`, `sprints.retro_doc_path`
 - Tests use real PostgreSQL (not mocks) — each test runs inside a rolled-back transaction for isolation; requires `TEST_DATABASE_URL`
+
+**Feature tracking REST endpoints** (agents and PM can call these):
+- Comments: `POST/GET /api/features/{id}/comments` — author field: `pm`, `poller`, or persona name
+- Changelog: `GET /api/features/{id}/changelog` — auto-populated on every status/priority/sprint mutation; no manual writes needed
+- Labels: `POST /api/labels`, `GET /api/products/{id}/labels`, `POST/DELETE /api/features/{id}/labels/{label_id}`
+- Links: `POST/GET /api/features/{id}/links`, `DELETE /api/features/{id}/links/{link_id}`
+- Search: `GET /api/features/search?q=...&product_id=...` (PostgreSQL tsvector full-text)
+- Overdue: `GET /api/features/overdue` (past due_date, not Pushed/Rejected/Deferred)
+- Sync: `POST /api/products/{id}/sync-features` — reads `features.md` and reconciles statuses into DB; called on poller startup and useful after a DB volume wipe
 
 ### Docker Network Model
 

@@ -102,7 +102,27 @@ Your working directory is /workspace. All files must be written inside /workspac
    ```
    **Important:** merge with existing config — do a GET first, then PATCH with merged object.
 
-7. **Exit 0** when done.
+7. **Sprint DoD sign-off** — sign off security gate for the active sprint:
+
+   ```bash
+   curl -s {pm_api_url}/api/products/{product_id}/sprints/active
+   ```
+   If an active sprint exists (store `id` as `SPRINT_ID`):
+
+   If **no issues found**:
+   ```bash
+   curl -s -X POST {pm_api_url}/api/sprints/<SPRINT_ID>/sign-off \
+     -H "Content-Type: application/json" \
+     -d '{{"gate": "security_clean", "value": true, "notes": "Audit complete — no issues found in PR #{pr_number}"}}'
+   ```
+   If **issues were found**:
+   ```bash
+   curl -s -X POST {pm_api_url}/api/sprints/<SPRINT_ID>/sign-off \
+     -H "Content-Type: application/json" \
+     -d '{{"gate": "security_clean", "value": false, "notes": "N security bug(s) filed — sprint blocked until resolved"}}'
+   ```
+
+8. **Exit 0** when done.
 
 ---
 

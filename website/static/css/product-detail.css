@@ -1,0 +1,811 @@
+/* ============================================================
+   Product Detail Page
+   ============================================================ */
+
+/* ── PRODUCT HEADER ─────────────────────────────────────── */
+.product-header-title {
+  font-size: var(--text-2xl);
+  font-weight: 600;
+  color: var(--color-fg-default);
+  letter-spacing: -0.3px;
+}
+
+
+/* ── PRODUCT TABS (backward compat) ─────────────────────── */
+.product-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--color-border-default);
+  margin-bottom: 20px;
+}
+
+.product-tab {
+  padding: 8px 16px;
+  font-size: var(--text-md);
+  font-weight: 500;
+  color: var(--color-fg-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.12s, border-color 0.12s;
+}
+
+.product-tab:hover {
+  color: var(--color-fg-default);
+}
+
+.product-tab.active {
+  color: var(--color-fg-default);
+  border-bottom-color: var(--color-accent-fg);
+  font-weight: 600;
+}
+
+
+/* ── TAB CONTENT ────────────────────────────────────────── */
+.tab-content {
+  padding: 24px 0;
+}
+
+
+/* ============================================================
+   Board / Kanban
+   ============================================================ */
+
+/* ── PHASE TABS ─────────────────────────────────────────── */
+.phase-tab-bar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.phase-tab {
+  padding: 5px 12px;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--color-border-default);
+  background: var(--color-canvas-default);
+  color: var(--color-fg-muted);
+  cursor: pointer;
+  transition: all 0.12s;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.phase-tab:hover {
+  background: var(--color-canvas-subtle);
+}
+
+.phase-tab.active {
+  font-weight: 600;
+  color: var(--color-fg-on-emphasis);
+  border-color: transparent;
+}
+
+.phase-tab.active[data-status="pending"]      { background: var(--color-fg-subtle); }
+.phase-tab.active[data-status="approved"]     { background: var(--green); }
+.phase-tab.active[data-status="implementing"] { background: var(--blue); }
+.phase-tab.active[data-status="reviewing"]    { background: var(--amber); }
+.phase-tab.active[data-status="pushed"]       { background: var(--purple); }
+
+.phase-count {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.25);
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  min-width: 16px;
+  text-align: center;
+}
+
+
+/* ── PHASE PANEL ────────────────────────────────────────── */
+.phase-panel {
+  animation: fadein 0.15s ease;
+}
+@keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+
+.phase-actions-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.phase-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.phase-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--color-canvas-default);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  transition: border-color 0.12s;
+}
+
+.phase-card:hover {
+  border-color: var(--color-accent-muted);
+}
+
+.phase-card-left {
+  flex: 1;
+  min-width: 0;
+}
+
+.phase-card-name {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--color-fg-default);
+}
+
+.phase-card-desc {
+  font-size: var(--text-sm);
+  color: var(--color-fg-muted);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.phase-card-meta {
+  font-size: var(--text-xs);
+  color: var(--color-fg-subtle);
+  margin-top: 4px;
+  display: flex;
+  gap: 8px;
+}
+
+.phase-card-right {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.phase-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--color-fg-subtle);
+  font-size: var(--text-sm);
+}
+
+
+/* ── KANBAN (vertical stacked) ──────────────────────────── */
+.kanban {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kanban-col {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+}
+
+.kanban-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-fg-default);
+  cursor: pointer;
+  user-select: none;
+  border-radius: var(--radius-md);
+  transition: background 0.12s;
+  width: 100%;
+}
+
+.kanban-header:hover {
+  background: var(--color-canvas-subtle);
+}
+
+.kanban-header::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+
+.col-count {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--color-fg-subtle);
+  background: var(--color-canvas-subtle);
+  padding: 0 6px;
+  border-radius: var(--radius-full);
+  margin-left: 4px;
+}
+
+.col-toggle {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--color-fg-subtle);
+  transition: transform 0.15s;
+}
+
+
+/* ── STATUS COLOR CLASSES ───────────────────────────────── */
+.s-pending         { color: var(--color-fg-subtle); }
+.s-pending::before { background: var(--color-fg-subtle); }
+
+.s-approved         { color: var(--green); }
+.s-approved::before { background: var(--green); }
+
+.s-designing         { color: var(--purple); }
+.s-designing::before { background: var(--purple); animation: dot-pulse 1.5s ease-in-out infinite; }
+
+.s-designed         { color: var(--purple); }
+.s-designed::before { background: var(--purple); }
+
+.s-implementing         { color: var(--blue); }
+.s-implementing::before { background: var(--blue); animation: dot-pulse 1.5s ease-in-out infinite; }
+
+.s-reviewing         { color: var(--amber); }
+.s-reviewing::before { background: var(--amber); animation: dot-pulse 1.5s ease-in-out infinite; }
+
+.s-reviewed         { color: var(--teal); }
+.s-reviewed::before { background: var(--teal); }
+
+.s-blocked         { color: var(--red); }
+.s-blocked::before { background: var(--red); }
+
+.s-pushed         { color: var(--color-done-fg); }
+.s-pushed::before { background: var(--color-done-fg); }
+
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.4; transform: scale(0.8); }
+}
+
+
+/* ── FEATURE CARDS (kanban) ─────────────────────────────── */
+.feature-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--color-canvas-default);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+  flex: 1 1 auto;
+  min-width: 220px;
+}
+
+.feature-card:hover {
+  border-color: var(--color-accent-muted);
+  background: var(--color-canvas-subtle);
+}
+
+.feature-name {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--color-fg-default);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feature-desc {
+  display: none;
+  font-size: var(--text-sm);
+  color: var(--color-fg-muted);
+  line-height: 1.4;
+  margin-top: 4px;
+}
+
+.feature-card:hover .feature-desc,
+.feature-card.expanded .feature-desc {
+  display: block;
+}
+
+.feature-card.expanded {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.ai-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  background: var(--purple-lt);
+  color: var(--purple);
+  white-space: nowrap;
+}
+
+.pr-link {
+  font-size: var(--text-xs);
+  color: var(--color-accent-fg);
+  text-decoration: none;
+  font-family: var(--font-mono);
+}
+
+.pr-link:hover {
+  text-decoration: underline;
+}
+
+.blocked-reason {
+  font-size: var(--text-xs);
+  color: var(--red);
+  font-style: italic;
+}
+
+.fix-attempts {
+  font-size: var(--text-xs);
+  color: var(--color-fg-subtle);
+  font-family: var(--font-mono);
+}
+
+.kanban-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--color-fg-subtle);
+  font-size: var(--text-sm);
+  width: 100%;
+}
+
+.status-form select {
+  padding: 3px 8px;
+  font-size: var(--text-sm);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-canvas-default);
+  color: var(--color-fg-default);
+}
+
+.kanban-col.col-empty {
+  display: none;
+}
+
+.kanban-col.col-empty .kanban-header {
+  display: flex;
+}
+
+
+/* ── ADD FEATURE FORM / CARD ────────────────────────────── */
+.card {
+  background: var(--color-canvas-default);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+}
+
+.feature-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.form-row {
+  display: flex;
+  gap: 8px;
+}
+
+
+/* ── TEMPLATE PANEL ─────────────────────────────────────── */
+.template-panel {
+  margin-bottom: 16px;
+}
+
+.template-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.template-card {
+  padding: 10px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+  text-align: center;
+}
+
+.template-card:hover {
+  border-color: var(--color-accent-muted);
+  background: var(--color-canvas-subtle);
+}
+
+.template-card .t-icon {
+  font-size: 20px;
+  margin-bottom: 4px;
+}
+
+.template-card .t-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-fg-default);
+}
+
+.template-card .t-desc {
+  font-size: var(--text-xs);
+  color: var(--color-fg-subtle);
+  margin-top: 2px;
+}
+
+
+/* ── BULK APPROVE ───────────────────────────────────────── */
+.bulk-bar {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: var(--color-accent-subtle);
+  border: 1px solid var(--color-accent-muted);
+  border-radius: var(--radius-md);
+  margin-bottom: 12px;
+}
+
+.bulk-bar.visible {
+  display: flex;
+}
+
+.feature-checkbox {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--color-accent-fg);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+
+/* ── OPEN PRS ───────────────────────────────────────────── */
+.pr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pr-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+}
+
+.pr-num {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--color-accent-fg);
+  white-space: nowrap;
+}
+
+.pr-title {
+  flex: 1;
+  color: var(--color-fg-default);
+  font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pr-branch {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-fg-subtle);
+  background: var(--color-canvas-subtle);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+}
+
+
+/* ── SETTINGS ───────────────────────────────────────────── */
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.settings-card {
+  background: var(--color-canvas-default);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+}
+
+.settings-card-title {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--color-fg-default);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.title-icon {
+  font-size: 16px;
+  opacity: 0.7;
+}
+
+.icon-config { color: var(--color-fg-subtle); }
+.icon-pm     { color: var(--color-accent-fg); }
+
+.run-now-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.pat-field {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+
+/* ── VIDEOS ─────────────────────────────────────────────── */
+#videos-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.video-card {
+  background: var(--color-canvas-default);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  transition: border-color 0.12s;
+}
+
+.video-card:hover {
+  border-color: var(--color-accent-muted);
+}
+
+.video-meta {
+  font-size: var(--text-xs);
+  color: var(--color-fg-subtle);
+  margin-top: 6px;
+}
+
+.video-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-fg-default);
+}
+
+.video-size {
+  font-size: var(--text-xs);
+  color: var(--color-fg-muted);
+}
+
+
+/* ── DESIGN DOC ─────────────────────────────────────────── */
+.design-doc-link {
+  font-size: var(--text-sm);
+  color: var(--color-accent-fg);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.design-doc-link:hover {
+  text-decoration: underline;
+}
+
+
+/* ── ARCHIVED SECTION ───────────────────────────────────── */
+.archived-section summary {
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-fg-muted);
+  padding: 8px 0;
+  user-select: none;
+}
+
+.archived-section summary:hover {
+  color: var(--color-fg-default);
+}
+
+
+/* ── BASELINE BAR ───────────────────────────────────────── */
+.baseline-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: var(--color-canvas-subtle);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  margin-bottom: 12px;
+  font-size: var(--text-sm);
+  color: var(--color-fg-muted);
+}
+
+
+/* ── TASK LIST VIEW ─────────────────────────────────────── */
+.tasks-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.tasks-search-input {
+  flex: 1;
+  padding: 6px 12px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  background: var(--color-canvas-default);
+  color: var(--color-fg-default);
+}
+
+.tasks-search-input:focus {
+  border-color: var(--color-accent-fg);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--color-accent-subtle);
+}
+
+.tasks-status-select {
+  padding: 6px 10px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  background: var(--color-canvas-default);
+  color: var(--color-fg-default);
+}
+
+.tasks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.task-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-canvas-default);
+  transition: border-color 0.12s;
+  cursor: pointer;
+}
+
+.task-row:hover {
+  border-color: var(--color-accent-muted);
+}
+
+.task-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+
+.task-status-dot.s-pending      { background: var(--color-fg-subtle); }
+.task-status-dot.s-approved     { background: var(--green); }
+.task-status-dot.s-designing    { background: var(--purple); }
+.task-status-dot.s-designed     { background: var(--purple); }
+.task-status-dot.s-implementing { background: var(--blue); }
+.task-status-dot.s-reviewing    { background: var(--amber); }
+.task-status-dot.s-reviewed     { background: var(--teal); }
+.task-status-dot.s-pushed       { background: var(--color-done-fg); }
+.task-status-dot.s-blocked      { background: var(--red); }
+.task-status-dot.s-deferred     { background: var(--color-fg-subtle); }
+.task-status-dot.s-rejected     { background: var(--red); }
+
+.task-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.task-name {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--color-fg-default);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-desc {
+  font-size: var(--text-xs);
+  color: var(--color-fg-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 1px;
+}
+
+.task-badges {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.task-status-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  white-space: nowrap;
+}
+
+.task-status-pill.s-pending      { background: var(--color-canvas-subtle); color: var(--color-fg-subtle); }
+.task-status-pill.s-approved     { background: var(--green-lt); color: var(--green); }
+.task-status-pill.s-designing    { background: var(--purple-lt); color: var(--purple); }
+.task-status-pill.s-designed     { background: var(--purple-lt); color: var(--purple); }
+.task-status-pill.s-implementing { background: var(--blue-lt); color: var(--blue); }
+.task-status-pill.s-reviewing    { background: var(--amber-lt); color: var(--amber); }
+.task-status-pill.s-reviewed     { background: var(--teal-lt); color: var(--teal); }
+.task-status-pill.s-pushed       { background: var(--color-done-subtle); color: var(--color-done-fg); }
+.task-status-pill.s-blocked      { background: var(--red-lt); color: var(--red); }
+
+.task-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+
+/* ── DARK MODE OVERRIDES ────────────────────────────────── */
+[data-theme="dark"] .product-tab.active {
+  border-bottom-color: var(--color-accent-fg);
+}
+
+[data-theme="dark"] .phase-card {
+  background: var(--color-canvas-subtle);
+}
+
+[data-theme="dark"] .feature-card {
+  background: var(--color-canvas-subtle);
+}
+
+[data-theme="dark"] .card {
+  background: var(--color-canvas-subtle);
+  border-color: var(--color-border-default);
+}
+
+[data-theme="dark"] .task-row {
+  background: var(--color-canvas-subtle);
+}
+
+[data-theme="dark"] .settings-card {
+  background: var(--color-canvas-subtle);
+  border-color: var(--color-border-default);
+}
+
+[data-theme="dark"] .video-card {
+  background: var(--color-canvas-subtle);
+  border-color: var(--color-border-default);
+}
+
+[data-theme="dark"] .template-card {
+  background: var(--color-canvas-subtle);
+  border-color: var(--color-border-default);
+}

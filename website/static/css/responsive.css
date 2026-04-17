@@ -1,0 +1,291 @@
+/* ============================================================
+   Mobile Responsive Overrides — max-width 768px
+   ============================================================ */
+
+@media (max-width: 768px) {
+
+  /* ── PAGE & NAV ───────────────────────────────────────── */
+  .pf-page {
+    padding: 16px 12px;
+  }
+
+  nav {
+    padding: 0 10px;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+
+  .pf-nav-search {
+    order: 10;
+    max-width: none;
+    flex-basis: 100%;
+    margin-bottom: 6px;
+  }
+
+  .pf-nav-logo {
+    margin-right: 6px;
+  }
+
+
+  /* ── SIDEBAR ──────────────────────────────────────────── */
+  .pf-sidebar {
+    display: none;
+  }
+
+  .pf-layout-sidebar {
+    flex-direction: column;
+  }
+
+  .pf-content {
+    width: 100%;
+    padding: 16px 12px;
+  }
+
+
+  /* ── PRODUCT GRID ─────────────────────────────────────── */
+  .product-grid {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+
+  /* ── STATS BAR ────────────────────────────────────────── */
+  .stats-bar {
+    flex-wrap: wrap;
+  }
+
+  .stat-item {
+    flex: 1 1 33%;
+    min-width: 0;
+  }
+
+  .stat-divider {
+    display: none;
+  }
+
+
+  /* ── SEARCH BAR ───────────────────────────────────────── */
+  .search-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .filter-chips {
+    justify-content: flex-start;
+  }
+
+
+  /* ── KANBAN ───────────────────────────────────────────── */
+  .kanban-col {
+    flex-direction: column;
+  }
+
+  .feature-card {
+    min-width: 0;
+  }
+
+
+  /* ── PHASE TAB BAR ────────────────────────────────────── */
+  .phase-tab-bar {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .phase-tab {
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+
+  /* ── SETTINGS GRID ────────────────────────────────────── */
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+
+  /* ── ADMIN ────────────────────────────────────────────── */
+  .admin-fields-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-card-wide {
+    padding: 14px;
+  }
+
+  .admin-tab-bar {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+  }
+
+  .admin-tab-bar .tab-btn {
+    white-space: nowrap;
+    flex-shrink: 0;
+    padding: 8px 12px;
+  }
+
+
+  /* ── GREENFIELD FORM ──────────────────────────────────── */
+  .gf-grid {
+    grid-template-columns: 1fr;
+  }
+
+
+  /* ── TYPE PICKER ──────────────────────────────────────── */
+  .type-picker {
+    grid-template-columns: 1fr;
+  }
+
+
+  /* ── SUGGESTIONS GRID ─────────────────────────────────── */
+  .suggestions-grid {
+    grid-template-columns: 1fr;
+  }
+
+
+  /* ── TEMPLATE GRID ────────────────────────────────────── */
+  .template-grid {
+    grid-template-columns: 1fr;
+  }
+
+
+  /* ── VIDEOS GRID ──────────────────────────────────────── */
+  #videos-grid {
+    grid-template-columns: 1fr;
+  }
+
+
+  /* ── PROFILE SWITCHER ─────────────────────────────────── */
+  .profile-switcher {
+    flex-direction: column;
+  }
+
+  .profile-option {
+    min-width: auto;
+    flex-direction: row;
+    padding: 10px 14px;
+    text-align: left;
+  }
+
+
+  /* ── SLIDE-OUT PANEL ──────────────────────────────────── */
+  .pf-panel {
+    max-width: 100vw;
+    width: 100%;
+  }
+
+
+  /* ── REGISTER DRAWER ──────────────────────────────────── */
+  .register-drawer {
+    width: 100%;
+    max-width: 100vw;
+  }
+
+
+  /* ── FORM ROW ─────────────────────────────────────────── */
+  .form-row {
+    flex-direction: column;
+  }
+
+
+  /* ── PR LIST ──────────────────────────────────────────── */
+  .pr-row {
+    flex-wrap: wrap;
+  }
+
+  .pr-branch {
+    display: none;
+  }
+
+
+  /* ── TASK ROW ─────────────────────────────────────────── */
+  .task-row {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .task-badges {
+    flex-basis: 100%;
+    order: 10;
+  }
+
+
+  /* ── BULK BAR ─────────────────────────────────────────── */
+  .bulk-bar {
+    flex-wrap: wrap;
+  }
+
+
+  /* ── SESSION PANEL ────────────────────────────────────── */
+  .session-terminal {
+    max-height: 50vh;
+    font-size: 11px;
+  }
+
+  .session-panel-header {
+    padding: 8px 12px;
+    font-size: var(--text-xs);
+  }
+
+
+  /* ── WIZARD STEPS ─────────────────────────────────────── */
+  .wizard-steps {
+    flex-wrap: wrap;
+  }
+
+  .wizard-step {
+    flex: 1 1 auto;
+    font-size: var(--text-xs);
+    padding: 8px 10px;
+  }
+
+
+  /* ── PAGE HEADER ──────────────────────────────────────── */
+  .pf-page-header {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+
+  /* ── STACK OPTIONS ────────────────────────────────────── */
+  .stack-options {
+    flex-direction: column;
+  }
+
+  .stack-opt {
+    justify-content: center;
+  }
+
+
+  /* ── TABS ─────────────────────────────────────────────── */
+  .product-tabs {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+  }
+
+  .product-tab {
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+
+  /* ── PANEL META ───────────────────────────────────────── */
+  .pf-panel__meta {
+    grid-template-columns: 1fr;
+  }
+
+
+  /* ── LIST CONTROLS ────────────────────────────────────── */
+  .list-controls {
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-start;
+  }
+
+
+  /* ── TASKS TOOLBAR ────────────────────────────────────── */
+  .tasks-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

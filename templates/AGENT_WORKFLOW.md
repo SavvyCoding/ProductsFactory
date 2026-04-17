@@ -40,14 +40,13 @@ resume_feature_id: <id>   # which feature was in progress
 | 3 | Feature claimed (Implementing), now write code |
 | 4 | Code written, now run tests |
 | 5 | Tests passed, now commit + push + open PR |
-| 6 | PR open, now update features.md + session summary |
+| 6 | PR open, now update session summary |
 | 7 | Batch done, now run competitor research |
 
 If `resume_step` is present → **RESUME mode**: skip to that step for `resume_feature_id`.
 If absent or file missing → **FRESH mode**: start a new batch from step 2.
 
 After reading context:
-- On **main branch only**: regenerate `features.md` from API (never on a feature branch)
 - If on a feature branch: `git fetch origin && git rebase origin/main`
 
 ---
@@ -77,8 +76,7 @@ Last heartbeat: {datetime} UTC
 - [ ] {feature_2_name} (id={id})
 ```
 
-- Update `features.md`: mark batch features as 🔄 In Progress
-- **Commit + push `progress.md` and `features.md` to main** — this is heartbeat #0
+- **Commit + push `progress.md` to main** — this is heartbeat #0
 
 ---
 
@@ -154,7 +152,7 @@ Stage only:
 - `{TEST_PATH}/test_{feature_name}.*`
 - `Results/{feature_name}_*`
 
-**Never stage:** `Temp/` · `*.log` · `__pycache__` · `node_modules/` · `session.lock` · `features.md`
+**Never stage:** `Temp/` · `*.log` · `__pycache__` · `node_modules/` · `session.lock`
 
 ```
 git fetch origin && git rebase origin/main
@@ -170,8 +168,6 @@ On success, append **one JSON line** to `/workspace/session_result.json`:
 {"id": <feature_id>, "status": "Reviewing", "pr_number": <n>, "pr_url": "<url>"}
 ```
 Use `echo '{"id":...}' >> /workspace/session_result.json`. The poller polls this file every 30 s and applies each new line to the DB in real-time. Do NOT call `PATCH /api/features/{id}`.
-
-On main branch: update `features.md` — mark feature as 🔍 Reviewing. Commit + push.
 
 Append **Session State Summary** to `progress.md`:
 > Key decisions made, patterns introduced, anything the next session must know about this feature.
@@ -223,7 +219,7 @@ Read `product_config.json` before any implementation. It defines:
 ## 7. Hard rules — never break these
 
 - ❌ Push directly to `main` (Analysis Run is the only exception — one commit, one time)
-- ❌ Commit or update `features.md` on a feature branch
+- ❌ Write or update `features.md` (DB is the single source of truth for feature status)
 - ❌ Exit 0 after a push failure
 - ❌ Introduce a new architectural pattern without PM approval
 - ❌ Stage `session.lock`, `Temp/`, `*.log`, `__pycache__/`, `node_modules/`

@@ -9,8 +9,10 @@ FROM python:3.12-slim
 ENV DEBIAN_FRONTEND=noninteractive
 
 # libpq-dev + gcc needed to compile psycopg2-binary on some platforms
+# nodejs + npm for Claude CLI (used for OAuth-based LLM calls)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq-dev gcc curl \
+    libpq-dev gcc curl nodejs npm \
+    && npm install -g @anthropic-ai/claude-code \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

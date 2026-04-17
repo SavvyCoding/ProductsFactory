@@ -371,8 +371,35 @@ class FeatureLabelAdd(BaseModel):
     label_id: int
 
 
+class PhaseCreate(BaseModel):
+    product_id: int
+    name:       str
+    goal:       Optional[str] = None
+    order:      int = 0
+    status:     str = "planned"
+
+
+class PhaseUpdate(BaseModel):
+    name:   Optional[str] = None
+    goal:   Optional[str] = None
+    order:  Optional[int] = None
+    status: Optional[str] = None
+
+
+class PhaseOut(BaseModel):
+    id:         int
+    product_id: int
+    name:       str
+    goal:       Optional[str]
+    order:      int
+    status:     str
+
+    model_config = {"from_attributes": True}
+
+
 class SprintCreate(BaseModel):
     product_id: int
+    phase_id:   Optional[int] = None
     name:       str
     goal:       Optional[str] = None
     start_date: Optional[date] = None
@@ -381,6 +408,7 @@ class SprintCreate(BaseModel):
 
 
 class SprintUpdate(BaseModel):
+    phase_id:   Optional[int]  = None
     name:       Optional[str]  = None
     goal:       Optional[str]  = None
     start_date: Optional[date] = None
@@ -389,13 +417,18 @@ class SprintUpdate(BaseModel):
 
 
 class SprintOut(BaseModel):
-    id:         int
-    product_id: int
-    name:       str
-    goal:       Optional[str]
-    start_date: Optional[date]
-    end_date:   Optional[date]
-    status:     str
+    id:             int
+    product_id:     int
+    phase_id:       Optional[int]
+    name:           str
+    goal:           Optional[str]
+    start_date:     Optional[date]
+    end_date:       Optional[date]
+    status:         str
+    release_notes:  Optional[str] = None
+    dod_status:     Optional[dict] = None
+    retro_doc_path: Optional[str] = None
+    completed_at:   Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 

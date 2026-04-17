@@ -6,7 +6,7 @@
   <title>{% block title %}ProductFactory{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
   <nav>
     <a href="/" class="logo">
       <div class="logo-mark">⚙</div>
@@ -14,6 +14,12 @@
     </a>
     <a href="/" class="{{ 'nav-active' if request.url.path == '/' else '' }}">Products</a>
     <a href="/admin" class="{{ 'nav-active' if request.url.path.startswith('/admin') else '' }}">Admin</a>
+    <div class="pf-nav-search">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+        <path d="M10.68 11.74a6 6 0 1 1 1.06-1.06l3.04 3.04a.75.75 0 1 1-1.06 1.06l-3.04-3.04ZM11.5 7a4.5 4.5 0 1 0-9 0 4.5 4.5 0 0 0 9 0Z"/>
+      </svg>
+      <input type="search" id="global-search" placeholder="Search features...  /" aria-label="Search features">
+    </div>
     {% if alert_count %}
     <a href="/api/alerts/unread" class="nav-alerts" title="Unread alerts">
       🔔 <span class="alert-badge">{{ alert_count }}</span>
@@ -34,87 +40,23 @@
     {% endif %}
   </nav>
 
+  {% block breadcrumb %}{% endblock %}
+
   {% if error %}
   <div class="flash flash-error">{{ error }}</div>
   {% endif %}
 
-  <main class="page">
+  <main class="page {% block page_class %}{% endblock %}">
     {% block content %}{% endblock %}
   </main>
 
   <!-- ── TOAST CONTAINER ──────────────────────────────────── -->
   <div id="toast-container" aria-live="polite" aria-atomic="false"></div>
 
-<script>
-// ── THEME ────────────────────────────────────────────────
-(function() {
-  const saved = localStorage.getItem('pf-theme') || 'light';
-  if (saved === 'dark') document.getElementById('html-root').setAttribute('data-theme', 'dark');
-})();
-function toggleDark() {
-  const el = document.getElementById('html-root');
-  const isDark = el.getAttribute('data-theme') === 'dark';
-  el.setAttribute('data-theme', isDark ? 'light' : 'dark');
-  localStorage.setItem('pf-theme', isDark ? 'light' : 'dark');
-  document.getElementById('dark-btn').textContent = isDark ? '🌙' : '☀️';
-}
-(function() {
-  const saved = localStorage.getItem('pf-theme') || 'light';
-  if (saved === 'dark') document.getElementById('dark-btn').textContent = '☀️';
-})();
-
-// ── TOAST SYSTEM ─────────────────────────────────────────
-function showToast(type, message, duration) {
-  duration = duration || 4000;
-  const container = document.getElementById('toast-container');
-  const toast = document.createElement('div');
-  toast.className = 'toast toast-' + type;
-  toast.innerHTML = `
-    <span class="toast-msg">${escHtmlGlobal(message)}</span>
-    <div class="toast-bar"></div>
-    <button class="toast-close" onclick="this.parentElement.remove()" aria-label="Dismiss">✕</button>
-  `;
-  container.appendChild(toast);
-  // Trigger animation
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => toast.classList.add('toast-in'));
-  });
-  const bar = toast.querySelector('.toast-bar');
-  bar.style.transition = `width ${duration}ms linear`;
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => { bar.style.width = '0%'; });
-  });
-  const timer = setTimeout(() => {
-    toast.classList.remove('toast-in');
-    toast.addEventListener('transitionend', () => toast.remove(), { once: true });
-  }, duration);
-  toast.querySelector('.toast-close').addEventListener('click', () => clearTimeout(timer));
-}
-
-function escHtmlGlobal(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-
-// ── LIVE NAV INDICATOR ───────────────────────────────────
-(function pollRunning() {
-  async function update() {
-    try {
-      const r = await fetch('/api/products/running-count');
-      const { count } = await r.json();
-      const dot  = document.getElementById('nav-live-dot');
-      const text = document.getElementById('nav-live-text');
-      if (count > 0) {
-        dot.classList.add('active');
-        text.textContent = count + ' Running';
-      } else {
-        dot.classList.remove('active');
-        text.textContent = 'Idle';
-      }
-    } catch(e) { /* silent */ }
-  }
-  update();
-  setInterval(update, 30000);
-})();
-</script>
+<script src="/static/js/theme.js"></script>
+<script src="/static/js/toast.js"></script>
+<script src="/static/js/nav.js"></script>
+<script src="/static/js/search.js"></script>
+{% block scripts %}{% endblock %}
 </body>
 </html>

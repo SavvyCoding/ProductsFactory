@@ -1,0 +1,17 @@
+/* ProductFactory PM — Design System (GitHub/Jira-inspired)
+   ─────────────────────────────────────────────────────────
+   Import order matters: tokens first, then reset, then components.
+*/
+@import "tokens.css";
+@import "reset.css";
+@import "layout.css";
+@import "components.css";
+@import "table.css";
+@import "toast.css";
+@import "product-grid.css";
+@import "product-detail.css";
+@import "feature-panel.css";
+@import "session.css";
+@import "wizard.css";
+@import "admin.css";
+@import "responsive.css";

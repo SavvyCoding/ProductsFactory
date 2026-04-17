@@ -1,0 +1,52 @@
+{# ── Reusable UI macros ────────────────────────────────────── #}
+
+{# Badge #}
+{% macro badge(label, variant='muted') %}
+<span class="pf-badge pf-badge--{{ variant }}">{{ label }}</span>
+{% endmacro %}
+
+{# Status badge (matches feature status) #}
+{% macro status_badge(status) %}
+<span class="badge badge-status-{{ status | lower }}">{{ status }}</span>
+{% endmacro %}
+
+{# Button #}
+{% macro button(text, variant='primary', size='', type='button', disabled=false) %}
+<button type="{{ type }}" class="pf-btn pf-btn--{{ variant }}{% if size %} pf-btn--{{ size }}{% endif %}"{% if disabled %} disabled{% endif %}>{{ text }}</button>
+{% endmacro %}
+
+{# Notice/alert #}
+{% macro notice(message, variant='info', icon='') %}
+<div class="pf-notice pf-notice--{{ variant }}">
+  {% if icon %}{{ icon }} {% endif %}{{ message }}
+</div>
+{% endmacro %}
+
+{# Empty state #}
+{% macro empty_state(icon, title, description='') %}
+<div class="pf-empty">
+  <div class="pf-empty__icon">{{ icon }}</div>
+  <div class="pf-empty__title">{{ title }}</div>
+  {% if description %}<div class="pf-empty__desc">{{ description }}</div>{% endif %}
+</div>
+{% endmacro %}
+
+{# Form group #}
+{% macro form_group(label, name, type='text', value='', placeholder='', hint='', required=false) %}
+<div class="pf-form-group">
+  <label for="{{ name }}">{{ label }}</label>
+  {% if type == 'textarea' %}
+  <textarea id="{{ name }}" name="{{ name }}" class="pf-textarea" placeholder="{{ placeholder }}"{% if required %} required{% endif %}>{{ value }}</textarea>
+  {% else %}
+  <input type="{{ type }}" id="{{ name }}" name="{{ name }}" class="pf-input" value="{{ value }}" placeholder="{{ placeholder }}"{% if required %} required{% endif %}>
+  {% endif %}
+  {% if hint %}<p class="pf-field-hint">{{ hint }}</p>{% endif %}
+</div>
+{% endmacro %}
+
+{# Persona badge #}
+{% macro persona(name) %}
+{% set icons = {'designer':'✏','coder':'⚙','reviewer':'🔍','planner':'📋','recommender':'💡','qa_tester':'🧪','security_auditor':'🔒','documenter':'📝','refactorer':'🔧','devops':'⚙','analytics':'📊','product_planner':'📋','retrospective':'🔁'} %}
+{% set classes = {'designer':'persona-designer','coder':'persona-coder','reviewer':'persona-reviewer','planner':'persona-planner','recommender':'persona-recommender','qa_tester':'persona-qa','security_auditor':'persona-security','documenter':'persona-documenter','refactorer':'persona-refactorer','devops':'persona-devops','analytics':'persona-analytics','product_planner':'persona-designer','retrospective':'persona-planner'} %}
+<span class="persona-badge {{ classes.get(name, 'persona-coder') }}">{{ icons.get(name, '⚙') }} {{ name | replace('_', ' ') | title }}</span>
+{% endmacro %}

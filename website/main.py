@@ -79,7 +79,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from website.database import get_db
 from website.models import (
     Product, Feature, FeatureReview, Session as DBSession, Alert, SystemConfig, PMUser,
-    FeatureComment, FeatureChangelog, Label, FeatureLabel, Sprint, FeatureLink,
+    FeatureComment, FeatureChangelog, Label, FeatureLabel, Phase, Sprint, FeatureLink,
 )
 from website.auth import require_auth
 from website import schemas
@@ -102,6 +102,43 @@ SESSION_LOG_WARN_AT     = int(SESSION_LOG_MAXLEN * 0.9)  # warn when buffer is 9
 
 # Claude model used for PM-facing LLM features (feature recommendations, vision articulation)
 _RECOMMENDATION_MODEL = "claude-haiku-4-5-20251001"
+
+
+async def _llm_call(prompt: str, max_tokens: int = 3000) -> str:
+    """Call Claude — tries CLI first (OAuth subscription), falls back to SDK (API key)."""
+    import subprocess, shutil
+
+    # 1) Try claude CLI (uses OAuth tokens from ~/.claude)
+    claude_bin = shutil.which("claude")
+    if claude_bin:
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    [claude_bin, "-p", prompt, "--output-format", "text"],
+                    capture_output=True, text=True, timeout=120,
+                ),
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except Exception:
+            pass  # fall through to SDK
+
+    # 2) Fall back to Anthropic SDK with API key
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise HTTPException(
+            status_code=501,
+            detail="Neither Claude CLI nor ANTHROPIC_API_KEY is available",
+        )
+    import anthropic
+    client = anthropic.Anthropic(api_key=api_key)
+    msg = client.messages.create(
+        model=_RECOMMENDATION_MODEL,
+        max_tokens=max_tokens,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return msg.content[0].text.strip()
 _CONTAINER_WORKSPACE = Path("/workspace")
 
 
@@ -163,9 +200,8 @@ _CFG_DEFAULTS = {
     "max_open_prs":                1,
     "pr_gate_sleep":               300,
     "stuck_feature_timeout_hours": 0.75,  # 45 minutes — matches stale session threshold
-    "max_features_per_run":        1,
+    "max_features_per_run":        5,
     "brownfield_file_threshold":   10,
-    "recommender_pending_threshold": 15,
     "auto_merge_enabled":            False,
     # Agent / Ollama
     "agent_backend":    "claude",
@@ -249,6 +285,25 @@ async def dashboard(
         elif row.status == "Pending":
             fc["pending"] += row.cnt
 
+    # Active phase + sprint per product for dashboard cards
+    phases_result = await db.execute(
+        select(Phase).where(Phase.status == "active")
+    )
+    active_phases: dict[int, Phase] = {p.product_id: p for p in phases_result.scalars().all()}
+
+    sprints_result = await db.execute(
+        select(Sprint).where(Sprint.status == "active")
+    )
+    active_sprints: dict[int, Sprint] = {s.product_id: s for s in sprints_result.scalars().all()}
+
+    # Last session persona per product
+    sessions_result = await db.execute(
+        select(DBSession.product_id, DBSession.persona, DBSession.started_at)
+        .distinct(DBSession.product_id)
+        .order_by(DBSession.product_id, DBSession.started_at.desc())
+    )
+    last_persona: dict[int, str] = {row.product_id: row.persona for row in sessions_result}
+
     return templates.TemplateResponse("index.html", {
         "request": request,
         "products": products,
@@ -256,6 +311,9 @@ async def dashboard(
         "current_pm": current_pm,
         "products_root_dir": config.products_root_dir if config else None,
         "feature_counts": feature_counts,
+        "active_phases": active_phases,
+        "active_sprints": active_sprints,
+        "last_persona": last_persona,
     })
 
 
@@ -324,9 +382,14 @@ async def product_detail(
     open_prs_list = list_open_prs(product.github_repo or "", token=_gh_pat) if product.github_repo else []
     open_prs = len(open_prs_list)
 
-    # Sprint + label data for the Sprints tab
+    # Phase + Sprint + label data for the Sprints tab
+    phase_result = await db.execute(
+        select(Phase).where(Phase.product_id == product_id).order_by(Phase.order, Phase.id)
+    )
+    phases = phase_result.scalars().all()
+
     sprint_result = await db.execute(
-        select(Sprint).where(Sprint.product_id == product_id).order_by(Sprint.id.desc())
+        select(Sprint).where(Sprint.product_id == product_id).order_by(Sprint.phase_id.nulls_last(), Sprint.id)
     )
     sprints = sprint_result.scalars().all()
     active_sprint = next((s for s in sprints if s.status == "active"), None)
@@ -349,6 +412,7 @@ async def product_detail(
         "current_pm": current_pm,
         "active_tab": tab,
         "max_features_default": _cfg(await _get_system_config(db), "max_features_per_run"),
+        "phases": phases,
         "sprints": sprints,
         "active_sprint": active_sprint,
         "labels": labels,
@@ -606,7 +670,6 @@ _POLLER_INT_BOUNDS: dict[str, tuple[int, int]] = {
     "stuck_feature_timeout_hours": (0.25,  48),
     "max_features_per_run":        (1,     10),
     "brownfield_file_threshold":   (1,    100),
-    "recommender_pending_threshold": (0,   500),
     "ollama_timeout":              (30,  1800),
     "bash_timeout":                (10,   600),
     "max_turns":                   (5,    500),
@@ -667,7 +730,6 @@ async def admin_save_poller_settings(
     config.stuck_feature_timeout_hours = _float("stuck_feature_timeout_hours")
     config.max_features_per_run        = _int("max_features_per_run")
     config.brownfield_file_threshold       = _int("brownfield_file_threshold")
-    config.recommender_pending_threshold   = _int("recommender_pending_threshold")
     config.auto_merge_enabled              = form.get("auto_merge_enabled") == "1"
     config.agent_backend               = _str("agent_backend")
     config.ollama_host                 = _str("ollama_host")
@@ -807,16 +869,222 @@ async def create_sprint_form(
     return RedirectResponse(f"/product/{product_id}?tab=sprints", status_code=303)
 
 
+@app.get("/api/sprints/{sprint_id}/dod")
+async def api_sprint_dod(sprint_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Evaluate the Definition of Done for a sprint.
+    Returns the current gate states — used by poller and UI.
+    """
+    sprint = await db.get(Sprint, sprint_id)
+    if not sprint:
+        raise HTTPException(status_code=404, detail="Sprint not found")
+    dod = await _evaluate_dod(sprint_id, sprint.product_id, db)
+    return dod
+
+
+@app.post("/api/sprints/{sprint_id}/check-dod")
+async def api_check_dod(sprint_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Poller calls this every cycle. Evaluates gates; if all pass, auto-completes sprint.
+    Does NOT modify any gate state — only triggers completion.
+    """
+    sprint = await db.get(Sprint, sprint_id)
+    if not sprint or sprint.status == "completed":
+        return {"action": "skipped"}
+    dod = await _evaluate_dod(sprint_id, sprint.product_id, db)
+    all_pass = (
+        dod["all_features_done"]
+        and dod["no_open_prs"]
+        and dod["qa_passed"]
+        and dod["security_clean"]
+    )
+    if all_pass:
+        await _do_complete_sprint(sprint, sprint.product_id, db)
+        return {"action": "auto_completed", "dod": dod}
+    return {"action": "gates_pending", "dod": dod}
+
+
+async def _evaluate_dod(sprint_id: int, product_id: int, db: AsyncSession) -> dict:
+    """
+    Compute DoD gate states for a sprint:
+      all_features_done — all sprint features are Pushed or Deferred
+      no_open_prs       — no sprint features have an open PR
+      qa_passed         — QA agent has signed off (stored in dod_status)
+      security_clean    — Security agent has signed off (stored in dod_status)
+      retro_done        — Retrospective agent has completed (stored in dod_status)
+    """
+    sprint = await db.get(Sprint, sprint_id)
+    if not sprint:
+        return {}
+
+    # Persisted sign-offs (set by agents)
+    persisted = sprint.dod_status or {}
+
+    # Compute live gates
+    feat_result = await db.execute(
+        select(Feature).where(Feature.sprint_id == sprint_id)
+    )
+    sprint_features = feat_result.scalars().all()
+
+    terminal = {"Pushed", "Deferred", "Rejected"}
+    all_features_done = all(f.status in terminal for f in sprint_features) if sprint_features else False
+    no_open_prs = all(f.pr_number is None or f.status == "Pushed" for f in sprint_features)
+
+    return {
+        "all_features_done": all_features_done,
+        "no_open_prs":       no_open_prs,
+        "qa_passed":         bool(persisted.get("qa_passed")),
+        "security_clean":    bool(persisted.get("security_clean")),
+        "retro_done":        bool(persisted.get("retro_done")),
+        "feature_count":     len(sprint_features),
+        "features_terminal": sum(1 for f in sprint_features if f.status in terminal),
+    }
+
+
+async def _do_complete_sprint(sprint: Sprint, product_id: int, db: AsyncSession) -> None:
+    """Mark sprint completed, generate release notes, activate next sprint."""
+    from datetime import datetime as _dt, timezone as _tz
+    sprint.status = "completed"
+    sprint.completed_at = _dt.now(_tz.utc)
+    await db.flush()
+
+    # Generate release notes
+    try:
+        notes = await _generate_sprint_release_notes(sprint.id, product_id, db)
+        if notes:
+            sprint.release_notes = notes
+            await db.flush()
+    except Exception:
+        pass
+
+    # Activate the next sprint in the same phase, or next phase's first sprint
+    await _activate_next_sprint(sprint, product_id, db)
+
+
+async def _activate_next_sprint(completed: Sprint, product_id: int, db: AsyncSession) -> None:
+    """Find and activate the next planned sprint after the completed one."""
+    # Same phase first
+    if completed.phase_id:
+        next_result = await db.execute(
+            select(Sprint).where(
+                Sprint.product_id == product_id,
+                Sprint.phase_id == completed.phase_id,
+                Sprint.status == "planned",
+                Sprint.id > completed.id,
+            ).order_by(Sprint.id).limit(1)
+        )
+        nxt = next_result.scalar_one_or_none()
+        if nxt:
+            nxt.status = "active"
+            await db.flush()
+            return
+
+        # No more sprints in this phase — check if phase should be completed
+        phase = await db.get(Phase, completed.phase_id)
+        if phase:
+            rem_result = await db.execute(
+                select(func.count()).where(
+                    Sprint.phase_id == completed.phase_id,
+                    Sprint.status.in_(["planned", "active"]),
+                )
+            )
+            if (rem_result.scalar() or 0) == 0:
+                phase.status = "completed"
+                await db.flush()
+
+    # Move to next phase's first planned sprint
+    if completed.phase_id:
+        phase = await db.get(Phase, completed.phase_id)
+        if phase:
+            next_phase_result = await db.execute(
+                select(Phase).where(
+                    Phase.product_id == product_id,
+                    Phase.status == "planned",
+                    Phase.order > phase.order,
+                ).order_by(Phase.order).limit(1)
+            )
+            next_phase = next_phase_result.scalar_one_or_none()
+            if next_phase:
+                next_phase.status = "active"
+                await db.flush()
+                first_sprint_result = await db.execute(
+                    select(Sprint).where(
+                        Sprint.phase_id == next_phase.id,
+                        Sprint.status == "planned",
+                    ).order_by(Sprint.id).limit(1)
+                )
+                first = first_sprint_result.scalar_one_or_none()
+                if first:
+                    first.status = "active"
+                    await db.flush()
+
+
 @app.post("/product/{product_id}/sprints/{sprint_id}/complete")
 async def complete_sprint_form(
     product_id: int, sprint_id: int,
     db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
 ):
+    """PM override — complete sprint regardless of DoD gate state."""
     sprint = await db.get(Sprint, sprint_id)
-    if sprint and sprint.product_id == product_id:
-        sprint.status = "completed"
-        await db.flush()
+    if sprint and sprint.product_id == product_id and sprint.status != "completed":
+        await _do_complete_sprint(sprint, product_id, db)
     return RedirectResponse(f"/product/{product_id}?tab=sprints", status_code=303)
+
+
+async def _generate_sprint_release_notes(sprint_id: int, product_id: int, db: AsyncSession) -> str | None:
+    """Call Claude to write release notes for all Pushed features in a sprint."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return None
+    sprint = await db.get(Sprint, sprint_id)
+    if not sprint:
+        return None
+    product = await db.get(Product, product_id)
+
+    feat_result = await db.execute(
+        select(Feature).where(
+            Feature.sprint_id == sprint_id,
+            Feature.status == "Pushed",
+        ).order_by(Feature.priority.desc())
+    )
+    pushed = feat_result.scalars().all()
+    if not pushed:
+        return None
+
+    feature_list = "\n".join(f"- {f.name}: {f.description or ''}" for f in pushed)
+    try:
+        return await _llm_call(
+            f"Write concise release notes for {product.name if product else 'this product'} "
+            f"— {sprint.name}.\n\n"
+            f"Shipped features:\n{feature_list}\n\n"
+            "Format as Markdown with:\n"
+            "- A one-sentence summary of what this release delivers\n"
+            "- A '## What's New' section with bullet points grouped by theme\n"
+            "- Keep it short and user-facing — no internal jargon\n"
+            "Return only the Markdown, nothing else.",
+            max_tokens=800,
+        )
+    except Exception:
+        return None
+
+
+@app.post("/product/{product_id}/plan-sprints")
+async def plan_sprints_form(
+    product_id: int,
+    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
+):
+    """Trigger LLM sprint auto-planning (form post → redirect to sprints tab)."""
+    # Re-use the API endpoint logic by calling it directly
+    try:
+        result = await api_plan_sprints(product_id=product_id, db=db, _=_)
+        n = result.get("sprints_created", 0)
+        return RedirectResponse(
+            f"/product/{product_id}?tab=sprints&msg=Created+{n}+sprint(s)", status_code=303
+        )
+    except HTTPException as exc:
+        return RedirectResponse(
+            f"/product/{product_id}?tab=sprints&err={exc.detail}", status_code=303
+        )
 
 
 @app.post("/product/{product_id}/features/{feature_id}/assign-sprint")
@@ -903,7 +1171,39 @@ async def bulk_approve(
     for f in result.scalars().all():
         f.status = "Approved"
     await db.flush()
-    return RedirectResponse(f"/product/{product_id}", status_code=303)
+    return RedirectResponse(f"/product/{product_id}?tab=board&phase=Approved", status_code=303)
+
+
+@app.post("/product/{product_id}/features/bulk-reject")
+async def bulk_reject(
+    product_id: int,
+    feature_ids: str = Form(...),
+    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
+):
+    """Reject multiple Pending features at once."""
+    ids = [int(x) for x in feature_ids.split(",") if x.strip().isdigit()]
+    result = await db.execute(
+        select(Feature).where(Feature.product_id == product_id, Feature.id.in_(ids), Feature.status == "Pending")
+    )
+    for f in result.scalars().all():
+        f.status = "Rejected"
+    await db.flush()
+    return RedirectResponse(f"/product/{product_id}?tab=board&phase=Pending", status_code=303)
+
+
+@app.post("/product/{product_id}/features/bulk-approve-all")
+async def bulk_approve_all(
+    product_id: int,
+    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
+):
+    """Approve ALL Pending features for a product in one click."""
+    result = await db.execute(
+        select(Feature).where(Feature.product_id == product_id, Feature.status == "Pending")
+    )
+    for f in result.scalars().all():
+        f.status = "Approved"
+    await db.flush()
+    return RedirectResponse(f"/product/{product_id}?tab=board&phase=Approved", status_code=303)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -985,154 +1285,8 @@ async def api_update_product(
 
 @app.post("/api/products/{product_id}/sync-features")
 async def api_sync_features(product_id: int, db: AsyncSession = Depends(get_db)):
-    """
-    Read {working_dir}/features.md and sync feature statuses into the DB.
-    Self-heals after a DB wipe. Returns {"changes": N, "details": [...]}.
-
-    Status mapping (features.md raw → DB status):
-      Pushed/Approved/Reviewed/Designed/Pending/Deferred/Rejected → same
-      Reviewing/Designing/Implementing/Implemented → Approved  (reset stale in-flight)
-      Blocked → Pending  (unblock)
-      Reverted → Pending
-    """
-    import re as _re
-
-    _STATUS_MAP_SYNC: dict[str, str] = {
-        "Pushed":        "Pushed",
-        "Approved":      "Approved",
-        "Reviewing":     "Approved",
-        "Reviewed":      "Reviewed",
-        "Designed":      "Designed",
-        "Designing":     "Approved",
-        "Implemented":   "Approved",
-        "Implementing":  "Approved",
-        "Pending":       "Pending",
-        "Blocked":       "Pending",
-        "Deferred":      "Deferred",
-        "Rejected":      "Rejected",
-        "Reverted":      "Pending",
-        "Testing":       "Approved",
-        "Committed":     "Pushed",
-    }
-
-    def _strip_emoji(cell: str) -> str:
-        return _re.sub(r"[^\x00-\x7F]", "", cell).strip()
-
-    product = await _get_product_or_404(product_id, db)
-    working_dir = product.working_dir or ""
-
-    if not working_dir:
-        return {"changes": 0, "details": [], "error": "product has no working_dir"}
-
-    features_md_path = Path(working_dir) / "features.md"
-    if not features_md_path.exists():
-        return {"changes": 0, "details": [], "error": f"features.md not found at {features_md_path}"}
-
-    try:
-        content = features_md_path.read_text(encoding="utf-8", errors="replace")
-    except OSError as e:
-        raise HTTPException(status_code=500, detail=f"Could not read features.md: {e}")
-
-    # Parse markdown table
-    header_cols: list[str] | None = None
-    parsed_rows: list[dict] = []
-
-    for raw_line in content.splitlines():
-        line = raw_line.strip()
-        if not line or not line.startswith("|"):
-            continue
-        cells = [c.strip() for c in line.split("|") if c.strip()]
-        if not cells:
-            continue
-        if all(_re.fullmatch(r":?-+:?", c) for c in cells):
-            continue
-        lowered = [c.lower() for c in cells]
-        if "id" in lowered:
-            header_cols = lowered
-            continue
-        if header_cols is None:
-            continue
-
-        def _get(col_name: str) -> str:
-            try:
-                idx = header_cols.index(col_name)
-                return cells[idx] if idx < len(cells) else ""
-            except ValueError:
-                return ""
-
-        raw_id = _get("id")
-        try:
-            fid = int(raw_id)
-        except (ValueError, TypeError):
-            continue
-
-        raw_status = _strip_emoji(_get("status"))
-        raw_name   = _get("name").strip() or f"Feature {fid}"
-        try:
-            priority = max(1, min(100, int(_get("priority"))))
-        except (ValueError, TypeError):
-            priority = 50
-        ftype_raw = _strip_emoji(_get("type")).lower()
-        ftype = ftype_raw if ftype_raw in ("feature", "bug", "chore") else "feature"
-
-        parsed_rows.append({
-            "id": fid, "name": raw_name, "status": raw_status,
-            "priority": priority, "feature_type": ftype,
-        })
-
-    if not parsed_rows:
-        return {"changes": 0, "details": [], "error": "no feature rows found in features.md"}
-
-    changes = 0
-    details: list[dict] = []
-
-    for row in parsed_rows:
-        fid          = row["id"]
-        md_status    = row["status"]
-        target_status = _STATUS_MAP_SYNC.get(md_status)
-
-        if target_status is None:
-            details.append({"id": fid, "action": "skipped", "reason": f"unknown status {md_status!r}"})
-            continue
-
-        # Look up feature by ID — must belong to this product
-        db_feature = await db.get(Feature, fid)
-
-        if db_feature is not None:
-            if db_feature.product_id != product_id:
-                details.append({"id": fid, "action": "skipped", "reason": "belongs to different product"})
-                continue
-            if db_feature.status == target_status:
-                details.append({"id": fid, "action": "no-op", "status": target_status})
-                continue
-            old_status = db_feature.status
-            db_feature.status  = target_status
-            db_feature.version = (db_feature.version or 0) + 1
-            details.append({
-                "id": fid, "action": "updated",
-                "from": old_status, "to": target_status,
-            })
-            changes += 1
-        else:
-            # Feature not in DB — create it
-            new_f = Feature(
-                product_id=product_id,
-                name=row["name"],
-                status=target_status,
-                priority=row["priority"],
-                feature_type=row["feature_type"],
-                source="pm",
-            )
-            db.add(new_f)
-            await db.flush()  # get new_f.id
-            details.append({
-                "id": fid, "action": "created",
-                "new_db_id": new_f.id, "status": target_status,
-            })
-            changes += 1
-
-    await db.flush()
-    return {"changes": changes, "details": details}
+    """Deprecated: DB is the single source of truth for feature status."""
+    return {"changes": 0, "details": [], "message": "Disabled — DB is source of truth for feature status"}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1426,32 +1580,29 @@ async def recommend_features(
     _: str = Depends(require_auth),
 ):
     """Call Claude to suggest initial features based on product vision."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        raise HTTPException(status_code=501, detail="ANTHROPIC_API_KEY not configured")
-
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model=_RECOMMENDATION_MODEL,
-            max_tokens=900,
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"You are helping a PM plan an MVP for a new software product.\n\n"
-                    f"Product vision: {body.vision}\n"
-                    f"Tech stack: {body.preferred_stack}\n\n"
-                    "List 6-8 concrete MVP features for a v0.1 release. "
-                    "Focus on core functionality only — no nice-to-haves.\n"
-                    "Return ONLY a JSON array, no other text:\n"
-                    '[{"name": "Feature name (3-7 words)", '
-                    '"description": "One sentence: what it does and why it matters."}]'
-                ),
-            }],
+        raw = await _llm_call(
+            f"You are a senior product manager generating a comprehensive product backlog.\n\n"
+            f"Product vision: {body.vision}\n"
+            f"Tech stack: {body.preferred_stack}\n\n"
+            "Generate a COMPLETE product backlog of 25-35 features covering ALL layers of the product:\n"
+            "- Core functionality (the main user-facing features)\n"
+            "- Authentication & user management\n"
+            "- Security hardening\n"
+            "- Performance & caching\n"
+            "- API & integrations\n"
+            "- Admin & ops tooling\n"
+            "- Observability (logging, metrics, health checks)\n"
+            "- Testing infrastructure\n"
+            "- Developer experience (CI/CD, linting, docs)\n\n"
+            "For each feature include: name (4-8 words), description (1-2 sentences), "
+            "feature_type (feature/bug/chore), priority (1-100 where 100=critical), "
+            "skip_design (true for chores/infra, false for user-facing features).\n\n"
+            "Return ONLY a JSON array, no other text:\n"
+            '[{"name": "...", "description": "...", "feature_type": "feature", '
+            '"priority": 70, "skip_design": false}]',
+            max_tokens=4000,
         )
-        raw = message.content[0].text.strip()
-        # Strip markdown code fences if Claude wrapped the JSON
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -1470,31 +1621,19 @@ async def articulate_vision(
     _: str = Depends(require_auth),
 ):
     """Refine and articulate a rough product vision into a clear, structured statement."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        raise HTTPException(status_code=501, detail="ANTHROPIC_API_KEY not configured")
-
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model=_RECOMMENDATION_MODEL,
+        result = await _llm_call(
+            f"You are a senior product manager helping articulate a product vision.\n\n"
+            f"Raw vision input: {body.vision}\n"
+            f"Tech stack: {body.preferred_stack}\n\n"
+            "Rewrite the vision as a concise, well-structured product vision statement. "
+            "Cover: the problem being solved, the target user, the core value proposition, "
+            "and what success looks like. "
+            "Write in plain English — no bullet points, no headings, 3-5 sentences. "
+            "Return only the articulated vision text, nothing else.",
             max_tokens=600,
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"You are a senior product manager helping articulate a product vision.\n\n"
-                    f"Raw vision input: {body.vision}\n"
-                    f"Tech stack: {body.preferred_stack}\n\n"
-                    "Rewrite the vision as a concise, well-structured product vision statement. "
-                    "Cover: the problem being solved, the target user, the core value proposition, "
-                    "and what success looks like. "
-                    "Write in plain English — no bullet points, no headings, 3-5 sentences. "
-                    "Return only the articulated vision text, nothing else."
-                ),
-            }],
         )
-        return {"vision": message.content[0].text.strip()}
+        return {"vision": result}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"LLM error: {e}")
 
@@ -1605,6 +1744,40 @@ async def api_feature_labels(feature_id: int, db: AsyncSession = Depends(get_db)
     return result.scalars().all()
 
 
+@app.post("/api/phases", response_model=schemas.PhaseOut, status_code=201)
+async def api_create_phase(body: schemas.PhaseCreate, db: AsyncSession = Depends(get_db)):
+    """Create a phase for a product."""
+    await _get_product_or_404(body.product_id, db)
+    phase = Phase(**body.model_dump())
+    db.add(phase)
+    await db.flush()
+    return phase
+
+
+@app.get("/api/products/{product_id}/phases", response_model=list[schemas.PhaseOut])
+async def api_list_phases(product_id: int, db: AsyncSession = Depends(get_db)):
+    """List all phases for a product ordered by phase order."""
+    await _get_product_or_404(product_id, db)
+    result = await db.execute(
+        select(Phase)
+        .where(Phase.product_id == product_id)
+        .order_by(Phase.order, Phase.id)
+    )
+    return result.scalars().all()
+
+
+@app.patch("/api/phases/{phase_id}", response_model=schemas.PhaseOut)
+async def api_update_phase(phase_id: int, body: schemas.PhaseUpdate, db: AsyncSession = Depends(get_db)):
+    """Update phase fields."""
+    phase = await db.get(Phase, phase_id)
+    if not phase:
+        raise HTTPException(status_code=404, detail="Phase not found")
+    for field, value in body.model_dump(exclude_unset=True).items():
+        setattr(phase, field, value)
+    await db.flush()
+    return phase
+
+
 @app.post("/api/sprints", response_model=schemas.SprintOut, status_code=201)
 async def api_create_sprint(body: schemas.SprintCreate, db: AsyncSession = Depends(get_db)):
     """Create a sprint for a product."""
@@ -1646,6 +1819,186 @@ async def api_update_sprint(sprint_id: int, body: schemas.SprintUpdate, db: Asyn
         setattr(sprint, field, value)
     await db.flush()
     return sprint
+
+
+@app.post("/api/sprints/{sprint_id}/sign-off")
+async def api_sprint_sign_off(
+    sprint_id: int,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Agent sign-off endpoint — merges gate values into sprint.dod_status.
+    Body: {"gate": "qa_passed"|"security_clean"|"retro_done", "value": true/false,
+           "notes": "optional notes", "retro_doc_path": "optional path"}
+    After each sign-off, check if all gates pass → auto-complete sprint.
+    """
+    sprint = await db.get(Sprint, sprint_id)
+    if not sprint:
+        raise HTTPException(status_code=404, detail="Sprint not found")
+    if sprint.status == "completed":
+        return {"status": "already_completed"}
+
+    gate  = body.get("gate")
+    value = body.get("value", True)
+    valid_gates = {"qa_passed", "security_clean", "retro_done"}
+    if gate not in valid_gates:
+        raise HTTPException(status_code=400, detail=f"gate must be one of {valid_gates}")
+
+    current = dict(sprint.dod_status or {})
+    current[gate] = bool(value)
+    if body.get("notes"):
+        current[f"{gate}_notes"] = body["notes"]
+    if gate == "retro_done" and body.get("retro_doc_path"):
+        sprint.retro_doc_path = body["retro_doc_path"]
+    sprint.dod_status = current
+    await db.flush()
+
+    # Re-evaluate all gates — if all pass, auto-complete sprint
+    dod = await _evaluate_dod(sprint_id, sprint.product_id, db)
+    all_pass = (
+        dod["all_features_done"]
+        and dod["no_open_prs"]
+        and dod["qa_passed"]
+        and dod["security_clean"]
+    )
+    auto_completed = False
+    if all_pass and sprint.status != "completed":
+        await _do_complete_sprint(sprint, sprint.product_id, db)
+        auto_completed = True
+
+    return {"dod": dod, "auto_completed": auto_completed}
+
+
+@app.post("/api/products/{product_id}/plan-sprints")
+async def api_plan_sprints(
+    product_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """
+    LLM auto-plans phasewise implementation from all Approved features.
+    Generates phases (e.g. Foundation, Core, Enhancements) each with 1-3 sprints.
+    Creates Phase + Sprint rows and assigns feature.sprint_id for each.
+    """
+    product = await db.get(Product, product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    # Read max features per sprint from DB config
+    _sys_cfg = await _get_system_config(db)
+    max_per_sprint = _cfg(_sys_cfg, "max_features_per_run") or 5
+
+    # Fetch all non-terminal features (everything except Pushed/Rejected/Reverted/Deferred)
+    terminal_statuses = ("Pushed", "Rejected", "Reverted", "Deferred")
+    feat_result = await db.execute(
+        select(Feature).where(
+            Feature.product_id == product_id,
+            Feature.status.notin_(terminal_statuses),
+        ).order_by(Feature.priority.desc())
+    )
+    approved = feat_result.scalars().all()
+    if not approved:
+        raise HTTPException(status_code=400, detail="No features to plan")
+
+    features_list = [
+        {"id": f.id, "name": f.name, "description": f.description or "",
+         "feature_type": f.feature_type, "priority": f.priority}
+        for f in approved
+    ]
+
+    try:
+        raw = await _llm_call(
+            f"You are a senior product manager doing phasewise implementation planning for: {product.name}\n"
+            f"Vision: {getattr(product, 'vision', None) or (product.config or {}).get('vision') or 'Not specified'}\n\n"
+            f"Approved features to plan ({len(features_list)} total):\n"
+            f"{json.dumps(features_list, indent=2)}\n\n"
+            "Organise these features into PHASES, where each phase has 1-3 SPRINTS.\n\n"
+            "Phase structure (use exactly these phase names or similar):\n"
+            "- Phase 1: Foundation — infrastructure, auth, CI/CD, core data models, dev tooling\n"
+            "- Phase 2: Core Product — the main user-facing value, primary workflows\n"
+            "- Phase 3: Growth & Polish — integrations, analytics, UX improvements, API\n"
+            "- Phase 4: Scale & Ops — performance, observability, security hardening (if enough features)\n\n"
+            "Rules:\n"
+            "- Every feature must be in exactly one sprint\n"
+            "- Sprints within a phase are sequential (Sprint 1 → Sprint 2 → Sprint 3)\n"
+            f"- Each sprint should have at most {max_per_sprint} features — all features in a sprint are planned and implemented together in one session\n"
+            "- Respect dependencies: foundational work (auth, DB schema) goes in Phase 1\n"
+            "- Only create phases that have features to put in them\n\n"
+            "Return ONLY a JSON array of phases, no other text:\n"
+            '[\n'
+            '  {\n'
+            '    "phase_name": "Phase 1: Foundation",\n'
+            '    "phase_goal": "Set up infrastructure and core data models",\n'
+            '    "sprints": [\n'
+            '      {"sprint_name": "Sprint 1", "sprint_goal": "...", "feature_ids": [1, 2, 3]},\n'
+            '      {"sprint_name": "Sprint 2", "sprint_goal": "...", "feature_ids": [4, 5]}\n'
+            '    ]\n'
+            '  }\n'
+            ']',
+            max_tokens=3000,
+        )
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        phase_plan = json.loads(raw.strip())
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="LLM returned malformed JSON — try again")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"LLM error: {e}")
+
+    # Delete existing phases, sprints, and clear feature sprint assignments
+    await db.execute(
+        Feature.__table__.update()
+        .where(Feature.product_id == product_id, Feature.sprint_id.isnot(None))
+        .values(sprint_id=None)
+    )
+    await db.execute(Sprint.__table__.delete().where(Sprint.product_id == product_id))
+    await db.execute(Phase.__table__.delete().where(Phase.product_id == product_id))
+    await db.flush()
+
+    # Create phases → sprints → assign features
+    phases_created = 0
+    sprints_created = 0
+    features_assigned = 0
+    first_sprint_overall = True
+
+    for phase_idx, ph in enumerate(phase_plan):
+        phase = Phase(
+            product_id=product_id,
+            name=ph.get("phase_name", f"Phase {phase_idx + 1}"),
+            goal=ph.get("phase_goal", ""),
+            order=phase_idx,
+            status="active" if phase_idx == 0 else "planned",
+        )
+        db.add(phase)
+        await db.flush()
+        phases_created += 1
+
+        for sprint_idx, sp in enumerate(ph.get("sprints", [])):
+            sprint = Sprint(
+                product_id=product_id,
+                phase_id=phase.id,
+                name=sp.get("sprint_name", f"Sprint {sprints_created + 1}"),
+                goal=sp.get("sprint_goal", ""),
+                status="active" if first_sprint_overall else "planned",
+            )
+            db.add(sprint)
+            await db.flush()
+            sprints_created += 1
+            first_sprint_overall = False
+
+            for fid in sp.get("feature_ids", []):
+                feat_row = await db.execute(
+                    select(Feature).where(Feature.id == fid, Feature.product_id == product_id)
+                )
+                feat = feat_row.scalar_one_or_none()
+                if feat:
+                    feat.sprint_id = sprint.id
+                    features_assigned += 1
+
+    return {"phases_created": phases_created, "sprints_created": sprints_created, "features_assigned": features_assigned}
 
 
 @app.post("/api/features/{feature_id}/links", response_model=schemas.FeatureLinkOut, status_code=201)
