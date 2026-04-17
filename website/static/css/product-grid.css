@@ -1,0 +1,373 @@
+/* ============================================================
+   Product Grid & Cards — Dashboard home page
+   ============================================================ */
+
+/* ── STATS BAR ──────────────────────────────────────────── */
+.stats-bar {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  background: var(--color-canvas-default);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-lg);
+  padding: 6px 0;
+  margin-bottom: 16px;
+  box-shadow: var(--shadow-sm);
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 1;
+  padding: 6px 12px;
+  gap: 2px;
+}
+
+.stat-item[data-filter] {
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  transition: background 0.12s;
+}
+
+.stat-item[data-filter]:hover {
+  background: var(--color-canvas-subtle);
+}
+
+.stat-item.stat-active {
+  background: var(--color-accent-subtle);
+}
+
+.stat-value {
+  font-size: var(--text-xl);
+  font-weight: 700;
+  color: var(--color-fg-default);
+  line-height: 1.2;
+}
+
+.stat-label {
+  font-size: var(--text-xs);
+  color: var(--color-fg-subtle);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.stat-divider {
+  width: 1px;
+  height: 28px;
+  background: var(--color-border-muted);
+  flex-shrink: 0;
+}
+
+
+/* ── SEARCH BAR ─────────────────────────────────────────── */
+.search-bar {
+  position: relative;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.search-bar input {
+  flex: 1;
+  padding: 7px 12px 7px 34px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  font-size: var(--text-md);
+  font-family: inherit;
+  background: var(--color-canvas-default);
+  color: var(--color-fg-default);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%236e7781' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.3-4.3'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: 10px center;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.search-bar input:focus {
+  border-color: var(--color-accent-fg);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--color-accent-subtle);
+}
+
+.filter-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-full);
+  background: var(--color-canvas-default);
+  color: var(--color-fg-muted);
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.filter-chip:hover {
+  background: var(--color-canvas-subtle);
+  border-color: var(--color-border-muted);
+}
+
+.filter-chip.active {
+  background: var(--color-accent-subtle);
+  color: var(--color-accent-fg);
+  border-color: var(--color-accent-fg);
+  font-weight: 600;
+}
+
+
+/* ── LIST CONTROLS ──────────────────────────────────────── */
+.list-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+
+/* ── PRODUCT GRID ───────────────────────────────────────── */
+.product-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+
+/* ── PRODUCT CARD ───────────────────────────────────────── */
+.product-card {
+  background: var(--color-canvas-default);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  border-left: 3px solid var(--color-border-default);
+  transition: border-color 0.15s;
+  text-decoration: none;
+  color: inherit;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.product-card:hover {
+  border-color: var(--color-border-muted);
+  border-left-color: var(--color-accent-fg);
+}
+
+.product-card[data-type="greenfield"] {
+  border-left-color: var(--green);
+}
+
+.product-card[data-type="brownfield"] {
+  border-left-color: var(--orange);
+}
+
+.product-card-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.product-type-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+  margin-top: 5px;
+}
+
+.product-name {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--color-fg-default);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── STATUS PILLS ───────────────────────────────────────── */
+.product-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  white-space: nowrap;
+}
+
+.status-pill--ready              { background: var(--color-success-subtle); color: var(--color-success-fg); }
+.status-pill--running            { background: var(--color-accent-subtle); color: var(--color-accent-fg); }
+.status-pill--paused             { background: var(--color-attention-subtle); color: var(--color-attention-fg); }
+.status-pill--discovering        { background: var(--color-accent-subtle); color: var(--color-accent-fg); }
+.status-pill--discovered         { background: var(--color-accent-subtle); color: var(--color-accent-fg); }
+.status-pill--error              { background: var(--color-danger-subtle); color: var(--color-danger-fg); }
+.status-pill--greenfield_pending { background: var(--purple-lt); color: var(--purple); }
+.status-pill--registered         { background: var(--color-canvas-subtle); color: var(--color-fg-subtle); }
+
+
+/* ── STACK CHIPS ────────────────────────────────────────── */
+.product-stack-chips {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.stack-chip {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--color-canvas-subtle);
+  color: var(--color-fg-muted);
+  border: 1px solid var(--color-border-subtle);
+}
+
+
+/* ── CARD FOOTER ────────────────────────────────────────── */
+.product-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: var(--text-xs);
+  color: var(--color-fg-subtle);
+  margin-top: auto;
+}
+
+.product-type-label {
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: var(--color-fg-subtle);
+}
+
+.product-last-run {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  color: var(--color-fg-subtle);
+}
+
+.staleness-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+
+.stale-fresh  { background: var(--green); }
+.stale--warn  { background: var(--amber); }
+.stale--danger { background: var(--red); }
+
+
+/* ── PROGRESS BAR ───────────────────────────────────────── */
+.product-progress-bar {
+  display: flex;
+  height: 4px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--color-canvas-subtle);
+  gap: 1px;
+}
+
+.ppb-pushed  { background: var(--green); }
+.ppb--active { background: var(--blue); }
+.ppb--blocked { background: var(--red); }
+.ppb--pending { background: var(--color-border-muted); }
+
+
+/* ── MISC CARD ELEMENTS ─────────────────────────────────── */
+.product-meta {
+  font-size: var(--text-xs);
+  color: var(--color-fg-subtle);
+}
+
+.product-stack {
+  font-size: var(--text-xs);
+  color: var(--color-fg-muted);
+  font-family: var(--font-mono);
+}
+
+.gh-link {
+  font-size: var(--text-xs);
+  color: var(--color-accent-fg);
+  text-decoration: none;
+}
+
+.gh-link:hover {
+  text-decoration: underline;
+}
+
+.run-queued-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  background: var(--color-attention-subtle);
+  color: var(--color-attention-fg);
+}
+
+.product-count {
+  font-size: var(--text-sm);
+  color: var(--color-fg-muted);
+  font-weight: 500;
+}
+
+
+/* ── RUNNING CARD PULSE ─────────────────────────────────── */
+.product-card[data-status="running"] {
+  border-left-color: var(--blue);
+  animation: card-pulse 2s ease-in-out infinite;
+}
+
+@keyframes card-pulse {
+  0%, 100% { border-left-color: var(--blue); }
+  50%      { border-left-color: var(--blue-mid); }
+}
+
+
+/* ── DARK MODE OVERRIDES ────────────────────────────────── */
+[data-theme="dark"] .stats-bar {
+  background: var(--color-canvas-subtle);
+  border-color: var(--color-border-default);
+}
+
+[data-theme="dark"] .search-bar input {
+  background: var(--color-canvas-subtle);
+  border-color: var(--color-border-default);
+  color: var(--color-fg-default);
+}
+
+[data-theme="dark"] .filter-chip {
+  background: var(--color-canvas-subtle);
+  border-color: var(--color-border-default);
+  color: var(--color-fg-muted);
+}
+
+[data-theme="dark"] .filter-chip.active {
+  background: var(--color-accent-subtle);
+  color: var(--color-accent-fg);
+  border-color: var(--color-accent-fg);
+}
+
+[data-theme="dark"] .stack-chip {
+  background: var(--color-canvas-inset);
+  border-color: var(--color-border-default);
+  color: var(--color-fg-muted);
+}

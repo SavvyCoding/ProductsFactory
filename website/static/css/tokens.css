@@ -1,0 +1,198 @@
+/* ============================================================
+   Design Tokens — GitHub-inspired design system
+   ============================================================ */
+
+:root {
+  /* ---- Surfaces ---- */
+  --color-canvas-default:  #ffffff;
+  --color-canvas-subtle:   #f6f8fa;
+  --color-canvas-inset:    #eff2f5;
+  --color-canvas-overlay:  #ffffff;
+
+  /* ---- Borders ---- */
+  --color-border-default:  #d0d7de;
+  --color-border-muted:    #d8dee4;
+  --color-border-subtle:   #eaeef2;
+
+  /* ---- Foreground / Text ---- */
+  --color-fg-default:      #1f2328;
+  --color-fg-muted:        #656d76;
+  --color-fg-subtle:       #6e7781;
+  --color-fg-on-emphasis:  #ffffff;
+
+  /* ---- Accent (blue) ---- */
+  --color-accent-fg:       #0969da;
+  --color-accent-emphasis: #0550ae;
+  --color-accent-muted:    rgba(84, 174, 255, 0.4);
+  --color-accent-subtle:   #ddf4ff;
+
+  /* ---- Success (green) ---- */
+  --color-success-fg:       #1a7f37;
+  --color-success-emphasis:  #1f883d;
+  --color-success-subtle:    #dafbe1;
+
+  /* ---- Attention (yellow / amber) ---- */
+  --color-attention-fg:       #9a6700;
+  --color-attention-emphasis:  #bf8700;
+  --color-attention-subtle:    #fff8c5;
+
+  /* ---- Danger (red) ---- */
+  --color-danger-fg:       #d1242f;
+  --color-danger-emphasis:  #cf222e;
+  --color-danger-subtle:    #ffebe9;
+
+  /* ---- Done / Closed (purple) ---- */
+  --color-done-fg:       #8250df;
+  --color-done-emphasis:  #7048c6;
+  --color-done-subtle:    #fbefff;
+
+  /* ---- Spacing scale ---- */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 48px;
+
+  /* ---- Border radius ---- */
+  --radius-sm:   3px;
+  --radius-md:   6px;
+  --radius-lg:  12px;
+  --radius-full: 9999px;
+
+  /* ---- Font sizes ---- */
+  --text-xs:   11px;
+  --text-sm:   12px;
+  --text-md:   13px;
+  --text-base: 14px;
+  --text-lg:   16px;
+  --text-xl:   20px;
+  --text-2xl:  24px;
+
+  /* ---- Shadows (light) ---- */
+  --shadow-sm:  0 1px 2px rgba(27, 31, 36, 0.04);
+  --shadow-md:  0 1px 3px rgba(27, 31, 36, 0.06), 0 1px 2px rgba(27, 31, 36, 0.04);
+  --shadow-lg:  0 4px 12px rgba(27, 31, 36, 0.08);
+  --shadow-xl:  0 8px 24px rgba(27, 31, 36, 0.12);
+
+  /* ---- Font families ---- */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* ============================================================
+     Backward-compatible aliases (legacy variable names)
+     ============================================================ */
+  --dark:      var(--color-fg-default);
+  --mid:       var(--color-fg-muted);
+  --slate:     var(--color-fg-subtle);
+  --muted:     var(--color-fg-muted);
+  --border:    var(--color-border-default);
+  --border2:   var(--color-border-muted);
+  --light:     var(--color-canvas-subtle);
+  --white:     var(--color-canvas-default);
+  --bg:        var(--color-canvas-default);
+  --card-bg:   var(--color-canvas-overlay);
+
+  /* ---- Legacy color aliases ---- */
+  --blue:      #0969da;
+  --blue-lt:   #ddf4ff;
+  --blue-mid:  #218bff;
+  --green:     #1a7f37;
+  --green-lt:  #dafbe1;
+  --green-mid: #1f883d;
+  --amber:     #9a6700;
+  --amber-lt:  #fff8c5;
+  --amber-mid: #bf8700;
+  --red:       #d1242f;
+  --red-lt:    #ffebe9;
+  --red-mid:   #cf222e;
+  --orange:    #bc4c00;
+  --orange-lt: #fff1e5;
+  --orange-mid:#d46514;
+  --purple:    #8250df;
+  --purple-lt: #fbefff;
+  --purple-mid:#7048c6;
+  --teal:      #0e7c6b;
+  --teal-lt:   #ccfef5;
+  --teal-mid:  #0d9e85;
+}
+
+
+/* ============================================================
+   Dark theme
+   ============================================================ */
+[data-theme="dark"] {
+  /* ---- Surfaces ---- */
+  --color-canvas-default:  #0d1117;
+  --color-canvas-subtle:   #161b22;
+  --color-canvas-inset:    #010409;
+  --color-canvas-overlay:  #1c2128;
+
+  /* ---- Borders ---- */
+  --color-border-default:  #30363d;
+  --color-border-muted:    #21262d;
+  --color-border-subtle:   #21262d;
+
+  /* ---- Foreground / Text ---- */
+  --color-fg-default:      #e6edf3;
+  --color-fg-muted:        #8b949e;
+  --color-fg-subtle:       #6e7681;
+  --color-fg-on-emphasis:  #ffffff;
+
+  /* ---- Accent (blue) ---- */
+  --color-accent-fg:       #58a6ff;
+  --color-accent-emphasis: #1f6feb;
+  --color-accent-muted:    rgba(56, 139, 253, 0.4);
+  --color-accent-subtle:   rgba(56, 139, 253, 0.1);
+
+  /* ---- Success (green) ---- */
+  --color-success-fg:       #3fb950;
+  --color-success-emphasis:  #238636;
+  --color-success-subtle:    rgba(46, 160, 67, 0.15);
+
+  /* ---- Attention (yellow / amber) ---- */
+  --color-attention-fg:       #d29922;
+  --color-attention-emphasis:  #9e6a03;
+  --color-attention-subtle:    rgba(187, 128, 9, 0.15);
+
+  /* ---- Danger (red) ---- */
+  --color-danger-fg:       #f85149;
+  --color-danger-emphasis:  #da3633;
+  --color-danger-subtle:    rgba(248, 81, 73, 0.1);
+
+  /* ---- Done / Closed (purple) ---- */
+  --color-done-fg:       #bc8cff;
+  --color-done-emphasis:  #8957e5;
+  --color-done-subtle:    rgba(137, 87, 229, 0.15);
+
+  /* ---- Shadows (dark) ---- */
+  --shadow-sm:  0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md:  0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-lg:  0 4px 12px rgba(0, 0, 0, 0.5);
+  --shadow-xl:  0 8px 24px rgba(0, 0, 0, 0.6);
+
+  /* ---- Legacy color aliases (dark overrides) ---- */
+  --blue:      #58a6ff;
+  --blue-lt:   rgba(56, 139, 253, 0.1);
+  --blue-mid:  #388bfd;
+  --green:     #3fb950;
+  --green-lt:  rgba(46, 160, 67, 0.15);
+  --green-mid: #238636;
+  --amber:     #d29922;
+  --amber-lt:  rgba(187, 128, 9, 0.15);
+  --amber-mid: #9e6a03;
+  --red:       #f85149;
+  --red-lt:    rgba(248, 81, 73, 0.1);
+  --red-mid:   #da3633;
+  --orange:    #d18616;
+  --orange-lt: rgba(209, 134, 22, 0.15);
+  --orange-mid:#db6d28;
+  --purple:    #bc8cff;
+  --purple-lt: rgba(137, 87, 229, 0.15);
+  --purple-mid:#8957e5;
+  --teal:      #39d2c0;
+  --teal-lt:   rgba(57, 210, 192, 0.15);
+  --teal-mid:  #2ea493;
+}

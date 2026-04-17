@@ -15,7 +15,11 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None) ->
       coder     → greenfield.md or brownfield.md (existing coder path)
       None      → legacy routing (analysis_run / brownfield / greenfield)
     """
-    if persona == "designer":
+    if persona == "retrospective":
+        template_name = "retrospective"
+    elif persona == "product_planner":
+        template_name = "product_planner"
+    elif persona == "designer":
         template_name = "designer"
     elif persona == "reviewer":
         template_name = "reviewer"
@@ -73,7 +77,7 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None) ->
         "{pm_api_url}": str(os.environ.get("PM_API_URL_CONTAINER", os.environ["PM_API_URL"])),
         "{tech_stack}": ", ".join(product.get("tech_stack") or []),
         "{max_features_per_run}": str(
-            product.get("max_features_per_run") or int(os.environ.get("MAX_FEATURES_PER_RUN", "1"))
+            int(os.environ.get("MAX_FEATURES_PER_SPRINT", "5"))
         ),
         "{auto_merge_enabled}": str(product.get("_auto_merge_enabled", False)),
         "{assigned_features}": product.get("_assigned_features_md", ""),

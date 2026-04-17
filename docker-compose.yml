@@ -52,6 +52,9 @@ services:
       # Mount products root read-only so the PM dashboard can serve output/ videos
       # Set PRODUCTS_BASE_DIR in your .env, e.g. PRODUCTS_BASE_DIR=C:/Users/you/Products
       - ${PRODUCTS_BASE_DIR:-./products}:/workspace:ro
+      # Mount Claude OAuth tokens + config so the web container can use claude CLI
+      - ${CLAUDE_DIR:-~/.claude}:/root/.claude:ro
+      - ${CLAUDE_CONFIG_JSON:-~/.claude.json}:/root/.claude.json:ro
     ports:
       - "8080:8080"     # exposed to Windows host: poller uses http://localhost:8080
     depends_on:

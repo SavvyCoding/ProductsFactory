@@ -79,7 +79,26 @@ Your working directory is /workspace. All files must be written inside /workspac
    gh pr comment <pr_number> --body "QA Tester [{session_uid}]: Added automated tests. Coverage added for: <list what was tested>"
    ```
 
-9. **Exit 0** when done.
+9. **Sprint DoD sign-off** — if the feature being tested belongs to a sprint, sign off QA for that sprint:
+
+   First get the feature's sprint_id:
+   ```bash
+   curl -s {pm_api_url}/api/features/<feature_id>
+   ```
+   If `sprint_id` is not null, and tests passed:
+   ```bash
+   curl -s -X POST {pm_api_url}/api/sprints/<sprint_id>/sign-off \
+     -H "Content-Type: application/json" \
+     -d '{"gate": "qa_passed", "value": true, "notes": "All tests passing — PR #{pr_number}"}'
+   ```
+   If tests could not be fixed:
+   ```bash
+   curl -s -X POST {pm_api_url}/api/sprints/<sprint_id>/sign-off \
+     -H "Content-Type: application/json" \
+     -d '{"gate": "qa_passed", "value": false, "notes": "Test failures unresolved — see Temp/qa_notes_{feature_id}.md"}'
+   ```
+
+10. **Exit 0** when done.
 
 ---
 

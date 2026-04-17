@@ -1,0 +1,125 @@
+/* ============================================================
+   Toast Notification System
+   Uses design tokens from tokens.css
+   ============================================================ */
+
+#toast-container {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  flex-direction: column;
+  min-width: 280px;
+  max-width: 420px;
+  background: var(--color-canvas-overlay);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: 12px 14px 0;
+  overflow: hidden;
+  pointer-events: all;
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity .2s ease, transform .2s ease;
+  position: relative;
+}
+
+.toast-in {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.toast-msg {
+  font-size: var(--text-md);
+  color: var(--color-fg-default);
+  padding-bottom: 10px;
+  flex: 1;
+  line-height: 1.45;
+}
+
+.toast-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: transparent;
+  border: none;
+  font-size: var(--text-xs);
+  color: var(--color-fg-muted);
+  cursor: pointer;
+  padding: 2px 4px;
+  line-height: 1;
+  border-radius: var(--radius-sm);
+  transition: background .1s, color .1s;
+}
+
+.toast-close:hover {
+  background: var(--color-canvas-subtle);
+  color: var(--color-fg-default);
+}
+
+.toast-bar {
+  height: 3px;
+  width: 100%;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  margin: 0 -14px;
+  width: calc(100% + 28px);
+}
+
+
+/* ── Variants ────────────────────────────────────────────── */
+.toast-success {
+  border-left: 3px solid var(--green);
+}
+.toast-success .toast-bar {
+  background: var(--green);
+}
+
+.toast-error {
+  border-left: 3px solid var(--red);
+}
+.toast-error .toast-bar {
+  background: var(--red);
+}
+
+.toast-info {
+  border-left: 3px solid var(--blue);
+}
+.toast-info .toast-bar {
+  background: var(--blue);
+}
+
+.toast-warn {
+  border-left: 3px solid var(--amber);
+}
+.toast-warn .toast-bar {
+  background: var(--amber);
+}
+
+
+/* ── Dark mode overrides ─────────────────────────────────── */
+[data-theme="dark"] .toast {
+  background: var(--color-canvas-overlay);
+  border-color: var(--color-border-default);
+  box-shadow: var(--shadow-xl);
+}
+
+[data-theme="dark"] .toast-msg {
+  color: var(--color-fg-default);
+}
+
+[data-theme="dark"] .toast-close {
+  color: var(--color-fg-subtle);
+}
+
+[data-theme="dark"] .toast-close:hover {
+  background: var(--color-canvas-subtle);
+  color: var(--color-fg-default);
+}

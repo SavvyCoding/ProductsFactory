@@ -166,16 +166,7 @@ def install_templates(
         context, force,
     )
 
-    # 4. features.md — empty starter (Claude regenerates from API each session)
-    features_path = working_dir / "features.md"
-    if force or not features_path.exists():
-        features_path.write_text(
-            f"# Features — {context['PRODUCT_NAME']}\n\n"
-            "_(regenerated from PM API at the start of each Claude session)_\n",
-            encoding="utf-8",
-        )
-        written.append(str(features_path))
-        log.info(f"Wrote: {features_path}")
+    # 4. features.md — no longer created (DB is single source of truth)
 
     # 5. Create required directories if they don't exist (greenfield only)
     if product.get("type", "greenfield") == "greenfield":

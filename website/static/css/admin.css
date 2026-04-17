@@ -1,0 +1,375 @@
+/* ============================================================
+   Admin Page
+   ============================================================ */
+
+/* ── ADMIN TABS ─────────────────────────────────────────── */
+.admin-tabs-wrap {
+  margin-bottom: 20px;
+}
+
+.admin-tab-bar {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--color-border-default);
+}
+
+.admin-tab-bar .tab-btn {
+  padding: 8px 16px;
+  font-size: var(--text-md);
+  font-weight: 500;
+  color: var(--color-fg-muted);
+  cursor: pointer;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  transition: color 0.12s, border-color 0.12s;
+}
+
+.admin-tab-bar .tab-btn:hover {
+  color: var(--color-fg-default);
+}
+
+.admin-tab-bar .tab-btn.active {
+  color: var(--color-fg-default);
+  border-bottom-color: var(--color-accent-fg);
+  font-weight: 600;
+}
+
+.admin-tab-panel {
+  padding: 28px 32px 60px;
+}
+
+
+/* ── ADMIN CARDS & LAYOUT ───────────────────────────────── */
+.admin-notice {
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  margin-bottom: 16px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: var(--color-accent-subtle);
+  color: var(--color-accent-fg);
+  border: 1px solid var(--color-accent-muted);
+}
+
+.admin-card-wide {
+  background: var(--color-canvas-default);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.admin-fields-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.admin-section-label {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-fg-subtle);
+  margin-bottom: 10px;
+  margin-top: 16px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.field-narrow {
+  max-width: 120px;
+}
+
+.field-unit {
+  font-size: var(--text-xs);
+  color: var(--color-fg-subtle);
+  margin-left: 4px;
+}
+
+
+/* ── TOGGLE ─────────────────────────────────────────────── */
+.toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: var(--text-md);
+  color: var(--color-fg-default);
+}
+
+.toggle-label input[type="checkbox"] {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--color-border-default);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+
+.toggle-label input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background: white;
+  border-radius: var(--radius-full);
+  transition: transform 0.2s;
+}
+
+.toggle-label input[type="checkbox"]:checked {
+  background: var(--color-accent-fg);
+}
+
+.toggle-label input[type="checkbox"]:checked::after {
+  transform: translateX(16px);
+}
+
+.toggle-text {
+  font-size: var(--text-sm);
+  color: var(--color-fg-muted);
+}
+
+
+/* ── FORM ACTIONS ───────────────────────────────────────── */
+.form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border-subtle);
+}
+
+
+/* ── ADD PM ─────────────────────────────────────────────── */
+.add-pm-details {
+  margin-top: 12px;
+  padding: 14px;
+  background: var(--color-canvas-subtle);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+}
+
+.add-pm-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+
+/* ── PROFILE SWITCHER ───────────────────────────────────── */
+.profile-switcher {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.profile-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 20px;
+  border: 2px solid var(--color-border-default);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  min-width: 120px;
+  text-align: center;
+}
+
+.profile-option:hover {
+  border-color: var(--color-border-muted);
+  background: var(--color-canvas-subtle);
+}
+
+.profile-option.active {
+  border-color: var(--color-accent-fg);
+  background: var(--color-accent-subtle);
+}
+
+.profile-icon {
+  font-size: 24px;
+  opacity: 0.8;
+}
+
+.profile-label {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--color-fg-default);
+}
+
+.profile-desc {
+  font-size: var(--text-xs);
+  color: var(--color-fg-subtle);
+  line-height: 1.4;
+}
+
+
+/* ── PROGRESS VIEWER ────────────────────────────────────── */
+.progress-viewer {
+  background: var(--color-canvas-default);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  overflow-x: auto;
+}
+
+.md-body h1 {
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  color: var(--color-fg-default);
+  margin-top: 24px;
+  margin-bottom: 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--color-border-default);
+}
+
+.md-body h2 {
+  font-size: var(--text-xl);
+  font-weight: 600;
+  color: var(--color-fg-default);
+  margin-top: 20px;
+  margin-bottom: 10px;
+}
+
+.md-body h3 {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--color-fg-default);
+  margin-top: 16px;
+  margin-bottom: 8px;
+}
+
+.md-body h4, .md-body h5, .md-body h6 {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--color-fg-default);
+  margin-top: 14px;
+  margin-bottom: 6px;
+}
+
+.md-body p {
+  margin-bottom: 10px;
+  line-height: 1.6;
+  color: var(--color-fg-default);
+  font-size: var(--text-base);
+}
+
+.md-body ul, .md-body ol {
+  margin-bottom: 10px;
+  padding-left: 24px;
+  color: var(--color-fg-default);
+  font-size: var(--text-base);
+}
+
+.md-body li {
+  margin-bottom: 4px;
+  line-height: 1.5;
+}
+
+.md-body code {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  background: var(--color-canvas-subtle);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  color: var(--color-fg-default);
+}
+
+.md-body pre {
+  background: var(--color-canvas-subtle);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  padding: 12px 16px;
+  overflow-x: auto;
+  margin-bottom: 12px;
+}
+
+.md-body pre code {
+  background: none;
+  padding: 0;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.md-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 12px;
+  font-size: var(--text-sm);
+}
+
+.md-body table th,
+.md-body table td {
+  padding: 6px 12px;
+  border: 1px solid var(--color-border-default);
+  text-align: left;
+}
+
+.md-body table th {
+  background: var(--color-canvas-subtle);
+  font-weight: 600;
+}
+
+.md-body hr {
+  border: none;
+  border-top: 1px solid var(--color-border-default);
+  margin: 20px 0;
+}
+
+.md-body blockquote {
+  border-left: 3px solid var(--color-border-default);
+  padding: 4px 16px;
+  margin: 0 0 12px 0;
+  color: var(--color-fg-muted);
+  font-style: italic;
+}
+
+
+/* ── DARK MODE OVERRIDES ────────────────────────────────── */
+[data-theme="dark"] .admin-card-wide {
+  background: var(--color-canvas-subtle);
+  border-color: var(--color-border-default);
+}
+
+[data-theme="dark"] .admin-notice {
+  background: var(--color-accent-subtle);
+  border-color: var(--color-accent-muted);
+}
+
+[data-theme="dark"] .add-pm-details {
+  background: var(--color-canvas-inset);
+  border-color: var(--color-border-default);
+}
+
+[data-theme="dark"] .profile-option {
+  border-color: var(--color-border-default);
+}
+
+[data-theme="dark"] .profile-option.active {
+  border-color: var(--color-accent-fg);
+  background: var(--color-accent-subtle);
+}
+
+[data-theme="dark"] .progress-viewer {
+  background: var(--color-canvas-subtle);
+  border-color: var(--color-border-default);
+}
+
+[data-theme="dark"] .toggle-label input[type="checkbox"] {
+  background: var(--color-border-muted);
+}
+
+[data-theme="dark"] .toggle-label input[type="checkbox"]:checked {
+  background: var(--color-accent-fg);
+}

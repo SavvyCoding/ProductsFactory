@@ -53,7 +53,7 @@ AGENT_BACKEND  = os.environ.get("AGENT_BACKEND", "claude")   # "claude" | "ollam
 OLLAMA_HOST    = os.environ.get("OLLAMA_HOST",   "http://host.docker.internal:11434")
 DESIGNER_MODEL       = os.environ.get("DESIGNER_MODEL",       "gemma3:27b")
 CODER_MODEL          = os.environ.get("CODER_MODEL",          "qwen3-coder:30b")
-MAX_FEATURES_PER_RUN = int(os.environ.get("MAX_FEATURES_PER_RUN", "1"))
+MAX_FEATURES_PER_SPRINT = int(os.environ.get("MAX_FEATURES_PER_SPRINT", "5"))
 
 
 def _get_deploy_key_path(product: dict, ssh_dir: Path | None = None) -> Path | None:
@@ -87,9 +87,10 @@ def _rollback_stuck_features(product_id: int, persona: str | None) -> None:
     Each feature is patched individually so a single API failure does not block the rest.
     """
     stuck_statuses = {
-        "designer": ["Designing"],
-        "coder":    ["Implementing"],
-        "reviewer": [],
+        "designer":         ["Designing"],
+        "product_planner":  ["Designing"],
+        "coder":            ["Implementing"],
+        "reviewer":         [],
     }
     rollback_from = stuck_statuses.get(persona or "", ["Designing", "Implementing"])
     if not rollback_from:
@@ -195,6 +196,23 @@ def _apply_session_entry(client: httpx.Client, entry: dict) -> bool:
                 f"[progress] Feature #{fid} transitioning to Reviewing without pr_number — "
                 "feature may get stuck. Agent should include pr_number in session_result.json."
             )
+    # Guard: never downgrade a feature's status
+    _PROGRESS_RANK = {
+        "Pending": 0, "Approved": 1, "Designing": 2, "Designed": 3,
+        "Implementing": 4, "Reviewing": 5, "Reviewed": 6, "Pushed": 7,
+        "Blocked": 2, "Deferred": 7, "Rejected": 7, "Reverted": 0,
+    }
+    if status:
+        try:
+            current_resp = client.get(f"/api/features/{fid}")
+            if current_resp.status_code == 200:
+                current_status = current_resp.json().get("status", "")
+                if _PROGRESS_RANK.get(current_status, 0) > _PROGRESS_RANK.get(status, 0):
+                    log.debug(f"[progress] Feature #{fid}: skipping downgrade {current_status} → {status}")
+                    return False
+        except Exception:
+            pass  # proceed with update if check fails
+
     patch_body = {k: v for k, v in entry.items() if k not in ("id", "confidence")}
     try:
         resp = client.patch(f"/api/features/{fid}", json=patch_body)
@@ -502,44 +520,55 @@ def _read_session_summary(working_dir: str) -> str:
     return ""
 
 
-def _fetch_assigned_features(product_id: int, persona: str | None, max_count: int) -> list[dict]:
+def _fetch_assigned_features(product_id: int, persona: str | None, max_count: int = MAX_FEATURES_PER_SPRINT) -> list[dict]:
     """
     Pre-fetch features the agent should work on this session.
-    Poller selects features — agent no longer self-discovers via API.
+    Sprint-aware: when an active sprint exists, picks ALL eligible features in
+    that sprint (up to MAX_FEATURES_PER_SPRINT) so the entire sprint is planned
+    and implemented together.
     Returns [] for personas that manage their own work (qa_tester, recommender, etc.).
     """
-    if persona not in ("coder", "designer", "reviewer"):
+    if persona not in ("coder", "designer", "product_planner", "reviewer"):
         return []
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            # Check for active sprint — if one exists, scope to its features
+            active_sprint_id = None
+            active_resp = client.get(f"/api/products/{product_id}/sprints/active")
+            if active_resp.status_code == 200 and active_resp.json():
+                active_sprint_id = active_resp.json().get("id")
+
+            resp = client.get(f"/api/products/{product_id}/features")
+            resp.raise_for_status()
+            all_features = resp.json()
+            all_features = all_features if isinstance(all_features, list) else []
+
             if persona == "coder":
-                resp = client.get("/api/features/approved", params={"product_id": product_id})
-                resp.raise_for_status()
-                all_features = resp.json()
-                features = all_features if isinstance(all_features, list) else []
+                features = [f for f in all_features
+                            if f.get("status") in ("Designed", "Approved")
+                            and (f.get("status") == "Designed" or f.get("skip_design"))]
+                # Scope to active sprint if one exists
+                if active_sprint_id:
+                    sprint_features = [f for f in features if f.get("sprint_id") == active_sprint_id]
+                    if sprint_features:
+                        features = sprint_features
             elif persona == "reviewer":
-                # Use the same server-side filter as get_next_reviewer_product.
-                # Fetching all features and filtering client-side can drift if a feature
-                # moves between the poller's trigger check and this assignment call.
-                resp = client.get(f"/api/products/{product_id}/features")
-                resp.raise_for_status()
-                all_features = resp.json()
-                features = [f for f in (all_features if isinstance(all_features, list) else [])
+                features = [f for f in all_features
                             if f.get("status") == "Reviewing" and f.get("pr_number")]
                 if not features:
-                    # Cross-check with the endpoint that triggered this session
                     nfp = client.get("/api/features/next-for-persona",
                                      params={"persona": "reviewer", "product_id": product_id})
                     if nfp.status_code == 200 and nfp.json():
-                        log.warning(f"[assign] product features endpoint returned 0 Reviewing features "
-                                    f"but next-for-persona found #{nfp.json()['id']} — using it directly")
+                        log.warning(f"[assign] fallback to next-for-persona for reviewer")
                         features = [nfp.json()]
-            elif persona == "designer":
-                resp = client.get(f"/api/products/{product_id}/features")
-                resp.raise_for_status()
-                all_features = resp.json()
-                features = [f for f in (all_features if isinstance(all_features, list) else [])
+            elif persona in ("designer", "product_planner"):
+                features = [f for f in all_features
                             if f.get("status") == "Approved" and not f.get("skip_design")]
+                # product_planner/designer: scope to active sprint
+                if active_sprint_id:
+                    sprint_features = [f for f in features if f.get("sprint_id") == active_sprint_id]
+                    if sprint_features:
+                        features = sprint_features
             else:
                 features = []
 
@@ -725,7 +754,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     sys_cfg = _get_system_config_sync()
     effective_backend = (sys_cfg.get("agent_backend") or AGENT_BACKEND)
     session_timeout_seconds = int(sys_cfg.get("session_timeout_minutes") or 0) * 60 or _DEFAULT_SESSION_TIMEOUT_SECONDS
-    effective_max_features = product.get("max_features_per_run") or int(sys_cfg.get("max_features_per_run") or MAX_FEATURES_PER_RUN)
+    effective_max_features = int(sys_cfg.get("max_features_per_run") or MAX_FEATURES_PER_SPRINT)
 
     # Read all runtime settings from sys_cfg (DB → env var → built-in default).
     # Never rely on module-level constants after this point.
@@ -821,7 +850,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             "-e", f"OLLAMA_HOST={effective_ollama_host}",
             "-e", f"DESIGNER_MODEL={effective_designer_model}",
             "-e", f"CODER_MODEL={effective_coder_model}",
-            "-e", f"MAX_FEATURES_PER_RUN={effective_max_features}",
+            "-e", f"MAX_FEATURES_PER_SPRINT={effective_max_features}",
             "-e", f"OLLAMA_TIMEOUT={effective_ollama_timeout}",
             "-e", f"MAX_TURNS={effective_max_turns}",
             "-e", f"BASH_TIMEOUT={effective_bash_timeout}",
@@ -890,7 +919,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         # --dangerously-skip-permissions works now that container runs as non-root
         agent_cmd = ["claude", "--dangerously-skip-permissions", "-p", prompt]
         ollama_env = [
-            "-e", f"MAX_FEATURES_PER_RUN={effective_max_features}",
+            "-e", f"MAX_FEATURES_PER_SPRINT={effective_max_features}",
             "-e", f"CLAUDE_MODEL={claude_model}",
             "-e", f"MAX_TURNS={effective_max_turns}",
             "-e", f"BASH_TIMEOUT={effective_bash_timeout}",
@@ -1076,29 +1105,32 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
         log.info(f"Launching Security Auditor for {product['name']}")
         run_claude_in_docker(product, persona="security_auditor")
-        # Skip recommender if the Pending backlog is at or above the configured threshold.
-        # Threshold is read from system_config (recommender_pending_threshold, default 15).
-        # Set to 0 to always run the recommender.
-        _sys_cfg = _get_system_config_sync()
-        _rec_threshold = int(_sys_cfg.get("recommender_pending_threshold") or 15)
+        # Skip recommender unless the backlog is truly empty.
+        # "Empty" means no features in any non-terminal state:
+        # Pending, Approved, Designing, Designed, Implementing, Reviewing, Reviewed, Blocked
+        # Only run when every feature is Pushed, Rejected, or Deferred.
+        _terminal_statuses = ("Pushed", "Rejected", "Deferred", "Reverted")
         try:
             with httpx.Client(base_url=PM_API_URL, timeout=10) as _client:
-                _resp = _client.get(
-                    "/api/features/count",
-                    params={"product_id": product["id"], "status": "Pending"},
+                _all_resp = _client.get(
+                    f"/api/products/{product['id']}/features",
                 )
-                _pending_count = _resp.json().get("count", 0)
+                _all_features = _all_resp.json() if _all_resp.status_code == 200 else []
+                _active_count = sum(
+                    1 for f in (_all_features if isinstance(_all_features, list) else [])
+                    if f.get("status") not in _terminal_statuses
+                )
         except Exception as _e:
-            log.warning(f"Could not count pending features: {_e} — skipping recommender (fail-safe)")
-            _pending_count = max(_rec_threshold, 1)  # Fail closed: skip rather than runaway
+            log.warning(f"Could not count active features: {_e} — skipping recommender (fail-safe)")
+            _active_count = 1  # Fail closed: skip rather than runaway
 
-        if _rec_threshold > 0 and _pending_count >= _rec_threshold:
+        if _active_count > 0:
             log.info(
                 f"Skipping recommender for {product['name']} — "
-                f"{_pending_count} Pending features in backlog (threshold: {_rec_threshold})"
+                f"{_active_count} active feature(s) in backlog (recommender runs only when backlog is empty)"
             )
         else:
-            log.info(f"Launching recommender for {product['name']} ({_pending_count} Pending, threshold: {_rec_threshold})")
+            log.info(f"Launching recommender for {product['name']} (backlog empty)")
             run_claude_in_docker(product, persona="recommender")
 
     return exit_code

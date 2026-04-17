@@ -222,12 +222,24 @@ def sync_features_from_md(product: dict, pm_api_url: str) -> int:
                     continue
 
                 if db_status == target_status:
+                    continue
+
+                # Never downgrade: if DB status is further along, skip
+                _PROGRESS = {
+                    "Pending": 0, "Approved": 1, "Designing": 2, "Designed": 3,
+                    "Implementing": 4, "Reviewing": 5, "Reviewed": 6, "Pushed": 7,
+                    "Blocked": 2, "Deferred": 7, "Rejected": 7, "Reverted": 0,
+                }
+                db_rank = _PROGRESS.get(db_status, 0)
+                target_rank = _PROGRESS.get(target_status, 0)
+                if target_rank < db_rank:
                     log.debug(
-                        f"Feature #{feature_id} already at {target_status!r} — no-op"
+                        f"Feature #{feature_id}: DB={db_status!r}(rank {db_rank}) > "
+                        f"features.md={target_status!r}(rank {target_rank}) — skipping downgrade"
                     )
                     continue
 
-                # Status differs — update only status
+                # Status differs and is an upgrade — update
                 try:
                     patch_resp = client.patch(
                         f"/api/features/{feature_id}",

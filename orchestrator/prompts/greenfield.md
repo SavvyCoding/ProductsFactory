@@ -41,7 +41,6 @@ Follow it exactly. Do not deviate without PM approval.
 - Max {max_features_per_run} feature(s) per session
 - For each: Implement → Test (--cov-fail-under=70) → Commit → Push → Open PR
 - Push progress.md after every atomic step (heartbeat)
-- features.md updated on main branch ONLY
 
 **Status updates — append a JSON line to `/workspace/session_result.json` at each phase transition:**
 The poller has already set your features to Implementing. As you complete each phase, append one line (no trailing comma, no wrapping array) to `session_result.json`:
