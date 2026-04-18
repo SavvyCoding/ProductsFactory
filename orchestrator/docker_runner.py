@@ -107,8 +107,10 @@ def _rollback_stuck_features(product_id: int, persona: str | None) -> None:
             for f in feats:
                 if f["status"] in rollback_from and not f.get("pr_number"):
                     try:
-                        client.patch(f"/api/features/{f['id']}", json={"status": "Approved"})
-                        log.info(f"Rolled back feature #{f['id']} '{f['name']}' {f['status']} -> Approved")
+                        # Preserve Designed state if design doc exists
+                        reset_to = "Designed" if f.get("design_doc_path") else "Approved"
+                        client.patch(f"/api/features/{f['id']}", json={"status": reset_to})
+                        log.info(f"Rolled back feature #{f['id']} '{f['name']}' {f['status']} -> {reset_to}")
                         rolled_back += 1
                     except Exception as fe:
                         log.warning(f"Could not roll back feature #{f['id']}: {fe}")
