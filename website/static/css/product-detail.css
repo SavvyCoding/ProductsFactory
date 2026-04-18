@@ -146,6 +146,12 @@
   border: none;
 }
 
+.sprint-report-btn:hover {
+  background: var(--color-accent-subtle, #dbeafe) !important;
+  color: var(--color-accent-fg, #1d4ed8) !important;
+  border-color: var(--color-accent-muted, #93c5fd) !important;
+}
+
 .phase-card-left {
   flex: 1;
   min-width: 0;
