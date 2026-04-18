@@ -869,6 +869,59 @@ async def create_sprint_form(
     return RedirectResponse(f"/product/{product_id}?tab=sprints", status_code=303)
 
 
+@app.post("/api/sprints/bug-fix", response_model=schemas.SprintOut, status_code=201)
+async def api_create_bugfix_sprint(body: schemas.BugFixSprintCreate, db: AsyncSession = Depends(get_db)):
+    """
+    QA tester creates a bug-fix sub-sprint when tests fail.
+    Names it {parent_name}.a, .b, .c, etc.  Prevents nesting: if the parent
+    is already a sub-sprint (name contains '.'), extends that sprint instead.
+    Bug features are assigned to the sub-sprint and auto-approved.
+    """
+    parent = await db.get(Sprint, body.parent_sprint_id)
+    if not parent:
+        raise HTTPException(status_code=404, detail="Parent sprint not found")
+
+    # Prevent nesting: if parent is itself a sub-sprint, use it directly
+    if "." in parent.name:
+        # Assign bugs to the existing sub-sprint instead of creating a new one
+        for fid in body.bug_feature_ids:
+            feat = await db.get(Feature, fid)
+            if feat:
+                feat.sprint_id = parent.id
+                feat.status = "Approved"
+        return parent
+
+    # Count existing sub-sprints to determine suffix letter
+    existing = await db.execute(
+        select(Sprint).where(
+            Sprint.product_id == body.product_id,
+            Sprint.name.like(f"{parent.name}.%"),
+        )
+    )
+    count = len(existing.scalars().all())
+    suffix = chr(ord("a") + count)
+    sub_name = f"{parent.name}.{suffix}"
+
+    sub_sprint = Sprint(
+        product_id=body.product_id,
+        phase_id=parent.phase_id,
+        name=sub_name,
+        goal=f"Bug fixes for {parent.name}",
+        status="active",
+    )
+    db.add(sub_sprint)
+    await db.flush()
+
+    # Assign bug features to the sub-sprint and auto-approve
+    for fid in body.bug_feature_ids:
+        feat = await db.get(Feature, fid)
+        if feat:
+            feat.sprint_id = sub_sprint.id
+            feat.status = "Approved"
+
+    return sub_sprint
+
+
 @app.get("/api/sprints/{sprint_id}/dod")
 async def api_sprint_dod(sprint_id: int, db: AsyncSession = Depends(get_db)):
     """

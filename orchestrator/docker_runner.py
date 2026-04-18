@@ -401,10 +401,9 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
             })
             continue
 
-        # Low confidence — leave as Reviewed for human sign-off
+        # Low confidence — merge anyway (sprint-gating handles the flow)
         if entry.get("confidence", "low") != "high":
-            log.info(f"[auto-merge] Feature #{fid} approved but low-confidence — leaving for human review")
-            continue
+            log.info(f"[auto-merge] Feature #{fid} approved (low-confidence) — merging via sprint flow")
 
         # PR is open + high confidence — attempt merge
         log.info(f"[auto-merge] Merging PR #{pr_number} for feature #{fid} (high-confidence)")
@@ -520,23 +519,26 @@ def _read_session_summary(working_dir: str) -> str:
     return ""
 
 
-def _fetch_assigned_features(product_id: int, persona: str | None, max_count: int = MAX_FEATURES_PER_SPRINT) -> list[dict]:
+def _fetch_assigned_features(product_id: int, persona: str | None, max_count: int = MAX_FEATURES_PER_SPRINT) -> tuple[list[dict], str | None]:
     """
     Pre-fetch features the agent should work on this session.
     Sprint-aware: when an active sprint exists, picks ALL eligible features in
     that sprint (up to MAX_FEATURES_PER_SPRINT) so the entire sprint is planned
     and implemented together.
-    Returns [] for personas that manage their own work (qa_tester, recommender, etc.).
+    Returns ([], None) for personas that manage their own work (qa_tester, recommender, etc.).
+    Second element is the active sprint name (for features.md generation).
     """
     if persona not in ("coder", "designer", "product_planner", "reviewer"):
-        return []
+        return [], None
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
             # Check for active sprint — if one exists, scope to its features
             active_sprint_id = None
+            active_sprint_name = None
             active_resp = client.get(f"/api/products/{product_id}/sprints/active")
             if active_resp.status_code == 200 and active_resp.json():
                 active_sprint_id = active_resp.json().get("id")
+                active_sprint_name = active_resp.json().get("name")
 
             resp = client.get(f"/api/products/{product_id}/features")
             resp.raise_for_status()
@@ -588,10 +590,40 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                 "blocked_reason": f.get("blocked_reason"),
             }
             for f in selected
-        ]
+        ], active_sprint_name
     except Exception as e:
         log.warning(f"[assign] Could not pre-fetch features for {persona}: {e} — agent will get empty list")
-        return []
+        return [], None
+
+
+def _write_sprint_features_md(working_dir: str, features: list[dict], sprint_name: str | None) -> None:
+    """Write a sprint-scoped features.md to the working directory (write-only, no read-back sync)."""
+    md_path = Path(working_dir) / "features.md"
+    if not features:
+        # Remove stale features.md if no sprint features
+        if md_path.exists():
+            md_path.unlink()
+        return
+    header = sprint_name or "Current Sprint"
+    lines = [
+        f"# Sprint Features — {header}",
+        "> Auto-generated at session start. DO NOT edit — DB is source of truth.",
+        "",
+    ]
+    for f in features:
+        ftype = f.get("feature_type", "feature") if "feature_type" in f else "feature"
+        lines.append(f"## Feature #{f['id']}: {f['name']}")
+        lines.append(f"- **Status:** {f['status']}")
+        if ftype != "feature":
+            lines.append(f"- **Type:** {ftype}")
+        if f.get("description"):
+            lines.append(f"- {f['description']}")
+        lines.append("")
+    try:
+        md_path.write_text("\n".join(lines), encoding="utf-8")
+        log.info(f"Wrote sprint features.md ({len(features)} features) to {md_path}")
+    except Exception as e:
+        log.warning(f"Could not write features.md to {working_dir}: {e}")
 
 
 def _format_assigned_features(features: list[dict], persona: str | None) -> str:
@@ -773,10 +805,13 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     # Poller-driven feature assignment: pre-fetch and claim features before launch.
     # Agent receives an explicit task list — no self-discovery inside the container.
-    assigned_features = _fetch_assigned_features(product["id"], persona, effective_max_features)
+    assigned_features, active_sprint_name = _fetch_assigned_features(product["id"], persona, effective_max_features)
     _claim_features(assigned_features, persona)
     product["_assigned_features"] = assigned_features
     product["_assigned_features_md"] = _format_assigned_features(assigned_features, persona)
+
+    # Write sprint-scoped features.md to working dir (replaces any stale full-backlog copy)
+    _write_sprint_features_md(working_dir, assigned_features, active_sprint_name)
 
     # Inject previous session summary for continuity.
     product["_prev_session_summary"] = _read_session_summary(working_dir)
@@ -1074,13 +1109,21 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # 3. Apply status updates (deletes session_result.json at end).
     _reconcile_session_result(working_dir, product["id"], exit_code, features=_session_features, persona=persona)
 
-    # 4. Record session end in DB.
+    # 4. Record session end in DB — include feature counts.
     if session_id is not None:
+        assigned_ids = {f["id"] for f in product.get("_assigned_features", [])}
+        attempted = len(assigned_ids)
+        # Count only assigned features that progressed (not stale entries from prior sessions)
+        pushed = sum(1 for f in _session_features
+                     if f.get("id") in assigned_ids
+                     and f.get("status") in ("Pushed", "Reviewing", "Reviewed", "Designed"))
         try:
             with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
                 client.patch(f"/api/sessions/{session_id}", json={
                     "ended_at":  datetime.now(timezone.utc).isoformat(),
                     "exit_code": exit_code,
+                    "features_attempted": attempted,
+                    "features_pushed": pushed,
                 })
         except Exception as e:
             log.warning(f"Could not update session record: {e}")
