@@ -389,15 +389,19 @@ def determine_persona(product: dict) -> str:
                     return None
 
                 # Approved features in sprint → product_planner (design stories)
-                approved_in_sprint = [f for f in sprint_features
-                                      if f.get("status") == "Approved" and not f.get("skip_design")]
-                if approved_in_sprint:
+                # Skip features that already have a design doc (they need coder, not planner)
+                needs_design = [f for f in sprint_features
+                                if f.get("status") == "Approved"
+                                and not f.get("skip_design")
+                                and not f.get("design_doc_path")]
+                if needs_design:
                     return "product_planner"
 
-                # Designed features or Approved+skip_design → coder
+                # Designed features, or Approved+skip_design, or Approved with existing design doc → coder
                 codable = [f for f in sprint_features
                            if f.get("status") == "Designed"
-                           or (f.get("status") == "Approved" and f.get("skip_design"))]
+                           or (f.get("status") == "Approved" and f.get("skip_design"))
+                           or (f.get("status") == "Approved" and f.get("design_doc_path"))]
                 if codable:
                     return "coder"
 
@@ -500,8 +504,10 @@ def determine_persona(product: dict) -> str:
                     if not has_active:
                         log.info(f"Active sprint {sid}: {len(in_agent)} features in agent states but no active session — resetting")
                         for f in in_agent:
-                            client.patch(f"/api/features/{f['id']}", json={"status": "Approved"})
-                            log.info(f"  Feature #{f['id']} {f['status']} → Approved (no active session)")
+                            # Reset to Designed if design doc exists, otherwise Approved
+                            reset_to = "Designed" if f.get("design_doc_path") else "Approved"
+                            client.patch(f"/api/features/{f['id']}", json={"status": reset_to})
+                            log.info(f"  Feature #{f['id']} {f['status']} → {reset_to} (no active session)")
                         return None  # next cycle will pick them up
                     log.info(f"Active sprint {sid}: {len(in_agent)} features being processed by agents — waiting")
                     return None
