@@ -270,6 +270,14 @@ FastAPI evaluates routes in definition order. The parameterized `GET /api/featur
 - **Model changes require a migration**: add the column to `website/models.py` AND create a new `db/migrations/versions/NNN_*.py` file — Alembic does not auto-generate these
 - **Route ordering matters**: in `website/main.py`, parameterized routes (`/api/features/{id}`) must come after all static routes at the same path prefix to avoid shadowing
 - **Thread safety in orchestrator**: `orchestrator/alerts.py` uses a `threading.Lock` for the webhook fail counter; the poller spawns daemon threads for log streaming and live-polling `session_result.json`
+- **No linter/formatter configured**: there is no ruff, black, flake8, or eslint config — code style is enforced by convention only
+- **Shared requirements file**: `requirements.txt` covers both website and orchestrator (no separate dev/test requirements)
+
+## Utility Scripts
+
+- `scripts/seed.py` — Seeds the database with sample data for local development
+- `scripts/backup_db.sh` — Backs up the PostgreSQL database
+- `scripts/recover_db.py` — Restores a database from backup
 
 ## Environment Variables
 
@@ -287,3 +295,7 @@ See `.env.example` for all variables. Critical ones:
 - `OLLAMA_HOST` — Ollama base URL (default: `http://host.docker.internal:11434` inside Docker, `http://localhost:11434` for local runs)
 - `DESIGNER_MODEL` / `CODER_MODEL` — Ollama model names (defaults: `gemma3:27b` / `qwen3-coder:30b`)
 - `MAX_TURNS` — Hard cap on Ollama agent turns per session (default: 80)
+- `AUTH_CHECK_TIMEOUT` — Seconds for Claude CLI auth probe (default: 30)
+- `PR_GATE_SLEEP` — Seconds to wait when PR gate is triggered (default: 300)
+- `ANTHROPIC_API_KEY` — Optional; used for AI feature recommendations on the greenfield product form
+- `PRODUCTS_BASE_DIR` — Root directory where product repos live; also used for video serving in docker-compose

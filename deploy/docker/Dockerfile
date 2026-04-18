@@ -10,7 +10,7 @@
 #   GitHub CLI (gh)
 #
 # Security:
-#   Runs as non-root user 'agent' (UID 1000) so --dangerously-skip-permissions works
+#   Runs as non-root user 'agent' (UID 1001) so --dangerously-skip-permissions works
 #   ~/.claude mounted :ro at runtime (OAuth tokens — never writable)
 #   ~/.ssh    mounted :ro at runtime (deploy key — never writable)
 #   /workspace bound to product dir only
@@ -99,7 +99,7 @@ RUN GOPATH=/tmp/gobuild go install golang.org/x/vuln/cmd/govulncheck@latest && \
 
 # ── Layer 9: Non-root agent user ─────────────────────────────────────────────
 # Claude's --dangerously-skip-permissions is blocked when running as root.
-# Create user 'agent' (UID 1000) for all runtime operations.
+# Create user 'agent' (UID 1001) for all runtime operations.
 RUN useradd -m -u 1001 -s /bin/bash agent && \
     # SSH known hosts for git push (github, gitlab, bitbucket)
     mkdir -p /home/agent/.ssh && chmod 700 /home/agent/.ssh && \

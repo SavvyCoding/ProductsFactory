@@ -323,16 +323,68 @@ def determine_persona(product: dict) -> str:
                                 })
                             except Exception:
                                 pass
+                        # Get the current sprint's phase before completing
+                        current_sprint_resp = client.get(f"/api/sprints/{sid}/dod")
+                        completed_sprint = active_sprint  # has phase_id
+                        current_phase_id = completed_sprint.get("phase_id")
+
                         client.patch(f"/api/sprints/{sid}", json={"status": "completed"})
-                        # Activate the next planned sprint
+
+                        # Reset maintenance timestamps so all 4 run after sprint completion
+                        try:
+                            cfg_resp = client.get(f"/api/products/{product['id']}")
+                            if cfg_resp.status_code == 200:
+                                current_config = dict(cfg_resp.json().get("config") or {})
+                                for maint_persona, _ in _MAINTENANCE_SCHEDULE:
+                                    current_config.pop(f"last_{maint_persona}_at", None)
+                                client.patch(f"/api/products/{product['id']}", json={"config": current_config})
+                                log.info(f"Cleared maintenance timestamps — documenter/analytics/refactorer/devops will run post-sprint")
+                        except Exception as _me:
+                            log.warning(f"Could not reset maintenance timestamps: {_me}")
+
+                        # Activate next sprint: same phase first, then next phase
                         all_sprints_resp = client.get(f"/api/products/{product['id']}/sprints")
+                        phases_resp = client.get(f"/api/products/{product['id']}/phases")
                         if all_sprints_resp.status_code == 200:
-                            planned = [s for s in all_sprints_resp.json()
-                                       if s.get("status") == "planned"]
-                            if planned:
-                                next_sprint = planned[0]
+                            all_sprints = all_sprints_resp.json()
+                            all_phases = phases_resp.json() if phases_resp.status_code == 200 else []
+                            all_phases.sort(key=lambda p: p.get("order", 0))
+
+                            # 1) Next planned sprint in the same phase
+                            same_phase_planned = [s for s in all_sprints
+                                                  if s.get("phase_id") == current_phase_id
+                                                  and s.get("status") == "planned"]
+                            if same_phase_planned:
+                                next_sprint = same_phase_planned[0]
                                 client.patch(f"/api/sprints/{next_sprint['id']}", json={"status": "active"})
-                                log.info(f"Activated next sprint: #{next_sprint['id']} \"{next_sprint['name']}\"")
+                                log.info(f"Activated next sprint in same phase: #{next_sprint['id']} \"{next_sprint['name']}\"")
+                            else:
+                                # Phase complete — mark it
+                                if current_phase_id:
+                                    client.patch(f"/api/phases/{current_phase_id}", json={"status": "completed"})
+                                    log.info(f"Phase #{current_phase_id} completed — all sprints done")
+
+                                # 2) First planned sprint in the next phase (by phase order)
+                                current_phase_order = -1
+                                for p in all_phases:
+                                    if p["id"] == current_phase_id:
+                                        current_phase_order = p.get("order", 0)
+                                        break
+                                next_phases = [p for p in all_phases
+                                               if p.get("order", 0) > current_phase_order
+                                               and p.get("status") != "completed"]
+                                for next_phase in next_phases:
+                                    phase_sprints = [s for s in all_sprints
+                                                     if s.get("phase_id") == next_phase["id"]
+                                                     and s.get("status") == "planned"]
+                                    if phase_sprints:
+                                        next_sprint = phase_sprints[0]
+                                        client.patch(f"/api/phases/{next_phase['id']}", json={"status": "active"})
+                                        client.patch(f"/api/sprints/{next_sprint['id']}", json={"status": "active"})
+                                        log.info(f"Activated Phase #{next_phase['id']} \"{next_phase['name']}\" → Sprint #{next_sprint['id']} \"{next_sprint['name']}\"")
+                                        break
+                                else:
+                                    log.info("All phases and sprints completed — nothing left to activate")
                     # Next cycle will pick up the new active sprint
                     return None
 
@@ -355,7 +407,17 @@ def determine_persona(product: dict) -> str:
                 if reviewable:
                     return "reviewer"
 
-                # Reviewed features → auto-merge if enabled, otherwise wait for PM
+                # Reviewed with no PR → auto-push (PR was already merged/closed)
+                reviewed_no_pr = [f for f in sprint_features
+                                  if f.get("status") == "Reviewed" and not f.get("pr_number")]
+                for f in reviewed_no_pr:
+                    try:
+                        client.patch(f"/api/features/{f['id']}", json={"status": "Pushed"})
+                        log.info(f"Feature #{f['id']}: Reviewed with no PR → Pushed")
+                    except Exception:
+                        pass
+
+                # Reviewed features with PRs → auto-merge if enabled
                 reviewed = [f for f in sprint_features
                             if f.get("status") == "Reviewed" and f.get("pr_number")]
                 if reviewed:
@@ -432,6 +494,15 @@ def determine_persona(product: dict) -> str:
                 in_agent = [f for f in sprint_features
                             if f.get("status") in ("Designing", "Implementing", "Reviewing")]
                 if in_agent:
+                    # Check if there's actually a running container — if not, reset the features
+                    active_session = client.get(f"/api/sessions/active", params={"product_id": product["id"]})
+                    has_active = active_session.status_code == 200 and active_session.json()
+                    if not has_active:
+                        log.info(f"Active sprint {sid}: {len(in_agent)} features in agent states but no active session — resetting")
+                        for f in in_agent:
+                            client.patch(f"/api/features/{f['id']}", json={"status": "Approved"})
+                            log.info(f"  Feature #{f['id']} {f['status']} → Approved (no active session)")
+                        return None  # next cycle will pick them up
                     log.info(f"Active sprint {sid}: {len(in_agent)} features being processed by agents — waiting")
                     return None
                 if pending and not in_agent:
@@ -823,13 +894,8 @@ def main():
                 if (product.get("config") or {}).get("pm_messages"):
                     deliver_pm_messages(product)
 
-            # ⑦a Reviewer-first: check globally for PRs awaiting review
-            reviewer_product, persona = get_next_reviewer_product(products)
-
-            if reviewer_product:
-                product = reviewer_product
-                log.info(f"Reviewer session for: {product['name']} (id={product['id']})")
-            elif any(p.get("run_trainer_now") for p in products if p["status"] == "ready"):
+            # ⑦a Reviewer handled by sprint-gating in determine_persona now
+            if any(p.get("run_trainer_now") for p in products if p["status"] == "ready"):
                 # ⑦a2 On-demand trainer: a PM requested a showcase video
                 product = next(p for p in products if p["status"] == "ready" and p.get("run_trainer_now"))
                 persona = "product_trainer"

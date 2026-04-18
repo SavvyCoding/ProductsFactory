@@ -47,8 +47,9 @@ Your working directory is /workspace. All files must be written inside /workspac
    ```
    Fix any test failures before proceeding.
 
-   **If tests fail** (and you cannot fix them):
-   Write a failure analysis to `Temp/qa_notes_<feature_id>.md` (get the feature id from the PR title or body):
+   **If tests fail** (and you cannot fix them after 2 attempts):
+
+   a. Write a failure analysis to `Temp/qa_notes_<feature_id>.md` (get the feature id from the PR title or body):
    ```
    mkdir -p /workspace/Temp
    cat > /workspace/Temp/qa_notes_<feature_id>.md << 'EOF'
@@ -65,7 +66,36 @@ Your working directory is /workspace. All files must be written inside /workspac
    <specific: "add mock for X", "fix assertion on line Y", "the endpoint returns Z not W">
    EOF
    ```
-   Then commit and push the Temp/ directory so the next coder session can read it.
+   Commit and push the Temp/ directory so the next coder session can read it.
+
+   b. **File a bug feature** for each distinct test failure:
+   ```bash
+   BUG_RESP=$(curl -s -X POST {pm_api_url}/api/features \
+     -H "Content-Type: application/json" \
+     -d '{
+       "product_id": {product_id},
+       "name": "Bug: <short failure description>",
+       "description": "PR #<pr_number> — <test name> fails: <root cause>. Fix: <recommendation>",
+       "feature_type": "bug",
+       "priority": 80,
+       "skip_design": true,
+       "source": "ai",
+       "status": "Approved"
+     }')
+   BUG_ID=$(echo "$BUG_RESP" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+   ```
+
+   c. **Create a bug-fix sub-sprint** so the bugs are worked on next:
+   ```bash
+   curl -s -X POST {pm_api_url}/api/sprints/bug-fix \
+     -H "Content-Type: application/json" \
+     -d "{
+       \"product_id\": {product_id},
+       \"parent_sprint_id\": <sprint_id>,
+       \"bug_feature_ids\": [$BUG_ID]
+     }"
+   ```
+   The API names the sub-sprint automatically (e.g. "Sprint 1.a"). If you filed multiple bugs, collect all IDs into the `bug_feature_ids` array.
 
 7. **Commit and push tests to the PR branch:**
    ```

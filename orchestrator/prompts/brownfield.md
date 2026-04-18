@@ -49,6 +49,13 @@ Same startup, heartbeat, and exit rules as greenfield apply.
 
 If the feature has a design doc at docs/feature_{id:03d}_design.md, read it before implementing.
 
+**Self-review gate — REQUIRED before opening the PR:**
+After implementing and before committing/pushing, review your own changes:
+1. Run `git diff --stat` then `git diff` to see all changes
+2. Review critically: bugs, typos, dead code, unused imports, hardcoded values, missing error handling
+3. Fix any issues found and re-run tests to confirm nothing broke
+4. Only proceed to commit + push + PR when the diff is clean
+
 **Status updates — append a JSON line to `/workspace/session_result.json` at each phase transition:**
 The poller has already set your features to Implementing. As you complete each phase, append one line to `session_result.json`:
 

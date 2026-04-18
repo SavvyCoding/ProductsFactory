@@ -135,6 +135,17 @@
   border-color: var(--color-accent-muted);
 }
 
+.sprint-feature-row.phase-card {
+  padding: 4px 6px;
+  border: none;
+  background: transparent;
+  gap: 4px;
+}
+.sprint-feature-row.phase-card:hover {
+  background: var(--color-canvas-subtle, rgba(0,0,0,0.04));
+  border: none;
+}
+
 .phase-card-left {
   flex: 1;
   min-width: 0;

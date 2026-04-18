@@ -86,12 +86,20 @@ class FeatureCreate(BaseModel):
     sprint_id:    Optional[int] = None
     story_points: Optional[int] = None
     due_date:     Optional[date] = None
+    status:       str = "Pending"
 
     @field_validator("priority")
     @classmethod
     def priority_range(cls, v: int) -> int:
         if not 1 <= v <= 100:
             raise ValueError("priority must be between 1 and 100")
+        return v
+
+    @field_validator("status")
+    @classmethod
+    def status_allowed(cls, v: str) -> str:
+        if v not in ("Pending", "Approved"):
+            raise ValueError("status must be 'Pending' or 'Approved'")
         return v
 
     @field_validator("source")
@@ -431,6 +439,12 @@ class SprintOut(BaseModel):
     completed_at:   Optional[datetime] = None
 
     model_config = {"from_attributes": True}
+
+
+class BugFixSprintCreate(BaseModel):
+    product_id:       int
+    parent_sprint_id: int
+    bug_feature_ids:  list[int]
 
 
 class FeatureLinkCreate(BaseModel):

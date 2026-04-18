@@ -166,11 +166,19 @@ def reconcile_merged_prs(product: dict):
                 log.warning("reconcile_merged_prs: unexpected features response shape")
                 return
 
-            terminal = {"Pushed", "Rejected", "Reverted"}
+            terminal = {"Pushed", "Rejected", "Reverted", "Deferred"}
 
             for feature in features_data:
                 if feature.get("status") in terminal:
                     continue
+                # Never reset a feature that was already Pushed (race condition guard)
+                # Re-fetch current status to avoid stale data
+                try:
+                    fresh = client.get(f"/api/features/{feature['id']}")
+                    if fresh.status_code == 200 and fresh.json().get("status") in terminal:
+                        continue
+                except Exception:
+                    pass
                 pr_n = _pr_number_for(feature)
                 if pr_n is None:
                     continue
