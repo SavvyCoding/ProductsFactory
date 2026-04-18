@@ -922,6 +922,81 @@ async def api_create_bugfix_sprint(body: schemas.BugFixSprintCreate, db: AsyncSe
     return sub_sprint
 
 
+@app.get("/api/sprints/{sprint_id}/report")
+async def api_sprint_report(sprint_id: int, db: AsyncSession = Depends(get_db)):
+    """Sprint report: DoD gates, agent sign-offs with notes, feature summary, sessions."""
+    sprint = await db.get(Sprint, sprint_id)
+    if not sprint:
+        raise HTTPException(status_code=404, detail="Sprint not found")
+
+    dod = sprint.dod_status or {}
+
+    # Feature summary
+    feat_result = await db.execute(
+        select(Feature).where(Feature.sprint_id == sprint_id)
+    )
+    sprint_features = feat_result.scalars().all()
+    terminal = {"Pushed", "Deferred", "Rejected"}
+
+    # Sessions that touched this sprint's features
+    feature_ids = [f.id for f in sprint_features]
+    sessions = []
+    if feature_ids:
+        sess_result = await db.execute(
+            select(DBSession)
+            .where(DBSession.product_id == sprint.product_id)
+            .order_by(DBSession.started_at.desc())
+            .limit(50)
+        )
+        sessions = [
+            {
+                "persona": s.persona,
+                "started_at": s.started_at.isoformat() if s.started_at else None,
+                "exit_code": s.exit_code,
+                "features_attempted": s.features_attempted,
+                "features_pushed": s.features_pushed,
+                "notes": s.notes,
+            }
+            for s in sess_result.scalars().all()
+            if s.persona  # skip null persona sessions
+        ]
+
+    return {
+        "sprint": {
+            "id": sprint.id,
+            "name": sprint.name,
+            "goal": sprint.goal,
+            "status": sprint.status,
+            "completed_at": sprint.completed_at.isoformat() if sprint.completed_at else None,
+            "release_notes": sprint.release_notes,
+            "retro_doc_path": sprint.retro_doc_path,
+        },
+        "gates": {
+            "all_features_done": {
+                "passed": all(f.status in terminal for f in sprint_features) if sprint_features else False,
+                "detail": f"{sum(1 for f in sprint_features if f.status in terminal)}/{len(sprint_features)} features completed",
+            },
+            "qa_passed": {
+                "passed": bool(dod.get("qa_passed")),
+                "notes": dod.get("qa_passed_notes", ""),
+            },
+            "security_clean": {
+                "passed": bool(dod.get("security_clean")),
+                "notes": dod.get("security_clean_notes", ""),
+            },
+            "retro_done": {
+                "passed": bool(dod.get("retro_done")),
+                "notes": dod.get("retro_done_notes", ""),
+            },
+        },
+        "features": [
+            {"id": f.id, "name": f.name, "status": f.status, "feature_type": f.feature_type, "pr_number": f.pr_number}
+            for f in sprint_features
+        ],
+        "sessions": sessions,
+    }
+
+
 @app.get("/api/sprints/{sprint_id}/dod")
 async def api_sprint_dod(sprint_id: int, db: AsyncSession = Depends(get_db)):
     """

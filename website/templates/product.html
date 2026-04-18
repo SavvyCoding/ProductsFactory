@@ -385,7 +385,7 @@
             <div>
               <span style="font-size:13px;font-weight:600;color:var(--text)">{{ sprint.name }}</span>
               {% if sprint.status == 'active' %}<span style="font-size:10px;background:var(--green);color:#fff;padding:1px 6px;border-radius:8px;margin-left:6px;font-weight:600">ACTIVE</span>{% endif %}
-              {% if sprint.status == 'completed' %}<span style="font-size:10px;background:var(--surface);color:var(--text-muted);padding:1px 6px;border-radius:8px;margin-left:6px;border:1px solid var(--border)">DONE</span>{% endif %}
+              {% if sprint.status == 'completed' %}<button class="sprint-report-btn" onclick="openSprintReport({{ sprint.id }}, '{{ sprint.name }}')" style="font-size:10px;background:var(--surface);color:var(--text-muted);padding:1px 6px;border-radius:8px;margin-left:6px;border:1px solid var(--border);cursor:pointer" title="View sprint report">DONE ▶</button>{% endif %}
               {% if sprint.goal %}<div style="font-size:11px;color:var(--text-muted);margin-top:1px">{{ sprint.goal }}</div>{% endif %}
             </div>
             <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
@@ -766,6 +766,18 @@
 </div><!-- /pf-layout-sidebar -->
 
 <!-- ── Feature Detail Slide-Out Panel ──────────────────────── -->
+<!-- Sprint Report Panel -->
+<div class="pf-panel-backdrop" id="sprint-report-backdrop" onclick="closeSprintReport()"></div>
+<div class="pf-panel" id="sprint-report-panel">
+  <div class="pf-panel__header">
+    <span class="pf-panel__title" id="sr-title">Sprint Report</span>
+    <button class="pf-panel__close" onclick="closeSprintReport()" aria-label="Close" title="Close">✕</button>
+  </div>
+  <div class="pf-panel__body" id="sr-body">
+    <div style="text-align:center;padding:40px;color:var(--text-muted)">Loading...</div>
+  </div>
+</div>
+
 <div class="pf-panel-backdrop" id="feature-panel-backdrop" onclick="closeFeaturePanel()"></div>
 <div class="pf-panel" id="feature-panel">
   <div class="pf-panel__header">
@@ -782,6 +794,121 @@
 <script src="/static/js/session.js"></script>
 <script src="/static/js/history.js"></script>
 <script src="/static/js/feature-panel.js"></script>
+<script>
+function openSprintReport(sprintId, sprintName) {
+  const backdrop = document.getElementById('sprint-report-backdrop');
+  const panel = document.getElementById('sprint-report-panel');
+  if (!backdrop || !panel) return;
+  backdrop.classList.add('open');
+  panel.classList.add('open');
+  document.body.style.overflow = 'hidden';
+  document.getElementById('sr-title').textContent = sprintName + ' — Report';
+  document.getElementById('sr-body').innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-muted)">Loading...</div>';
+
+  fetch('/api/sprints/' + sprintId + '/report')
+    .then(r => r.json())
+    .then(data => renderSprintReport(data))
+    .catch(err => {
+      document.getElementById('sr-body').innerHTML = '<div style="color:var(--red);padding:20px">Failed to load report: ' + err.message + '</div>';
+    });
+}
+
+function closeSprintReport() {
+  const backdrop = document.getElementById('sprint-report-backdrop');
+  const panel = document.getElementById('sprint-report-panel');
+  if (backdrop) backdrop.classList.remove('open');
+  if (panel) panel.classList.remove('open');
+  document.body.style.overflow = '';
+}
+
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape' && document.getElementById('sprint-report-panel').classList.contains('open')) closeSprintReport();
+});
+
+function renderSprintReport(data) {
+  const body = document.getElementById('sr-body');
+  if (!body) return;
+  const s = data.sprint;
+  const g = data.gates;
+
+  function gateRow(label, gate) {
+    const icon = gate.passed ? '✅' : '❌';
+    const detail = gate.notes || gate.detail || '';
+    return '<div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">' +
+      '<span style="font-size:14px;flex-shrink:0">' + icon + '</span>' +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="font-size:12px;font-weight:600;color:var(--text)">' + label + '</div>' +
+        (detail ? '<div style="font-size:11px;color:var(--text-muted);margin-top:2px">' + escHtml(detail) + '</div>' : '') +
+      '</div></div>';
+  }
+
+  let html = '';
+
+  // Sprint info
+  if (s.goal) {
+    html += '<div style="font-size:12px;color:var(--text-muted);margin-bottom:12px"><strong>Goal:</strong> ' + escHtml(s.goal) + '</div>';
+  }
+  if (s.completed_at) {
+    html += '<div style="font-size:11px;color:var(--text-muted);margin-bottom:12px">Completed: ' + new Date(s.completed_at).toLocaleDateString() + '</div>';
+  }
+
+  // Gates
+  html += '<div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px">Definition of Done</div>';
+  html += '<div style="margin-bottom:16px">';
+  html += gateRow('Features Done', g.all_features_done);
+  html += gateRow('QA Tester Sign-off', g.qa_passed);
+  html += gateRow('Security Auditor Sign-off', g.security_clean);
+  html += gateRow('Retrospective', g.retro_done);
+  html += '</div>';
+
+  // Features
+  html += '<div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px">Features (' + data.features.length + ')</div>';
+  html += '<div style="margin-bottom:16px">';
+  data.features.forEach(function(f) {
+    const typeIcon = f.feature_type === 'bug' ? '🐛 ' : f.feature_type === 'chore' ? '🔧 ' : '';
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;font-size:12px">' +
+      '<span style="color:var(--text)">' + typeIcon + escHtml(f.name) + '</span>' +
+      '<span class="badge badge-status-' + f.status.toLowerCase() + '" style="font-size:10px">' + f.status + '</span>' +
+    '</div>';
+  });
+  html += '</div>';
+
+  // Sessions
+  if (data.sessions.length > 0) {
+    html += '<div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px">Agent Sessions</div>';
+    html += '<div style="margin-bottom:16px">';
+    data.sessions.forEach(function(sess) {
+      const exitBadge = sess.exit_code === 0
+        ? '<span style="color:var(--green);font-size:10px">✓</span>'
+        : '<span style="color:var(--red);font-size:10px">✗</span>';
+      const dt = sess.started_at ? new Date(sess.started_at).toLocaleString() : '';
+      html += '<div style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">' +
+        '<span style="flex-shrink:0">' + exitBadge + '</span>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="font-size:12px;font-weight:600;color:var(--text)">' + escHtml(sess.persona || 'unknown') + '</div>' +
+          '<div style="font-size:10px;color:var(--text-muted)">' + dt + '</div>' +
+          (sess.notes ? '<div style="font-size:11px;color:var(--text-muted);margin-top:2px">' + escHtml(sess.notes) + '</div>' : '') +
+        '</div></div>';
+    });
+    html += '</div>';
+  }
+
+  // Release notes
+  if (s.release_notes) {
+    html += '<details style="margin-bottom:16px"><summary style="font-size:13px;font-weight:600;color:var(--text);cursor:pointer">Release Notes</summary>';
+    html += '<div style="font-size:11px;color:var(--text);margin-top:6px;padding:8px;background:var(--bg);border-radius:6px;border:1px solid var(--border);white-space:pre-wrap;line-height:1.5">' + escHtml(s.release_notes) + '</div></details>';
+  }
+
+  body.innerHTML = html;
+}
+
+function escHtml(str) {
+  if (!str) return '';
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+</script>
 {% endblock %}
 
 {% endblock %}
