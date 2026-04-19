@@ -11,6 +11,7 @@ Security model:
 """
 
 import os
+import shlex
 import shutil
 import tempfile
 import uuid
@@ -237,23 +238,25 @@ def _live_poll_session_result(working_dir: str, stop_event: threading.Event, per
     Background thread: polls session_result.json every 30 s while the container runs.
     Applies new NDJSON lines to the DB in real-time as the agent writes phase transitions.
     Tracks applied lines by index so each entry is applied exactly once.
+
+    On shutdown (stop_event set) performs a final drain pass so any entries written
+    between the last tick and container exit are not silently lost.
     """
     import json as _json
     result_file = Path(working_dir) / "session_result.json"
     applied_up_to = 0  # number of lines already applied this session
 
-    while not stop_event.wait(30):  # poll every 30 s; exits when stop_event is set
+    def _drain_new(label: str) -> None:
+        nonlocal applied_up_to
         if not result_file.exists():
-            continue
+            return
         try:
             lines = result_file.read_text(encoding="utf-8").splitlines()
         except Exception:
-            continue
-
+            return
         new_lines = lines[applied_up_to:]
         if not new_lines:
-            continue
-
+            return
         try:
             with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
                 for line in new_lines:
@@ -266,14 +269,23 @@ def _live_poll_session_result(working_dir: str, stop_event: threading.Event, per
                         # Reviewer is not allowed to set status back to Reviewing —
                         # these are pre-claim entries that must never overwrite Pushed.
                         if persona == "reviewer" and entry.get("status") == "Reviewing":
-                            log.debug(f"[live-poll] Skipping reviewer Reviewing entry for feature #{entry.get('id')}")
+                            log.debug(f"[{label}] Skipping reviewer Reviewing entry for feature #{entry.get('id')}")
                         else:
                             _apply_session_entry(client, entry)
                     except Exception:
                         pass  # malformed line — skip, don't block the rest
                     applied_up_to += 1
         except Exception as e:
-            log.debug(f"[live-poll] PM API error: {e}")
+            log.debug(f"[{label}] PM API error: {e}")
+
+    while not stop_event.wait(30):  # poll every 30 s; exits when stop_event is set
+        _drain_new("live-poll")
+
+    # Final drain — catches entries written between the last tick and stop_event.
+    # Reconcile will re-apply these idempotently but running it here ensures the
+    # DB reaches a consistent state even if reconcile is short-circuited by an
+    # exception, and gives the user faster feedback in the UI.
+    _drain_new("live-poll-final")
 
 
 def _reconcile_session_result(working_dir: str, product_id: int, exit_code: int,
@@ -694,11 +706,24 @@ def _reset_workspace(working_dir: str, product_name: str) -> None:
     if not (wd / ".git").exists():
         return  # Not a git repo yet — skip
 
-    def _run(cmd: list[str]) -> subprocess.CompletedProcess:
-        return subprocess.run(cmd, cwd=str(wd), capture_output=True, text=True)
+    def _run(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
+        """Run a git command with a hard timeout so network hangs don't freeze the poller."""
+        try:
+            return subprocess.run(
+                cmd, cwd=str(wd), capture_output=True, text=True, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as te:
+            log.warning(f"[{product_name}] git {' '.join(cmd[1:])} timed out after {timeout}s")
+            # Synthesize a failed CompletedProcess so callers uniformly check returncode
+            return subprocess.CompletedProcess(
+                cmd, returncode=124,
+                stdout=(te.stdout.decode() if isinstance(te.stdout, bytes) else (te.stdout or "")),
+                stderr=f"timed out after {timeout}s",
+            )
 
     # 1. Fetch latest from origin (updates remote-tracking refs, prunes deleted branches)
-    r = _run(["git", "fetch", "origin", "--prune"])
+    # Longer timeout — fetch can legitimately take a while on slow networks.
+    r = _run(["git", "fetch", "origin", "--prune"], timeout=120)
     if r.returncode != 0:
         log.warning(f"[{product_name}] git fetch failed: {r.stderr.strip()[:200]}")
 
@@ -743,8 +768,14 @@ def _cleanup_workspace_post_session(working_dir: str, product_name: str) -> None
     if not (wd / ".git").exists():
         return
 
-    def _run(cmd: list[str]) -> subprocess.CompletedProcess:
-        return subprocess.run(cmd, cwd=str(wd), capture_output=True, text=True)
+    def _run(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(
+                cmd, cwd=str(wd), capture_output=True, text=True, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            log.warning(f"[{product_name}] git {' '.join(cmd[1:])} timed out after {timeout}s")
+            return subprocess.CompletedProcess(cmd, returncode=124, stdout="", stderr="timed out")
 
     # Return to main branch (agent may have left us on a feature branch)
     for branch in ("main", "master"):
@@ -877,9 +908,32 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     if deploy_key:
         ssh_mount = ["-v", f"{deploy_key}:/home/agent/.ssh/id_ed25519:ro"]
 
-    # Inject GH_TOKEN so `gh` CLI works inside the container without a separate login
+    # GH_TOKEN — write to a 0600 temp file and bind-mount at /run/secrets/gh_token.
+    # The agent_cmd wrapper (below) sources it into GH_TOKEN at runtime, so `gh` CLI
+    # works but the token is never visible in `docker inspect` / process listings.
     gh_token = _get_gh_token()
-    gh_env = ["-e", f"GH_TOKEN={gh_token}"] if gh_token else []
+    gh_token_file: str | None = None
+    gh_mount: list[str] = []
+    if gh_token:
+        try:
+            _fd, gh_token_file = tempfile.mkstemp(prefix="pf_gh_", suffix=".token")
+            os.close(_fd)
+            Path(gh_token_file).write_text(gh_token)
+            try:
+                os.chmod(gh_token_file, 0o600)
+            except Exception:
+                pass  # Windows: NTFS perms don't map cleanly; 0600 is best-effort
+            gh_mount = ["-v", f"{gh_token_file}:/run/secrets/gh_token:ro"]
+        except Exception as e:
+            log.warning(f"Could not write gh token file: {e} — agent will have no gh auth")
+            if gh_token_file:
+                try:
+                    Path(gh_token_file).unlink()
+                except Exception:
+                    pass
+            gh_token_file = None
+            gh_mount = []
+    gh_env: list[str] = []  # legacy name retained — now always empty (token comes via file)
 
     persona_env = ["-e", f"AGENT_PERSONA={persona}"] if persona else []
 
@@ -966,18 +1020,43 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             "-e", f"BASH_TIMEOUT={effective_bash_timeout}",
         ]
 
+    # If GH_TOKEN is provided via file mount, wrap agent_cmd so it's exported to the
+    # agent's env at startup. Using `sh -c ... exec cmd` keeps the token out of
+    # `docker inspect` while still making it available to gh CLI inside the container.
+    if gh_mount:
+        quoted = " ".join(shlex.quote(a) for a in agent_cmd)
+        agent_cmd = [
+            "sh", "-c",
+            '[ -r /run/secrets/gh_token ] && export GH_TOKEN="$(cat /run/secrets/gh_token)"; '
+            f'exec {quoted}',
+        ]
+
     cmd = [
         "docker", "run", "--rm",
         "--name", f"pf-{product['id']}-{session_uid}",
         "--network", "productfactory-net",
         "--add-host", "pm-api:host-gateway",  # resolves to Windows host where pm-api container exposes :8080
         "--add-host", "host.docker.internal:host-gateway",  # Ollama on Windows host
+        # Resource limits
         "--memory", "4g",
         "--cpus", "2",
+        "--pids-limit", "512",                     # cap process count — prevents fork-bombs
+        # Sandbox hardening — agent container runs untrusted LLM-generated shell commands
+        "--cap-drop", "ALL",                       # drop all Linux capabilities (agent runs as UID 1001)
+        "--security-opt", "no-new-privileges:true",  # block setuid privilege escalation
+        "--read-only",                             # rootfs is immutable; writes go to tmpfs/volumes below
+        "--tmpfs", "/tmp:rw,size=1g,mode=1777",
+        "--tmpfs", "/run:rw,size=64m",
+        "--tmpfs", "/home/agent/.cache:rw,size=1g,uid=1001,gid=1001",
+        "--tmpfs", "/home/agent/.npm:rw,size=500m,uid=1001,gid=1001",
+        "--tmpfs", "/home/agent/.config:rw,size=100m,uid=1001,gid=1001",
+        "--tmpfs", "/home/agent/.local:rw,size=500m,uid=1001,gid=1001",
+        # Volume mounts — unaffected by --read-only
         "-v", f"{working_dir}:/workspace",
         *claude_mount,                             # OAuth session (claude backend only)
         *ssh_mount,                                # deploy key :ro (not whole .ssh dir)
-        *gh_env,                                   # GH_TOKEN for gh CLI auth
+        *gh_mount,                                 # GH_TOKEN via file at /run/secrets/gh_token (not env)
+        *gh_env,                                   # empty unless mount failed — legacy fallback
         *persona_env,                              # AGENT_PERSONA for prompt selection
         *ollama_env,                               # Ollama model config (ollama backend only)
         "-e", f"PM_API_URL={PM_API_URL_CONTAINER}",
@@ -1100,6 +1179,12 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         if _tmp_claude_dir:
             try:
                 shutil.rmtree(_tmp_claude_dir, ignore_errors=True)
+            except Exception:
+                pass
+        # Clean up gh_token temp file if we created one
+        if gh_token_file:
+            try:
+                Path(gh_token_file).unlink()
             except Exception:
                 pass
 

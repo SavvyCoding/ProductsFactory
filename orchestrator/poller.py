@@ -94,8 +94,12 @@ def _load_runtime_cfg():
 import sys as _sys
 import io as _io
 from logging.handlers import RotatingFileHandler as _RotatingFileHandler
+from orchestrator.log_context import build_formatter, log_scope  # noqa: F401 (log_scope re-exported)
+
 _stdout_utf8 = _io.TextIOWrapper(_sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True) if hasattr(_sys.stdout, "buffer") else _sys.stdout
-_log_fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+# Formatter is selected by LOG_FORMAT env var (text|json). Both formats include
+# the active log_scope() fields (product_id, session_uid, persona) automatically.
+_log_fmt = build_formatter()
 _file_handler = _RotatingFileHandler(
     "orchestrator/poller.log",
     maxBytes=10 * 1024 * 1024,  # 10 MB per file
@@ -109,11 +113,14 @@ logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _stream_handler
 log = logging.getLogger("poller")
 
 # Track sessions launched today per product: {product_id: count}
+# Mutated from main thread + heartbeat/live-poll threads — guarded by _daily_counts_lock.
 _daily_session_counts: dict[int, int] = {}
 _daily_session_date: date | None = None
+_daily_counts_lock = threading.Lock()
 
 
 def _reset_daily_counts_if_new_day():
+    """Caller must hold _daily_counts_lock."""
     global _daily_session_counts, _daily_session_date
     today = datetime.now(timezone.utc).date()
     if _daily_session_date != today:
@@ -234,8 +241,9 @@ def is_daily_cap_reached(product: dict) -> bool:
     cap = product.get("daily_session_cap")
     if not cap:
         return False
-    _reset_daily_counts_if_new_day()
-    return _daily_session_counts.get(product["id"], 0) >= cap
+    with _daily_counts_lock:
+        _reset_daily_counts_if_new_day()
+        return _daily_session_counts.get(product["id"], 0) >= cap
 
 
 def get_next_reviewer_product(products: list[dict]) -> tuple[dict | None, str | None]:
@@ -914,6 +922,13 @@ def main():
     )
     _hb_thread.start()
 
+    # Prometheus metrics endpoint + optional dead-man's-switch heartbeat.
+    # Both are no-ops when their respective env vars (PROMETHEUS_PORT,
+    # HEARTBEAT_URL) are unset, so this is safe to always invoke.
+    from orchestrator.metrics import start_prometheus_exporter, start_heartbeat
+    start_prometheus_exporter()
+    start_heartbeat()
+
     log.info("ProductFactory Poller starting...")
     _close_orphaned_sessions()
     _startup_sync_features()
@@ -1054,12 +1069,27 @@ def main():
                     time.sleep(_cfg["pr_gate_sleep"])
                     continue
 
-            # ⑫ Run Claude session
+            # ⑫ Run Claude session — wrap in a log scope so every record emitted
+            # by the docker_runner, the live-poll thread, and the log-stream thread
+            # carries (product_id, session_uid, persona) fields automatically.
             log.info(f"Launching {persona} session for: {product['name']}")
             _session_start = datetime.now(timezone.utc)
             session_uid = f"{product['id']}-{int(_session_start.timestamp())}"
-            exit_code = run_claude_in_docker(product, persona=persona)
+            with log_scope(product_id=product["id"], persona=persona, session_uid=session_uid):
+                exit_code = run_claude_in_docker(product, persona=persona)
             log.info(f"Session ended — exit_code={exit_code} persona={persona}")
+
+            # Prometheus metrics — no-op stub when prometheus_client isn't installed.
+            try:
+                from orchestrator.metrics import record_session
+                _duration = (datetime.now(timezone.utc) - _session_start).total_seconds()
+                _outcome = "success" if exit_code == 0 else "failure"
+                record_session(persona=persona or "unknown",
+                               product=product.get("name", "unknown"),
+                               outcome=_outcome,
+                               duration_seconds=_duration)
+            except Exception as _me:
+                log.debug(f"metric emission failed: {_me}")
 
             # Clear loop history after a successful coder session (progress was made)
             if exit_code == 0 and persona == "coder":
@@ -1085,8 +1115,9 @@ def main():
 
             # Track daily count (reviewers exempt)
             if persona != "reviewer":
-                _reset_daily_counts_if_new_day()
-                _daily_session_counts[product["id"]] = _daily_session_counts.get(product["id"], 0) + 1
+                with _daily_counts_lock:
+                    _reset_daily_counts_if_new_day()
+                    _daily_session_counts[product["id"]] = _daily_session_counts.get(product["id"], 0) + 1
 
             # ⑬ Update last_run_at ONLY on clean exit
             if exit_code == 0:

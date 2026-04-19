@@ -324,11 +324,86 @@ def _log(msg: str):
 
 # ── Main agentic loop ─────────────────────────────────────────────────────────
 
+class _OllamaBackend:
+    """Single-turn chat backend against Ollama's OpenAI-compatible API.
+
+    Handles Ollama-specific concerns: retrying on HTTP 500 (common with
+    quantized models), timeout distinction, and falling back to embedded-JSON
+    tool-call parsing for models that don't use the structured tool_calls field.
+    """
+
+    def __init__(self, model: str, chat_url: str, timeout: int, retry_sleep: int) -> None:
+        self.model = model
+        self.chat_url = chat_url
+        self.timeout = timeout
+        self.retry_sleep = retry_sleep
+
+    def __call__(self, messages: list[dict], tools: list[dict]) -> dict:
+        payload = {
+            "model":       self.model,
+            "messages":    messages,
+            "tools":       tools,
+            "tool_choice": "auto",
+            "stream":      False,
+            "options": {
+                "temperature": 0.2,    # low temp for deterministic code generation
+                "num_ctx":     32768,
+            },
+        }
+
+        # Retry up to 3× on 500 (quantized models sometimes emit malformed XML).
+        for attempt in range(3):
+            try:
+                resp = httpx.post(self.chat_url, json=payload, timeout=self.timeout)
+                resp.raise_for_status()
+                data = resp.json()
+                break
+            except httpx.TimeoutException:
+                raise RuntimeError(
+                    f"Ollama request timed out ({self.timeout}s) — model may be stuck"
+                )
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 500 and attempt < 2:
+                    _log(f"WARNING: Ollama 500 on attempt {attempt+1}, retrying… "
+                         f"({e.response.text[:200]})")
+                    import time as _time
+                    _time.sleep(self.retry_sleep)
+                    continue
+                raise RuntimeError(
+                    f"Ollama API returned {e.response.status_code}: {e.response.text[:500]}"
+                )
+        else:
+            raise RuntimeError("Ollama 500 persisted after 3 attempts — giving up")
+
+        choice = data["choices"][0]
+        message: dict = choice["message"]
+        tool_calls = message.get("tool_calls") or []
+
+        # Fallback parser for models that emit tool calls inside `content`.
+        if not tool_calls and message.get("content"):
+            tool_calls = _try_parse_tool_calls_from_content(message["content"])
+
+        # Normalize to the shape AgentLoop expects.
+        return {
+            "role":          "assistant",
+            "content":       message.get("content") or "",
+            "tool_calls":    tool_calls,
+            "finish_reason": choice.get("finish_reason", ""),
+        }
+
+
 def run_agent(initial_prompt: str) -> int:
-    """Returns 0 on clean exit, 1 on error."""
+    """Returns 0 on clean exit, 1 on error, 2 on incomplete.
+
+    Thin wrapper: the loop itself lives in orchestrator.agent_loop.AgentLoop so
+    future Claude-API / OpenAI-gateway backends don't have to reimplement it.
+    """
+    from orchestrator.agent_loop import AgentLoop
+
     _log(f"Starting — model={MODEL} persona={AGENT_PERSONA} max_turns={MAX_TURNS}")
 
-    # Verify Ollama is reachable
+    # Best-effort reachability probe — don't abort on failure since Ollama may
+    # still be starting up (e.g. WSL container on Windows Docker Desktop).
     try:
         resp = httpx.get(f"{OLLAMA_HOST}/api/tags", timeout=10)
         available = [m["name"] for m in resp.json().get("models", [])]
@@ -339,116 +414,26 @@ def run_agent(initial_prompt: str) -> int:
         _log(f"WARNING: Could not reach Ollama at {OLLAMA_HOST}: {e}")
         _log("Proceeding anyway — Ollama may still be starting up...")
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are an autonomous software agent. You have access to tools: bash, read_file, "
-                "write_file, http_request, and task_done. Work step-by-step, using one or more tools "
-                "per response. Always call task_done when you have completed all work. "
-                f"When in doubt about a path, check with bash('ls {WORKSPACE_DIR}') first."
-            ),
-        },
-        {"role": "user", "content": initial_prompt},
-    ]
+    system_prompt = (
+        "You are an autonomous software agent. You have access to tools: bash, read_file, "
+        "write_file, http_request, and task_done. Work step-by-step, using one or more tools "
+        "per response. Always call task_done when you have completed all work. "
+        f"When in doubt about a path, check with bash('ls {WORKSPACE_DIR}') first."
+    )
 
-    for turn in range(1, MAX_TURNS + 1):
-        _log(f"Turn {turn}/{MAX_TURNS}")
-
-        payload = {
-            "model": MODEL,
-            "messages": messages,
-            "tools": TOOLS,
-            "tool_choice": "auto",
-            "stream": False,
-            "options": {
-                "temperature": 0.2,     # low temperature for deterministic code generation
-                "num_ctx": 32768,       # large context window
-            },
-        }
-
-        # Retry up to 3 times on 500 errors (model-side XML/serialization glitches)
-        data = None
-        for _attempt in range(3):
-            try:
-                resp = httpx.post(CHAT_URL, json=payload, timeout=OLLAMA_TIMEOUT)
-                resp.raise_for_status()
-                data = resp.json()
-                break
-            except httpx.TimeoutException:
-                _log(f"ERROR: Ollama request timed out ({OLLAMA_TIMEOUT}s) — model may be too slow or stuck")
-                return 1
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 500 and _attempt < 2:
-                    _log(f"WARNING: Ollama 500 on attempt {_attempt+1}, retrying… ({e.response.text[:200]})")
-                    import time as _time; _time.sleep(RETRY_SLEEP)
-                    continue
-                _log(f"ERROR: Ollama API returned {e.response.status_code}: {e.response.text[:500]}")
-                return 1
-            except Exception as e:
-                _log(f"ERROR: Unexpected error calling Ollama: {e}")
-                return 1
-        if data is None:
-            _log("ERROR: Ollama 500 persisted after 3 attempts — giving up")
-            return 1
-
-        choice = data["choices"][0]
-        message = choice["message"]
-        finish_reason = choice.get("finish_reason", "")
-        messages.append(message)
-
-        # Print assistant reasoning/text
-        if message.get("content"):
-            for line in message["content"].split("\n"):
-                _log(f"  > {line}")
-
-        # Extract tool calls
-        tool_calls = message.get("tool_calls") or []
-
-        # Fallback: some models embed tool calls as JSON in content
-        if not tool_calls and message.get("content"):
-            tool_calls = _try_parse_tool_calls_from_content(message["content"])
-
-        if not tool_calls:
-            if finish_reason in ("stop", "end_turn", ""):
-                _log("Agent finished without calling task_done — exiting with code 2 (incomplete)")
-                return 2
-            _log(f"No tool calls and finish_reason={finish_reason!r} — exiting with code 2 (incomplete)")
-            return 2
-
-        # Execute each tool call
-        tool_results = []
-        session_done = False
-        for tc in tool_calls:
-            fn = tc.get("function", tc)  # handle both formats
-            name = fn.get("name", "")
-            raw_args = fn.get("arguments", "{}")
-
-            try:
-                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-            except json.JSONDecodeError:
-                args = {}
-
-            result_text, is_done = dispatch_tool(name, args)
-            if is_done:
-                session_done = True
-
-            # Build tool result in the format Ollama expects
-            tc_id = tc.get("id", f"call_{turn}_{name}")
-            tool_results.append({
-                "role": "tool",
-                "tool_call_id": tc_id,
-                "content": result_text,
-            })
-
-        messages.extend(tool_results)
-
-        if session_done:
-            _log("Session completed via task_done")
-            return 0
-
-    _log(f"Reached max turns ({MAX_TURNS}) without completing — exiting with error")
-    return 1
+    backend = _OllamaBackend(
+        model=MODEL, chat_url=CHAT_URL,
+        timeout=OLLAMA_TIMEOUT, retry_sleep=RETRY_SLEEP,
+    )
+    loop = AgentLoop(
+        backend=backend,
+        tool_specs=TOOLS,
+        dispatcher=dispatch_tool,
+        max_turns=MAX_TURNS,
+        system_prompt=system_prompt,
+        log=_log,
+    )
+    return loop.run(initial_prompt)
 
 
 def _try_parse_tool_calls_from_content(content: str) -> list[dict]:

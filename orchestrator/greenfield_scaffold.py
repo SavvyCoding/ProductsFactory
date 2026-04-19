@@ -60,18 +60,26 @@ def scaffold_greenfield(product: dict, system_config: dict, pm_api_url: str, ssh
         _add_deploy_key(actual_owner, github_repo_name, pat, public_key,
                         f"{ssh_key_name}-{key_slug}")
 
-        # ④ Create local folder
-        working_dir.mkdir(parents=True, exist_ok=False)
+        # ④ Create local folder (idempotent — safe to re-run after a partial prior scaffold)
+        working_dir.mkdir(parents=True, exist_ok=True)
 
-        # ⑤ git init + remote
-        subprocess.run(
-            ["git", "init", "-b", "main"],
-            cwd=working_dir, check=True, capture_output=True,
-        )
-        subprocess.run(
+        # ⑤ git init + remote (skip init if the repo already exists; update remote url if needed)
+        if not (working_dir / ".git").exists():
+            subprocess.run(
+                ["git", "init", "-b", "main"],
+                cwd=working_dir, check=True, capture_output=True,
+            )
+        # `remote add` fails if origin already exists — use set-url as a fallback so the
+        # scaffold re-runs cleanly.
+        add = subprocess.run(
             ["git", "remote", "add", "origin", ssh_url],
-            cwd=working_dir, check=True, capture_output=True,
+            cwd=working_dir, capture_output=True,
         )
+        if add.returncode != 0:
+            subprocess.run(
+                ["git", "remote", "set-url", "origin", ssh_url],
+                cwd=working_dir, check=True, capture_output=True,
+            )
 
         # ⑥ Write scaffold files
         _write_readme(working_dir, product_name)
@@ -92,9 +100,6 @@ def scaffold_greenfield(product: dict, system_config: dict, pm_api_url: str, ssh
         })
         log.info(f"Scaffold [{product_name}]: complete — {working_dir}")
 
-    except FileExistsError:
-        log.error(f"Scaffold [{product_name}]: working_dir already exists — {working_dir}")
-        _patch_product(pm_api_url, product["id"], {"status": "error"})
     except subprocess.CalledProcessError as e:
         log.error(f"Scaffold [{product_name}]: shell command failed: {e.stderr.decode()}")
         _patch_product(pm_api_url, product["id"], {"status": "error"})

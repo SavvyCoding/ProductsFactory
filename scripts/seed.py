@@ -76,11 +76,23 @@ def seed(db: Session) -> None:
     db.add(cfg)
 
     # ── PM users ──────────────────────────────────────────────────────────────
+    # Passwords sourced from env to avoid hardcoded weak defaults in source.
+    # Set SEED_PM_PASSWORD_DIGVI / SEED_PM_PASSWORD_ALICE in .env before running.
     import bcrypt as _bcrypt
     def _hash(pw): return _bcrypt.hashpw(pw.encode(), _bcrypt.gensalt()).decode()
 
-    db.add(PMUser(name="Digvijay", username="digvi", password_hash=_hash("admin123")))
-    db.add(PMUser(name="Alice PM", username="alice", password_hash=_hash("admin123")))
+    _weak = {"", "admin", "admin123", "password", "password123", "12345678"}
+    pw_digvi = os.environ.get("SEED_PM_PASSWORD_DIGVI", "")
+    pw_alice = os.environ.get("SEED_PM_PASSWORD_ALICE", "")
+    if pw_digvi.strip().lower() in _weak or pw_alice.strip().lower() in _weak:
+        sys.exit(
+            "ERROR: SEED_PM_PASSWORD_DIGVI and SEED_PM_PASSWORD_ALICE must be set "
+            "to non-trivial passwords in .env before seeding. Refusing to seed "
+            "with a weak/default password."
+        )
+
+    db.add(PMUser(name="Digvijay", username="digvi", password_hash=_hash(pw_digvi)))
+    db.add(PMUser(name="Alice PM", username="alice", password_hash=_hash(pw_alice)))
     db.commit()
     print("✓ System config + PM users")
 
