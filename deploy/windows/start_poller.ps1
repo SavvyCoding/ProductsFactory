@@ -93,6 +93,11 @@ while ($true) {
             -RedirectStandardError  $StderrLog.Replace('.log', '.err.log')
         $exitCode = if ($p) { $p.ExitCode } else { -1 }
         Add-Content -Path $LogFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Poller exited with code=$exitCode"
+        # Exit code 42 = another instance already running on this machine — do not restart
+        if ($exitCode -eq 42) {
+            Add-Content -Path $LogFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Another poller instance is running — this wrapper exiting."
+            exit 0
+        }
     } catch {
         Add-Content -Path $LogFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Poller crashed in launcher: $_"
     }

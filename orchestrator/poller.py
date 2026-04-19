@@ -732,7 +732,7 @@ def _check_single_instance() -> bool:
                     log.error(
                         f"Another poller is already running (pid={existing_pid}). Exiting."
                     )
-                    return False
+                    sys.exit(42)  # sentinel: wrapper must NOT restart on this code
                 except OSError:
                     pass  # stale PID file — previous poller died without cleanup
         except (ValueError, OSError):
