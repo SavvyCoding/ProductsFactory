@@ -1184,8 +1184,19 @@ def main():
             reconcile_in_flight_prs(product)
 
             # ⑪ PR count gate (only applies to coder - designer/reviewer don't open new PRs)
+            # Exclude PRs already being fixed (feature is Implementing + review_outcome set)
+            # — those are in-flight fix cycles and should not block new coder work.
             if persona == "coder":
-                open_pr_count = count_open_prs(product)
+                try:
+                    _feats_resp = httpx.get(f"{PM_API_URL}/api/products/{product['id']}/features", timeout=10)
+                    _fixing_prs = {
+                        f["pr_number"]
+                        for f in (_feats_resp.json() if _feats_resp.status_code == 200 else [])
+                        if f.get("status") == "Implementing" and f.get("review_outcome") and f.get("pr_number")
+                    }
+                except Exception:
+                    _fixing_prs = set()
+                open_pr_count = max(0, count_open_prs(product) - len(_fixing_prs))
                 if open_pr_count >= _cfg["max_open_prs"]:
                     log.info(f"PR gate: {open_pr_count} open PRs - skipping")
                     send_alert("warning", f"{product['name']}: ≥{_cfg['max_open_prs']} open PRs unmerged - pausing")
