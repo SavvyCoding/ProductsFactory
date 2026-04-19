@@ -763,23 +763,47 @@ def _acquire_db_lock() -> bool:
     Returns True on success, False if another live poller holds the lock.
     Falls back to True (allow start) if the API is unreachable - better to risk
     a duplicate than to prevent all pollers from ever starting.
+
+    On 409, if the holder is on the same host but the PID is dead, force-unlock
+    and retry once — recovers from hard-crashed pollers without waiting for the
+    30s TTL.
     """
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
             resp = client.post("/api/poller/lock", json={"pid": _LOCK_PID, "host": _LOCK_HOST})
-        if resp.status_code == 200:
-            log.info(f"Poller lock acquired (pid={_LOCK_PID}, host={_LOCK_HOST})")
+            if resp.status_code == 200:
+                log.info(f"Poller lock acquired (pid={_LOCK_PID}, host={_LOCK_HOST})")
+                return True
+            if resp.status_code == 409:
+                d = resp.json().get("detail", {})
+                holder_pid  = d.get("holder_pid")
+                holder_host = d.get("holder_host")
+                # Same-host stale-PID recovery: probe the holder PID locally.
+                if holder_host == _LOCK_HOST and isinstance(holder_pid, int) and holder_pid != _LOCK_PID:
+                    try:
+                        os.kill(holder_pid, 0)
+                        # Holder is alive — genuine conflict.
+                    except OSError:
+                        log.warning(
+                            f"Lock holder pid={holder_pid} on this host is dead — "
+                            f"force-unlocking and retrying."
+                        )
+                        client.post("/api/poller/force-unlock")
+                        retry = client.post(
+                            "/api/poller/lock",
+                            json={"pid": _LOCK_PID, "host": _LOCK_HOST},
+                        )
+                        if retry.status_code == 200:
+                            log.info(f"Poller lock acquired after force-unlock (pid={_LOCK_PID})")
+                            return True
+                log.error(
+                    f"Another poller holds the lock - "
+                    f"pid={holder_pid}, host={holder_host}, "
+                    f"last_heartbeat={d.get('heartbeat_at')}. Exiting."
+                )
+                return False
+            log.error(f"Unexpected response from lock endpoint: {resp.status_code} - allowing start")
             return True
-        if resp.status_code == 409:
-            d = resp.json().get("detail", {})
-            log.error(
-                f"Another poller holds the lock - "
-                f"pid={d.get('holder_pid')}, host={d.get('holder_host')}, "
-                f"last_heartbeat={d.get('heartbeat_at')}. Exiting."
-            )
-            return False
-        log.error(f"Unexpected response from lock endpoint: {resp.status_code} - allowing start")
-        return True
     except Exception as e:
         log.warning(f"Could not acquire DB lock ({e}) - allowing start (API may be starting up)")
         return True
@@ -1147,7 +1171,11 @@ def main():
                     continue
                 log.info(f"Persona: {persona}")
 
-            # ⑦d Loop detection - check for repeating persona patterns
+            # ⑦d Persona history (debug only). Real loop prevention lives in the
+            # reconciler's fix_attempts → Blocked policy: when a feature has been
+            # bounced back from a later state too many times, it is moved to
+            # Blocked rather than being retried forever. Skipping cycles based on
+            # persona-pattern matching produced too many false positives.
             _loop_detector.record(product["id"], persona)
             loop_pattern = _loop_detector.detect_loop(product["id"])
             if loop_pattern:
@@ -1156,10 +1184,9 @@ def main():
                 if _heal_loop(product, loop_pattern):
                     _loop_detector.clear(product["id"])
                     continue  # re-run determine_persona with healed state
-                else:
-                    log.warning(f"[loop-detect] Could not heal {product['name']} - skipping cycle")
-                    time.sleep(_cfg["poll_interval"])
-                    continue
+                # Heal failed — log and proceed; do not skip the cycle. The
+                # reconciler/Blocked policy will surface real stuck features.
+                log.warning(f"[loop-detect] Heal not applied for {product['name']} - proceeding")
 
             # Clear run_now flag if set
             if product.get("run_now"):
@@ -1179,9 +1206,10 @@ def main():
                 time.sleep(_cfg["poll_interval"])
                 continue
 
-            # ⑩ GitHub PR reconciliation (runs BEFORE PR gate so orphaned PRs get cleaned first)
-            reconcile_merged_prs(product)
-            reconcile_in_flight_prs(product)
+            # ⑩ PR reconciliation already ran for all ready products at step ⑥b
+            # (before reviewer-first selection). Calling it a second time here was
+            # redundant and created races with the live-poll thread of any session
+            # that was about to start.
 
             # ⑪ PR count gate (only applies to coder - designer/reviewer don't open new PRs)
             # Exclude PRs already being fixed (feature is Implementing + review_outcome set)
@@ -1247,16 +1275,32 @@ def main():
                 _updated_ids = []
             _post_session_comments(product, persona, session_uid, _updated_ids)
 
-            # Track daily count (reviewers exempt)
-            if persona != "reviewer":
+            # Detect zero-progress sessions: agent exited cleanly but no feature
+            # state advanced. Without this guard, the round-robin keeps picking
+            # the same product and the same persona, masking session-contract
+            # bugs (e.g. reviewer with empty assignment, coder with no work).
+            zero_progress = exit_code == 0 and not _updated_ids
+            if zero_progress:
+                log.warning(
+                    f"[zero-progress] {product['name']} {persona} session exited code=0 "
+                    f"but no features were updated — not advancing last_run_at"
+                )
+                send_alert(
+                    "warning",
+                    f"{product['name']}: {persona} session made no progress (0 features updated)",
+                )
+
+            # Track daily count (reviewers exempt; zero-progress sessions also exempt
+            # so the cap doesn't burn through on agents that aren't doing real work).
+            if persona != "reviewer" and not zero_progress:
                 with _daily_counts_lock:
                     _reset_daily_counts_if_new_day()
                     _daily_session_counts[product["id"]] = _daily_session_counts.get(product["id"], 0) + 1
 
-            # ⑬ Update last_run_at ONLY on clean exit.
+            # ⑬ Update last_run_at ONLY on clean exit AND if work was done.
             # Also stamp last_{persona}_at for post-sprint personas that don't
             # self-report (recommender is poller-launched, not agent-written).
-            if exit_code == 0:
+            if exit_code == 0 and not zero_progress:
                 now_iso = datetime.now(timezone.utc).isoformat()
                 patches: dict = {"last_run_at": now_iso}
                 if persona in _POST_SPRINT_PERSONAS:
@@ -1270,7 +1314,7 @@ def main():
                         log.warning(f"Could not stamp last_{persona}_at: {_ce}")
                 with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
                     client.patch(f"/api/products/{product['id']}", json=patches)
-            else:
+            elif exit_code != 0:
                 send_alert("warning", f"{product['name']}: {persona} session exited with code {exit_code}")
 
         except KeyboardInterrupt:
