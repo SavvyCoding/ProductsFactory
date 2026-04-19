@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 
-def build_prompt(product: dict, session_uid: str, persona: str | None = None) -> str:
+def build_prompt(product: dict, session_uid: str, persona: str | None = None, max_features: int | None = None) -> str:
     """
     Returns the full Claude prompt string for this product session.
 
@@ -77,7 +77,7 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None) ->
         "{pm_api_url}": str(os.environ.get("PM_API_URL_CONTAINER", os.environ["PM_API_URL"])),
         "{tech_stack}": ", ".join(product.get("tech_stack") or []),
         "{max_features_per_run}": str(
-            int(os.environ.get("MAX_FEATURES_PER_SPRINT", "5"))
+            max_features if max_features is not None else int(os.environ.get("MAX_FEATURES_PER_SPRINT", "5"))
         ),
         "{auto_merge_enabled}": str(product.get("_auto_merge_enabled", False)),
         "{assigned_features}": product.get("_assigned_features_md", ""),
