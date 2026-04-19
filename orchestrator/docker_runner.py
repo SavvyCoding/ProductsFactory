@@ -1232,40 +1232,14 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     if exit_code == 2:
         return 2
 
-    # After a successful coder session: QA → Security → Recommender
+    # After a successful coder session: QA → Security (feature-level, run per PR).
+    # Recommender runs post-sprint via the poller's _post_sprint_persona_due gate.
     if exit_code == 0 and persona == "coder":
         log.info(f"Coder succeeded — launching QA Tester for {product['name']}")
         run_claude_in_docker(product, persona="qa_tester")
 
         log.info(f"Launching Security Auditor for {product['name']}")
         run_claude_in_docker(product, persona="security_auditor")
-        # Skip recommender unless the backlog is truly empty.
-        # "Empty" means no features in any non-terminal state:
-        # Pending, Approved, Designing, Designed, Implementing, Reviewing, Reviewed, Blocked
-        # Only run when every feature is Pushed, Rejected, or Deferred.
-        _terminal_statuses = ("Pushed", "Rejected", "Deferred", "Reverted")
-        try:
-            with httpx.Client(base_url=PM_API_URL, timeout=10) as _client:
-                _all_resp = _client.get(
-                    f"/api/products/{product['id']}/features",
-                )
-                _all_features = _all_resp.json() if _all_resp.status_code == 200 else []
-                _active_count = sum(
-                    1 for f in (_all_features if isinstance(_all_features, list) else [])
-                    if f.get("status") not in _terminal_statuses
-                )
-        except Exception as _e:
-            log.warning(f"Could not count active features: {_e} — skipping recommender (fail-safe)")
-            _active_count = 1  # Fail closed: skip rather than runaway
-
-        if _active_count > 0:
-            log.info(
-                f"Skipping recommender for {product['name']} — "
-                f"{_active_count} active feature(s) in backlog (recommender runs only when backlog is empty)"
-            )
-        else:
-            log.info(f"Launching recommender for {product['name']} (backlog empty)")
-            run_claude_in_docker(product, persona="recommender")
 
     return exit_code
 

@@ -267,12 +267,15 @@ def get_next_reviewer_product(products: list[dict]) -> tuple[dict | None, str | 
     return None, None
 
 
-# Maintenance persona schedule: persona -> interval in days
-_MAINTENANCE_SCHEDULE = [
-    ("documenter",   3),
-    ("analytics",    7),
-    ("refactorer",   7),
-    ("devops",      14),
+# Post-sprint personas — run once after each sprint completes, in this order.
+# Agents write last_{persona}_at on completion; the poller compares that timestamp
+# against the sprint's completed_at to decide if the persona is due again.
+_POST_SPRINT_PERSONAS = [
+    "documenter",
+    "analytics",
+    "refactorer",
+    "devops",
+    "recommender",
 ]
 
 
@@ -392,20 +395,29 @@ def _heal_loop(product: dict, pattern: str) -> bool:
         return False
 
 
-def _maintenance_persona_due(product: dict) -> str | None:
-    """Return the next maintenance persona that is due to run, or None."""
+def _post_sprint_persona_due(product: dict, last_completed_sprint: dict | None) -> str | None:
+    """
+    Return the next post-sprint persona that hasn't run since the last sprint completed.
+    Compares each persona's last_{persona}_at timestamp against sprint.completed_at.
+    Returns None if no sprint has ever completed (planner handles cold-start features).
+    """
+    if not last_completed_sprint or not last_completed_sprint.get("completed_at"):
+        return None
+    try:
+        sprint_done_at = datetime.fromisoformat(last_completed_sprint["completed_at"])
+    except (ValueError, TypeError):
+        return None
     config = product.get("config") or {}
-    now = datetime.now(timezone.utc)
-    for persona, interval_days in _MAINTENANCE_SCHEDULE:
+    for persona in _POST_SPRINT_PERSONAS:
         last_run_str = config.get(f"last_{persona}_at")
         if not last_run_str:
-            return persona  # Never run before - schedule it
+            return persona  # Never run — due
         try:
             last_run = datetime.fromisoformat(last_run_str)
-            if (now - last_run) >= timedelta(days=interval_days):
-                return persona
-        except ValueError:
-            return persona  # Malformed date - run it
+            if last_run < sprint_done_at:
+                return persona  # Ran before this sprint completed — due again
+        except (ValueError, TypeError):
+            return persona
     return None
 
 
@@ -421,7 +433,7 @@ def determine_persona(product: dict) -> str:
     3. designer        - Approved features with skip_design=False in the active sprint
     4. coder           - Designed or skip_design Approved features in the active sprint
     5. (if no active sprint) designer/coder on unsprinted features
-    6. documenter / analytics / refactorer / devops  - scheduled maintenance
+    6. documenter / analytics / refactorer / devops / recommender  - once per completed sprint
     7. planner         - no actionable features; generate new ones
     """
     TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted"}
@@ -436,6 +448,14 @@ def determine_persona(product: dict) -> str:
             active_sprint = None
             if active_sprint_resp.status_code == 200 and active_sprint_resp.json():
                 active_sprint = active_sprint_resp.json()
+
+            # Fetch last completed sprint (for post-sprint persona gating)
+            last_completed_sprint = None
+            sprints_resp = client.get(f"/api/products/{product['id']}/sprints")
+            if sprints_resp.status_code == 200:
+                completed = [s for s in sprints_resp.json() if s.get("status") == "completed"]
+                if completed:
+                    last_completed_sprint = max(completed, key=lambda s: s["id"])
 
             # Fetch all product features
             feat_resp = client.get(f"/api/products/{product['id']}/features")
@@ -460,17 +480,9 @@ def determine_persona(product: dict) -> str:
                         if result.get("release_notes"):
                             log.info(f"Release notes generated ({len(result['release_notes'])} chars)")
 
-                    # Reset maintenance timestamps so all 4 run after sprint completion
-                    try:
-                        cfg_resp = client.get(f"/api/products/{product['id']}")
-                        if cfg_resp.status_code == 200:
-                            current_config = dict(cfg_resp.json().get("config") or {})
-                            for maint_persona, _ in _MAINTENANCE_SCHEDULE:
-                                current_config.pop(f"last_{maint_persona}_at", None)
-                            client.patch(f"/api/products/{product['id']}", json={"config": current_config})
-                            log.info(f"Cleared maintenance timestamps - documenter/analytics/refactorer/devops will run post-sprint")
-                    except Exception as _me:
-                        log.warning(f"Could not reset maintenance timestamps: {_me}")
+                    # No timestamp manipulation needed — sprint's completed_at now sits
+                    # ahead of all last_{persona}_at values, so post-sprint personas
+                    # will be picked up automatically on the next cycle.
 
                     # Clear workspace context for the new sprint
                     working_dir = product.get("working_dir")
@@ -627,11 +639,11 @@ def determine_persona(product: dict) -> str:
         log.error(f"determine_persona failed: {e}")
         return None
 
-    # No design/code work - check scheduled maintenance personas
-    maintenance = _maintenance_persona_due(product)
-    if maintenance:
-        log.info(f"Maintenance persona due: {maintenance}")
-        return maintenance
+    # No design/code work — check post-sprint personas (documenter/analytics/refactorer/devops/recommender)
+    post_sprint = _post_sprint_persona_due(product, last_completed_sprint)
+    if post_sprint:
+        log.info(f"Post-sprint persona due: {post_sprint} (last sprint: {last_completed_sprint.get('id') if last_completed_sprint else None})")
+        return post_sprint
 
     # Nothing else - run planner to generate new feature ideas
     return "planner"
@@ -1164,13 +1176,23 @@ def main():
                     _reset_daily_counts_if_new_day()
                     _daily_session_counts[product["id"]] = _daily_session_counts.get(product["id"], 0) + 1
 
-            # ⑬ Update last_run_at ONLY on clean exit
+            # ⑬ Update last_run_at ONLY on clean exit.
+            # Also stamp last_{persona}_at for post-sprint personas that don't
+            # self-report (recommender is poller-launched, not agent-written).
             if exit_code == 0:
+                now_iso = datetime.now(timezone.utc).isoformat()
+                patches: dict = {"last_run_at": now_iso}
+                if persona in _POST_SPRINT_PERSONAS:
+                    try:
+                        with httpx.Client(base_url=PM_API_URL, timeout=10) as _cfg_client:
+                            _cfg_resp = _cfg_client.get(f"/api/products/{product['id']}")
+                            current_cfg = dict((_cfg_resp.json().get("config") or {}) if _cfg_resp.status_code == 200 else {})
+                        current_cfg[f"last_{persona}_at"] = now_iso
+                        patches["config"] = current_cfg
+                    except Exception as _ce:
+                        log.warning(f"Could not stamp last_{persona}_at: {_ce}")
                 with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-                    client.patch(
-                        f"/api/products/{product['id']}",
-                        json={"last_run_at": datetime.now(timezone.utc).isoformat()},
-                    )
+                    client.patch(f"/api/products/{product['id']}", json=patches)
             else:
                 send_alert("warning", f"{product['name']}: {persona} session exited with code {exit_code}")
 
