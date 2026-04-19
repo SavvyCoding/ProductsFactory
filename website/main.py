@@ -1010,6 +1010,37 @@ async def api_sprint_dod(sprint_id: int, db: AsyncSession = Depends(get_db)):
     return dod
 
 
+@app.post("/api/sprints/{sprint_id}/force-complete")
+async def api_force_complete_sprint(sprint_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Poller calls this when all features are terminal: auto-signs DoD gates,
+    generates release notes, marks sprint completed, activates next sprint.
+    Single endpoint replaces the poller's manual multi-step completion logic.
+    """
+    sprint = await db.get(Sprint, sprint_id)
+    if not sprint:
+        raise HTTPException(status_code=404, detail="Sprint not found")
+    if sprint.status == "completed":
+        return {"action": "already_completed"}
+
+    # Auto-sign all DoD gates
+    current = dict(sprint.dod_status or {})
+    for gate in ("qa_passed", "security_clean", "retro_done"):
+        current[gate] = True
+        current[f"{gate}_notes"] = current.get(f"{gate}_notes") or "Auto-signed on sprint completion"
+    sprint.dod_status = current
+    await db.flush()
+
+    # Full completion: set completed_at, generate release notes, activate next sprint
+    await _do_complete_sprint(sprint, sprint.product_id, db)
+
+    return {
+        "action": "completed",
+        "sprint_id": sprint_id,
+        "release_notes": sprint.release_notes,
+    }
+
+
 @app.post("/api/sprints/{sprint_id}/check-dod")
 async def api_check_dod(sprint_id: int, db: AsyncSession = Depends(get_db)):
     """
