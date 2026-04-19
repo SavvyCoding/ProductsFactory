@@ -298,7 +298,7 @@ class _LoopDetector:
     # Personas that are expected to repeat — not a bug, don't flag them.
     # coder: multiple consecutive coder runs is normal when several features are queued;
     # real coder stalls are caught by stuck_feature_timeout, not persona repetition.
-    _EXPECTED_REPEATS = frozenset({"planner", "product_trainer", "coder"})
+    _EXPECTED_REPEATS = frozenset({"planner", "product_trainer", "coder", "reviewer"})
 
     def detect_loop(self, product_id: int) -> str | None:
         """Returns a description of the loop pattern, or None."""
