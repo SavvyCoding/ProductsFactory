@@ -642,7 +642,7 @@
     <a href="#security">Security</a>
     <a href="#env">Config</a>
   </div>
-  <span class="nav-badge">v2.1 — Poller-Driven</span>
+  <span class="nav-badge">v2.2 — Sprint-Gated</span>
 </nav>
 
 <!-- HERO -->
@@ -659,7 +659,7 @@
   </p>
   <div class="hero-stats">
     <div>
-      <div class="hero-stat-val">11</div>
+      <div class="hero-stat-val">13</div>
       <div class="hero-stat-lbl">AI Personas</div>
     </div>
     <div>
@@ -727,7 +727,7 @@
         <div class="step-num">③</div>
         <div class="step-body">
           <div class="step-title">Discover Registered Products</div>
-          <div class="step-desc">Reads <code>CLAUDE.md</code>, detects stack (python/node/go), installs templates (AGENT_WORKFLOW.md, ARCHITECTURE.md), sets status to <code>ready</code>.</div>
+          <div class="step-desc">Reads <code>CLAUDE.md</code>, detects stack (python/node/go), installs templates (AGENT_WORKFLOW.md, ARCHITECTURE.md). <strong>Brownfield:</strong> sets status to <code>ready</code> immediately. <strong>Greenfield:</strong> sets to <code>discovered</code> for PM scaffold review.</div>
           <span class="step-tag tag-infra">INFRA</span>
         </div>
       </div>
@@ -1058,7 +1058,7 @@
         <div class="wf-step">
           <div class="wf-step-num">STEP 11</div>
           <div class="wf-step-title">Post-Coder Chain</div>
-          <div class="wf-step-desc">On coder clean exit: runs QA Tester → Security Auditor → Recommender (with backlog gate). Each is a separate <code>docker run</code> in sequence. Failures don't block the chain.</div>
+          <div class="wf-step-desc">On coder clean exit: runs QA Tester → Security Auditor. Each is a separate <code>docker run</code> in sequence. Recommender runs post-sprint (not here). Failures don't block the chain.</div>
           <code class="wf-step-code">_run_post_coder_chain(product, session_uid)</code>
         </div>
         <div class="wf-step">
@@ -1066,46 +1066,6 @@
           <div class="wf-step-title">Update last_run_at</div>
           <div class="wf-step-desc">Only updates the round-robin pointer if Docker exited with code 0. Failed sessions don't advance the queue — the product is immediately eligible for re-selection in the next poll cycle.</div>
           <code class="wf-step-code">PATCH /api/products/{id} last_run_at=now()</code>
-        </div>
-      </div>
-    </div>
-
-    <div class="wf-phase-connector">▼ Recommender Gate (two-layer defence) ▼</div>
-
-    <!-- Phase 4: Recommender Gate -->
-    <div class="wf-phase">
-      <div class="wf-phase-stripe" style="background:linear-gradient(90deg,#ec4899,#f59e0b)"></div>
-      <div class="wf-phase-header">
-        <div class="wf-phase-icon" style="background:rgba(236,72,153,0.15)">🛡️</div>
-        <div>
-          <div class="wf-phase-title">Recommender Runaway Defence</div>
-          <div class="wf-phase-sub">Two independent gates prevent the recommender from running when the backlog already has plenty of Pending features.</div>
-        </div>
-      </div>
-      <div class="wf-gate-grid">
-        <div class="wf-gate-box">
-          <div class="wf-gate-label" style="color:var(--blue2)">🔒 Gate 1 — Poller (Python code)</div>
-          <div class="wf-gate-desc">
-            Before launching the recommender container, the poller counts Pending features for this product.
-            If <code>pending_count ≥ rec_threshold</code> (default: 15), the recommender is skipped.
-            <br><br>
-            <strong>Fail-safe:</strong> If the PM API returns an error, <code>pending_count</code> is set to
-            <code>max(rec_threshold, 1)</code> — <em>fail closed</em>. Previously it defaulted to 0,
-            making <code>0 ≥ 15</code> always False → recommender always launched on any API error.
-          </div>
-          <code class="wf-gate-code">_pending_count = max(_rec_threshold, 1)  # on API error</code>
-        </div>
-        <div class="wf-gate-box">
-          <div class="wf-gate-label" style="color:var(--amber2)">🤖 Gate 2 — Agent (recommender.md Step 0)</div>
-          <div class="wf-gate-desc">
-            Even if the poller launches the recommender container, Step 0 of <code>recommender.md</code>
-            instructs the agent to immediately check the backlog count before doing any web research.
-            If count ≥ 10, it exits immediately with "Backlog already full — skipping."
-            <br><br>
-            This second layer catches edge cases where the poller's count was stale (race condition
-            between two products' sessions).
-          </div>
-          <code class="wf-gate-code">GET /api/features/count?product_id=X&amp;status=Pending → exit if ≥10</code>
         </div>
       </div>
     </div>
@@ -1132,6 +1092,12 @@
       <strong style="color:var(--green2)">Claim-Before-Launch</strong>
       <div style="color:var(--text2);margin-top:8px;line-height:1.7">
         Features are PATCHed to <code style="font-family:'JetBrains Mono',monospace">Implementing</code> / <code style="font-family:'JetBrains Mono',monospace">Designing</code> by the poller <em>before</em> <code style="font-family:'JetBrains Mono',monospace">docker run</code>. If the poller polls again while the container is still running, those features are already claimed and won't be double-assigned.
+      </div>
+    </div>
+    <div style="background:var(--bg2);border:1px solid rgba(139,92,246,0.25);border-radius:10px;padding:16px;font-size:12px;">
+      <strong style="color:var(--violet2)">Strict Single-Sprint Scoping</strong>
+      <div style="color:var(--text2);margin-top:8px;line-height:1.7">
+        When an active sprint exists, agents only see features in that sprint — never features from future sprints. Newly approved features are auto-assigned to the next <em>planned</em> sprint (not the active one) to avoid scope creep mid-sprint.
       </div>
     </div>
     <div style="background:var(--bg2);border:1px solid rgba(245,158,11,0.25);border-radius:10px;padding:16px;font-size:12px;">
@@ -1209,7 +1175,7 @@
 
     <!-- Post-Coder Chain -->
     <div>
-      <div class="persona-group-label">Post-Coder Chain — auto-runs after every successful coder session</div>
+      <div class="persona-group-label">Post-Coder Chain — auto-runs after every successful coder session (PR-level)</div>
       <div class="persona-cards">
 
         <div class="persona-card">
@@ -1244,28 +1210,12 @@
           </div>
         </div>
 
-        <div class="persona-card">
-          <div class="persona-card-accent pc-rose" style="background:linear-gradient(90deg,#ec4899,#a78bfa)"></div>
-          <div class="persona-header">
-            <div class="persona-emoji">💡</div>
-            <div>
-              <div class="persona-name">Recommender</div>
-              <div class="persona-trigger">Auto-trigger: after Security Auditor</div>
-            </div>
-          </div>
-          <div class="persona-desc">Searches competitors via DuckDuckGo, analyses what was just built, and suggests 5 new feature ideas. Posts them as Pending features with source="ai" for the PM to approve or reject.</div>
-          <div class="persona-io">
-            <div class="io-row"><span class="io-label io-in">IN</span><span class="io-val">Product context + web search results</span></div>
-            <div class="io-row"><span class="io-label io-out">OUT</span><span class="io-val">5 new Pending features (source: ai)</span></div>
-          </div>
-        </div>
-
       </div>
     </div>
 
     <!-- Scheduled Maintenance -->
     <div>
-      <div class="persona-group-label">Scheduled Maintenance — rotate when no feature work exists (config: last_{persona}_at)</div>
+      <div class="persona-group-label">Post-Sprint Automation — run once after each sprint completes (gated by last_{persona}_at vs sprint.completed_at)</div>
       <div class="persona-cards">
 
         <div class="persona-card">
@@ -1274,7 +1224,7 @@
             <div class="persona-emoji">📝</div>
             <div>
               <div class="persona-name">Documenter</div>
-              <div class="persona-trigger">Every 3 days (last_documenter_at)</div>
+              <div class="persona-trigger">After each sprint completion (last_documenter_at)</div>
             </div>
           </div>
           <div class="persona-desc">Keeps README, CHANGELOG, and ARCHITECTURE.md in sync with what's actually been built. Writes for a new developer. Adds changelog entries for recently Pushed features.</div>
@@ -1290,7 +1240,7 @@
             <div class="persona-emoji">📊</div>
             <div>
               <div class="persona-name">Analytics</div>
-              <div class="persona-trigger">Every 7 days (last_analytics_at)</div>
+              <div class="persona-trigger">After each sprint completion (last_analytics_at)</div>
             </div>
           </div>
           <div class="persona-desc">Analyses feature velocity, backlog health, codebase growth, and UX gaps. Generates a structured analytics report in docs/ and files high-value feature suggestions backed by data.</div>
@@ -1306,7 +1256,7 @@
             <div class="persona-emoji">🔧</div>
             <div>
               <div class="persona-name">Refactorer</div>
-              <div class="persona-trigger">Every 7 days (last_refactorer_at)</div>
+              <div class="persona-trigger">After each sprint completion (last_refactorer_at)</div>
             </div>
           </div>
           <div class="persona-desc">Scans the codebase for tech debt: god classes, duplicated logic, N+1 queries, magic numbers, dead code, missing abstractions. Creates specific chore features — never modifies code directly.</div>
@@ -1322,13 +1272,29 @@
             <div class="persona-emoji">🏗️</div>
             <div>
               <div class="persona-name">DevOps</div>
-              <div class="persona-trigger">Every 14 days (last_devops_at)</div>
+              <div class="persona-trigger">After each sprint completion (last_devops_at)</div>
             </div>
           </div>
           <div class="persona-desc">Reviews Dockerfile, docker-compose, GitHub Actions, and dependency manifests. Checks for pinned base images, non-root users, secret handling, CI coverage, and outdated major versions.</div>
           <div class="persona-io">
             <div class="io-row"><span class="io-label io-in">IN</span><span class="io-val">Dockerfile + workflows + requirements + .env.example</span></div>
             <div class="io-row"><span class="io-label io-out">OUT</span><span class="io-val">Infra chore features (priority 50)</span></div>
+          </div>
+        </div>
+
+        <div class="persona-card">
+          <div class="persona-card-accent" style="background:linear-gradient(90deg,#ec4899,#a78bfa)"></div>
+          <div class="persona-header">
+            <div class="persona-emoji">💡</div>
+            <div>
+              <div class="persona-name">Recommender</div>
+              <div class="persona-trigger">After each sprint completion (last_recommender_at)</div>
+            </div>
+          </div>
+          <div class="persona-desc">Searches competitors via web, analyses what was just built in the sprint, and suggests new feature ideas aligned with market direction. Posts them as Pending with source="ai" for PM approval.</div>
+          <div class="persona-io">
+            <div class="io-row"><span class="io-label io-in">IN</span><span class="io-val">Sprint release notes + product context + web search</span></div>
+            <div class="io-row"><span class="io-label io-out">OUT</span><span class="io-val">New Pending features (source: ai) + last_recommender_at updated</span></div>
           </div>
         </div>
 
@@ -1495,7 +1461,7 @@
 <section id="postcoder">
   <div class="section-label">Automation Chain</div>
   <h2>Post-Coder Pipeline</h2>
-  <p class="section-sub">After every successful coder session, three additional agents run automatically in sequence — no human intervention required.</p>
+  <p class="section-sub">After every successful coder session, two agents run automatically in sequence — QA Tester and Security Auditor operate at the PR level. Recommender runs post-sprint (not post-coder).</p>
 
   <div class="chain-flow">
     <div class="chain-node">
@@ -1530,21 +1496,11 @@
       <div class="chain-label">Audits diff · Files bugs</div>
     </div>
 
+
     <div class="chain-arrow">
       <svg viewBox="0 0 32 12"><path d="M0,6 L26,6" stroke="#f43f5e" stroke-width="1.5" marker-end="url(#arrc)"/><defs><marker id="arrc" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L0,6 L6,3 z" fill="#f43f5e"/></marker></defs></svg>
     </div>
 
-    <div class="chain-node">
-      <div class="chain-circle cc-rec">
-        <div class="chain-emoji">💡</div>
-        <div style="font-size:10px">Recommender</div>
-      </div>
-      <div class="chain-label">Suggests 5 new features</div>
-    </div>
-
-    <div class="chain-arrow">
-      <svg viewBox="0 0 32 12"><path d="M0,6 L26,6" stroke="#ec4899" stroke-width="1.5" marker-end="url(#arre)"/><defs><marker id="arre" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L0,6 L6,3 z" fill="#ec4899"/></marker></defs></svg>
-    </div>
 
     <div class="chain-node">
       <div class="chain-circle" style="background:rgba(16,185,129,0.15);border-color:#10b981;color:#34d399;width:72px;height:72px;border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:11px;font-weight:700;text-align:center;gap:2px;">
@@ -1559,7 +1515,7 @@
   <!-- Notes -->
   <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-top:20px;">
     <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px;font-size:12px;color:var(--text2)">
-      <strong style="color:var(--text)">Exit codes don't block the chain.</strong> QA Tester and Security Auditor are best-effort — their failure doesn't prevent the Recommender from running.
+      <strong style="color:var(--text)">Exit codes don't block the chain.</strong> QA Tester and Security Auditor are best-effort — their failure doesn't prevent the Reviewer from running next cycle.
     </div>
     <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px;font-size:12px;color:var(--text2)">
       <strong style="color:var(--text)">Tests land before review.</strong> QA Tester pushes tests to the same PR branch, so the Reviewer sees the complete implementation + test suite.
@@ -1575,22 +1531,22 @@
 
 <!-- MAINTENANCE SCHEDULE -->
 <section id="maintenance">
-  <div class="section-label">Scheduled Automation</div>
-  <h2>Maintenance Rotation</h2>
-  <p class="section-sub">When no features are ready to implement, the poller automatically runs the next overdue maintenance persona. State is stored in <code style="font-family:'JetBrains Mono',monospace;color:var(--blue2)">product.config</code> as ISO timestamps.</p>
+  <div class="section-label">Post-Sprint Automation</div>
+  <h2>Post-Sprint Sequence</h2>
+  <p class="section-sub">After each sprint completes, five personas run once in sequence — triggered by comparing <code style="font-family:'JetBrains Mono',monospace;color:var(--blue2)">last_{persona}_at</code> against <code style="font-family:'JetBrains Mono',monospace;color:var(--cyan)">sprint.completed_at</code>. No time intervals — sprint completion is the event.</p>
 
-  <div class="schedule-grid">
+  <div class="schedule-grid" style="grid-template-columns:repeat(5,1fr)">
 
     <div class="schedule-card">
       <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:16px">
         <span style="font-size:28px">📝</span>
         <div>
-          <div class="schedule-interval" style="color:#94a3b8">3</div>
-          <div class="schedule-unit">days</div>
+          <div class="schedule-interval" style="color:#94a3b8;font-size:20px">1st</div>
+          <div class="schedule-unit">post-sprint</div>
         </div>
       </div>
       <div class="schedule-name">Documenter</div>
-      <div class="schedule-desc">Updates README, CHANGELOG, and ARCHITECTURE.md to reflect what's actually been built. Writes for a new developer.</div>
+      <div class="schedule-desc">Updates README, CHANGELOG, and ARCHITECTURE.md to reflect the completed sprint. Writes for a new developer.</div>
       <div class="schedule-output">config key: last_documenter_at</div>
       <div class="schedule-bar" style="background:linear-gradient(90deg,#64748b,#94a3b8)"></div>
     </div>
@@ -1599,12 +1555,12 @@
       <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:16px">
         <span style="font-size:28px">📊</span>
         <div>
-          <div class="schedule-interval" style="color:#34d399">7</div>
-          <div class="schedule-unit">days</div>
+          <div class="schedule-interval" style="color:#34d399;font-size:20px">2nd</div>
+          <div class="schedule-unit">post-sprint</div>
         </div>
       </div>
       <div class="schedule-name">Analytics</div>
-      <div class="schedule-desc">Velocity reports, backlog health, codebase growth trends, UX gap analysis. Files data-backed feature suggestions.</div>
+      <div class="schedule-desc">Velocity reports, backlog health, sprint retrospective data, UX gap analysis. Files data-backed feature suggestions.</div>
       <div class="schedule-output">config key: last_analytics_at</div>
       <div class="schedule-bar" style="background:linear-gradient(90deg,#14b8a6,#06b6d4)"></div>
     </div>
@@ -1613,12 +1569,12 @@
       <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:16px">
         <span style="font-size:28px">🔧</span>
         <div>
-          <div class="schedule-interval" style="color:#fbbf24">7</div>
-          <div class="schedule-unit">days</div>
+          <div class="schedule-interval" style="color:#fbbf24;font-size:20px">3rd</div>
+          <div class="schedule-unit">post-sprint</div>
         </div>
       </div>
       <div class="schedule-name">Refactorer</div>
-      <div class="schedule-desc">Identifies tech debt: god classes, N+1 queries, dead code, missing abstractions. Creates chore features (priority 40) for PM approval.</div>
+      <div class="schedule-desc">Identifies tech debt accumulated in the sprint: god classes, N+1 queries, dead code. Creates chore features (priority 40) for PM approval.</div>
       <div class="schedule-output">config key: last_refactorer_at</div>
       <div class="schedule-bar" style="background:linear-gradient(90deg,#f97316,#fbbf24)"></div>
     </div>
@@ -1627,14 +1583,28 @@
       <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:16px">
         <span style="font-size:28px">🏗️</span>
         <div>
-          <div class="schedule-interval" style="color:#a78bfa">14</div>
-          <div class="schedule-unit">days</div>
+          <div class="schedule-interval" style="color:#a78bfa;font-size:20px">4th</div>
+          <div class="schedule-unit">post-sprint</div>
         </div>
       </div>
       <div class="schedule-name">DevOps</div>
-      <div class="schedule-desc">Reviews Dockerfile, CI/CD, dependencies. Checks pinned base images, non-root users, secret hygiene, outdated deps. Files infra chores (priority 50).</div>
+      <div class="schedule-desc">Reviews Dockerfile, CI/CD, dependencies. Checks pinned images, non-root users, secret hygiene, outdated deps. Files infra chores (priority 50).</div>
       <div class="schedule-output">config key: last_devops_at</div>
       <div class="schedule-bar" style="background:linear-gradient(90deg,#8b5cf6,#ec4899)"></div>
+    </div>
+
+    <div class="schedule-card">
+      <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:16px">
+        <span style="font-size:28px">💡</span>
+        <div>
+          <div class="schedule-interval" style="color:#f472b6;font-size:20px">5th</div>
+          <div class="schedule-unit">post-sprint</div>
+        </div>
+      </div>
+      <div class="schedule-name">Recommender</div>
+      <div class="schedule-desc">Searches competitors, analyses the sprint's shipped features, suggests new feature ideas aligned with market direction. Posts as Pending for PM approval.</div>
+      <div class="schedule-output">config key: last_recommender_at</div>
+      <div class="schedule-bar" style="background:linear-gradient(90deg,#ec4899,#a78bfa)"></div>
     </div>
 
   </div>
@@ -1675,29 +1645,35 @@
         <tr style="border-top:1px solid var(--border)">
           <td style="padding:10px 20px;font-size:12px;font-weight:700;color:var(--blue2)">3</td>
           <td style="padding:10px 20px;font-size:12px;color:var(--slate)">📝 Documenter</td>
-          <td style="padding:10px 20px;font-size:12px;color:var(--text2)">last_documenter_at older than 3 days (or never)</td>
-          <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">product.config check (no API call)</td>
+          <td style="padding:10px 20px;font-size:12px;color:var(--text2)">last_documenter_at &lt; last sprint completed_at (or never ran)</td>
+          <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">_post_sprint_persona_due()</td>
         </tr>
         <tr style="border-top:1px solid var(--border)">
           <td style="padding:10px 20px;font-size:12px;font-weight:700;color:var(--blue2)">4</td>
           <td style="padding:10px 20px;font-size:12px;color:var(--cyan)">📊 Analytics</td>
-          <td style="padding:10px 20px;font-size:12px;color:var(--text2)">last_analytics_at older than 7 days (or never)</td>
-          <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">product.config check (no API call)</td>
+          <td style="padding:10px 20px;font-size:12px;color:var(--text2)">last_analytics_at &lt; last sprint completed_at (or never ran)</td>
+          <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">_post_sprint_persona_due()</td>
         </tr>
         <tr style="border-top:1px solid var(--border)">
           <td style="padding:10px 20px;font-size:12px;font-weight:700;color:var(--blue2)">5</td>
           <td style="padding:10px 20px;font-size:12px;color:var(--amber2)">🔧 Refactorer</td>
-          <td style="padding:10px 20px;font-size:12px;color:var(--text2)">last_refactorer_at older than 7 days (or never)</td>
-          <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">product.config check (no API call)</td>
+          <td style="padding:10px 20px;font-size:12px;color:var(--text2)">last_refactorer_at &lt; last sprint completed_at (or never ran)</td>
+          <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">_post_sprint_persona_due()</td>
         </tr>
         <tr style="border-top:1px solid var(--border)">
           <td style="padding:10px 20px;font-size:12px;font-weight:700;color:var(--blue2)">6</td>
           <td style="padding:10px 20px;font-size:12px;color:var(--violet2)">🏗️ DevOps</td>
-          <td style="padding:10px 20px;font-size:12px;color:var(--text2)">last_devops_at older than 14 days (or never)</td>
-          <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">product.config check (no API call)</td>
+          <td style="padding:10px 20px;font-size:12px;color:var(--text2)">last_devops_at &lt; last sprint completed_at (or never ran)</td>
+          <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">_post_sprint_persona_due()</td>
         </tr>
         <tr style="border-top:1px solid var(--border)">
           <td style="padding:10px 20px;font-size:12px;font-weight:700;color:var(--blue2)">7</td>
+          <td style="padding:10px 20px;font-size:12px;color:var(--pink)">💡 Recommender</td>
+          <td style="padding:10px 20px;font-size:12px;color:var(--text2)">last_recommender_at &lt; last sprint completed_at (or never ran)</td>
+          <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">_post_sprint_persona_due()</td>
+        </tr>
+        <tr style="border-top:1px solid var(--border)">
+          <td style="padding:10px 20px;font-size:12px;font-weight:700;color:var(--blue2)">8</td>
           <td style="padding:10px 20px;font-size:12px;color:var(--green2)">📋 Planner</td>
           <td style="padding:10px 20px;font-size:12px;color:var(--text2)">No in-flight features exist for this product</td>
           <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">fallback — always runs if above fail</td>
@@ -2064,7 +2040,7 @@
   <div style="display:flex;align-items:center;justify-content:center;gap:16px;flex-wrap:wrap">
     <span style="font-weight:800;letter-spacing:-0.5px;color:var(--text2)">⚙ ProductFactory</span>
     <span style="color:var(--border2)">·</span>
-    <span>11 Personas · Continuous Delivery · Zero Human PRs</span>
+    <span>13 Personas · Sprint-Gated · Zero Human PRs</span>
     <span style="color:var(--border2)">·</span>
     <span style="font-family:'JetBrains Mono',monospace;font-size:11px">orchestrator/ · website/ · deploy/</span>
   </div>
