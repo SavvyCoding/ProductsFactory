@@ -1064,13 +1064,18 @@ def main():
                 if (product.get("config") or {}).get("pm_messages"):
                     deliver_pm_messages(product)
 
-            # ⑦a Reviewer handled by sprint-gating in determine_persona now
+            # ⑦a Reviewer-first: any product with a Reviewing feature + PR takes priority
+            reviewer_product, reviewer_persona = get_next_reviewer_product(products)
             if any(p.get("run_trainer_now") for p in products if p["status"] == "ready"):
                 # ⑦a2 On-demand trainer: a PM requested a showcase video
                 product = next(p for p in products if p["status"] == "ready" and p.get("run_trainer_now"))
                 persona = "product_trainer"
                 clear_run_trainer_now(product["id"])
                 log.info(f"On-demand Product Trainer for: {product['name']} (id={product['id']})")
+            elif reviewer_product:
+                product = reviewer_product
+                persona = "reviewer"
+                log.info(f"Reviewer-first: {product['name']} has Reviewing features with PRs")
             else:
                 # ⑦b Normal round-robin for designer/coder work
                 product = get_next_product(products)
