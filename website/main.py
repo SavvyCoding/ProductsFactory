@@ -926,7 +926,6 @@ async def api_create_bugfix_sprint(body: schemas.BugFixSprintCreate, db: AsyncSe
 
     # Prevent nesting: if parent is itself a sub-sprint, use it directly
     if "." in parent.name:
-        # Assign bugs to the existing sub-sprint instead of creating a new one
         for fid in body.bug_feature_ids:
             feat = await db.get(Feature, fid)
             if feat:
@@ -934,14 +933,32 @@ async def api_create_bugfix_sprint(body: schemas.BugFixSprintCreate, db: AsyncSe
                 feat.status = "Approved"
         return parent
 
+    # Reuse any existing active sub-sprint for this product — only one active
+    # sub-sprint should exist at a time to keep the poller's sprint selection deterministic.
+    existing_active = await db.execute(
+        select(Sprint).where(
+            Sprint.product_id == body.product_id,
+            Sprint.status == "active",
+            Sprint.name.contains("."),
+        ).limit(1)
+    )
+    active_sub = existing_active.scalar_one_or_none()
+    if active_sub:
+        for fid in body.bug_feature_ids:
+            feat = await db.get(Feature, fid)
+            if feat:
+                feat.sprint_id = active_sub.id
+                feat.status = "Approved"
+        return active_sub
+
     # Count existing sub-sprints to determine suffix letter
-    existing = await db.execute(
+    all_subs = await db.execute(
         select(Sprint).where(
             Sprint.product_id == body.product_id,
             Sprint.name.like(f"{parent.name}.%"),
         )
     )
-    count = len(existing.scalars().all())
+    count = len(all_subs.scalars().all())
     suffix = chr(ord("a") + count)
     sub_name = f"{parent.name}.{suffix}"
 
@@ -2027,9 +2044,16 @@ async def api_list_sprints(product_id: int, db: AsyncSession = Depends(get_db)):
 
 @app.get("/api/products/{product_id}/sprints/active", response_model=schemas.SprintOut | None)
 async def api_active_sprint(product_id: int, db: AsyncSession = Depends(get_db)):
-    """Return the active sprint for a product, or null if none."""
+    """
+    Return the single highest-priority active sprint for a product.
+    Priority: bug-fix sub-sprints first (name contains '.'), then lowest id.
+    Bug-fix sprints block shipping and must be cleared before main sprint work resumes.
+    """
     result = await db.execute(
-        select(Sprint).where(Sprint.product_id == product_id, Sprint.status == "active").limit(1)
+        select(Sprint)
+        .where(Sprint.product_id == product_id, Sprint.status == "active")
+        .order_by(Sprint.name.contains(".").desc(), Sprint.id.asc())
+        .limit(1)
     )
     return result.scalar_one_or_none()
 
