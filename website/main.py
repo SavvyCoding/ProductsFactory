@@ -73,7 +73,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse,
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import bcrypt as _bcrypt_lib
-from sqlalchemy import select, func, text
+from sqlalchemy import select, func, text, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -2052,7 +2052,10 @@ async def api_active_sprint(product_id: int, db: AsyncSession = Depends(get_db))
     result = await db.execute(
         select(Sprint)
         .where(Sprint.product_id == product_id, Sprint.status == "active")
-        .order_by(Sprint.name.contains(".").desc(), Sprint.id.asc())
+        .order_by(
+            case((Sprint.name.like("%.%"), 0), else_=1),  # sub-sprints first
+            Sprint.id.asc(),
+        )
         .limit(1)
     )
     return result.scalar_one_or_none()
