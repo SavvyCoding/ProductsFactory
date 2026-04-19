@@ -295,10 +295,16 @@ class _LoopDetector:
         if len(buf) > self._window:
             buf.pop(0)
 
-    # Personas that are expected to repeat — not a bug, don't flag them.
-    # coder: multiple consecutive coder runs is normal when several features are queued;
-    # real coder stalls are caught by stuck_feature_timeout, not persona repetition.
-    _EXPECTED_REPEATS = frozenset({"planner", "product_trainer", "coder", "reviewer"})
+    # Feature-delivery and backlog personas naturally run back-to-back — exclude them
+    # from single-persona 3x detection. Real stalls in these are caught by
+    # stuck_feature_timeout. Only maintenance personas (documenter, analytics, etc.)
+    # should rotate; repeated maintenance is a scheduling bug worth flagging.
+    _EXPECTED_REPEATS = frozenset({
+        "planner", "product_trainer",
+        "coder", "reviewer", "designer",
+        "qa_tester", "security_auditor",
+        "retrospective", "product_planner",
+    })
 
     def detect_loop(self, product_id: int) -> str | None:
         """Returns a description of the loop pattern, or None."""
