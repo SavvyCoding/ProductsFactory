@@ -1,0 +1,36 @@
+# ProductFactory — Caddy reverse proxy config.
+#
+# The primary site name is read from the CADDY_SITE env var. For a local
+# development deployment this defaults to "localhost" which triggers Caddy's
+# automatic internal CA (a self-signed cert is installed to /data and trusted
+# by the host browser via `caddy trust`).
+#
+# For a real deployment set CADDY_SITE=your-domain.com; Caddy will obtain a
+# Let's Encrypt cert automatically as long as port 80/443 reach the container.
+#
+# HTTP → HTTPS redirect is Caddy's default when tls is configured.
+
+{$CADDY_SITE:localhost} {
+    encode gzip
+
+    # Small hardening headers — defense-in-depth on top of FastAPI's own defaults.
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options    "nosniff"
+        X-Frame-Options           "DENY"
+        Referrer-Policy           "strict-origin-when-cross-origin"
+        # Caddy sets Server automatically; strip to avoid leaking version.
+        -Server
+    }
+
+    # Larger body size for webhook payloads (GitHub PR events can be big).
+    request_body {
+        max_size 10MB
+    }
+
+    # Forward everything to the PM website container. `web` is the compose
+    # service name on the pf-internal network.
+    reverse_proxy web:8080 {
+        header_up X-Forwarded-Proto "https"
+    }
+}

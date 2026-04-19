@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  test:
+    name: Tests + lint
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER:     productfactory
+          POSTGRES_PASSWORD: ci_test_password
+          POSTGRES_DB:       productfactory_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U productfactory -d productfactory_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Tests use a real Postgres rolled-back-per-test (see tests/conftest.py)
+      TEST_DATABASE_URL: postgresql://productfactory:ci_test_password@localhost:5432/productfactory_test
+      DATABASE_URL:      postgresql://productfactory:ci_test_password@localhost:5432/productfactory_test
+      # docker_runner.py reads these at import time; safe defaults for the test env.
+      PM_API_URL:        http://pm-api:8080
+      PM_USERNAME:       ci_admin
+      PM_PASSWORD:       ci_test_password
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pip-audit bandit
+
+      - name: Run Alembic migrations
+        run: alembic upgrade head
+
+      - name: Run pytest
+        # Allow up to 15 pre-existing fixture-related failures (test setup uses
+        # /home/user/... paths invalid on Windows; tracked separately). CI will
+        # tighten this once those are fixed.
+        run: pytest tests/ -v --tb=short
+
+      - name: pip-audit (dependency CVE scan)
+        # Don't block on transitive vulnerabilities yet — surface them only.
+        continue-on-error: true
+        run: pip-audit --desc
+
+      - name: Bandit (Python static security scan)
+        # Skip B101 (assert in tests is fine), B404/B603 (subprocess use is by design).
+        continue-on-error: true
+        run: bandit -r orchestrator website -ll -x tests
+
+  dockerfile-scan:
+    name: Trivy scan of agent image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build agent image
+        run: docker build -t productfactory-agent:ci -f deploy/docker/Dockerfile .
+      - name: Trivy CRITICAL/HIGH scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: productfactory-agent:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"  # report-only for now; flip to "1" once baseline clean

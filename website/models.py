@@ -77,7 +77,7 @@ class Feature(Base):
     description:    Mapped[Optional[str]]  = mapped_column(Text)
     status:         Mapped[str]            = mapped_column(Text, nullable=False, default="Pending", index=True)
     priority:       Mapped[int]            = mapped_column(Integer, nullable=False, default=50)
-    depends_on:     Mapped[Optional[int]]  = mapped_column(Integer, ForeignKey("features.id"))
+    depends_on:     Mapped[Optional[int]]  = mapped_column(Integer, ForeignKey("features.id", ondelete="SET NULL"), index=True)
     fix_attempts:   Mapped[int]            = mapped_column(Integer, nullable=False, default=0)
     source:         Mapped[str]            = mapped_column(Text, nullable=False, default="pm")
     feature_type:   Mapped[str]            = mapped_column(Text, nullable=False, default="feature")
@@ -94,7 +94,7 @@ class Feature(Base):
     created_at:     Mapped[datetime]       = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at:     Mapped[datetime]       = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    sprint_id:    Mapped[Optional[int]]  = mapped_column(Integer, ForeignKey("sprints.id", ondelete="SET NULL"), nullable=True)
+    sprint_id:    Mapped[Optional[int]]  = mapped_column(Integer, ForeignKey("sprints.id", ondelete="SET NULL"), nullable=True, index=True)
     story_points: Mapped[Optional[int]]  = mapped_column(Integer, nullable=True)
     due_date:     Mapped[Optional[date]] = mapped_column(Date, nullable=True)
 
