@@ -132,6 +132,7 @@ class FeatureUpdate(BaseModel):
     review_notes:    Optional[str]  = None
     session_uid:     Optional[str]  = None  # review authorship — stored in feature_reviews, not on feature
     skip_design:     Optional[bool] = None  # PM may override design requirement
+    sprint_id:       Optional[int]  = None  # reassign to a different sprint
     expected_version: Optional[int] = None  # optimistic lock — if provided, update is rejected on mismatch
 
 
