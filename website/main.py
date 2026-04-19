@@ -1270,23 +1270,6 @@ async def _generate_sprint_release_notes(sprint_id: int, product_id: int, db: As
         return None
 
 
-@app.post("/product/{product_id}/plan-sprints")
-async def plan_sprints_form(
-    product_id: int,
-    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
-):
-    """Trigger LLM sprint auto-planning (form post → redirect to sprints tab)."""
-    # Re-use the API endpoint logic by calling it directly
-    try:
-        result = await api_plan_sprints(product_id=product_id, db=db, _=_)
-        n = result.get("sprints_created", 0)
-        return RedirectResponse(
-            f"/product/{product_id}?tab=sprints&msg=Created+{n}+sprint(s)", status_code=303
-        )
-    except HTTPException as exc:
-        return RedirectResponse(
-            f"/product/{product_id}?tab=sprints&err={exc.detail}", status_code=303
-        )
 
 
 @app.post("/product/{product_id}/features/{feature_id}/assign-sprint")
@@ -2126,6 +2109,16 @@ async def api_plan_sprints(
     product = await db.get(Product, product_id)
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
+
+    # Block re-planning if any sprint has already completed — history is immutable.
+    completed_check = await db.execute(
+        select(Sprint.id).where(Sprint.product_id == product_id, Sprint.status == "completed").limit(1)
+    )
+    if completed_check.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot re-plan: one or more sprints have already completed. Add new features and assign them to planned sprints instead.",
+        )
 
     # Read max features per sprint from DB config
     _sys_cfg = await _get_system_config(db)

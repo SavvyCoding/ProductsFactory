@@ -503,16 +503,6 @@
       </div>
       {% endif %}
 
-      <!-- Re-plan sprints -->
-      {% if phases %}
-      <div class="card">
-        <div style="font-size:13px;font-weight:600;color:var(--dark);margin-bottom:8px">Re-plan</div>
-        <p style="font-size:12px;color:var(--slate);margin-bottom:10px">Delete existing phases and re-plan from approved features.</p>
-        <form method="post" action="/product/{{ product.id }}/plan-sprints" onsubmit="return confirm('This will delete existing phases/sprints and re-plan. Continue?')">
-          <button class="btn btn-outline" style="width:100%">Re-plan Phases</button>
-        </form>
-      </div>
-      {% endif %}
 
     </div>
   </div>
