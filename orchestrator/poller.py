@@ -295,17 +295,23 @@ class _LoopDetector:
         if len(buf) > self._window:
             buf.pop(0)
 
+    # Personas that are expected to repeat — not a bug, don't flag them.
+    _EXPECTED_REPEATS = frozenset({"planner", "product_trainer"})
+
     def detect_loop(self, product_id: int) -> str | None:
         """Returns a description of the loop pattern, or None."""
         buf = self._history.get(product_id, [])
-        # 2-persona alternating: A-B-A-B
+        # 2-persona alternating: A-B-A-B (skip if either is an expected repeater)
         if len(buf) >= 4:
             last4 = buf[-4:]
-            if last4[0] == last4[2] and last4[1] == last4[3] and last4[0] != last4[1]:
+            if (last4[0] == last4[2] and last4[1] == last4[3] and last4[0] != last4[1]
+                    and last4[0] not in self._EXPECTED_REPEATS
+                    and last4[1] not in self._EXPECTED_REPEATS):
                 return f"{last4[0]}->{last4[1]} alternating loop"
-        # Same persona 3x in a row
+        # Same persona 3x in a row (skip expected repeaters)
         if len(buf) >= 3 and buf[-1] == buf[-2] == buf[-3]:
-            return f"{buf[-1]} repeated 3x"
+            if buf[-1] not in self._EXPECTED_REPEATS:
+                return f"{buf[-1]} repeated 3x"
         return None
 
     def should_alert(self, product_id: int) -> bool:
