@@ -38,7 +38,8 @@ def discover_and_populate(product: dict):
     1. Reads the working directory to populate DB fields.
     2. Installs AGENT_WORKFLOW.md, CLAUDE.md, ARCHITECTURE.md into the repo
        (only if they don't already exist — safe to re-run).
-    3. Sets status → 'discovered' (poller then sets it to 'ready' after PM reviews).
+    3. Sets status → 'ready' for brownfield (existing repo, intentionally registered),
+       or 'discovered' for greenfield (PM reviews scaffold before agents run).
     """
     working_dir = Path(product["working_dir"])
     if not working_dir.exists():
@@ -79,9 +80,10 @@ def discover_and_populate(product: dict):
     except Exception as e:
         log.warning(f"Template install failed (non-fatal): {e}")
 
-    updates["status"] = "discovered"
+    product_type = updates.get("type") or product.get("type", "brownfield")
+    updates["status"] = "discovered" if product_type == "greenfield" else "ready"
     _update_product(product["id"], updates)
-    log.info(f"Discovery complete for '{updates['name']}': type={updates.get('type', product.get('type'))} stack={updates.get('tech_stack', product.get('tech_stack'))}")
+    log.info(f"Discovery complete for '{updates['name']}': type={product_type} stack={updates.get('tech_stack', product.get('tech_stack'))} → {updates['status']}")
 
 
 def _discover_name(working_dir: Path) -> str | None:
