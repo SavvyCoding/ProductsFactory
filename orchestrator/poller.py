@@ -707,6 +707,40 @@ def clear_run_trainer_now(product_id: int):
 
 _LOCK_PID  = os.getpid()
 _LOCK_HOST = socket.gethostname()
+
+_PID_FILE = Path(__file__).parent / "poller.pid"
+
+
+def _check_single_instance() -> bool:
+    """
+    Return True if we're the only running instance.
+    Writes our PID to poller.pid; quits early if another process with the
+    stored PID is still alive (stale files from crashed pollers are ignored).
+    """
+    if _PID_FILE.exists():
+        try:
+            existing_pid = int(_PID_FILE.read_text().strip())
+            if existing_pid != _LOCK_PID:
+                try:
+                    os.kill(existing_pid, 0)  # signal 0 = check existence only
+                    log.error(
+                        f"Another poller is already running (pid={existing_pid}). Exiting."
+                    )
+                    return False
+                except OSError:
+                    pass  # stale PID file — previous poller died without cleanup
+        except (ValueError, OSError):
+            pass  # corrupt or unreadable file — proceed
+    _PID_FILE.write_text(str(_LOCK_PID))
+    return True
+
+
+def _cleanup_pid_file():
+    try:
+        if _PID_FILE.exists() and _PID_FILE.read_text().strip() == str(_LOCK_PID):
+            _PID_FILE.unlink()
+    except Exception:
+        pass
 # These must stay in sync with the server's TTL logic in /api/poller/heartbeat.
 # Do NOT make them env-configurable without also updating the server endpoint.
 _HEARTBEAT_INTERVAL = 15   # seconds between heartbeat updates
@@ -955,10 +989,16 @@ def _install_crash_handler():
 def main():
     _install_crash_handler()
 
-    if not _acquire_db_lock():
+    if not _check_single_instance():
         return
 
     import atexit
+    atexit.register(_cleanup_pid_file)
+
+    if not _acquire_db_lock():
+        _cleanup_pid_file()
+        return
+
     atexit.register(_release_db_lock)
 
     # Start heartbeat background thread
