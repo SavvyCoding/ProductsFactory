@@ -16,6 +16,11 @@ import httpx
 
 log = logging.getLogger("poller.github")
 
+# After this many "PR closed without merge" or "Reviewing → Implementing" reset
+# events on the same feature, the reconciler stops retrying and marks the feature
+# Blocked so a human can intervene. Prevents infinite review/fix loops.
+MAX_FIX_ATTEMPTS = int(os.environ.get("MAX_FIX_ATTEMPTS", "5"))
+
 
 def _gh_get(url: str, headers: dict, params: dict | None = None, timeout: int = 15) -> httpx.Response | None:
     """
@@ -221,9 +226,9 @@ def reconcile_in_flight_prs(product: dict):
 
     import re as _re
 
-    IN_FLIGHT = {"Implementing", "Reviewing", "Reviewed"}
-    TERMINAL  = {"Pushed", "Rejected", "Reverted", "Pending", "Approved",
-                 "Designed", "Designing", "Deferred", "Blocked"}
+    # Statuses to scan for: anything that may have a PR attached but is not terminal.
+    # Designed is included so a coder that opened a PR before advancing status is healed.
+    IN_FLIGHT = {"Designed", "Implementing", "Reviewing", "Reviewed"}
 
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=15) as client:
@@ -268,30 +273,58 @@ def reconcile_in_flight_prs(product: dict):
                     log.debug(f"[in-flight] Could not fetch PR #{pr_n}: {e}")
                     continue
 
-                state     = pr.get("state")      # "open" | "closed"
-                merged_at = pr.get("merged_at")  # None if not merged
+                state         = pr.get("state")      # "open" | "closed"
+                merged_at     = pr.get("merged_at")  # None if not merged
+                cur_status    = feature.get("status")
+                has_review    = bool(feature.get("review_outcome"))
 
-                if merged_at and feature.get("status") not in ("Pushed",):
+                # Merged terminal: Pushed always wins (PR is gone, no agent can disagree).
+                if merged_at and cur_status != "Pushed":
                     client.patch(f"/api/features/{fid}",
                                  json={"status": "Pushed", "pr_number": None})
                     log.info(f"[in-flight] Feature #{fid} → Pushed (PR #{pr_n} already merged)")
+                    continue
 
-                elif state == "closed" and not merged_at:
-                    reset = "Approved"
-                    if feature.get("status") == "Reviewing":
-                        reset = "Implementing"
-                    client.patch(f"/api/features/{fid}",
-                                 json={"status": reset, "pr_number": None,
-                                       "pr_url": None, "branch_name": None})
-                    log.info(f"[in-flight] Feature #{fid} → {reset} (PR #{pr_n} closed without merge)")
+                # Closed-without-merge: PR is gone, agent decisions are moot. Reset.
+                if state == "closed" and not merged_at:
+                    new_attempts = (feature.get("fix_attempts") or 0) + 1
+                    if new_attempts >= MAX_FIX_ATTEMPTS:
+                        client.patch(f"/api/features/{fid}", json={
+                            "status": "Blocked",
+                            "pr_number": None, "pr_url": None, "branch_name": None,
+                            "fix_attempts": new_attempts,
+                            "blocked_reason": (
+                                f"Auto-blocked: PR #{pr_n} closed without merge after "
+                                f"{new_attempts} attempts. Needs human review."
+                            ),
+                        })
+                        log.warning(
+                            f"[in-flight] Feature #{fid} → Blocked "
+                            f"(fix_attempts={new_attempts} ≥ {MAX_FIX_ATTEMPTS})"
+                        )
+                    else:
+                        reset = "Implementing" if cur_status == "Reviewing" else "Approved"
+                        client.patch(f"/api/features/{fid}", json={
+                            "status": reset,
+                            "pr_number": None, "pr_url": None, "branch_name": None,
+                            "fix_attempts": new_attempts,
+                        })
+                        log.info(
+                            f"[in-flight] Feature #{fid} → {reset} "
+                            f"(PR #{pr_n} closed without merge, attempt {new_attempts})"
+                        )
+                    continue
 
-                elif state == "open" and feature.get("status") == "Implementing":
-                    # Only advance to Reviewing if no reviewer has acted yet.
-                    # If review_outcome is set, the reviewer requested changes and
-                    # set it to Implementing — leave it there so the coder can fix it.
-                    if not feature.get("review_outcome"):
+                # Open PR + non-terminal disagreement: only advance if no agent
+                # decision exists. Once review_outcome is set, the reviewer's
+                # status is authoritative until something terminal happens to the PR.
+                if state == "open" and not has_review:
+                    if cur_status in ("Implementing", "Designed"):
                         client.patch(f"/api/features/{fid}", json={"status": "Reviewing"})
-                        log.info(f"[in-flight] Feature #{fid} → Reviewing (PR #{pr_n} open, status was Implementing)")
+                        log.info(
+                            f"[in-flight] Feature #{fid} → Reviewing "
+                            f"(PR #{pr_n} open, status was {cur_status})"
+                        )
 
     except Exception as e:
         log.warning(f"reconcile_in_flight_prs failed: {e}")

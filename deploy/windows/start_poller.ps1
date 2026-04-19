@@ -67,6 +67,35 @@ Get-Content $EnvFile | ForEach-Object {
 # -- Restart loop - Task Scheduler already handles startup, this handles crashes --
 Set-Location $RepoRoot
 
+# -- Wrapper mutex: prevent two concurrent start_poller.ps1 trees --
+# _launch_detached.ps1 invocations and Task Scheduler triggers can both spawn
+# this script. Without this guard, each spawned wrapper enters its own restart
+# loop and they fight for the DB lock indefinitely.
+$WrapperPidFile = Join-Path $RepoRoot "orchestrator\wrapper.pid"
+if (Test-Path $WrapperPidFile) {
+    try {
+        $existingPid = [int](Get-Content $WrapperPidFile -ErrorAction Stop).Trim()
+        if ($existingPid -ne $PID -and (Get-Process -Id $existingPid -ErrorAction SilentlyContinue)) {
+            Add-Content -Path $LogFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Wrapper already running (pid=$existingPid). This wrapper exiting."
+            exit 0
+        }
+    } catch {
+        # Corrupt file - overwrite below
+    }
+}
+Set-Content -Path $WrapperPidFile -Value $PID
+# Best-effort cleanup on script exit (PowerShell doesn't have a true atexit;
+# trap fires on uncaught exceptions and Ctrl+C; the loop's exit 0 path also
+# falls through here when invoked).
+trap {
+    try {
+        if ((Test-Path $WrapperPidFile) -and ((Get-Content $WrapperPidFile -ErrorAction SilentlyContinue).Trim() -eq "$PID")) {
+            Remove-Item $WrapperPidFile -Force -ErrorAction SilentlyContinue
+        }
+    } catch { }
+    continue
+}
+
 $StderrLog = Join-Path $RepoRoot "orchestrator\poller_stderr.log"
 
 while ($true) {
@@ -96,6 +125,11 @@ while ($true) {
         # Exit code 42 = another instance already running on this machine - do not restart
         if ($exitCode -eq 42) {
             Add-Content -Path $LogFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Another poller instance is running - this wrapper exiting."
+            try {
+                if ((Test-Path $WrapperPidFile) -and ((Get-Content $WrapperPidFile -ErrorAction SilentlyContinue).Trim() -eq "$PID")) {
+                    Remove-Item $WrapperPidFile -Force -ErrorAction SilentlyContinue
+                }
+            } catch { }
             exit 0
         }
     } catch {
