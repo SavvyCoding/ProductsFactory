@@ -1,4 +1,4 @@
-# ProductFactory Poller — startup script for Windows Task Scheduler
+# ProductFactory Poller - startup script for Windows Task Scheduler
 # Loads .env, then runs the poller. Restarts automatically if it crashes.
 #
 # To install as a scheduled task: run deploy\windows\install_task.ps1 as Administrator
@@ -8,7 +8,39 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $EnvFile  = Join-Path $RepoRoot ".env"
 $LogFile  = Join-Path $RepoRoot "orchestrator\poller.log"
-$Python   = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+# Pick a runnable Python. Order: .venv first (uv-managed, has every requirement
+# already installed, and WDAC lets it through when launched via the
+# Start-Process Hidden trust chain that _launch_detached.ps1 provides), then
+# fall back to user-installed system Pythons.
+$PythonCandidates = @(
+    (Join-Path $RepoRoot ".venv\Scripts\python.exe"),
+    "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+    "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
+)
+$Python = $null
+foreach ($cand in $PythonCandidates) {
+    if (-not (Test-Path $cand)) { continue }
+    # Strong probe - capture BOTH stdout+stderr and check that we actually got
+    # a "Python X.Y.Z" line back. Must be wrapped in try/catch because WDAC
+    # raises ApplicationFailedException which, combined with the script-wide
+    # $ErrorActionPreference = "Stop", would otherwise abort the whole script
+    # on the first blocked candidate.
+    try {
+        $probe = & $cand --version 2>&1 | Out-String
+        if ($probe -match 'Python\s+\d+\.\d+\.\d+') {
+            $Python = $cand
+            break
+        }
+    } catch {
+        Write-Host "Candidate $cand blocked or unrunnable: $_"
+        continue
+    }
+}
+if (-not $Python) {
+    Write-Error ("No runnable python.exe found. Tried: " + ($PythonCandidates -join ', '))
+    exit 1
+}
+Write-Host "Using python: $Python"
 
 # Ensure UTF-8 output so Unicode in log messages don't crash on Windows
 $env:PYTHONIOENCODING = "utf-8"
@@ -16,9 +48,9 @@ $env:PYTHONIOENCODING = "utf-8"
 # Ensure claude CLI is on PATH (installed by npm -g, lives in user's .local/bin)
 $env:PATH = "$env:USERPROFILE\.local\bin;$env:PATH"
 
-# ── Load .env into the current process environment ───────────────────────────
+# -- Load .env into the current process environment ---------------------------
 if (-not (Test-Path $EnvFile)) {
-    Write-Error ".env not found at $EnvFile — copy .env.example and fill in values"
+    Write-Error ".env not found at $EnvFile - copy .env.example and fill in values"
     exit 1
 }
 
@@ -32,16 +64,38 @@ Get-Content $EnvFile | ForEach-Object {
     }
 }
 
-# ── Restart loop — Task Scheduler already handles startup, this handles crashes ──
+# -- Restart loop - Task Scheduler already handles startup, this handles crashes --
 Set-Location $RepoRoot
 
+$StderrLog = Join-Path $RepoRoot "orchestrator\poller_stderr.log"
+
 while ($true) {
-    Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Starting poller..." | Tee-Object -Append $LogFile
+    Add-Content -Path $LogFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Starting poller..."
     try {
-        & $Python -m orchestrator.poller 2>&1 | Tee-Object -Append $LogFile
+        # Use Start-Process -Wait instead of `& | Tee-Object`. Tee-Object in
+        # PowerShell 5.1 appears to terminate long-running child processes
+        # when stdout is sparse (the poller sleeps POLL_INTERVAL between
+        # cycles). Start-Process with direct file redirection has none of
+        # that behaviour. `-u` on python gives unbuffered stdout so log
+        # lines land in the file immediately.
+        #
+        # Note: Start-Process requires stdout and stderr to go to DIFFERENT
+        # files. The poller's own RotatingFileHandler writes to $LogFile
+        # directly, so the child-stdout redirect here is just the
+        # print()s that happen before logging is configured.
+        $p = Start-Process -FilePath $Python `
+            -ArgumentList @('-u','-m','orchestrator.poller') `
+            -WorkingDirectory $RepoRoot `
+            -NoNewWindow `
+            -Wait `
+            -PassThru `
+            -RedirectStandardOutput $StderrLog `
+            -RedirectStandardError  $StderrLog.Replace('.log', '.err.log')
+        $exitCode = if ($p) { $p.ExitCode } else { -1 }
+        Add-Content -Path $LogFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Poller exited with code=$exitCode"
     } catch {
-        Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Poller crashed: $_" | Tee-Object -Append $LogFile
+        Add-Content -Path $LogFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Poller crashed in launcher: $_"
     }
-    Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Poller exited — restarting in 10s..." | Tee-Object -Append $LogFile
+    Add-Content -Path $LogFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Restarting in 10s..."
     Start-Sleep -Seconds 10
 }
