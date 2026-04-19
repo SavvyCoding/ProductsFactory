@@ -44,10 +44,26 @@ DUMP_FILE="$BACKUP_DIR/productfactory_${TIMESTAMP}.dump"
 
 echo "Starting backup: $DUMP_FILE"
 
-# pg_dump runs from the Docker host; the DB is inside the compose network.
-# If running on the Windows host where the DB is exposed on localhost:5432,
-# this works directly. Inside Docker, use the service name instead.
-pg_dump --format=custom --no-password "$DB_URL" -f "$DUMP_FILE"
+if command -v pg_dump >/dev/null 2>&1; then
+    # Host has postgres-client installed — dump directly.
+    pg_dump --format=custom --no-password "$DB_URL" -f "$DUMP_FILE"
+else
+    # Fallback: pg_dump inside the postgres container, then docker cp the
+    # result to the host. Works out-of-the-box on Windows hosts where
+    # nobody installs postgres-client but Docker Desktop is always there.
+    PG_CONTAINER="${PG_CONTAINER:-ProductsFactoryDB}"
+    if ! docker ps --format '{{.Names}}' | grep -q "^${PG_CONTAINER}$"; then
+        echo "ERROR: pg_dump not on PATH and container '${PG_CONTAINER}' not running." >&2
+        exit 1
+    fi
+    DUMP_NAME=$(basename "$DUMP_FILE")
+    docker exec "$PG_CONTAINER" pg_dump --format=custom --no-password \
+        -U "${POSTGRES_USER:-productfactory}" \
+        -d "${POSTGRES_DB:-productfactory}" \
+        -f "/tmp/${DUMP_NAME}"
+    docker cp "${PG_CONTAINER}:/tmp/${DUMP_NAME}" "$DUMP_FILE"
+    docker exec "$PG_CONTAINER" rm -f "/tmp/${DUMP_NAME}"
+fi
 
 echo "Backup complete: $DUMP_FILE ($(du -sh "$DUMP_FILE" | cut -f1))"
 
