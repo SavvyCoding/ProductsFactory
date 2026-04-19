@@ -285,7 +285,10 @@ def reconcile_in_flight_prs(product: dict):
                                        "pr_url": None, "branch_name": None})
                     log.info(f"[in-flight] Feature #{fid} → {reset} (PR #{pr_n} closed without merge)")
 
-                # PR is open — nothing to do, agent is still working
+                elif state == "open" and feature.get("status") == "Implementing":
+                    # PR exists and is open but feature wasn't advanced — self-heal
+                    client.patch(f"/api/features/{fid}", json={"status": "Reviewing"})
+                    log.info(f"[in-flight] Feature #{fid} → Reviewing (PR #{pr_n} open, status was Implementing)")
 
     except Exception as e:
         log.warning(f"reconcile_in_flight_prs failed: {e}")
