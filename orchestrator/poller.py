@@ -186,6 +186,23 @@ def get_next_product(products: list[dict]) -> dict | None:
         return None
 
 
+def _clear_sprint_context(working_dir: str) -> None:
+    """
+    Clear workspace artifacts between sprints so the next sprint starts fresh.
+    Removes session_result.json, features.md, and session_summary.md.
+    Does NOT touch git history, docs/, or committed files.
+    """
+    wd = Path(working_dir)
+    for artifact in ("session_result.json", "features.md", "session_summary.md"):
+        p = wd / artifact
+        if p.exists():
+            try:
+                p.unlink()
+                log.info(f"[sprint-clear] Deleted {artifact} from {working_dir}")
+            except Exception as e:
+                log.warning(f"[sprint-clear] Could not delete {artifact}: {e}")
+
+
 def reset_stuck_features():
     """Reset features stuck in Implementing for >2h back to Approved."""
     try:
@@ -422,85 +439,36 @@ def determine_persona(product: dict) -> str:
                 sid = active_sprint.get("id")
                 sprint_features = [f for f in all_features if f.get("sprint_id") == sid]
 
-                # If all sprint features are terminal, complete the sprint and move on
+                # If all sprint features are terminal, complete the sprint
                 non_terminal = [f for f in sprint_features if f.get("status") not in TERMINAL]
                 if not non_terminal:
-                    # Try DoD check first (may auto-complete if all gates pass)
-                    dod_resp = client.post(f"/api/sprints/{sid}/check-dod")
-                    # Check if sprint is still active after DoD
-                    recheck = client.get(f"/api/products/{product['id']}/sprints/active")
-                    if recheck.status_code == 200 and recheck.json() and recheck.json().get("id") == sid:
-                        # Sprint still active — auto-sign all DoD gates and complete
-                        log.info(f"Active sprint {sid}: all features terminal — auto-completing sprint")
-                        for gate in ("qa_passed", "security_clean", "retro_done"):
-                            try:
-                                client.post(f"/api/sprints/{sid}/sign-off", json={
-                                    "gate": gate, "value": True, "notes": "Auto-signed on sprint completion"
-                                })
-                            except Exception:
-                                pass
-                        # Get the current sprint's phase before completing
-                        current_sprint_resp = client.get(f"/api/sprints/{sid}/dod")
-                        completed_sprint = active_sprint  # has phase_id
-                        current_phase_id = completed_sprint.get("phase_id")
+                    log.info(f"Active sprint {sid}: all features terminal — completing sprint")
 
-                        client.patch(f"/api/sprints/{sid}", json={"status": "completed"})
+                    # Single API call: auto-signs gates, generates release notes, activates next sprint
+                    complete_resp = client.post(f"/api/sprints/{sid}/force-complete")
+                    if complete_resp.status_code == 200:
+                        result = complete_resp.json()
+                        log.info(f"Sprint {sid} completed via API: {result.get('action')}")
+                        if result.get("release_notes"):
+                            log.info(f"Release notes generated ({len(result['release_notes'])} chars)")
 
-                        # Reset maintenance timestamps so all 4 run after sprint completion
-                        try:
-                            cfg_resp = client.get(f"/api/products/{product['id']}")
-                            if cfg_resp.status_code == 200:
-                                current_config = dict(cfg_resp.json().get("config") or {})
-                                for maint_persona, _ in _MAINTENANCE_SCHEDULE:
-                                    current_config.pop(f"last_{maint_persona}_at", None)
-                                client.patch(f"/api/products/{product['id']}", json={"config": current_config})
-                                log.info(f"Cleared maintenance timestamps — documenter/analytics/refactorer/devops will run post-sprint")
-                        except Exception as _me:
-                            log.warning(f"Could not reset maintenance timestamps: {_me}")
+                    # Reset maintenance timestamps so all 4 run after sprint completion
+                    try:
+                        cfg_resp = client.get(f"/api/products/{product['id']}")
+                        if cfg_resp.status_code == 200:
+                            current_config = dict(cfg_resp.json().get("config") or {})
+                            for maint_persona, _ in _MAINTENANCE_SCHEDULE:
+                                current_config.pop(f"last_{maint_persona}_at", None)
+                            client.patch(f"/api/products/{product['id']}", json={"config": current_config})
+                            log.info(f"Cleared maintenance timestamps — documenter/analytics/refactorer/devops will run post-sprint")
+                    except Exception as _me:
+                        log.warning(f"Could not reset maintenance timestamps: {_me}")
 
-                        # Activate next sprint: same phase first, then next phase
-                        all_sprints_resp = client.get(f"/api/products/{product['id']}/sprints")
-                        phases_resp = client.get(f"/api/products/{product['id']}/phases")
-                        if all_sprints_resp.status_code == 200:
-                            all_sprints = all_sprints_resp.json()
-                            all_phases = phases_resp.json() if phases_resp.status_code == 200 else []
-                            all_phases.sort(key=lambda p: p.get("order", 0))
+                    # Clear workspace context for the new sprint
+                    working_dir = product.get("working_dir")
+                    if working_dir:
+                        _clear_sprint_context(working_dir)
 
-                            # 1) Next planned sprint in the same phase
-                            same_phase_planned = [s for s in all_sprints
-                                                  if s.get("phase_id") == current_phase_id
-                                                  and s.get("status") == "planned"]
-                            if same_phase_planned:
-                                next_sprint = same_phase_planned[0]
-                                client.patch(f"/api/sprints/{next_sprint['id']}", json={"status": "active"})
-                                log.info(f"Activated next sprint in same phase: #{next_sprint['id']} \"{next_sprint['name']}\"")
-                            else:
-                                # Phase complete — mark it
-                                if current_phase_id:
-                                    client.patch(f"/api/phases/{current_phase_id}", json={"status": "completed"})
-                                    log.info(f"Phase #{current_phase_id} completed — all sprints done")
-
-                                # 2) First planned sprint in the next phase (by phase order)
-                                current_phase_order = -1
-                                for p in all_phases:
-                                    if p["id"] == current_phase_id:
-                                        current_phase_order = p.get("order", 0)
-                                        break
-                                next_phases = [p for p in all_phases
-                                               if p.get("order", 0) > current_phase_order
-                                               and p.get("status") != "completed"]
-                                for next_phase in next_phases:
-                                    phase_sprints = [s for s in all_sprints
-                                                     if s.get("phase_id") == next_phase["id"]
-                                                     and s.get("status") == "planned"]
-                                    if phase_sprints:
-                                        next_sprint = phase_sprints[0]
-                                        client.patch(f"/api/phases/{next_phase['id']}", json={"status": "active"})
-                                        client.patch(f"/api/sprints/{next_sprint['id']}", json={"status": "active"})
-                                        log.info(f"Activated Phase #{next_phase['id']} \"{next_phase['name']}\" → Sprint #{next_sprint['id']} \"{next_sprint['name']}\"")
-                                        break
-                                else:
-                                    log.info("All phases and sprints completed — nothing left to activate")
                     # Next cycle will pick up the new active sprint
                     return None
 
