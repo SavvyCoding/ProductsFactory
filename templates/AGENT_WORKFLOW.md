@@ -222,7 +222,7 @@ Read `product_config.json` before any implementation. It defines:
 - ❌ Write or update `features.md` (DB is the single source of truth for feature status)
 - ❌ Exit 0 after a push failure
 - ❌ Introduce a new architectural pattern without PM approval
-- ❌ Stage `session.lock`, `Temp/`, `*.log`, `__pycache__/`, `node_modules/`
+- ❌ Stage `session_result.json`, `session.lock`, `Temp/`, `*.log`, `__pycache__/`, `node_modules/`
 - ❌ Start more than {MAX_BATCH_SIZE} features in one session
 - ❌ Touch existing source files in a brownfield product without an explicit requirement
 - ❌ Regenerate a lock file from scratch

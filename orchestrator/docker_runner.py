@@ -770,6 +770,10 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # This discards any half-baked code from failed/incomplete previous sessions.
     _reset_workspace(working_dir, product.get("name", str(working_dir)))
 
+    # Delete stale session_result.json BEFORE launch — previous agents may have
+    # committed it to git, so git clean won't remove it.
+    _delete_session_result(working_dir)
+
     # Re-install templates after reset — git clean may have removed untracked template files.
     # force=False ensures we never overwrite files the agent has customised and committed.
     try:
