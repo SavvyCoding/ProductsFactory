@@ -54,7 +54,7 @@ Your working directory is /workspace. All files must be written inside /workspac
 
 4. **For each issue found**, file a bug feature and apply the `security` label:
 
-   a. Create the bug feature:
+   a. Create the bug feature (auto-approved so it enters the coder pipeline immediately):
    ```
    POST {pm_api_url}/api/features
    {{
@@ -64,7 +64,8 @@ Your working directory is /workspace. All files must be written inside /workspac
      "feature_type": "bug",
      "priority": 90,
      "skip_design": true,
-     "source": "ai"
+     "source": "ai",
+     "status": "Approved"
    }}
    ```
    Note the returned `id` (call it `new_feature_id`).
@@ -85,6 +86,24 @@ Your working directory is /workspace. All files must be written inside /workspac
    POST {pm_api_url}/api/features/<new_feature_id>/labels
    {{"label_id": <security_label_id>}}
    ```
+
+   d. **Create a bug-fix sub-sprint** so security bugs are worked on next.
+      First, get the feature's sprint_id from the PR's parent feature:
+   ```bash
+   FEATURE_DATA=$(curl -s {pm_api_url}/api/features/<original_feature_id>)
+   SPRINT_ID=$(echo "$FEATURE_DATA" | grep -o '"sprint_id":[0-9]*' | cut -d: -f2)
+   ```
+      Then create the sub-sprint (collects all bug IDs into one call):
+   ```bash
+   curl -s -X POST {pm_api_url}/api/sprints/bug-fix \
+     -H "Content-Type: application/json" \
+     -d "{
+       \"product_id\": {product_id},
+       \"parent_sprint_id\": $SPRINT_ID,
+       \"bug_feature_ids\": [<comma-separated new_feature_ids>]
+     }"
+   ```
+      The API names the sub-sprint automatically (e.g. "Sprint 1.a"). If the parent sprint already has a sub-sprint, bugs are added to it.
 
 5. **Comment on the PR** with the audit result:
    ```
