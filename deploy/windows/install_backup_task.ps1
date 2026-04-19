@@ -32,7 +32,7 @@ if ($Uninstall) {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
         Write-Host "Unregistered task: $TaskName"
     } else {
-        Write-Host "No task named $TaskName is registered — nothing to do."
+        Write-Host "No task named $TaskName is registered - nothing to do."
     }
     return
 }
@@ -64,9 +64,12 @@ $action = New-ScheduledTaskAction `
 
 $trigger = New-ScheduledTaskTrigger -Daily -At $At
 
-# Run whether user is logged on or not, with stored credentials. Highest
-# privileges aren't needed (user owns the repo + has Docker CLI access).
-$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Limited
+# Run only when the user is logged on. S4U would allow firing while logged
+# off, but that requires admin-granted "Log on as a batch job" right;
+# Interactive needs no admin. It's fine because Docker Desktop (which hosts
+# postgres) also only runs when the user is logged on, so there's nothing
+# to back up while logged off anyway.
+$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -90,7 +93,7 @@ Register-ScheduledTask `
     -Settings $settings `
     -Description $description | Out-Null
 
-Write-Host "Registered scheduled task '$TaskName' — runs daily at $At"
+Write-Host "Registered scheduled task '$TaskName' - runs daily at $At"
 Write-Host ""
 Write-Host "Verify:    Get-ScheduledTask -TaskName $TaskName"
 Write-Host "Run now:   Start-ScheduledTask -TaskName $TaskName"

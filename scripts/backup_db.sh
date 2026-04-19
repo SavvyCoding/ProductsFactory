@@ -57,12 +57,20 @@ else
         exit 1
     fi
     DUMP_NAME=$(basename "$DUMP_FILE")
-    docker exec "$PG_CONTAINER" pg_dump --format=custom --no-password \
+    # Path handling notes for the docker calls on Git Bash / MSYS:
+    #   * MSYS_NO_PATHCONV=1 stops Git Bash rewriting the container-side
+    #     /tmp/... into a Windows path before docker exec sees it.
+    #   * For docker cp's host-side arg we need a Windows-style path (e.g.
+    #     C:\Users\...) because Docker Desktop on Windows treats / as a
+    #     container path. cygpath handles the conversion.
+    DUMP_FILE_WIN=$(cygpath -w "$DUMP_FILE" 2>/dev/null || echo "$DUMP_FILE")
+
+    MSYS_NO_PATHCONV=1 docker exec "$PG_CONTAINER" pg_dump --format=custom --no-password \
         -U "${POSTGRES_USER:-productfactory}" \
         -d "${POSTGRES_DB:-productfactory}" \
         -f "/tmp/${DUMP_NAME}"
-    docker cp "${PG_CONTAINER}:/tmp/${DUMP_NAME}" "$DUMP_FILE"
-    docker exec "$PG_CONTAINER" rm -f "/tmp/${DUMP_NAME}"
+    MSYS_NO_PATHCONV=1 docker cp "${PG_CONTAINER}:/tmp/${DUMP_NAME}" "$DUMP_FILE_WIN"
+    MSYS_NO_PATHCONV=1 docker exec "$PG_CONTAINER" rm -f "/tmp/${DUMP_NAME}"
 fi
 
 echo "Backup complete: $DUMP_FILE ($(du -sh "$DUMP_FILE" | cut -f1))"
