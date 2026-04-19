@@ -1041,7 +1041,11 @@ def main():
                 time.sleep(_cfg["poll_interval"])
                 continue
 
-            # ⑩ PR count gate (only applies to coder — designer/reviewer don't open new PRs)
+            # ⑩ GitHub PR reconciliation (runs BEFORE PR gate so orphaned PRs get cleaned first)
+            reconcile_merged_prs(product)
+            reconcile_in_flight_prs(product)
+
+            # ⑪ PR count gate (only applies to coder — designer/reviewer don't open new PRs)
             if persona == "coder":
                 open_pr_count = count_open_prs(product)
                 if open_pr_count >= _cfg["max_open_prs"]:
@@ -1049,10 +1053,6 @@ def main():
                     send_alert("warning", f"{product['name']}: ≥{_cfg['max_open_prs']} open PRs unmerged — pausing")
                     time.sleep(_cfg["pr_gate_sleep"])
                     continue
-
-            # ⑪ GitHub PR reconciliation
-            reconcile_merged_prs(product)
-            reconcile_in_flight_prs(product)  # self-heal any stuck in-flight PRs every cycle
 
             # ⑫ Run Claude session
             log.info(f"Launching {persona} session for: {product['name']}")
