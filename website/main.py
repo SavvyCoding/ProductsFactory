@@ -217,6 +217,17 @@ async def _get_system_config(db: AsyncSession) -> SystemConfig | None:
     return await db.get(SystemConfig, 1)
 
 
+async def _next_planned_sprint(product_id: int, db: AsyncSession) -> Sprint | None:
+    """Return the lowest-id planned sprint for this product, or None."""
+    result = await db.execute(
+        select(Sprint)
+        .where(Sprint.product_id == product_id, Sprint.status == "planned")
+        .order_by(Sprint.id.asc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 _CFG_DEFAULTS = {
     # Poller
     "poll_interval":               60,
@@ -1359,8 +1370,11 @@ async def bulk_approve(
     result = await db.execute(
         select(Feature).where(Feature.product_id == product_id, Feature.id.in_(ids), Feature.status == "Pending")
     )
+    next_sprint = await _next_planned_sprint(product_id, db)
     for f in result.scalars().all():
         f.status = "Approved"
+        if f.sprint_id is None and next_sprint:
+            f.sprint_id = next_sprint.id
     await db.flush()
     return RedirectResponse(f"/product/{product_id}?tab=board&phase=Approved", status_code=303)
 
@@ -1391,8 +1405,11 @@ async def bulk_approve_all(
     result = await db.execute(
         select(Feature).where(Feature.product_id == product_id, Feature.status == "Pending")
     )
+    next_sprint = await _next_planned_sprint(product_id, db)
     for f in result.scalars().all():
         f.status = "Approved"
+        if f.sprint_id is None and next_sprint:
+            f.sprint_id = next_sprint.id
     await db.flush()
     return RedirectResponse(f"/product/{product_id}?tab=board&phase=Approved", status_code=303)
 
@@ -1619,6 +1636,28 @@ async def api_pm_status_update(
     feature.status = body.status
     if body.status == "Approved" and feature.fix_attempts > 0:
         feature.fix_attempts = 0
+
+    # Auto-assign to the next planned sprint when PM approves an unsprinted feature.
+    # Avoids approved features becoming invisible while an active sprint is running.
+    if body.status == "Approved" and feature.sprint_id is None:
+        next_sprint_result = await db.execute(
+            select(Sprint)
+            .where(Sprint.product_id == feature.product_id)
+            .where(Sprint.status == "planned")
+            .order_by(Sprint.id.asc())
+            .limit(1)
+        )
+        next_sprint = next_sprint_result.scalar_one_or_none()
+        if next_sprint:
+            feature.sprint_id = next_sprint.id
+            db.add(FeatureChangelog(
+                feature_id=feature_id,
+                field="sprint_id",
+                old_value=None,
+                new_value=str(next_sprint.id),
+                changed_by="pm",
+            ))
+
     if old_status != body.status:
         db.add(FeatureChangelog(
             feature_id=feature_id,
