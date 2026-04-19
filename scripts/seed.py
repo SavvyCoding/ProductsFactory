@@ -46,6 +46,24 @@ if not DATABASE_URL:
 engine = create_engine(DATABASE_URL, echo=False)
 
 
+_DATA_TABLES = ("products", "features", "sessions", "alerts",
+                "sprints", "phases", "pm_users", "feature_comments")
+
+
+def is_db_populated(db: Session) -> list[tuple[str, int]]:
+    """Return list of (table_name, row_count) for every data table with rows."""
+    populated = []
+    for t in _DATA_TABLES:
+        try:
+            n = db.execute(text(f"SELECT COUNT(*) FROM {t}")).scalar() or 0
+        except Exception:
+            # Table may not exist on a fresh schema — that's fine, just skip it
+            continue
+        if n > 0:
+            populated.append((t, int(n)))
+    return populated
+
+
 def wipe(db: Session) -> None:
     """Truncate all tables in dependency order."""
     db.execute(text("TRUNCATE feature_reviews, sessions, alerts, features, products, system_config, pm_users RESTART IDENTITY CASCADE"))
@@ -275,16 +293,43 @@ def seed(db: Session) -> None:
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(description="Seed ProductFactory database")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Seed ProductFactory database. Refuses to run against a populated "
+            "DB unless --force is passed — this protects real data from "
+            "accidental TRUNCATE (see incident 2026-04-19)."
+        ),
+    )
     parser.add_argument("--wipe-only",    action="store_true", help="Wipe DB without seeding")
     parser.add_argument("--no-sessions",  action="store_true", help="Skip session history")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=("Proceed even if the DB contains real data. WITHOUT this flag, "
+              "seed.py aborts when any data table has rows — because the wipe "
+              "is a TRUNCATE CASCADE and destroys everything."),
+    )
     args = parser.parse_args()
 
     with Session(engine) as db:
+        populated = is_db_populated(db)
+        if populated and not args.force:
+            summary = ", ".join(f"{t}={n}" for t, n in populated)
+            sys.exit(
+                "ABORT: refusing to wipe a populated database.\n"
+                f"  Tables with data: {summary}\n"
+                "\n"
+                "To seed anyway (destroys existing data), pass --force:\n"
+                "    python scripts/seed.py --force\n"
+                "\n"
+                "To back up first:\n"
+                "    bash scripts/backup_db.sh"
+            )
+
         wipe(db)
         if not args.wipe_only:
             seed(db)
-            print("\n✓ Seed complete. Login: digvi / admin123")
+            print("\n✓ Seed complete.")
         else:
             print("\n✓ Wipe complete. DB is empty (schema intact).")
 
