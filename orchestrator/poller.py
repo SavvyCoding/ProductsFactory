@@ -1,5 +1,5 @@
 """
-ProductFactory Poller — main loop (Windows localhost).
+ProductFactory Poller - main loop (Windows localhost).
 
 Runs as a Windows Service via NSSM.
 Poll interval: 60s when idle, 5s between products.
@@ -13,16 +13,16 @@ Flow per cycle:
   1. Auth health check (real API call, not --version)
   2. Scaffold any greenfield_pending products
   3. Discover any newly-registered folders
-  4. Heartbeat — kill stale containers (progress.md not pushed in >45m)
+  4. Heartbeat - kill stale containers (progress.md not pushed in >45m)
   5. Reset stuck features (Implementing/Designing/Reviewing > 2h)
   6. Deliver pending PM messages to workspace files
   7a. Reviewer-first: check globally for Reviewing features with PRs
   7b. If none: pick next product via round-robin (has Approved/Designed features)
   7c. Determine persona: designer (Approved+no skip_design) or coder
-  8. Quiet hours gate (reviewers skip this gate — reviews are time-sensitive)
+  8. Quiet hours gate (reviewers skip this gate - reviews are time-sensitive)
   9. Daily session cap gate (reviewers exempt)
-  10. PR count gate (coder only — designer/reviewer don't open new PRs)
-  11. GitHub PR reconciliation (sync merged PRs → DB → Pushed)
+  10. PR count gate (coder only - designer/reviewer don't open new PRs)
+  11. GitHub PR reconciliation (sync merged PRs -> DB -> Pushed)
   12. Run Claude in Docker with persona (blocks until session ends)
   13. Update last_run_at ONLY on clean exit (exit code 0)
 """
@@ -30,7 +30,7 @@ Flow per cycle:
 import os
 from pathlib import Path
 
-# Auto-load .env from repo root — MUST happen before any other imports
+# Auto-load .env from repo root - MUST happen before any other imports
 # because docker_runner.py reads env vars at module level.
 _env_file = Path(__file__).parent.parent / ".env"
 if _env_file.exists():
@@ -59,7 +59,7 @@ from orchestrator.greenfield_scaffold import scaffold_greenfield
 PM_API_URL    = os.environ["PM_API_URL"]
 SSH_DIR       = Path(os.environ.get("SSH_DIR", "C:/Users/digvi/.ssh"))
 
-# Env-var defaults — overridden by DB system config each cycle (see _load_runtime_cfg)
+# Env-var defaults - overridden by DB system config each cycle (see _load_runtime_cfg)
 _ENV_DEFAULTS = {
     "poll_interval":               int(os.environ.get("POLL_INTERVAL",            "60")),
     "auth_check_timeout":          int(os.environ.get("AUTH_CHECK_TIMEOUT",       "30")),
@@ -71,7 +71,7 @@ _ENV_DEFAULTS = {
     "brownfield_file_threshold":   int(os.environ.get("BROWNFIELD_FILE_THRESHOLD","10")),
 }
 
-# Runtime config — refreshed from DB at the start of each cycle
+# Runtime config - refreshed from DB at the start of each cycle
 _cfg: dict = dict(_ENV_DEFAULTS)
 
 
@@ -89,7 +89,7 @@ def _load_runtime_cfg():
                 merged[key] = data[key]
         _cfg = merged
     except Exception as e:
-        log.warning(f"Could not load runtime config from DB — using env defaults: {e}")
+        log.warning(f"Could not load runtime config from DB - using env defaults: {e}")
 
 import sys as _sys
 import io as _io
@@ -113,7 +113,7 @@ logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _stream_handler
 log = logging.getLogger("poller")
 
 # Track sessions launched today per product: {product_id: count}
-# Mutated from main thread + heartbeat/live-poll threads — guarded by _daily_counts_lock.
+# Mutated from main thread + heartbeat/live-poll threads - guarded by _daily_counts_lock.
 _daily_session_counts: dict[int, int] = {}
 _daily_session_date: date | None = None
 _daily_counts_lock = threading.Lock()
@@ -130,7 +130,7 @@ def _reset_daily_counts_if_new_day():
 
 def claude_auth_healthy() -> bool:
     """
-    Real auth check — makes an actual API call.
+    Real auth check - makes an actual API call.
     claude --version always returns 0 even when logged out. Don't use it.
     A budget-exceeded error means the API was reached and auth is valid.
     """
@@ -232,7 +232,7 @@ def is_quiet_hours(product: dict) -> bool:
     current_hour = datetime.now(timezone.utc).hour
     if start <= end:
         return start <= current_hour < end
-    else:  # wraps midnight e.g. 22–6
+    else:  # wraps midnight e.g. 22-6
         return current_hour >= start or current_hour < end
 
 
@@ -267,7 +267,7 @@ def get_next_reviewer_product(products: list[dict]) -> tuple[dict | None, str | 
     return None, None
 
 
-# Maintenance persona schedule: persona → interval in days
+# Maintenance persona schedule: persona -> interval in days
 _MAINTENANCE_SCHEDULE = [
     ("documenter",   3),
     ("analytics",    7),
@@ -279,7 +279,7 @@ _MAINTENANCE_SCHEDULE = [
 class _LoopDetector:
     """
     Tracks recent persona selections per product and detects repeating patterns.
-    In-memory only — resets on poller restart. No DB storage needed.
+    In-memory only - resets on poller restart. No DB storage needed.
     """
     def __init__(self, window: int = 10):
         self._history: dict[int, list[str]] = {}
@@ -299,7 +299,7 @@ class _LoopDetector:
         if len(buf) >= 4:
             last4 = buf[-4:]
             if last4[0] == last4[2] and last4[1] == last4[3] and last4[0] != last4[1]:
-                return f"{last4[0]}→{last4[1]} alternating loop"
+                return f"{last4[0]}->{last4[1]} alternating loop"
         # Same persona 3x in a row
         if len(buf) >= 3 and buf[-1] == buf[-2] == buf[-3]:
             return f"{buf[-1]} repeated 3x"
@@ -340,14 +340,14 @@ def _heal_loop(product: dict, pattern: str) -> bool:
 
             healed = 0
 
-            # Fix 1: Approved features with design docs → should be Designed
+            # Fix 1: Approved features with design docs -> should be Designed
             for f in sprint_features:
                 if f.get("status") == "Approved" and f.get("design_doc_path"):
                     client.patch(f"/api/features/{f['id']}", json={"status": "Designed"})
-                    log.info(f"[loop-heal] Feature #{f['id']}: Approved→Designed (has design doc)")
+                    log.info(f"[loop-heal] Feature #{f['id']}: Approved->Designed (has design doc)")
                     healed += 1
 
-            # Fix 2: In-agent state with no active session → reset properly
+            # Fix 2: In-agent state with no active session -> reset properly
             active_sess = client.get("/api/sessions/active", params={"product_id": pid})
             has_active = active_sess.status_code == 200 and active_sess.json()
             if not has_active:
@@ -355,7 +355,7 @@ def _heal_loop(product: dict, pattern: str) -> bool:
                     if f.get("status") in ("Implementing", "Designing", "Reviewing"):
                         reset_to = "Designed" if f.get("design_doc_path") else "Approved"
                         client.patch(f"/api/features/{f['id']}", json={"status": reset_to})
-                        log.info(f"[loop-heal] Feature #{f['id']}: {f['status']}→{reset_to} (no active session)")
+                        log.info(f"[loop-heal] Feature #{f['id']}: {f['status']}->{reset_to} (no active session)")
                         healed += 1
 
             # Fix 3: Delete stale session_result.json
@@ -367,11 +367,11 @@ def _heal_loop(product: dict, pattern: str) -> bool:
                     log.info(f"[loop-heal] Deleted stale session_result.json in {working_dir}")
                     healed += 1
 
-            # Fix 4: All features terminal but sprint still active → complete it
+            # Fix 4: All features terminal but sprint still active -> complete it
             TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted"}
             non_terminal = [f for f in sprint_features if f.get("status") not in TERMINAL]
             if sprint_features and not non_terminal:
-                log.info(f"[loop-heal] All sprint features terminal — forcing sprint completion")
+                log.info(f"[loop-heal] All sprint features terminal - forcing sprint completion")
                 for gate in ("qa_passed", "security_clean", "retro_done"):
                     try:
                         client.post(f"/api/sprints/{sid}/sign-off", json={
@@ -399,13 +399,13 @@ def _maintenance_persona_due(product: dict) -> str | None:
     for persona, interval_days in _MAINTENANCE_SCHEDULE:
         last_run_str = config.get(f"last_{persona}_at")
         if not last_run_str:
-            return persona  # Never run before — schedule it
+            return persona  # Never run before - schedule it
         try:
             last_run = datetime.fromisoformat(last_run_str)
             if (now - last_run) >= timedelta(days=interval_days):
                 return persona
         except ValueError:
-            return persona  # Malformed date — run it
+            return persona  # Malformed date - run it
     return None
 
 
@@ -416,18 +416,18 @@ def determine_persona(product: dict) -> str:
     Never jump to a different sprint until the current one is marked done.
 
     Priority order:
-    1. retrospective   — a sprint was just completed with no retro yet
-    2. product_planner — Approved features in the active sprint (writes detailed stories)
-    3. designer        — Approved features with skip_design=False in the active sprint
-    4. coder           — Designed or skip_design Approved features in the active sprint
+    1. retrospective   - a sprint was just completed with no retro yet
+    2. product_planner - Approved features in the active sprint (writes detailed stories)
+    3. designer        - Approved features with skip_design=False in the active sprint
+    4. coder           - Designed or skip_design Approved features in the active sprint
     5. (if no active sprint) designer/coder on unsprinted features
-    6. documenter / analytics / refactorer / devops  — scheduled maintenance
-    7. planner         — no actionable features; generate new ones
+    6. documenter / analytics / refactorer / devops  - scheduled maintenance
+    7. planner         - no actionable features; generate new ones
     """
     TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted"}
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-            # Retrospective disabled — DoD gates are auto-signed on sprint completion.
+            # Retrospective disabled - DoD gates are auto-signed on sprint completion.
             # The retrospective agent was causing infinite loops. If needed, re-enable
             # by un-commenting and ensuring the agent calls the sign-off endpoint.
 
@@ -450,7 +450,7 @@ def determine_persona(product: dict) -> str:
                 # If all sprint features are terminal, complete the sprint
                 non_terminal = [f for f in sprint_features if f.get("status") not in TERMINAL]
                 if not non_terminal:
-                    log.info(f"Active sprint {sid}: all features terminal — completing sprint")
+                    log.info(f"Active sprint {sid}: all features terminal - completing sprint")
 
                     # Single API call: auto-signs gates, generates release notes, activates next sprint
                     complete_resp = client.post(f"/api/sprints/{sid}/force-complete")
@@ -468,7 +468,7 @@ def determine_persona(product: dict) -> str:
                             for maint_persona, _ in _MAINTENANCE_SCHEDULE:
                                 current_config.pop(f"last_{maint_persona}_at", None)
                             client.patch(f"/api/products/{product['id']}", json={"config": current_config})
-                            log.info(f"Cleared maintenance timestamps — documenter/analytics/refactorer/devops will run post-sprint")
+                            log.info(f"Cleared maintenance timestamps - documenter/analytics/refactorer/devops will run post-sprint")
                     except Exception as _me:
                         log.warning(f"Could not reset maintenance timestamps: {_me}")
 
@@ -480,7 +480,7 @@ def determine_persona(product: dict) -> str:
                     # Next cycle will pick up the new active sprint
                     return None
 
-                # Approved features in sprint → product_planner (design stories)
+                # Approved features in sprint -> product_planner (design stories)
                 # Skip features that already have a design doc (they need coder, not planner)
                 needs_design = [f for f in sprint_features
                                 if f.get("status") == "Approved"
@@ -489,7 +489,7 @@ def determine_persona(product: dict) -> str:
                 if needs_design:
                     return "product_planner"
 
-                # Designed features, or Approved+skip_design, or Approved with existing design doc → coder
+                # Designed features, or Approved+skip_design, or Approved with existing design doc -> coder
                 codable = [f for f in sprint_features
                            if f.get("status") == "Designed"
                            or (f.get("status") == "Approved" and f.get("skip_design"))
@@ -497,23 +497,23 @@ def determine_persona(product: dict) -> str:
                 if codable:
                     return "coder"
 
-                # Reviewing features → reviewer
+                # Reviewing features -> reviewer
                 reviewable = [f for f in sprint_features
                               if f.get("status") == "Reviewing" and f.get("pr_number")]
                 if reviewable:
                     return "reviewer"
 
-                # Reviewed with no PR → auto-push (PR was already merged/closed)
+                # Reviewed with no PR -> auto-push (PR was already merged/closed)
                 reviewed_no_pr = [f for f in sprint_features
                                   if f.get("status") == "Reviewed" and not f.get("pr_number")]
                 for f in reviewed_no_pr:
                     try:
                         client.patch(f"/api/features/{f['id']}", json={"status": "Pushed"})
-                        log.info(f"Feature #{f['id']}: Reviewed with no PR → Pushed")
+                        log.info(f"Feature #{f['id']}: Reviewed with no PR -> Pushed")
                     except Exception:
                         pass
 
-                # Reviewed features with PRs → auto-merge if enabled
+                # Reviewed features with PRs -> auto-merge if enabled
                 reviewed = [f for f in sprint_features
                             if f.get("status") == "Reviewed" and f.get("pr_number")]
                 if reviewed:
@@ -548,7 +548,7 @@ def determine_persona(product: dict) -> str:
                                         client.patch(f"/api/features/{f['id']}", json={"status": "Pushed"})
                                         merged_features.append(f)
                                     elif merge_resp.status_code == 405:
-                                        log.warning(f"PR #{pr_num} not mergeable (conflicts?) — skipping")
+                                        log.warning(f"PR #{pr_num} not mergeable (conflicts?) - skipping")
                                     elif merge_resp.status_code == 422:
                                         log.info(f"PR #{pr_num} already merged")
                                         client.patch(f"/api/features/{f['id']}", json={"status": "Pushed"})
@@ -590,27 +590,27 @@ def determine_persona(product: dict) -> str:
                 in_agent = [f for f in sprint_features
                             if f.get("status") in ("Designing", "Implementing", "Reviewing")]
                 if in_agent:
-                    # Check if there's actually a running container — if not, reset the features
+                    # Check if there's actually a running container - if not, reset the features
                     active_session = client.get(f"/api/sessions/active", params={"product_id": product["id"]})
                     has_active = active_session.status_code == 200 and active_session.json()
                     if not has_active:
-                        log.info(f"Active sprint {sid}: {len(in_agent)} features in agent states but no active session — resetting")
+                        log.info(f"Active sprint {sid}: {len(in_agent)} features in agent states but no active session - resetting")
                         for f in in_agent:
                             # Reset to Designed if design doc exists, otherwise Approved
                             reset_to = "Designed" if f.get("design_doc_path") else "Approved"
                             client.patch(f"/api/features/{f['id']}", json={"status": reset_to})
-                            log.info(f"  Feature #{f['id']} {f['status']} → {reset_to} (no active session)")
+                            log.info(f"  Feature #{f['id']} {f['status']} -> {reset_to} (no active session)")
                         return None  # next cycle will pick them up
-                    log.info(f"Active sprint {sid}: {len(in_agent)} features being processed by agents — waiting")
+                    log.info(f"Active sprint {sid}: {len(in_agent)} features being processed by agents - waiting")
                     return None
                 if pending and not in_agent:
-                    log.info(f"Active sprint {sid}: {len(pending)} Pending features awaiting PM approval — nothing for agents to do")
+                    log.info(f"Active sprint {sid}: {len(pending)} Pending features awaiting PM approval - nothing for agents to do")
                     return None
 
-                log.info(f"Active sprint {sid}: {len(non_terminal)} features in other states — waiting")
+                log.info(f"Active sprint {sid}: {len(non_terminal)} features in other states - waiting")
                 return None
 
-            # No active sprint — work on unsprinted features
+            # No active sprint - work on unsprinted features
             resp = client.get(
                 "/api/features/next-for-persona",
                 params={"persona": "designer", "product_id": product["id"]}
@@ -627,13 +627,13 @@ def determine_persona(product: dict) -> str:
         log.error(f"determine_persona failed: {e}")
         return None
 
-    # No design/code work — check scheduled maintenance personas
+    # No design/code work - check scheduled maintenance personas
     maintenance = _maintenance_persona_due(product)
     if maintenance:
         log.info(f"Maintenance persona due: {maintenance}")
         return maintenance
 
-    # Nothing else — run planner to generate new feature ideas
+    # Nothing else - run planner to generate new feature ideas
     return "planner"
 
 
@@ -690,7 +690,7 @@ _LOCK_HOST = socket.gethostname()
 # These must stay in sync with the server's TTL logic in /api/poller/heartbeat.
 # Do NOT make them env-configurable without also updating the server endpoint.
 _HEARTBEAT_INTERVAL = 15   # seconds between heartbeat updates
-_LOCK_TTL           = 30   # seconds — stale lock threshold (must match server)
+_LOCK_TTL           = 30   # seconds - stale lock threshold (must match server)
 
 _hb_stop: threading.Event | None = None
 _hb_lock_stolen = threading.Event()  # set by heartbeat thread when lock is stolen/expired
@@ -701,7 +701,7 @@ def _acquire_db_lock() -> bool:
     Atomically acquire the poller distributed lock via PM API.
     Uses a single PostgreSQL UPDATE WHERE so two callers can never both succeed.
     Returns True on success, False if another live poller holds the lock.
-    Falls back to True (allow start) if the API is unreachable — better to risk
+    Falls back to True (allow start) if the API is unreachable - better to risk
     a duplicate than to prevent all pollers from ever starting.
     """
     try:
@@ -713,20 +713,20 @@ def _acquire_db_lock() -> bool:
         if resp.status_code == 409:
             d = resp.json().get("detail", {})
             log.error(
-                f"Another poller holds the lock — "
+                f"Another poller holds the lock - "
                 f"pid={d.get('holder_pid')}, host={d.get('holder_host')}, "
                 f"last_heartbeat={d.get('heartbeat_at')}. Exiting."
             )
             return False
-        log.error(f"Unexpected response from lock endpoint: {resp.status_code} — allowing start")
+        log.error(f"Unexpected response from lock endpoint: {resp.status_code} - allowing start")
         return True
     except Exception as e:
-        log.warning(f"Could not acquire DB lock ({e}) — allowing start (API may be starting up)")
+        log.warning(f"Could not acquire DB lock ({e}) - allowing start (API may be starting up)")
         return True
 
 
 def _release_db_lock():
-    """Release the lock. Called via atexit — best-effort, never raises."""
+    """Release the lock. Called via atexit - best-effort, never raises."""
     global _hb_stop
     if _hb_stop is not None:
         _hb_stop.set()
@@ -741,7 +741,7 @@ def _release_db_lock():
 def _heartbeat_loop(stop_event: threading.Event):
     """
     Background thread: refreshes the DB lock heartbeat every 15s.
-    If the API returns 404, the lock was stolen (another poller took over) — signal the
+    If the API returns 404, the lock was stolen (another poller took over) - signal the
     main thread to abort the current cycle and re-acquire the lock or exit.
     """
     while not stop_event.wait(_HEARTBEAT_INTERVAL):
@@ -749,7 +749,7 @@ def _heartbeat_loop(stop_event: threading.Event):
             with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
                 resp = client.post("/api/poller/heartbeat", json={"pid": _LOCK_PID, "host": _LOCK_HOST})
             if resp.status_code == 404:
-                log.critical("Heartbeat 404 — lock was stolen or expired. Signalling main thread to abort cycle.")
+                log.critical("Heartbeat 404 - lock was stolen or expired. Signalling main thread to abort cycle.")
                 _hb_lock_stolen.set()
             elif resp.status_code != 200:
                 log.warning(f"Heartbeat unexpected status: {resp.status_code}")
@@ -778,7 +778,7 @@ def _close_orphaned_sessions():
         except Exception as docker_err:
             # If docker ps fails, close any orphan older than SESSION_TIMEOUT_MINUTES
             # to avoid permanently blocking those products.
-            log.warning(f"docker ps failed during orphan check: {docker_err} — closing timed-out orphans only")
+            log.warning(f"docker ps failed during orphan check: {docker_err} - closing timed-out orphans only")
             running_set = None
 
         now = datetime.now(timezone.utc)
@@ -795,7 +795,7 @@ def _close_orphaned_sessions():
                         age_minutes = int((now - datetime.fromisoformat(started)).total_seconds() / 60)
                         should_close = age_minutes > timeout_minutes
                     except Exception:
-                        should_close = True  # unknown age — close it
+                        should_close = True  # unknown age - close it
                 if should_close:
                     client.patch(f"/api/sessions/{s['id']}", json={
                         "ended_at":  now.isoformat(),
@@ -809,17 +809,17 @@ def _close_orphaned_sessions():
 def _startup_sync_features():
     """
     Disabled: DB is the single source of truth for feature status.
-    features.md sync was causing status downgrades (e.g. Approved → Pending)
+    features.md sync was causing status downgrades (e.g. Approved -> Pending)
     when the file was stale. Kept as a no-op in case manual re-enable is needed.
     """
-    log.info("Startup features.md sync disabled — DB is source of truth")
+    log.info("Startup features.md sync disabled - DB is source of truth")
 
 
 def _post_session_comments(product: dict, persona: str, session_uid: str, features_updated: list[int]):
     """
     After a session completes, post the session summary as a comment on each
     feature that was updated. Author = persona name (e.g. 'coder', 'reviewer').
-    Fault-tolerant — never raises.
+    Fault-tolerant - never raises.
     """
     if not features_updated:
         return
@@ -847,7 +847,7 @@ def _post_session_comments(product: dict, persona: str, session_uid: str, featur
 def _check_due_date_alerts():
     """
     Post a comment and send a Slack alert for features past their due_date.
-    Called once per poller cycle. Fault-tolerant — never raises.
+    Called once per poller cycle. Fault-tolerant - never raises.
     """
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
@@ -860,7 +860,7 @@ def _check_due_date_alerts():
                 name = f.get("name", f"Feature #{fid}")
                 due  = f.get("due_date", "?")
                 stat = f.get("status", "?")
-                msg  = f"⚠️ Overdue: '{name}' was due {due} — current status: {stat}"
+                msg  = f"⚠️ Overdue: '{name}' was due {due} - current status: {stat}"
                 try:
                     client.post(f"/api/features/{fid}/comments", json={"author": "poller", "body": msg})
                 except Exception:
@@ -876,7 +876,7 @@ def _check_sprint_dod_all_products(products: list[dict]):
     If all gates pass (features done, no open PRs, QA + security signed off),
     trigger sprint auto-completion via the sign-off endpoint (retro_done=False means
     the poller just fires the structural gates; agent sign-offs set qa/security).
-    Fault-tolerant — never raises.
+    Fault-tolerant - never raises.
     """
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=15) as client:
@@ -893,20 +893,48 @@ def _check_sprint_dod_all_products(products: list[dict]):
                 if not sid or sprint.get("status") == "completed":
                     continue
 
-                # Check DoD — auto-completes if all gates pass
+                # Check DoD - auto-completes if all gates pass
                 check_resp = client.post(f"/api/sprints/{sid}/check-dod")
                 if check_resp.status_code == 200:
                     result = check_resp.json()
                     if result.get("action") == "auto_completed":
                         log.info(
                             f"[dod] Sprint {sid} ({product.get('name')}) auto-completed "
-                            f"— all gates passed"
+                            f"- all gates passed"
                         )
     except Exception as e:
         log.warning(f"_check_sprint_dod_all_products: {e}")
 
 
+def _install_crash_handler():
+    """Ensure un-caught exceptions land in poller.log with a full traceback.
+
+    The stdlib RotatingFileHandler flushes lazily, so a process that dies mid-
+    startup can lose the exception message. Here we register a sys.excepthook
+    that explicitly logs + flushes every root handler before the interpreter
+    exits, then delegates to the default hook so the traceback still hits
+    stderr as usual.
+    """
+    _prev_hook = _sys.excepthook
+
+    def _hook(exc_type, exc, tb):
+        try:
+            log.critical("Poller crashed - un-caught exception",
+                         exc_info=(exc_type, exc, tb))
+            for h in list(logging.getLogger().handlers) + list(log.handlers):
+                try:
+                    h.flush()
+                except Exception:
+                    pass
+        finally:
+            _prev_hook(exc_type, exc, tb)
+
+    _sys.excepthook = _hook
+
+
 def main():
+    _install_crash_handler()
+
     if not _acquire_db_lock():
         return
 
@@ -930,14 +958,31 @@ def main():
     start_heartbeat()
 
     log.info("ProductFactory Poller starting...")
-    _close_orphaned_sessions()
-    _startup_sync_features()
+    # Belt-and-braces: wrap the two startup helpers in explicit logging so that
+    # if one raises we at least see which one, even if excepthook doesn't fire
+    # (e.g. under an embedded interpreter or a subthread).
+    try:
+        _close_orphaned_sessions()
+    except Exception:
+        log.exception("startup: _close_orphaned_sessions failed")
+        for h in list(logging.getLogger().handlers) + list(log.handlers):
+            try: h.flush()
+            except Exception: pass
+        raise
+    try:
+        _startup_sync_features()
+    except Exception:
+        log.exception("startup: _startup_sync_features failed")
+        for h in list(logging.getLogger().handlers) + list(log.handlers):
+            try: h.flush()
+            except Exception: pass
+        raise
 
     while True:
         try:
             # Abort if the heartbeat thread detected our lock was stolen
             if _hb_lock_stolen.is_set():
-                log.critical("Lock stolen detected — exiting poller to prevent duplicate runs")
+                log.critical("Lock stolen detected - exiting poller to prevent duplicate runs")
                 break
 
             # Refresh runtime config from DB at start of each cycle
@@ -945,12 +990,12 @@ def main():
 
             # ① Auth check
             if not claude_auth_healthy():
-                send_alert("critical", "Claude OAuth session expired — re-login needed")
-                log.warning("Auth unhealthy — skipping cycle")
+                send_alert("critical", "Claude OAuth session expired - re-login needed")
+                log.warning("Auth unhealthy - skipping cycle")
                 time.sleep(_cfg["poll_interval"])
                 continue
 
-            # Fetch all products for this cycle — retry on transient PM API failures
+            # Fetch all products for this cycle - retry on transient PM API failures
             products = None
             for _attempt in range(3):
                 try:
@@ -959,10 +1004,10 @@ def main():
                     break
                 except Exception as _fetch_err:
                     if _attempt < 2:
-                        log.warning(f"Failed to fetch products (attempt {_attempt + 1}/3): {_fetch_err} — retrying")
+                        log.warning(f"Failed to fetch products (attempt {_attempt + 1}/3): {_fetch_err} - retrying")
                         time.sleep(2 ** _attempt)
                     else:
-                        log.error(f"Could not fetch products after 3 attempts: {_fetch_err} — skipping cycle")
+                        log.error(f"Could not fetch products after 3 attempts: {_fetch_err} - skipping cycle")
                         send_alert("warning", f"Poller: PM API unreachable after 3 retries: {_fetch_err}")
             if products is None:
                 time.sleep(_cfg["poll_interval"])
@@ -982,7 +1027,7 @@ def main():
                     log.info(f"Discovering product: {product['working_dir']}")
                     discover_and_populate(product)
 
-            # ④ Heartbeat — kill stale containers
+            # ④ Heartbeat - kill stale containers
             check_stale_sessions(products)
 
             # ⑤ Reset stuck features
@@ -991,7 +1036,7 @@ def main():
             # ⑤b Due-date alerts
             _check_due_date_alerts()
 
-            # ⑤c Sprint DoD auto-check — complete any sprints where all gates pass
+            # ⑤c Sprint DoD auto-check - complete any sprints where all gates pass
             _check_sprint_dod_all_products(products)
 
             # ⑥ Deliver PM messages
@@ -1010,7 +1055,7 @@ def main():
                 # ⑦b Normal round-robin for designer/coder work
                 product = get_next_product(products)
                 if not product:
-                    log.debug("No products ready — sleeping")
+                    log.debug("No products ready - sleeping")
                     time.sleep(_cfg["poll_interval"])
                     continue
 
@@ -1019,22 +1064,22 @@ def main():
                 # ⑦c Determine whether to run designer or coder
                 persona = determine_persona(product)
                 if persona is None:
-                    log.info(f"No actionable work for {product['name']} — sprint in progress, waiting")
+                    log.info(f"No actionable work for {product['name']} - sprint in progress, waiting")
                     time.sleep(_cfg["poll_interval"])
                     continue
                 log.info(f"Persona: {persona}")
 
-            # ⑦d Loop detection — check for repeating persona patterns
+            # ⑦d Loop detection - check for repeating persona patterns
             _loop_detector.record(product["id"], persona)
             loop_pattern = _loop_detector.detect_loop(product["id"])
             if loop_pattern:
                 if _loop_detector.should_alert(product["id"]):
-                    send_alert("warning", f"Loop detected: {loop_pattern} — attempting self-heal", product["name"])
+                    send_alert("warning", f"Loop detected: {loop_pattern} - attempting self-heal", product["name"])
                 if _heal_loop(product, loop_pattern):
                     _loop_detector.clear(product["id"])
                     continue  # re-run determine_persona with healed state
                 else:
-                    log.warning(f"[loop-detect] Could not heal {product['name']} — skipping cycle")
+                    log.warning(f"[loop-detect] Could not heal {product['name']} - skipping cycle")
                     time.sleep(_cfg["poll_interval"])
                     continue
 
@@ -1042,17 +1087,17 @@ def main():
             if product.get("run_now"):
                 clear_run_now(product["id"])
 
-            # ⑧ Quiet hours gate (skip for reviewer — reviews are time-sensitive)
+            # ⑧ Quiet hours gate (skip for reviewer - reviews are time-sensitive)
             if persona != "reviewer" and is_quiet_hours(product):
                 h_start = product.get("quiet_hours_start")
                 h_end   = product.get("quiet_hours_end")
-                log.info(f"Quiet hours ({h_start}–{h_end} UTC) — skipping {product['name']}")
+                log.info(f"Quiet hours ({h_start}-{h_end} UTC) - skipping {product['name']}")
                 time.sleep(_cfg["poll_interval"])
                 continue
 
             # ⑨ Daily session cap gate (reviewer doesn't count against cap)
             if persona != "reviewer" and is_daily_cap_reached(product):
-                log.info(f"Daily cap reached for {product['name']} — skipping")
+                log.info(f"Daily cap reached for {product['name']} - skipping")
                 time.sleep(_cfg["poll_interval"])
                 continue
 
@@ -1060,16 +1105,16 @@ def main():
             reconcile_merged_prs(product)
             reconcile_in_flight_prs(product)
 
-            # ⑪ PR count gate (only applies to coder — designer/reviewer don't open new PRs)
+            # ⑪ PR count gate (only applies to coder - designer/reviewer don't open new PRs)
             if persona == "coder":
                 open_pr_count = count_open_prs(product)
                 if open_pr_count >= _cfg["max_open_prs"]:
-                    log.info(f"PR gate: {open_pr_count} open PRs — skipping")
-                    send_alert("warning", f"{product['name']}: ≥{_cfg['max_open_prs']} open PRs unmerged — pausing")
+                    log.info(f"PR gate: {open_pr_count} open PRs - skipping")
+                    send_alert("warning", f"{product['name']}: ≥{_cfg['max_open_prs']} open PRs unmerged - pausing")
                     time.sleep(_cfg["pr_gate_sleep"])
                     continue
 
-            # ⑫ Run Claude session — wrap in a log scope so every record emitted
+            # ⑫ Run Claude session - wrap in a log scope so every record emitted
             # by the docker_runner, the live-poll thread, and the log-stream thread
             # carries (product_id, session_uid, persona) fields automatically.
             log.info(f"Launching {persona} session for: {product['name']}")
@@ -1077,9 +1122,9 @@ def main():
             session_uid = f"{product['id']}-{int(_session_start.timestamp())}"
             with log_scope(product_id=product["id"], persona=persona, session_uid=session_uid):
                 exit_code = run_claude_in_docker(product, persona=persona)
-            log.info(f"Session ended — exit_code={exit_code} persona={persona}")
+            log.info(f"Session ended - exit_code={exit_code} persona={persona}")
 
-            # Prometheus metrics — no-op stub when prometheus_client isn't installed.
+            # Prometheus metrics - no-op stub when prometheus_client isn't installed.
             try:
                 from orchestrator.metrics import record_session
                 _duration = (datetime.now(timezone.utc) - _session_start).total_seconds()
@@ -1095,9 +1140,9 @@ def main():
             if exit_code == 0 and persona == "coder":
                 _loop_detector.clear(product["id"])
 
-            # exit_code=99 means "already running — skipped". Not an error; don't count or alert.
+            # exit_code=99 means "already running - skipped". Not an error; don't count or alert.
             if exit_code == 99:
-                log.info(f"Session skipped (already running) for {product['name']} — will retry next cycle")
+                log.info(f"Session skipped (already running) for {product['name']} - will retry next cycle")
                 time.sleep(30)  # Short sleep so we re-check soon
                 continue
 
