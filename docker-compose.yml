@@ -15,7 +15,8 @@ services:
     container_name: ProductsFactoryDB
     environment:
       POSTGRES_USER:     ${POSTGRES_USER:-productfactory}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ProductDBPassword}
+      # No default — POSTGRES_PASSWORD must be set explicitly in .env (fail-fast on unset).
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
       POSTGRES_DB:       ${POSTGRES_DB:-productfactory}
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -39,9 +40,10 @@ services:
     container_name: pm-api
     environment:
       # db resolves via pf-internal compose network
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-productfactory}:${POSTGRES_PASSWORD:-ProductDBPassword}@db:5432/${POSTGRES_DB:-productfactory}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-productfactory}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@db:5432/${POSTGRES_DB:-productfactory}
       PM_USERNAME: ${PM_USERNAME:-admin}
-      PM_PASSWORD: ${PM_PASSWORD:-ProductDBPassword}
+      # No default — PM_PASSWORD must be set in .env.
+      PM_PASSWORD: ${PM_PASSWORD:?PM_PASSWORD must be set in .env}
       STUCK_FEATURE_TIMEOUT_HOURS: ${STUCK_FEATURE_TIMEOUT_HOURS:-2}
       SESSION_LOG_MAXLEN: ${SESSION_LOG_MAXLEN:-1000}
       # Set this to enable AI feature recommendations on the Greenfield form
@@ -65,6 +67,31 @@ services:
       - productfactory-net   # agent containers reach pm-api via host-gateway:8080
     restart: unless-stopped
 
+  # ── Caddy HTTPS reverse proxy (opt-in via `--profile tls`) ──────────────────
+  # Terminates TLS in front of the PM website and sets security headers.
+  # Default CADDY_SITE=localhost uses Caddy's internal CA (run `caddy trust`
+  # inside the container once to install the root cert to the host browser).
+  # For a real deployment set CADDY_SITE=your-domain.com in .env — Caddy will
+  # obtain a Let's Encrypt cert automatically.
+  caddy:
+    profiles: ["tls"]
+    image: caddy:2-alpine
+    container_name: pf-caddy
+    environment:
+      CADDY_SITE: ${CADDY_SITE:-localhost}
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data          # certs + ACME account — must survive restarts
+      - caddy_config:/config
+    ports:
+      - "443:443"
+      - "80:80"                   # ACME HTTP-01 challenge + HTTP→HTTPS redirect
+    depends_on:
+      - web
+    networks:
+      - pf-internal
+    restart: unless-stopped
+
 networks:
   # Internal compose network — db ↔ web only
   pf-internal:
@@ -77,3 +104,8 @@ networks:
 volumes:
   postgres_data:
     name: productfactory-postgres-data
+  # Caddy's persistent state (TLS certs, ACME account keys)
+  caddy_data:
+    name: productfactory-caddy-data
+  caddy_config:
+    name: productfactory-caddy-config

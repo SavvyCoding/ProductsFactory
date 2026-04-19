@@ -18,7 +18,9 @@ htmlcov/
 
 # Logs
 *.log
+*.log.[0-9]*
 orchestrator/poller.log
+orchestrator/poller_boot.log
 
 # Node
 node_modules/

@@ -275,9 +275,12 @@ FastAPI evaluates routes in definition order. The parameterized `GET /api/featur
 
 ## Utility Scripts
 
-- `scripts/seed.py` — Seeds the database with sample data for local development
+- `scripts/seed.py` — Seeds the database with sample data for local development (`--wipe-only` to reset without seeding, `--no-sessions` to skip session history)
 - `scripts/backup_db.sh` — Backs up the PostgreSQL database
 - `scripts/recover_db.py` — Restores a database from backup
+- `scripts/test_calculator.py` — End-to-end integration test: creates a greenfield "Calculator" product and runs a full agent cycle (scaffold → discover → coder session → GitHub PR). Use `--dry-run` to stop after scaffolding, `--persona designer` to test other personas.
+- `deploy/docker/test_image.sh` — Smoke test for the agent Docker image; verifies all required tools (git, gh, claude, etc.) are installed. Usage: `bash deploy/docker/test_image.sh [image-tag]`
+- `deploy/docker/startup.sh` — Runs inside the pm-api container before uvicorn; self-heals stale `alembic_version` rows after a volume wipe so migrations can re-run from scratch
 
 ## Environment Variables
 
@@ -298,4 +301,5 @@ See `.env.example` for all variables. Critical ones:
 - `AUTH_CHECK_TIMEOUT` — Seconds for Claude CLI auth probe (default: 30)
 - `PR_GATE_SLEEP` — Seconds to wait when PR gate is triggered (default: 300)
 - `ANTHROPIC_API_KEY` — Optional; used for AI feature recommendations on the greenfield product form
+- `SESSION_LOG_MAXLEN` — Max in-memory log lines buffered per session in the PM website (default: 1000)
 - `PRODUCTS_BASE_DIR` — Root directory where product repos live; also used for video serving in docker-compose
