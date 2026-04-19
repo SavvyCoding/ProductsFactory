@@ -1064,6 +1064,13 @@ def main():
                 if (product.get("config") or {}).get("pm_messages"):
                     deliver_pm_messages(product)
 
+            # ⑥b PR reconciliation for all products — runs every cycle so Implementing+open-PR
+            # features are advanced to Reviewing before the reviewer-first check below.
+            for _p in products:
+                if _p.get("status") == "ready":
+                    reconcile_merged_prs(_p)
+                    reconcile_in_flight_prs(_p)
+
             # ⑦a Reviewer-first: any product with a Reviewing feature + PR takes priority
             reviewer_product, reviewer_persona = get_next_reviewer_product(products)
             if any(p.get("run_trainer_now") for p in products if p["status"] == "ready"):
