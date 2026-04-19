@@ -286,9 +286,12 @@ def reconcile_in_flight_prs(product: dict):
                     log.info(f"[in-flight] Feature #{fid} → {reset} (PR #{pr_n} closed without merge)")
 
                 elif state == "open" and feature.get("status") == "Implementing":
-                    # PR exists and is open but feature wasn't advanced — self-heal
-                    client.patch(f"/api/features/{fid}", json={"status": "Reviewing"})
-                    log.info(f"[in-flight] Feature #{fid} → Reviewing (PR #{pr_n} open, status was Implementing)")
+                    # Only advance to Reviewing if no reviewer has acted yet.
+                    # If review_outcome is set, the reviewer requested changes and
+                    # set it to Implementing — leave it there so the coder can fix it.
+                    if not feature.get("review_outcome"):
+                        client.patch(f"/api/features/{fid}", json={"status": "Reviewing"})
+                        log.info(f"[in-flight] Feature #{fid} → Reviewing (PR #{pr_n} open, status was Implementing)")
 
     except Exception as e:
         log.warning(f"reconcile_in_flight_prs failed: {e}")
