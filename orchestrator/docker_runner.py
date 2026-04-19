@@ -560,31 +560,32 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
             all_features = all_features if isinstance(all_features, list) else []
 
             if persona == "coder":
-                features = [f for f in all_features
-                            if f.get("status") in ("Designed", "Approved")
-                            and (f.get("status") == "Designed" or f.get("skip_design"))]
-                # Scope to active sprint if one exists
+                candidates = [f for f in all_features
+                              if f.get("status") in ("Designed", "Approved")
+                              and (f.get("status") == "Designed" or f.get("skip_design"))]
                 if active_sprint_id:
-                    sprint_features = [f for f in features if f.get("sprint_id") == active_sprint_id]
-                    if sprint_features:
-                        features = sprint_features
+                    # Strict: only work on features in the active sprint
+                    features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
+                else:
+                    # No active sprint — unsprinted features only
+                    features = [f for f in candidates if f.get("sprint_id") is None]
             elif persona == "reviewer":
-                features = [f for f in all_features
-                            if f.get("status") == "Reviewing" and f.get("pr_number")]
-                if not features:
-                    nfp = client.get("/api/features/next-for-persona",
-                                     params={"persona": "reviewer", "product_id": product_id})
-                    if nfp.status_code == 200 and nfp.json():
-                        log.warning(f"[assign] fallback to next-for-persona for reviewer")
-                        features = [nfp.json()]
-            elif persona in ("designer", "product_planner"):
-                features = [f for f in all_features
-                            if f.get("status") == "Approved" and not f.get("skip_design")]
-                # product_planner/designer: scope to active sprint
+                candidates = [f for f in all_features
+                              if f.get("status") == "Reviewing" and f.get("pr_number")]
                 if active_sprint_id:
-                    sprint_features = [f for f in features if f.get("sprint_id") == active_sprint_id]
-                    if sprint_features:
-                        features = sprint_features
+                    features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
+                    if not features:
+                        features = candidates  # reviewer follows the PR, not the sprint boundary
+                else:
+                    features = candidates
+            elif persona in ("designer", "product_planner"):
+                candidates = [f for f in all_features
+                              if f.get("status") == "Approved" and not f.get("skip_design")]
+                if active_sprint_id:
+                    # Strict: only plan features in the active sprint
+                    features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
+                else:
+                    features = [f for f in candidates if f.get("sprint_id") is None]
             else:
                 features = []
 
@@ -853,7 +854,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # Inject previous session summary for continuity.
     product["_prev_session_summary"] = _read_session_summary(working_dir)
 
-    prompt = build_prompt(product, session_uid, persona=persona)
+    prompt = build_prompt(product, session_uid, persona=persona, max_features=effective_max_features)
 
     # Guard: check DB for an already-running session for this product.
     # Cross-check with docker ps — if the container is gone, auto-close the stale DB record.
