@@ -1040,9 +1040,9 @@ async def api_force_complete_sprint(sprint_id: int, db: AsyncSession = Depends(g
     if sprint.status == "completed":
         return {"action": "already_completed"}
 
-    # Auto-sign all DoD gates
+    # Auto-sign structural gates — retro_done is agent-owned and preserved as-is
     current = dict(sprint.dod_status or {})
-    for gate in ("qa_passed", "security_clean", "retro_done"):
+    for gate in ("qa_passed", "security_clean"):
         current[gate] = True
         current[f"{gate}_notes"] = current.get(f"{gate}_notes") or "Auto-signed on sprint completion"
     sprint.dod_status = current
@@ -1073,6 +1073,7 @@ async def api_check_dod(sprint_id: int, db: AsyncSession = Depends(get_db)):
         and dod["no_open_prs"]
         and dod["qa_passed"]
         and dod["security_clean"]
+        and dod["retro_done"]
     )
     if all_pass:
         await _do_complete_sprint(sprint, sprint.product_id, db)
