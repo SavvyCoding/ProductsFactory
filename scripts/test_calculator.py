@@ -66,7 +66,6 @@ FEATURES = [
         "name":        "Health check endpoint",
         "description": "GET /health returns {status: 'ok', version: '1.0.0'}.",
         "priority":    50,
-        "skip_design": True,
     },
 ]
 
@@ -191,7 +190,6 @@ def main():
             "name":        feat["name"],
             "description": feat["description"],
             "priority":    feat["priority"],
-            "skip_design": feat.get("skip_design", False),
             "source":      "pm",
         })
         # Approve immediately

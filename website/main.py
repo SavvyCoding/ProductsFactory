@@ -585,7 +585,6 @@ async def add_feature_form(
     description: str = Form(""),
     priority: int = Form(50),
     feature_type: str = Form("feature"),
-    skip_design: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
 ):
     """PM adds a feature via the product detail form."""
@@ -599,7 +598,6 @@ async def add_feature_form(
         priority=max(1, min(100, priority)),
         source="pm",
         feature_type=feature_type,
-        skip_design=(skip_design == "true"),
     )
     db.add(feature)
     await db.flush()
@@ -1524,16 +1522,13 @@ async def api_feature_count(product_id: int, status: str | None = None, db: Asyn
 
 @app.get("/api/features/approved", response_model=list[schemas.FeatureOut])
 async def api_approved_features(product_id: int, db: AsyncSession = Depends(get_db)):
-    """Poller fetches features ready for coder: Approved (with skip_design) + Designed."""
+    """Poller fetches features ready for coder: Designed features or Approved with design doc."""
     result = await db.execute(
         select(Feature)
         .where(
             Feature.product_id == product_id,
-            Feature.status.in_(["Approved", "Designed"]),
-        )
-        .where(
             (Feature.status == "Designed") |
-            ((Feature.status == "Approved") & (Feature.skip_design == True))
+            ((Feature.status == "Approved") & (Feature.design_doc_path.isnot(None))),
         )
         .order_by(Feature.priority, Feature.created_at)
     )
@@ -1719,8 +1714,8 @@ async def api_next_feature_for_persona(
 ):
     """
     Returns the next feature for a given persona to work on.
-    - designer: Approved features where skip_design=False
-    - coder:    Designed features OR Approved features where skip_design=True
+    - designer: Approved features with no design doc yet
+    - coder:    Designed features OR Approved with existing design doc
     - reviewer: Reviewing features that have a PR number
     Optional product_id filter scopes to a single product.
     Returns null if nothing to do.
@@ -1728,15 +1723,11 @@ async def api_next_feature_for_persona(
     q = select(Feature).order_by(Feature.priority, Feature.created_at).limit(1)
 
     if persona == "designer":
-        q = q.where(Feature.status == "Approved", Feature.skip_design == False)
+        q = q.where(Feature.status == "Approved", Feature.design_doc_path.is_(None))
     elif persona == "coder":
         q = q.where(
-            Feature.status.in_(["Designed", "Approved"]),
-            # For Approved features, only pick them if skip_design is True
-            # (Designed features are always ready for coder)
-        ).where(
             (Feature.status == "Designed") |
-            ((Feature.status == "Approved") & (Feature.skip_design == True))
+            ((Feature.status == "Approved") & (Feature.design_doc_path.isnot(None)))
         )
     elif persona == "reviewer":
         q = q.where(Feature.status == "Reviewing", Feature.pr_number.isnot(None))
@@ -1832,11 +1823,9 @@ async def recommend_features(
             "- Testing infrastructure\n"
             "- Developer experience (CI/CD, linting, docs)\n\n"
             "For each feature include: name (4-8 words), description (1-2 sentences), "
-            "feature_type (feature/bug/chore), priority (1-100 where 100=critical), "
-            "skip_design (true for chores/infra, false for user-facing features).\n\n"
+            "feature_type (feature/bug/chore), priority (1-100 where 100=critical).\n\n"
             "Return ONLY a JSON array, no other text:\n"
-            '[{"name": "...", "description": "...", "feature_type": "feature", '
-            '"priority": 70, "skip_design": false}]',
+            '[{"name": "...", "description": "...", "feature_type": "feature", "priority": 70}]',
             max_tokens=4000,
         )
         if raw.startswith("```"):

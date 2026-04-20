@@ -61,7 +61,6 @@ POST {pm_api_url}/api/features
   "name": "<short name, max 8 words>",
   "description": "<one sentence: what it does and why valuable>",
   "source": "ai",
-  "skip_design": false,
   "priority": 50
 }}
 ```

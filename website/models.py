@@ -85,7 +85,6 @@ class Feature(Base):
     pr_url:         Mapped[Optional[str]]  = mapped_column(Text)
     pr_number:      Mapped[Optional[int]]  = mapped_column(Integer)
     blocked_reason: Mapped[Optional[str]]  = mapped_column(Text)
-    skip_design:    Mapped[bool]           = mapped_column(Boolean, nullable=False, default=False)
     version:        Mapped[int]            = mapped_column(Integer, nullable=False, default=0, server_default="0")
     design_doc:     Mapped[Optional[str]]  = mapped_column(Text)
     design_doc_path: Mapped[Optional[str]] = mapped_column(Text)

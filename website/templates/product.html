@@ -3,7 +3,7 @@
 {% block page_class %}pf-page--full{% endblock %}
 
 {% block breadcrumb %}
-<div class="pf-breadcrumb" style="padding:8px 32px;background:var(--color-canvas-subtle);border-bottom:1px solid var(--color-border-default)">
+<div class="pf-breadcrumb">
   <a href="/">Products</a>
   <span class="breadcrumb-sep">/</span>
   <span>{{ product.name or product.working_dir }}</span>
@@ -64,59 +64,77 @@
   (function() {
     var btn = document.getElementById('sidebar-toggle');
     var sidebar = document.getElementById('pf-sidebar');
+    var COLLAPSED_W = '52px';
+    var EXPANDED_W  = '220px';
+    function applyState(c) {
+      document.getElementById('sidebar-toggle-icon').innerHTML = c ? '&#9654;' : '&#9664;';
+      btn.style.left = c ? COLLAPSED_W : EXPANDED_W;
+    }
     function toggle() {
       sidebar.classList.toggle('collapsed');
       var c = sidebar.classList.contains('collapsed');
-      document.getElementById('sidebar-toggle-icon').innerHTML = c ? '&#9654;' : '&#9664;';
-      btn.style.left = c ? '0px' : '200px';
+      applyState(c);
       localStorage.setItem('pf-sidebar', c ? 'collapsed' : 'expanded');
     }
     btn.addEventListener('click', toggle);
     if (localStorage.getItem('pf-sidebar') === 'expanded') {
       sidebar.classList.remove('collapsed');
-      document.getElementById('sidebar-toggle-icon').innerHTML = '&#9664;';
-      btn.style.left = '200px';
     }
+    applyState(sidebar.classList.contains('collapsed'));
   })();
   </script>
   <div class="pf-content">
     <!-- Page header -->
-    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;flex-wrap:wrap;gap:12px">
+    <div class="pf-page-header product-page-header">
       <div>
-        <h1 style="font-size:20px;font-weight:600">{{ product.name or product.working_dir }}</h1>
-        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:4px">
+        <h1>{{ product.name or product.working_dir }}</h1>
+        <div class="product-page-header-meta">
           {% if open_prs >= 3 %}
-          <span class="badge badge-prs-warn">{{ open_prs }} open PRs ⚠</span>
+          <span class="badge badge-prs-warn">{{ open_prs }} open PRs</span>
           {% endif %}
         </div>
       </div>
-      <div class="actions" style="display:flex;gap:6px;flex-wrap:wrap">
-        <a href="/product/{{ product.id }}/progress" class="btn btn-outline btn-sm">progress.md</a>
-        <a href="/product/{{ product.id }}/architecture" class="btn btn-outline btn-sm">arch</a>
+      <div class="actions product-page-actions">
+        <a href="/product/{{ product.id }}/progress" class="pf-icon-action" data-tooltip="progress.md" aria-label="progress.md">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+        </a>
+        <a href="/product/{{ product.id }}/architecture" class="pf-icon-action" data-tooltip="Architecture" aria-label="Architecture">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 21V8l9-5 9 5v13"/><path d="M9 21V12h6v9"/></svg>
+        </a>
         {% if product.status == 'discovered' %}
-        <form method="post" action="/product/{{ product.id }}/approve" style="display:inline">
-          <button class="btn btn-green btn-sm">Approve</button>
+        <form method="post" action="/product/{{ product.id }}/approve" class="inline-form">
+          <button class="pf-icon-action pf-icon-action--primary" data-tooltip="Approve" aria-label="Approve">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+          </button>
         </form>
         {% elif product.status == 'ready' %}
-        <form method="post" action="/product/{{ product.id }}/pause" style="display:inline">
-          <button class="btn btn-outline btn-sm">Pause</button>
+        <form method="post" action="/product/{{ product.id }}/pause" class="inline-form">
+          <button class="pf-icon-action" data-tooltip="Pause" aria-label="Pause">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+          </button>
         </form>
         {% elif product.status == 'paused' %}
-        <form method="post" action="/product/{{ product.id }}/resume" style="display:inline">
-          <button class="btn btn-green btn-sm">Resume</button>
+        <form method="post" action="/product/{{ product.id }}/resume" class="inline-form">
+          <button class="pf-icon-action pf-icon-action--primary" data-tooltip="Resume" aria-label="Resume">
+            <svg class="icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="5 3 19 12 5 21"/></svg>
+          </button>
         </form>
         {% endif %}
-        <form method="post" action="/product/{{ product.id }}/run-now" style="display:inline">
-          <button class="btn btn-outline btn-sm" title="Queue for next cycle">Run now</button>
+        <form method="post" action="/product/{{ product.id }}/run-now" class="inline-form">
+          <button class="pf-icon-action" data-tooltip="Run now" aria-label="Run now">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          </button>
         </form>
-        <form method="post" action="/product/{{ product.id }}/run-trainer" style="display:inline">
-          <button class="btn btn-outline btn-sm" {% if product.run_trainer_now %}disabled{% endif %}>
-            {% if product.run_trainer_now %}Showcase queued{% else %}Generate Showcase{% endif %}
+        <form method="post" action="/product/{{ product.id }}/run-trainer" class="inline-form">
+          <button class="pf-icon-action" {% if product.run_trainer_now %}disabled{% endif %} data-tooltip="{% if product.run_trainer_now %}Showcase queued{% else %}Generate showcase{% endif %}" aria-label="Generate showcase">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
           </button>
         </form>
         {% if product.type == 'brownfield' and product.analysis_status != 'running' and product.analysis_status != 'done' %}
-        <form method="post" action="/product/{{ product.id }}/trigger_analysis" style="display:inline">
-          <button class="btn btn-orange btn-sm">Run Analysis</button>
+        <form method="post" action="/product/{{ product.id }}/trigger_analysis" class="inline-form">
+          <button class="pf-icon-action" data-tooltip="Run analysis" aria-label="Run analysis">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/><path d="M11 8v6M8 11h6"/></svg>
+          </button>
         </form>
         {% endif %}
       </div>
@@ -178,10 +196,6 @@
           <option value="chore">🔧 Chore</option>
         </select>
         <button type="button" class="btn btn-outline" onclick="toggleTemplates()">📋 Templates</button>
-        <label style="display:flex; align-items:center; gap:5px; font-size:13px; color:var(--text-muted); cursor:pointer">
-          <input type="checkbox" name="skip_design" value="true" style="margin:0">
-          Skip design
-        </label>
       </div>
     </form>
 
@@ -226,7 +240,7 @@
         </form>
         <form method="post" action="/product/{{ product.id }}/features/bulk-reject" id="bulk-reject-form" style="display:inline">
           <input type="hidden" name="feature_ids" id="bulk-reject-ids">
-          <button type="submit" class="btn btn-sm" style="background:#fef2f2;color:#dc2626;border:1px solid #fecaca" id="bulk-reject-btn" disabled>✗ Reject selected</button>
+          <button type="submit" class="pf-btn pf-btn--sm pf-btn--danger" id="bulk-reject-btn" disabled>Reject selected</button>
         </form>
         <form method="post" action="/product/{{ product.id }}/features/bulk-approve-all" style="display:inline" onsubmit="return confirm('Approve all {{ pending_features | length }} pending features?')">
           <button type="submit" class="btn btn-green btn-sm">✓✓ Approve All</button>
@@ -337,7 +351,7 @@
     <span>🤖 <strong>{{ approved_features | length }} approved feature{{ 's' if approved_features | length != 1 else '' }} ready to plan.</strong>
     Let the AI organise them into phases and sprints automatically.</span>
     <form method="post" action="/product/{{ product.id }}/plan-sprints" style="display:inline">
-      <button class="btn btn-sm" style="background:#1d4ed8;color:#fff;border:none">🤖 Auto-Plan Phases</button>
+      <button class="pf-btn pf-btn--sm pf-btn--accent">Auto-Plan Phases</button>
     </form>
   </div>
   {% endif %}
@@ -491,17 +505,6 @@
     <!-- RIGHT: Labels + manual sprint creation -->
     <div>
 
-      <!-- Labels -->
-      {% if labels %}
-      <div class="card" style="margin-bottom:16px">
-        <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px">🏷 Labels</div>
-        <div style="display:flex;flex-wrap:wrap;gap:6px">
-          {% for lbl in labels %}
-          <span style="background:{{ lbl.color }}22;border:1px solid {{ lbl.color }}55;color:{{ lbl.color }};font-size:11px;padding:2px 8px;border-radius:10px;font-weight:500">{{ lbl.name }}</span>
-          {% endfor %}
-        </div>
-      </div>
-      {% endif %}
 
 
     </div>
@@ -541,9 +544,6 @@
 <!-- ══ TAB: HISTORY ════════════════════════════════════════ -->
 <div class="tab-content" id="tab-history" style="display:none">
   {% if sessions %}
-  <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
-    <button class="btn btn-sm btn-danger" onclick="clearHistory({{ product.id }})">Clear History</button>
-  </div>
   <table class="history-table">
     <thead>
       <tr>
@@ -638,11 +638,13 @@
 
 <!-- ══ TAB: VIDEOS ══════════════════════════════════════════ -->
 <div class="tab-content" id="tab-videos" style="display:none">
-  <div id="videos-loading" style="color:var(--text-muted);padding:24px 0">Loading videos…</div>
-  <div id="videos-grid" style="display:none"></div>
-  <div id="videos-empty" style="display:none">
+  <div id="videos-loading" class="muted videos-loading">Loading videos…</div>
+  <div id="videos-grid" class="hidden"></div>
+  <div id="videos-empty" class="hidden">
     <div class="empty-state">
-      <div class="empty-icon">🎬</div>
+      <div class="empty-icon">
+        <svg class="icon icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+      </div>
       <h2>No videos yet</h2>
       <p>Product videos are generated automatically after each successful coder session and stored in the <code>output/</code> folder.</p>
     </div>
@@ -658,9 +660,7 @@
       <span class="session-title">Agent Session — Live Output</span>
       <span class="session-elapsed" id="session-elapsed" style="display:none"></span>
       <span class="session-thinking" id="session-thinking">···</span>
-      <button onclick="toggleSession()" id="session-toggle"
-              style="background:none;border:1px solid #334155;color:#94a3b8;font-size:11px;
-                     padding:3px 10px;border-radius:4px;cursor:pointer"
+      <button onclick="toggleSession()" id="session-toggle" class="pf-btn pf-btn--xs pf-btn--ghost session-connect-btn"
               aria-label="Connect to live session">
         Connect
       </button>

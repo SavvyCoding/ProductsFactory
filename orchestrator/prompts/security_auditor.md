@@ -63,7 +63,6 @@ Your working directory is /workspace. All files must be written inside /workspac
      "description": "PR #<pr_number> — <detailed description of the vulnerability and fix>",
      "feature_type": "bug",
      "priority": 90,
-     "skip_design": true,
      "source": "ai",
      "status": "Approved"
    }}

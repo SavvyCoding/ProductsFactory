@@ -98,7 +98,6 @@ curl -s -X POST {pm_api_url}/api/features \
     "description": "<what to do and why — reference the retro>",
     "feature_type": "chore",
     "priority": <60 for High, 40 for Med, 20 for Low>,
-    "skip_design": true,
     "source": "ai"
   }'
 ```

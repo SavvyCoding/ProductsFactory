@@ -3,13 +3,16 @@
 {% block content %}
 
 <!-- ── PAGE HEADER ─────────────────────────────────────────── -->
-<div class="page-header" style="margin-bottom:20px">
+<div class="pf-page-header">
   <div>
     <h1>Products</h1>
-    <p class="muted" style="margin-top:3px">Manage and monitor your autonomous development pipeline</p>
+    <p class="muted">Manage and monitor your autonomous development pipeline</p>
   </div>
   <div class="actions">
-    <button class="btn btn-green" onclick="openWizard()">+ Add Product</button>
+    <button class="pf-btn pf-btn--primary" onclick="openWizard()">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      New product
+    </button>
   </div>
 </div>
 
@@ -23,28 +26,24 @@
 
 <div class="stats-bar">
   <div class="stat-item" data-filter="all" onclick="statFilter('all', this)" title="Show all products">
-    <span class="stat-value">{{ total }}</span>
     <span class="stat-label">Total</span>
+    <span class="stat-value">{{ total }}</span>
   </div>
-  <div class="stat-divider"></div>
   <div class="stat-item" data-filter="ready" onclick="statFilter('ready', this)" title="Filter: Ready">
-    <span class="stat-value" style="color:var(--green)">{{ ready }}</span>
     <span class="stat-label">Ready</span>
+    <span class="stat-value">{{ ready }}</span>
   </div>
-  <div class="stat-divider"></div>
   <div class="stat-item" data-filter="sprinting" onclick="statFilter('sprinting', this)" title="Filter: Has active sprint">
-    <span class="stat-value" style="color:var(--blue)">{{ active_sprint_count }}</span>
     <span class="stat-label">Sprinting</span>
+    <span class="stat-value">{{ active_sprint_count }}</span>
   </div>
-  <div class="stat-divider"></div>
   <div class="stat-item" data-filter="paused" onclick="statFilter('paused', this)" title="Filter: Paused">
-    <span class="stat-value" style="color:var(--slate)">{{ paused }}</span>
     <span class="stat-label">Paused</span>
+    <span class="stat-value">{{ paused }}</span>
   </div>
-  <div class="stat-divider"></div>
   <div class="stat-item" data-filter="greenfield" onclick="statFilter('greenfield', this)" title="Filter: Greenfield">
-    <span class="stat-value" style="color:var(--purple)">{{ gf }}</span>
     <span class="stat-label">Greenfield</span>
+    <span class="stat-value">{{ gf }}</span>
   </div>
 </div>
 
@@ -52,7 +51,9 @@
 <!-- ── ADD PRODUCT WIZARD MODAL ──────────────────────────── -->
 <div class="modal-overlay" id="add-product-modal" onclick="if(event.target===this)closeWizard()">
   <div class="modal-box">
-    <button class="modal-close" onclick="closeWizard()" aria-label="Close">✕</button>
+    <button class="modal-close" onclick="closeWizard()" aria-label="Close">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
 
     <!-- Steps indicator -->
     <div class="wizard-steps" id="wizard-steps">
@@ -63,35 +64,39 @@
 
     <!-- ── STEP 1: type picker ── -->
     <div class="wizard-panel active" id="wp-1">
-      <h2 style="margin-bottom:6px">What are you building?</h2>
-      <p class="muted" style="margin-bottom:20px;font-size:13px">Choose the product type to get started.</p>
+      <h2 class="wizard-title">What are you building?</h2>
+      <p class="muted wizard-sub">Choose the product type to get started.</p>
       <div class="type-picker">
         <div class="type-pick-card" id="pick-greenfield" onclick="selectType('greenfield')" tabindex="0">
-          <div class="type-pick-icon">✦</div>
+          <div class="type-pick-icon">
+            <svg class="icon icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2v20M2 12h20M5 5l14 14M19 5 5 19"/></svg>
+          </div>
           <div class="type-pick-title">New Greenfield</div>
           <div class="type-pick-desc">Scaffold a brand-new product from scratch — Claude creates the repo, stack, and initial code.</div>
         </div>
         <div class="type-pick-card" id="pick-brownfield" onclick="selectType('brownfield')" tabindex="0">
-          <div class="type-pick-icon">🏗</div>
+          <div class="type-pick-icon">
+            <svg class="icon icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 21V8l9-5 9 5v13"/><path d="M9 21V12h6v9"/></svg>
+          </div>
           <div class="type-pick-title">Existing Repo</div>
           <div class="type-pick-desc">Register an existing codebase. Claude will analyse it and start implementing features.</div>
         </div>
       </div>
       <div class="wizard-footer">
         <span></span>
-        <button class="btn btn-green" id="step1-next" onclick="wizardNext()" disabled>Next →</button>
+        <button class="pf-btn pf-btn--primary" id="step1-next" onclick="wizardNext()" disabled>Next →</button>
       </div>
     </div>
 
     <!-- ── STEP 2a: greenfield meta ── -->
     <div class="wizard-panel" id="wp-2-greenfield">
       {% if not products_root_dir %}
-      <div class="notice notice-amber" style="margin-bottom:16px">
-        ⚙ <strong>Admin not configured.</strong>
+      <div class="notice notice-amber wizard-notice">
+        <strong>Admin not configured.</strong>
         <a href="/admin">Set the products root directory and GitHub details</a> first.
       </div>
       {% endif %}
-      <h2 style="margin-bottom:18px">Product details</h2>
+      <h2 class="wizard-title">Product details</h2>
       <div class="form-group">
         <label for="gf-name">Product name</label>
         <input type="text" id="gf-name" placeholder="My Awesome App" autocomplete="off">
@@ -101,7 +106,7 @@
         <input type="text" id="gf-repo" placeholder="my-awesome-app" autocomplete="off"
                pattern="[a-z0-9_\-]+" oninput="updatePathPreview()">
         <div class="path-preview" id="path-preview" data-root="{{ products_root_dir or '' }}">
-          📁 <span id="path-preview-text">{{ products_root_dir or '{root}' }}/<span class="highlight">my-awesome-app</span></span>
+          <span id="path-preview-text">{{ products_root_dir or '{root}' }}/<span class="highlight">my-awesome-app</span></span>
         </div>
       </div>
       <div class="form-group">
@@ -135,49 +140,56 @@
             <option value="other">Other (specify below)</option>
           </optgroup>
         </select>
-        <input type="text" id="gf-stack-other" placeholder="e.g. Rust + PostgreSQL"
-               style="display:none; margin-top:8px" autocomplete="off">
+        <input type="text" id="gf-stack-other" class="hidden gf-stack-other-input" placeholder="e.g. Rust + PostgreSQL" autocomplete="off">
       </div>
       <div class="wizard-footer">
-        <button class="btn btn-outline" onclick="wizardBack()">← Back</button>
-        <button class="btn btn-green" onclick="wizardNext2()">Next →</button>
+        <button class="pf-btn pf-btn--secondary" onclick="wizardBack()">← Back</button>
+        <button class="pf-btn pf-btn--primary" onclick="wizardNext2()">Next →</button>
       </div>
     </div>
 
     <!-- ── STEP 2b: brownfield path ── -->
     <div class="wizard-panel" id="wp-2-brownfield">
-      <h2 style="margin-bottom:18px">Register existing repository</h2>
+      <h2 class="wizard-title">Register existing repository</h2>
       <div class="form-group">
         <label for="bf-working-dir">Path to repository</label>
         <input type="text" id="bf-working-dir" placeholder="C:/path/to/existing/repo" autocomplete="off">
-        <p class="field-hint" style="margin-top:6px">ProductFactory will auto-discover the stack and install agent workflow templates.</p>
+        <p class="field-hint">ProductFactory will auto-discover the stack and install agent workflow templates.</p>
       </div>
       <div class="wizard-footer">
-        <button class="btn btn-outline" onclick="wizardBack()">← Back</button>
-        <button class="btn btn-green" onclick="submitBrownfield()">Register →</button>
+        <button class="pf-btn pf-btn--secondary" onclick="wizardBack()">← Back</button>
+        <button class="pf-btn pf-btn--primary" onclick="submitBrownfield()">Register →</button>
       </div>
     </div>
 
     <!-- ── STEP 3: vision & AI suggestions ── -->
     <div class="wizard-panel" id="wp-3">
-      <h2 style="margin-bottom:18px">Vision &amp; initial features</h2>
-      <div class="form-group" style="margin-bottom:10px">
+      <h2 class="wizard-title">Vision &amp; initial features</h2>
+      <div class="form-group wizard-vision">
         <label for="gf-vision">Vision / goal</label>
         <div class="voice-field">
           <textarea id="gf-vision" rows="5"
                     placeholder="Describe what this product does, who it's for, and its core value proposition…"></textarea>
           <button type="button" class="voice-btn" id="voice-btn-vision"
-                  onclick="startVoice('gf-vision', this)" title="Voice input" aria-label="Voice input">🎙</button>
+                  onclick="startVoice('gf-vision', this)" title="Voice input" aria-label="Voice input">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>
+          </button>
         </div>
       </div>
-      <div class="gf-actions" style="margin-bottom:14px">
-        <button type="button" class="btn btn-purple" id="articulate-btn" onclick="articulateVision()">✦ Articulate Vision</button>
-        <button type="button" class="btn btn-outline" id="suggest-btn" onclick="suggestFeatures()">📋 Generate Full Backlog</button>
-        <span class="muted" id="articulate-status" style="font-size:12px"></span>
-        <span class="muted" id="suggest-status" style="font-size:12px"></span>
+      <div class="gf-actions">
+        <button type="button" class="pf-btn pf-btn--accent" id="articulate-btn" onclick="articulateVision()">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3v4M3 5h4M19 17v4M17 19h4M11 4 9 10l-6 2 6 2 2 6 2-6 6-2-6-2z"/></svg>
+          Articulate Vision
+        </button>
+        <button type="button" class="pf-btn pf-btn--secondary" id="suggest-btn" onclick="suggestFeatures()">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10M7 12h10M7 16h6"/></svg>
+          Generate Full Backlog
+        </button>
+        <span class="muted gf-status" id="articulate-status"></span>
+        <span class="muted gf-status" id="suggest-status"></span>
       </div>
       <div id="gf-suggestions" class="ai-suggestions hidden">
-        <p style="font-size:12px;font-weight:600;color:var(--dark);margin-bottom:10px">
+        <p class="ai-suggestions-title">
           Full backlog — click to deselect any you don't want, then submit to create all as Pending:
         </p>
         <div class="suggestions-grid" id="suggestions-grid"></div>
@@ -185,23 +197,24 @@
       </div>
       <input type="hidden" id="gf-suggestions-json" value="[]">
       <div class="wizard-footer">
-        <button class="btn btn-outline" onclick="wizardBack()">← Back</button>
-        <button class="btn btn-green" id="gf-submit-btn" onclick="submitGreenfield()"
+        <button class="pf-btn pf-btn--secondary" onclick="wizardBack()">← Back</button>
+        <button class="pf-btn pf-btn--primary" id="gf-submit-btn" onclick="submitGreenfield()"
                 {% if not products_root_dir %}disabled title="Configure Admin first"{% endif %}>
-          🚀 Create product
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+          Create product
         </button>
       </div>
     </div>
 
     <!-- Hidden form for actual submission -->
-    <form method="post" action="/product/register/greenfield" id="gf-hidden-form" style="display:none">
+    <form method="post" action="/product/register/greenfield" id="gf-hidden-form" class="hidden">
       <input type="hidden" name="product_name"      id="gf-h-name">
       <input type="hidden" name="github_repo_name"  id="gf-h-repo">
       <input type="hidden" name="preferred_stack"   id="gf-h-stack">
       <input type="hidden" name="vision"            id="gf-h-vision">
       <input type="hidden" name="suggested_features" id="gf-h-suggestions" value="[]">
     </form>
-    <form method="post" action="/product/register" id="bf-hidden-form" style="display:none">
+    <form method="post" action="/product/register" id="bf-hidden-form" class="hidden">
       <input type="hidden" name="working_dir" id="bf-h-working-dir">
     </form>
   </div>
@@ -212,7 +225,7 @@
 {% if products %}
 
 <div class="list-controls">
-  <div class="search-bar" style="margin-bottom:0">
+  <div class="search-bar">
     <input type="text" id="product-search" placeholder="Search products…" oninput="filterProducts()">
   </div>
   <div class="filter-chips">
@@ -244,7 +257,7 @@
      data-last-run="{{ p.last_run_at.isoformat() if p.last_run_at else '' }}">
 
     <div class="product-card-top">
-      <div class="product-type-dot product-type-dot--{{ p.type }}"></div>
+      <div class="product-card-mark product-card-mark--{{ p.type }}">{{ (p.name or 'P')[0:2] | capitalize }}</div>
       <div class="product-name">{{ p.name or p.working_dir.split('/')[-1] or p.working_dir }}</div>
       <div class="product-status-pill status-pill--{{ p.status }}">{{ p.status }}</div>
     </div>
@@ -259,12 +272,12 @@
 
     <!-- Phase / sprint context row -->
     {% if cur_phase or cur_sprint %}
-    <div style="display:flex;align-items:center;gap:6px;margin:4px 0 2px;flex-wrap:wrap">
+    <div class="product-context-row">
       {% if cur_phase %}
-      <span style="font-size:11px;background:var(--blue-lt);color:#1d4ed8;border:1px solid var(--blue-mid);padding:1px 7px;border-radius:8px;font-weight:500">{{ cur_phase.name }}</span>
+      <span class="ctx-pill ctx-pill--phase">{{ cur_phase.name }}</span>
       {% endif %}
       {% if cur_sprint %}
-      <span style="font-size:11px;background:var(--green-lt);color:#166534;border:1px solid var(--green-mid);padding:1px 7px;border-radius:8px;font-weight:500">{{ cur_sprint.name }}</span>
+      <span class="ctx-pill ctx-pill--sprint">{{ cur_sprint.name }}</span>
       {% endif %}
     </div>
     {% endif %}
@@ -276,17 +289,17 @@
       {% if fc_blocked %}<div class="ppb-blocked" style="flex:{{ fc_blocked }}"></div>{% endif %}
       {% if fc_pending %}<div class="ppb-pending" style="flex:{{ fc_pending }}"></div>{% endif %}
     </div>
-    <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);margin-top:2px">
+    <div class="product-progress-meta">
       <span>{{ fc_pushed }}/{{ fc_total }} shipped</span>
-      {% if fc_pending > 0 %}<span style="color:var(--amber)">{{ fc_pending }} awaiting review</span>{% endif %}
-      {% if fc_blocked > 0 %}<span style="color:var(--red)">{{ fc_blocked }} blocked</span>{% endif %}
+      {% if fc_pending > 0 %}<span class="meta-warning">{{ fc_pending }} awaiting review</span>{% endif %}
+      {% if fc_blocked > 0 %}<span class="meta-danger">{{ fc_blocked }} blocked</span>{% endif %}
     </div>
     {% endif %}
 
     <div class="product-card-footer">
       <span class="product-type-label">
         {{ p.type }}
-        {% if cur_persona %}<span style="opacity:.6"> · {{ cur_persona }}</span>{% endif %}
+        {% if cur_persona %}<span class="ctx-persona">· {{ cur_persona }}</span>{% endif %}
       </span>
       <span class="product-last-run">
         {% if p.last_run_at %}
@@ -299,10 +312,16 @@
     </div>
 
     {% if p.run_now %}
-    <div class="run-queued-badge">⚡ Run queued</div>
+    <div class="run-queued-badge">
+      <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13,2 3,14 12,14 11,22 21,10 12,10"/></svg>
+      Run queued
+    </div>
     {% endif %}
     {% if p.analysis_status == 'running' %}
-    <div class="run-queued-badge" style="background:var(--blue-lt);color:var(--blue);border-color:var(--blue-mid)">🔬 Analysing</div>
+    <div class="run-queued-badge run-queued-badge--analysing">
+      <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+      Analysing
+    </div>
     {% endif %}
   </a>
   {% endfor %}
@@ -310,12 +329,17 @@
 
 {% else %}
 
-<div class="empty-state" style="margin-top:40px">
-  <div class="empty-icon">📦</div>
+<div class="empty-state empty-state--top-margin">
+  <div class="empty-icon">
+    <svg class="icon icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 7 9 5 9-5"/><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M3 7l9-4 9 4"/></svg>
+  </div>
   <h2>No products yet</h2>
   <p>Register a brownfield repo or create a new greenfield product to get started.</p>
-  <div style="display:flex;gap:10px;justify-content:center;margin-top:20px">
-    <button class="btn btn-green" onclick="openWizard()">+ Add Product</button>
+  <div class="empty-actions">
+    <button class="pf-btn pf-btn--primary" onclick="openWizard()">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      New product
+    </button>
   </div>
 </div>
 

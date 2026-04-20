@@ -143,12 +143,17 @@ def _read_session_result(working_dir: str) -> list[dict]:
                 continue
             try:
                 obj = _json.loads(line)
-                # Unwrap {"features": [...]} format written by some agent versions
-                if isinstance(obj, dict) and "features" in obj and isinstance(obj["features"], list) and "id" not in obj:
+                # Bare JSON array written by some agent versions: [{"id":42,...}, ...]
+                if isinstance(obj, list):
+                    log.warning(f"[session_result] Unwrapping bare JSON array ({len(obj)} entries)")
+                    entries.extend(e for e in obj if isinstance(e, dict))
+                # Wrapped {"features": [...]} format
+                elif isinstance(obj, dict) and "features" in obj and isinstance(obj["features"], list) and "id" not in obj:
                     log.warning(f"[session_result] Unwrapping nested 'features' array ({len(obj['features'])} entries)")
-                    entries.extend(obj["features"])
-                else:
+                    entries.extend(e for e in obj["features"] if isinstance(e, dict))
+                elif isinstance(obj, dict):
                     entries.append(obj)
+                # else: skip non-dict, non-list top-level values
             except Exception:
                 pass  # skip malformed lines (e.g. partial write mid-line)
     except Exception as e:
@@ -266,10 +271,12 @@ def _live_poll_session_result(working_dir: str, stop_event: threading.Event, per
                         continue
                     try:
                         entry = _json.loads(line)
-                        # Reviewer is not allowed to set status back to Reviewing —
-                        # these are pre-claim entries that must never overwrite Pushed.
+                        # Reviewer must not set Reviewing (pre-claim artifact).
                         if persona == "reviewer" and entry.get("status") == "Reviewing":
                             log.debug(f"[{label}] Skipping reviewer Reviewing entry for feature #{entry.get('id')}")
+                        # Coder/reviewer must not write Pushed — PRs must go through GitHub merge.
+                        elif persona in ("coder", "reviewer") and entry.get("status") == "Pushed":
+                            log.warning(f"[{label}] Blocked agent-written Pushed for feature #{entry.get('id')} (persona={persona}) — PRs must merge via GitHub")
                         else:
                             _apply_session_entry(client, entry)
                     except Exception:
@@ -302,14 +309,20 @@ def _reconcile_session_result(working_dir: str, product_id: int, exit_code: int,
         _delete_session_result(working_dir)
         return
 
-    # Reviewer is not allowed to set features back to Reviewing —
-    # filter out any pre-claim entries before applying.
-    if persona == "reviewer":
+    # Reviewer must not set Reviewing; coder/reviewer must not write Pushed directly.
+    if persona in ("coder", "reviewer"):
         before = len(features)
-        features = [e for e in features if e.get("status") != "Reviewing"]
+        def _is_blocked(e: dict) -> bool:
+            s = e.get("status")
+            if persona == "reviewer" and s == "Reviewing":
+                return True
+            if s == "Pushed":
+                return True
+            return False
+        features = [e for e in features if not _is_blocked(e)]
         skipped = before - len(features)
         if skipped:
-            log.info(f"[reconcile] Filtered out {skipped} reviewer Reviewing entries (pre-claim artifacts)")
+            log.info(f"[reconcile] Filtered out {skipped} disallowed entries for persona={persona} (Pushed or reviewer-Reviewing)")
 
     if not features:
         _delete_session_result(working_dir)
@@ -352,7 +365,7 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
     gh_headers = {"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"}
 
     for entry in features:
-        if entry.get("review_outcome") != "approved":
+        if not isinstance(entry, dict) or entry.get("review_outcome") != "approved":
             continue
 
         fid = entry.get("id")
@@ -561,13 +574,11 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
 
             if persona == "coder":
                 candidates = [f for f in all_features
-                              if f.get("status") in ("Designed", "Approved")
-                              and (f.get("status") == "Designed" or f.get("skip_design"))]
+                              if f.get("status") == "Designed"
+                              or (f.get("status") == "Approved" and f.get("design_doc_path"))]
                 if active_sprint_id:
-                    # Strict: only work on features in the active sprint
                     features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
                 else:
-                    # No active sprint — unsprinted features only
                     features = [f for f in candidates if f.get("sprint_id") is None]
             elif persona == "reviewer":
                 candidates = [f for f in all_features
@@ -580,9 +591,8 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                     features = candidates
             elif persona in ("designer", "product_planner"):
                 candidates = [f for f in all_features
-                              if f.get("status") == "Approved" and not f.get("skip_design")]
+                              if f.get("status") == "Approved" and not f.get("design_doc_path")]
                 if active_sprint_id:
-                    # Strict: only plan features in the active sprint
                     features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
                 else:
                     features = [f for f in candidates if f.get("sprint_id") is None]
@@ -597,7 +607,6 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                 "name": f["name"],
                 "description": f.get("description", ""),
                 "status": f["status"],
-                "skip_design": f.get("skip_design", False),
                 "design_doc_path": f.get("design_doc_path"),
                 "pr_number": f.get("pr_number"),
                 "pr_url": f.get("pr_url"),
@@ -1207,7 +1216,8 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         attempted = len(assigned_ids)
         # Count only assigned features that progressed (not stale entries from prior sessions)
         pushed = sum(1 for f in _session_features
-                     if f.get("id") in assigned_ids
+                     if isinstance(f, dict)
+                     and f.get("id") in assigned_ids
                      and f.get("status") in ("Pushed", "Reviewing", "Reviewed", "Designed"))
         try:
             with httpx.Client(base_url=PM_API_URL, timeout=10) as client:

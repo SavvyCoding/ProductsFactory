@@ -57,7 +57,6 @@ Your working directory is /workspace. Do NOT modify application code.
      "description": "<Specific file and what needs to change. Why it matters for reliability/security/performance.>",
      "feature_type": "chore",
      "priority": 50,
-     "skip_design": true,
      "source": "ai"
    }}
    ```

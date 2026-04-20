@@ -159,7 +159,6 @@ Commit product_memory.md with your final push to main.
 - The only valid `status` values in session_result.json are `"Reviewed"` and `"Implementing"`. Never write `"Reviewing"`.
 - Write one JSON line **per feature**, never a nested `{"features": [...]}` object.
 - Cite specific lines or files when requesting changes.
-- If a feature has no design doc (skip_design=True), review against the feature description alone.
 - Security checklist (must check each): SQL injection, XSS, hardcoded secrets, missing auth, unvalidated input at API boundaries.
 
 ## Confidence guide

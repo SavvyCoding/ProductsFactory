@@ -4,38 +4,62 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}ProductFactory{% endblock %}</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/main.css">
 </head>
 <body class="{% block body_class %}{% endblock %}">
-  <nav>
-    <a href="/" class="logo">
-      <div class="logo-mark">⚙</div>
-      Product<span>Factory</span>
+  <nav class="pf-nav">
+    <a href="/" class="pf-nav-brand" aria-label="ProductFactory home">
+      <span class="pf-nav-brand-mark">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12,1 23,22 1,22"/></svg>
+      </span>
+      <span class="pf-nav-brand-name">ProductFactory</span>
     </a>
-    <a href="/" class="{{ 'nav-active' if request.url.path == '/' else '' }}">Products</a>
-    <a href="/admin" class="{{ 'nav-active' if request.url.path.startswith('/admin') else '' }}">Admin</a>
-    <div class="pf-nav-search">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-        <path d="M10.68 11.74a6 6 0 1 1 1.06-1.06l3.04 3.04a.75.75 0 1 1-1.06 1.06l-3.04-3.04ZM11.5 7a4.5 4.5 0 1 0-9 0 4.5 4.5 0 0 0 9 0Z"/>
-      </svg>
-      <input type="search" id="global-search" placeholder="Search features...  /" aria-label="Search features">
+
+    <div class="pf-nav-tabs">
+      <a href="/" class="pf-nav-tab {{ 'is-active' if request.url.path == '/' else '' }}">Products</a>
+      <a href="/admin" class="pf-nav-tab {{ 'is-active' if request.url.path.startswith('/admin') else '' }}">Admin</a>
     </div>
-    {% if alert_count %}
-    <a href="/api/alerts/unread" class="nav-alerts" title="Unread alerts">
-      🔔 <span class="alert-badge">{{ alert_count }}</span>
-    </a>
-    {% endif %}
-    <div class="nav-spacer"></div>
-    <a href="/?filter=running" class="nav-live-pill" id="nav-live" title="Running products">
-      <span class="nav-live-dot" id="nav-live-dot"></span>
+
+    <div class="pf-nav-search">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+      </svg>
+      <input type="search" id="global-search" placeholder="Search features…" aria-label="Search features">
+      <kbd>/</kbd>
+    </div>
+
+    <div class="pf-nav-spacer"></div>
+
+    <a href="/?filter=running" class="pf-nav-status" id="nav-live" title="Running products">
+      <span class="pf-nav-status-dot" id="nav-live-dot"></span>
       <span id="nav-live-text">Idle</span>
     </a>
-    <button class="dark-toggle" onclick="toggleDark()" id="dark-btn"
-            title="Toggle dark mode" aria-label="Toggle dark mode">🌙</button>
+
+    {% if alert_count %}
+    <a href="/api/alerts/unread" class="pf-nav-icon-btn pf-nav-alerts" title="Unread alerts">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>
+      </svg>
+      <span class="pf-nav-alerts-badge">{{ alert_count }}</span>
+    </a>
+    {% endif %}
+
+    <button class="pf-nav-icon-btn" onclick="toggleDark()" id="dark-btn"
+            title="Toggle theme" aria-label="Toggle theme">
+      <svg class="icon pf-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+      </svg>
+      <svg class="icon pf-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+      </svg>
+    </button>
+
     {% if current_pm %}
-    <div class="nav-user">
-      <div class="nav-avatar">{{ current_pm[0].upper() }}</div>
-      {{ current_pm }}
+    <div class="pf-nav-user" title="{{ current_pm }}">
+      <span class="pf-nav-avatar">{{ current_pm[0].upper() }}</span>
     </div>
     {% endif %}
   </nav>
@@ -50,7 +74,6 @@
     {% block content %}{% endblock %}
   </main>
 
-  <!-- ── TOAST CONTAINER ──────────────────────────────────── -->
   <div id="toast-container" aria-live="polite" aria-atomic="false"></div>
 
 <script src="/static/js/theme.js"></script>

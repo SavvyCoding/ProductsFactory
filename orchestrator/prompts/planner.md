@@ -33,7 +33,6 @@ Your working directory is /workspace. Read files but do NOT write any code.
    - **description** — 1-2 sentences: what it does and why it matters
    - **feature_type** — `feature`, `bug`, or `chore`
    - **priority** — 1–100 (higher = more important; core features > nice-to-haves)
-   - **skip_design** — `true` for simple/obvious changes, `false` for anything complex
 
 4. **Create each feature** via:
    ```
@@ -44,7 +43,6 @@ Your working directory is /workspace. Read files but do NOT write any code.
      "description": "What it does and why.",
      "feature_type": "feature",
      "priority": 70,
-     "skip_design": false,
      "source": "ai"
    }}
    ```

@@ -1,52 +1,54 @@
 /* ============================================================
-   Design Tokens — GitHub-inspired design system
+   Design Tokens — Vercel / Geist identity
+   High-contrast monochrome with a single blue accent.
+   Variable names preserved for backward compatibility.
    ============================================================ */
 
 :root {
   /* ---- Surfaces ---- */
   --color-canvas-default:  #ffffff;
-  --color-canvas-subtle:   #f6f8fa;
-  --color-canvas-inset:    #eff2f5;
+  --color-canvas-subtle:   #fafafa;
+  --color-canvas-inset:    #f4f4f5;
   --color-canvas-overlay:  #ffffff;
 
   /* ---- Borders ---- */
-  --color-border-default:  #d0d7de;
-  --color-border-muted:    #d8dee4;
-  --color-border-subtle:   #eaeef2;
+  --color-border-default:  #eaeaea;
+  --color-border-muted:    #d4d4d4;
+  --color-border-subtle:   #f0f0f0;
 
   /* ---- Foreground / Text ---- */
-  --color-fg-default:      #1f2328;
-  --color-fg-muted:        #656d76;
-  --color-fg-subtle:       #6e7781;
+  --color-fg-default:      #000000;
+  --color-fg-muted:        #666666;
+  --color-fg-subtle:       #999999;
   --color-fg-on-emphasis:  #ffffff;
 
-  /* ---- Accent (blue) ---- */
-  --color-accent-fg:       #0969da;
-  --color-accent-emphasis: #0550ae;
-  --color-accent-muted:    rgba(84, 174, 255, 0.4);
-  --color-accent-subtle:   #ddf4ff;
+  /* ---- Accent (blue — Geist signature) ---- */
+  --color-accent-fg:       #0070f3;
+  --color-accent-emphasis: #0061d5;
+  --color-accent-muted:    rgba(0, 112, 243, 0.4);
+  --color-accent-subtle:   #eff6ff;
 
   /* ---- Success (green) ---- */
-  --color-success-fg:       #1a7f37;
-  --color-success-emphasis:  #1f883d;
-  --color-success-subtle:    #dafbe1;
+  --color-success-fg:       #0a7d35;
+  --color-success-emphasis: #047a2c;
+  --color-success-subtle:   #f0fdf4;
 
-  /* ---- Attention (yellow / amber) ---- */
-  --color-attention-fg:       #9a6700;
-  --color-attention-emphasis:  #bf8700;
-  --color-attention-subtle:    #fff8c5;
+  /* ---- Attention (amber) ---- */
+  --color-attention-fg:       #92400e;
+  --color-attention-emphasis: #b45309;
+  --color-attention-subtle:   #fffbeb;
 
   /* ---- Danger (red) ---- */
-  --color-danger-fg:       #d1242f;
-  --color-danger-emphasis:  #cf222e;
-  --color-danger-subtle:    #ffebe9;
+  --color-danger-fg:       #c50e0e;
+  --color-danger-emphasis: #b91c1c;
+  --color-danger-subtle:   #fef2f2;
 
   /* ---- Done / Closed (purple) ---- */
-  --color-done-fg:       #8250df;
-  --color-done-emphasis:  #7048c6;
-  --color-done-subtle:    #fbefff;
+  --color-done-fg:       #6f3eff;
+  --color-done-emphasis: #5b32d6;
+  --color-done-subtle:   #f5f3ff;
 
-  /* ---- Spacing scale ---- */
+  /* ---- Spacing scale (8-pt with quarter steps) ---- */
   --space-1:  4px;
   --space-2:  8px;
   --space-3: 12px;
@@ -57,8 +59,8 @@
   --space-8: 48px;
 
   /* ---- Border radius ---- */
-  --radius-sm:   3px;
-  --radius-md:   6px;
+  --radius-sm:   4px;
+  --radius-md:   8px;
   --radius-lg:  12px;
   --radius-full: 9999px;
 
@@ -69,17 +71,42 @@
   --text-base: 14px;
   --text-lg:   16px;
   --text-xl:   20px;
-  --text-2xl:  24px;
+  --text-2xl:  28px;
 
-  /* ---- Shadows (light) ---- */
-  --shadow-sm:  0 1px 2px rgba(27, 31, 36, 0.04);
-  --shadow-md:  0 1px 3px rgba(27, 31, 36, 0.06), 0 1px 2px rgba(27, 31, 36, 0.04);
-  --shadow-lg:  0 4px 12px rgba(27, 31, 36, 0.08);
-  --shadow-xl:  0 8px 24px rgba(27, 31, 36, 0.12);
+  /* ---- Control (button / input / select / badge) sizing scale ---- */
+  /* Equal height enforced by min-height — used by .pf-btn / .btn / .pf-input / .pf-select / .pf-pill */
+  --ctrl-h-xs: 22px;
+  --ctrl-h-sm: 28px;
+  --ctrl-h-md: 32px;
+  --ctrl-h-lg: 40px;
+
+  --ctrl-px-xs: 8px;
+  --ctrl-px-sm: 10px;
+  --ctrl-px-md: 14px;
+  --ctrl-px-lg: 18px;
+
+  /* ---- Font weights ---- */
+  --weight-regular:  400;
+  --weight-medium:   500;
+  --weight-semibold: 600;
+  --weight-bold:     700;
+
+  /* ---- Shadows (light) — Vercel uses minimal depth ---- */
+  --shadow-sm:  0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md:  0 2px 4px rgba(0, 0, 0, 0.04);
+  --shadow-lg:  0 4px 12px rgba(0, 0, 0, 0.06);
+  --shadow-xl:  0 16px 32px rgba(0, 0, 0, 0.10);
+
+  /* ---- Motion ---- */
+  --motion-fast:   120ms;
+  --motion-base:   180ms;
+  --motion-slow:   240ms;
+  --ease-out:      cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out:   cubic-bezier(0.65, 0, 0.35, 1);
 
   /* ---- Font families ---- */
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
-  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
   /* ============================================================
      Backward-compatible aliases (legacy variable names)
@@ -96,103 +123,135 @@
   --card-bg:   var(--color-canvas-overlay);
 
   /* ---- Legacy color aliases ---- */
-  --blue:      #0969da;
-  --blue-lt:   #ddf4ff;
-  --blue-mid:  #218bff;
-  --green:     #1a7f37;
-  --green-lt:  #dafbe1;
-  --green-mid: #1f883d;
-  --amber:     #9a6700;
-  --amber-lt:  #fff8c5;
-  --amber-mid: #bf8700;
-  --red:       #d1242f;
-  --red-lt:    #ffebe9;
-  --red-mid:   #cf222e;
-  --orange:    #bc4c00;
-  --orange-lt: #fff1e5;
-  --orange-mid:#d46514;
-  --purple:    #8250df;
-  --purple-lt: #fbefff;
-  --purple-mid:#7048c6;
-  --teal:      #0e7c6b;
-  --teal-lt:   #ccfef5;
-  --teal-mid:  #0d9e85;
+  --blue:      #0070f3;
+  --blue-lt:   #eff6ff;
+  --blue-mid:  #0061d5;
+  --green:     #0a7d35;
+  --green-lt:  #f0fdf4;
+  --green-mid: #047a2c;
+  --amber:     #92400e;
+  --amber-lt:  #fffbeb;
+  --amber-mid: #b45309;
+  --red:       #c50e0e;
+  --red-lt:    #fef2f2;
+  --red-mid:   #b91c1c;
+  --orange:    #c2410c;
+  --orange-lt: #fff7ed;
+  --orange-mid:#9a3412;
+  --purple:    #6f3eff;
+  --purple-lt: #f5f3ff;
+  --purple-mid:#5b32d6;
+  --teal:      #006666;
+  --teal-lt:   #ecfeff;
+  --teal-mid:  #155e75;
 }
 
 
 /* ============================================================
-   Dark theme
+   Dark theme — Vercel/Geist dark
+   Pure black surface, white text, same accent blue
    ============================================================ */
 [data-theme="dark"] {
   /* ---- Surfaces ---- */
-  --color-canvas-default:  #0d1117;
-  --color-canvas-subtle:   #161b22;
-  --color-canvas-inset:    #010409;
-  --color-canvas-overlay:  #1c2128;
+  --color-canvas-default:  #000000;
+  --color-canvas-subtle:   #0a0a0a;
+  --color-canvas-inset:    #111111;
+  --color-canvas-overlay:  #0a0a0a;
 
   /* ---- Borders ---- */
-  --color-border-default:  #30363d;
-  --color-border-muted:    #21262d;
-  --color-border-subtle:   #21262d;
+  --color-border-default:  #2a2a2a;
+  --color-border-muted:    #3d3d3d;
+  --color-border-subtle:   #1a1a1a;
 
   /* ---- Foreground / Text ---- */
-  --color-fg-default:      #e6edf3;
-  --color-fg-muted:        #8b949e;
-  --color-fg-subtle:       #6e7681;
+  --color-fg-default:      #ededed;
+  --color-fg-muted:        #a1a1a1;
+  --color-fg-subtle:       #707070;
   --color-fg-on-emphasis:  #ffffff;
 
-  /* ---- Accent (blue) ---- */
-  --color-accent-fg:       #58a6ff;
-  --color-accent-emphasis: #1f6feb;
-  --color-accent-muted:    rgba(56, 139, 253, 0.4);
-  --color-accent-subtle:   rgba(56, 139, 253, 0.1);
+  /* ---- Accent (blue — Geist signature stays the same) ---- */
+  --color-accent-fg:       #3b91ff;
+  --color-accent-emphasis: #0070f3;
+  --color-accent-muted:    rgba(59, 145, 255, 0.4);
+  --color-accent-subtle:   rgba(59, 145, 255, 0.10);
 
   /* ---- Success (green) ---- */
-  --color-success-fg:       #3fb950;
-  --color-success-emphasis:  #238636;
-  --color-success-subtle:    rgba(46, 160, 67, 0.15);
+  --color-success-fg:       #4ade80;
+  --color-success-emphasis: #16a34a;
+  --color-success-subtle:   rgba(74, 222, 128, 0.10);
 
-  /* ---- Attention (yellow / amber) ---- */
-  --color-attention-fg:       #d29922;
-  --color-attention-emphasis:  #9e6a03;
-  --color-attention-subtle:    rgba(187, 128, 9, 0.15);
+  /* ---- Attention (amber) ---- */
+  --color-attention-fg:       #fbbf24;
+  --color-attention-emphasis: #d97706;
+  --color-attention-subtle:   rgba(251, 191, 36, 0.10);
 
   /* ---- Danger (red) ---- */
-  --color-danger-fg:       #f85149;
-  --color-danger-emphasis:  #da3633;
-  --color-danger-subtle:    rgba(248, 81, 73, 0.1);
+  --color-danger-fg:       #ef4444;
+  --color-danger-emphasis: #dc2626;
+  --color-danger-subtle:   rgba(239, 68, 68, 0.10);
 
   /* ---- Done / Closed (purple) ---- */
-  --color-done-fg:       #bc8cff;
-  --color-done-emphasis:  #8957e5;
-  --color-done-subtle:    rgba(137, 87, 229, 0.15);
+  --color-done-fg:       #a78bfa;
+  --color-done-emphasis: #8b5cf6;
+  --color-done-subtle:   rgba(167, 139, 250, 0.10);
 
-  /* ---- Shadows (dark) ---- */
-  --shadow-sm:  0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md:  0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-lg:  0 4px 12px rgba(0, 0, 0, 0.5);
-  --shadow-xl:  0 8px 24px rgba(0, 0, 0, 0.6);
+  /* ---- Shadows (dark — barely visible) ---- */
+  --shadow-sm:  0 1px 2px rgba(0, 0, 0, 0.6);
+  --shadow-md:  0 2px 4px rgba(0, 0, 0, 0.6);
+  --shadow-lg:  0 4px 12px rgba(0, 0, 0, 0.7);
+  --shadow-xl:  0 16px 32px rgba(0, 0, 0, 0.8);
 
   /* ---- Legacy color aliases (dark overrides) ---- */
-  --blue:      #58a6ff;
-  --blue-lt:   rgba(56, 139, 253, 0.1);
-  --blue-mid:  #388bfd;
-  --green:     #3fb950;
-  --green-lt:  rgba(46, 160, 67, 0.15);
-  --green-mid: #238636;
-  --amber:     #d29922;
-  --amber-lt:  rgba(187, 128, 9, 0.15);
-  --amber-mid: #9e6a03;
-  --red:       #f85149;
-  --red-lt:    rgba(248, 81, 73, 0.1);
-  --red-mid:   #da3633;
-  --orange:    #d18616;
-  --orange-lt: rgba(209, 134, 22, 0.15);
-  --orange-mid:#db6d28;
-  --purple:    #bc8cff;
-  --purple-lt: rgba(137, 87, 229, 0.15);
-  --purple-mid:#8957e5;
-  --teal:      #39d2c0;
-  --teal-lt:   rgba(57, 210, 192, 0.15);
-  --teal-mid:  #2ea493;
+  --blue:      #3b91ff;
+  --blue-lt:   rgba(59, 145, 255, 0.10);
+  --blue-mid:  #0070f3;
+  --green:     #4ade80;
+  --green-lt:  rgba(74, 222, 128, 0.10);
+  --green-mid: #16a34a;
+  --amber:     #fbbf24;
+  --amber-lt:  rgba(251, 191, 36, 0.10);
+  --amber-mid: #d97706;
+  --red:       #ef4444;
+  --red-lt:    rgba(239, 68, 68, 0.10);
+  --red-mid:   #dc2626;
+  --orange:    #fb923c;
+  --orange-lt: rgba(251, 146, 60, 0.10);
+  --orange-mid:#ea580c;
+  --purple:    #a78bfa;
+  --purple-lt: rgba(167, 139, 250, 0.10);
+  --purple-mid:#8b5cf6;
+  --teal:      #5eead4;
+  --teal-lt:   rgba(94, 234, 212, 0.10);
+  --teal-mid:  #2dd4bf;
+}
+
+
+/* ============================================================
+   Global typography baseline (used by every page)
+   ============================================================ */
+html {
+  font-family: var(--font-sans);
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  background: var(--color-canvas-default);
+  color: var(--color-fg-default);
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  background: var(--color-canvas-default);
+  color: var(--color-fg-default);
+  line-height: 1.5;
+}
+
+/* Tabular nums on all numeric counters/badges by default */
+.num,
+.stat-value,
+.stat .value,
+.product-count,
+.alert-badge {
+  font-variant-numeric: tabular-nums;
 }
