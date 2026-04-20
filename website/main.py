@@ -1409,10 +1409,11 @@ async def api_next_product(db: AsyncSession = Depends(get_db)):
     Includes products with Approved/Designed features (designer/coder work)
     AND products with no actionable features at all (planner will generate new ones).
     """
-    # Products with actionable features (designer/coder work)
+    # Products with actionable or in-flight features
+    # Includes Implementing/Reviewing so determine_persona can detect and reset orphaned claims
     has_actionable = Product.id.in_(
         select(Feature.product_id)
-        .where(Feature.status.in_(["Approved", "Designed"]))
+        .where(Feature.status.in_(["Approved", "Designed", "Implementing", "Reviewing", "Reviewed"]))
         .distinct()
     )
     # Products with NO in-flight features at all (needs planner)
