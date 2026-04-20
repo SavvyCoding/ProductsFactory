@@ -542,17 +542,15 @@ def determine_persona(product: dict) -> str:
 
             # Fetch last completed sprint (for post-sprint persona gating)
             last_completed_sprint = None
+            completed_no_retro = []
             sprints_resp = client.get(f"/api/products/{product['id']}/sprints")
             if sprints_resp.status_code == 200:
                 all_sprints = sprints_resp.json()
                 completed = [s for s in all_sprints if s.get("status") == "completed"]
                 if completed:
                     last_completed_sprint = max(completed, key=lambda s: s["id"])
-                # Retrospective priority check: any completed sprint with no retro doc yet
+                # Collect completed sprints missing retro — checked after active sprint work
                 completed_no_retro = [s for s in completed if not s.get("retro_doc_path")]
-                if completed_no_retro:
-                    log.info(f"Completed sprint(s) missing retrospective: {[s['id'] for s in completed_no_retro]}")
-                    return "retrospective"
 
             # Fetch all product features
             feat_resp = client.get(f"/api/products/{product['id']}/features")
@@ -720,6 +718,12 @@ def determine_persona(product: dict) -> str:
     except httpx.HTTPError as e:
         log.error(f"determine_persona failed: {e}")
         return None
+
+    # No design/code work — run retro for any recently completed sprint with no retro doc yet
+    if completed_no_retro:
+        most_recent = max(completed_no_retro, key=lambda s: s["id"])
+        log.info(f"Sprint {most_recent['id']} completed without retrospective — running retro")
+        return "retrospective"
 
     # No design/code work — check post-sprint personas (documenter/analytics/refactorer/devops/recommender)
     post_sprint = _post_sprint_persona_due(product, last_completed_sprint)
