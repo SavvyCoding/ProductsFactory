@@ -73,7 +73,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse,
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import bcrypt as _bcrypt_lib
-from sqlalchemy import select, func, text, case
+from sqlalchemy import select, func, text, case, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -2061,6 +2061,16 @@ async def api_sprint_sign_off(
         auto_completed = True
 
     return {"dod": dod, "auto_completed": auto_completed}
+
+
+@app.delete("/api/sprints/{sprint_id}", status_code=204)
+async def api_delete_sprint(sprint_id: int, db: AsyncSession = Depends(get_db), _: str = Depends(require_auth)):
+    """Delete a sprint. Unassigns any features still pointing at it."""
+    sprint = await db.get(Sprint, sprint_id)
+    if not sprint:
+        raise HTTPException(status_code=404, detail="Sprint not found")
+    await db.execute(update(Feature).where(Feature.sprint_id == sprint_id).values(sprint_id=None))
+    await db.delete(sprint)
 
 
 @app.post("/api/products/{product_id}/plan-sprints")
