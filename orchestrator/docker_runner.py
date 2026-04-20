@@ -572,30 +572,28 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
             all_features = resp.json()
             all_features = all_features if isinstance(all_features, list) else []
 
-            if persona == "coder":
+            if not active_sprint_id:
+                log.info(f"[assign] No active sprint for product {product_id} — skipping feature assignment")
+                features = []
+            elif persona == "coder":
                 candidates = [f for f in all_features
                               if f.get("status") == "Designed"
                               or (f.get("status") == "Approved" and f.get("design_doc_path"))]
-                if active_sprint_id:
-                    features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
-                else:
-                    features = [f for f in candidates if f.get("sprint_id") is None]
+                features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
             elif persona == "reviewer":
+                # Reviewer follows the PR — scope to active sprint but fall back to any sprint
+                # so open PRs are not left hanging if sprint rolled over mid-review.
                 candidates = [f for f in all_features
-                              if f.get("status") == "Reviewing" and f.get("pr_number")]
-                if active_sprint_id:
-                    features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
-                    if not features:
-                        features = candidates  # reviewer follows the PR, not the sprint boundary
-                else:
+                              if f.get("status") == "Reviewing"
+                              and f.get("pr_number")
+                              and f.get("sprint_id") is not None]
+                features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
+                if not features:
                     features = candidates
             elif persona in ("designer", "product_planner"):
                 candidates = [f for f in all_features
                               if f.get("status") == "Approved" and not f.get("design_doc_path")]
-                if active_sprint_id:
-                    features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
-                else:
-                    features = [f for f in candidates if f.get("sprint_id") is None]
+                features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
             else:
                 features = []
 
