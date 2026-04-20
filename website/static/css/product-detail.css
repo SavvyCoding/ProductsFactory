@@ -826,3 +826,136 @@
   background: var(--color-canvas-subtle);
   border-color: var(--color-border-default);
 }
+
+
+/* ============================================================
+   Product page header (action row, equal-width buttons)
+   ============================================================ */
+.product-page-header {
+  align-items: flex-end;
+}
+.product-page-header h1 {
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.6px;
+}
+.product-page-header-meta {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.product-page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+/* Uniform icon action buttons — all 36×36, tooltip on hover */
+.pf-icon-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-canvas-default);
+  color: var(--color-fg-muted);
+  cursor: pointer;
+  text-decoration: none;
+  flex-shrink: 0;
+  transition:
+    background   var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color        var(--motion-fast) var(--ease-out),
+    transform    var(--motion-fast) var(--ease-out);
+}
+.pf-icon-action:hover {
+  background: var(--color-canvas-subtle);
+  border-color: var(--color-border-muted);
+  color: var(--color-fg-default);
+}
+.pf-icon-action:focus-visible {
+  outline: 2px solid var(--color-accent-fg);
+  outline-offset: 2px;
+}
+.pf-icon-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.pf-icon-action .icon {
+  width: 18px;
+  height: 18px;
+}
+
+/* Primary variant — filled with fg color */
+.pf-icon-action--primary {
+  background: var(--color-fg-default);
+  color: var(--color-canvas-default);
+  border-color: var(--color-fg-default);
+}
+.pf-icon-action--primary:hover {
+  background: var(--color-fg-muted);
+  border-color: var(--color-fg-muted);
+  color: var(--color-canvas-default);
+}
+
+.inline-form { display: inline-flex; }
+
+
+/* ============================================================
+   Misc utilities used by product page
+   ============================================================ */
+.videos-loading { padding: 24px 0; }
+
+.session-connect-btn {
+  align-self: center;
+  margin-left: auto;
+}
+
+
+/* ============================================================
+   Sprint roadmap — visual cleanup of inline-styled regions
+   ============================================================ */
+.sprint-card {
+  padding: 12px;
+  background: var(--color-canvas-subtle);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-default);
+  margin: 0 0 10px 12px;
+  transition: border-color var(--motion-fast);
+}
+.sprint-card.is-active {
+  border-color: var(--color-success-fg);
+  box-shadow: 0 0 0 1px var(--color-success-fg);
+}
+
+.gate-list {
+  font-size: var(--text-xs);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: right;
+}
+.gate-list .gate-pass { color: var(--color-success-fg); }
+.gate-list .gate-fail { color: var(--color-fg-muted); }
+
+
+/* ============================================================
+   Dark mode coverage for any leftover CSS-variable–driven elements
+   ============================================================ */
+[data-theme="dark"] .product-page-actions .pf-btn--secondary {
+  background: var(--color-canvas-default);
+  color: var(--color-fg-default);
+  border-color: var(--color-border-default);
+}
+[data-theme="dark"] .product-page-actions .pf-btn--secondary:hover {
+  background: var(--color-canvas-subtle);
+  border-color: var(--color-border-muted);
+}
+

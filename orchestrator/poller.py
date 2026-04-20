@@ -435,6 +435,83 @@ def _post_sprint_persona_due(product: dict, last_completed_sprint: dict | None) 
     return None
 
 
+def _auto_create_sprint_for_unsprinted(product: dict, client: httpx.Client) -> bool:
+    """
+    If there are Approved unsprinted features and no active sprint, create a new sprint
+    in the last existing phase (or a new phase if none exist), assign the features, and
+    activate it. Returns True if a sprint was created.
+    """
+    pid = product["id"]
+
+    # Fetch approved unsprinted features
+    feat_resp = client.get(f"/api/products/{pid}/features")
+    if feat_resp.status_code != 200:
+        return False
+    all_features = feat_resp.json() if isinstance(feat_resp.json(), list) else []
+    unsprinted_approved = [
+        f for f in all_features
+        if f.get("status") == "Approved" and not f.get("sprint_id")
+    ]
+    if not unsprinted_approved:
+        return False
+
+    # Find last phase, or create one
+    phases_resp = client.get(f"/api/products/{pid}/phases")
+    phases = phases_resp.json() if phases_resp.status_code == 200 and isinstance(phases_resp.json(), list) else []
+
+    if phases:
+        last_phase = max(phases, key=lambda p: (p.get("order", 0), p["id"]))
+        phase_id = last_phase["id"]
+        log.info(f"[auto-sprint] Using existing phase '{last_phase['name']}' (id={phase_id})")
+    else:
+        phase_resp = client.post("/api/phases", json={
+            "product_id": pid,
+            "name": "Phase 1",
+            "order": 1,
+            "status": "active",
+        })
+        if phase_resp.status_code not in (200, 201):
+            log.warning(f"[auto-sprint] Failed to create phase: {phase_resp.status_code}")
+            return False
+        phase_id = phase_resp.json()["id"]
+        log.info(f"[auto-sprint] Created new Phase 1 (id={phase_id})")
+
+    # Determine sprint number within this phase
+    sprints_resp = client.get(f"/api/products/{pid}/sprints")
+    sprints = sprints_resp.json() if sprints_resp.status_code == 200 and isinstance(sprints_resp.json(), list) else []
+    phase_sprints = [s for s in sprints if s.get("phase_id") == phase_id]
+    sprint_num = len(phase_sprints) + 1
+    sprint_name = f"Sprint {sprint_num}"
+
+    from datetime import date, timedelta
+    today = date.today()
+    sprint_resp = client.post("/api/sprints", json={
+        "product_id": pid,
+        "phase_id": phase_id,
+        "name": sprint_name,
+        "goal": f"Deliver {len(unsprinted_approved)} approved feature(s)",
+        "start_date": today.isoformat(),
+        "end_date": (today + timedelta(weeks=2)).isoformat(),
+        "status": "active",
+    })
+    if sprint_resp.status_code not in (200, 201):
+        log.warning(f"[auto-sprint] Failed to create sprint: {sprint_resp.status_code} {sprint_resp.text[:100]}")
+        return False
+
+    sprint_id = sprint_resp.json()["id"]
+    log.info(f"[auto-sprint] Created {sprint_name} (id={sprint_id}) — assigning {len(unsprinted_approved)} features")
+
+    # Assign features to the new sprint
+    for f in unsprinted_approved:
+        try:
+            client.patch(f"/api/features/{f['id']}", json={"sprint_id": sprint_id})
+        except Exception as e:
+            log.warning(f"[auto-sprint] Could not assign feature #{f['id']}: {e}")
+
+    log.info(f"[auto-sprint] Sprint '{sprint_name}' activated with {len(unsprinted_approved)} features")
+    return True
+
+
 def determine_persona(product: dict) -> str:
     """
     Decide which persona should run for this product.
@@ -444,9 +521,9 @@ def determine_persona(product: dict) -> str:
     Priority order:
     1. retrospective   - a sprint was just completed with no retro yet
     2. product_planner - Approved features in the active sprint (writes detailed stories)
-    3. designer        - Approved features with skip_design=False in the active sprint
-    4. coder           - Designed or skip_design Approved features in the active sprint
-    5. (if no active sprint) designer/coder on unsprinted features
+    3. designer        - Approved features with no design doc in the active sprint
+    4. coder           - Designed features (or Approved with existing design doc)
+    5. (if no active sprint) post-sprint maintenance personas (documenter/analytics/etc.)
     6. documenter / analytics / refactorer / devops / recommender  - once per completed sprint
     7. planner         - no actionable features; generate new ones
     """
@@ -506,19 +583,16 @@ def determine_persona(product: dict) -> str:
                     # Next cycle will pick up the new active sprint
                     return None
 
-                # Approved features in sprint -> product_planner (design stories)
-                # Skip features that already have a design doc (they need coder, not planner)
+                # Approved features with no design doc -> product_planner writes the story
                 needs_design = [f for f in sprint_features
                                 if f.get("status") == "Approved"
-                                and not f.get("skip_design")
                                 and not f.get("design_doc_path")]
                 if needs_design:
                     return "product_planner"
 
-                # Designed features, or Approved+skip_design, or Approved with existing design doc -> coder
+                # Designed features or Approved with existing design doc -> coder
                 codable = [f for f in sprint_features
                            if f.get("status") == "Designed"
-                           or (f.get("status") == "Approved" and f.get("skip_design"))
                            or (f.get("status") == "Approved" and f.get("design_doc_path"))]
                 if codable:
                     return "coder"
@@ -636,19 +710,10 @@ def determine_persona(product: dict) -> str:
                 log.info(f"Active sprint {sid}: {len(non_terminal)} features in other states - waiting")
                 return None
 
-            # No active sprint - work on unsprinted features
-            resp = client.get(
-                "/api/features/next-for-persona",
-                params={"persona": "designer", "product_id": product["id"]}
-            )
-            if resp.status_code == 200 and resp.json():
-                return "designer"
-            resp2 = client.get(
-                "/api/features/next-for-persona",
-                params={"persona": "coder", "product_id": product["id"]}
-            )
-            if resp2.status_code == 200 and resp2.json():
-                return "coder"
+            # No active sprint — auto-create one for any Approved unsprinted features.
+            if _auto_create_sprint_for_unsprinted(product, client):
+                return None  # next cycle picks up the new active sprint
+            log.info(f"No active sprint and no approved unsprinted features for product {product['id']}")
     except httpx.HTTPError as e:
         log.error(f"determine_persona failed: {e}")
         return None

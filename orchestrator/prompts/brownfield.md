@@ -73,7 +73,7 @@ Each line is one complete JSON object. Use `echo '{"id":...}' >> /workspace/sess
 ⚠️ **Strict rules — violations cause features to get permanently stuck:**
 - Each entry MUST be one self-contained JSON object on a single line
 - NEVER wrap entries in `{"features": [...]}` — one object per line only
-- `"status"` MUST be exactly one of: `"Reviewing"`, `"Blocked"`, `"Implemented"`, `"Pushed"`
+- `"status"` MUST be exactly one of: `"Reviewing"`, `"Blocked"`, `"Implemented"` — NEVER write `"Pushed"` (the poller sets Pushed after the PR is merged on GitHub)
 - A `"Reviewing"` entry MUST include `"pr_number"` (integer) — without it the poller cannot find the PR
 - Do NOT write `"reviewing"` (lowercase) or `"InReview"` or any other variant
 - Do NOT call `PATCH /api/features/{id}` directly — session_result.json ONLY

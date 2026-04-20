@@ -53,7 +53,6 @@ Your working directory is /workspace. Do NOT write application code.
      "description": "<What it does and why analytics suggests it's valuable>",
      "feature_type": "feature",
      "priority": <50-80 based on impact>,
-     "skip_design": false,
      "source": "ai"
    }}
    ```

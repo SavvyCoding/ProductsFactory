@@ -559,16 +559,16 @@ class TestResetStuck:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestPersonaRouting:
-    def test_designer_picks_approved_without_skip_design(self, client, db):
+    def test_designer_picks_approved_with_no_design_doc(self, client, db):
         p = make_product(db, status="ready")
-        f = make_feature(db, p.id, status="Approved")  # skip_design defaults False
+        f = make_feature(db, p.id, status="Approved")
         r = client.get(f"/api/features/next-for-persona?persona=designer&product_id={p.id}")
         assert r.status_code == 200
         assert r.json()["id"] == f.id
 
-    def test_designer_skips_approved_with_skip_design(self, client, db):
+    def test_designer_skips_approved_with_design_doc(self, client, db):
         p = make_product(db, status="ready")
-        make_feature(db, p.id, status="Approved", skip_design=True)
+        make_feature(db, p.id, status="Approved", design_doc_path="docs/feature_001_design.md")
         r = client.get(f"/api/features/next-for-persona?persona=designer&product_id={p.id}")
         assert r.json() is None
 
@@ -579,15 +579,15 @@ class TestPersonaRouting:
         assert r.status_code == 200
         assert r.json()["id"] == f.id
 
-    def test_coder_picks_approved_skip_design(self, client, db):
+    def test_coder_picks_approved_with_design_doc(self, client, db):
         p = make_product(db, status="ready")
-        f = make_feature(db, p.id, status="Approved", skip_design=True)
+        f = make_feature(db, p.id, status="Approved", design_doc_path="docs/feature_001_design.md")
         r = client.get(f"/api/features/next-for-persona?persona=coder&product_id={p.id}")
         assert r.json()["id"] == f.id
 
-    def test_coder_skips_approved_without_skip_design(self, client, db):
+    def test_coder_skips_approved_without_design_doc(self, client, db):
         p = make_product(db, status="ready")
-        make_feature(db, p.id, status="Approved", skip_design=False)
+        make_feature(db, p.id, status="Approved")
         r = client.get(f"/api/features/next-for-persona?persona=coder&product_id={p.id}")
         assert r.json() is None
 
@@ -614,15 +614,6 @@ class TestPersonaRouting:
         r = client.get("/api/products/next")
         assert r.json()["id"] == p.id
 
-    def test_add_feature_with_skip_design(self, client, db):
-        p = make_product(db)
-        r = client.post(f"/product/{p.id}/features",
-                        data={"name": "quick fix", "skip_design": "true"},
-                        auth=AUTH, follow_redirects=False)
-        assert r.status_code == 303
-        # Verify it was stored
-        feat_r = client.post("/api/features", json={"product_id": p.id, "name": "x", "skip_design": True})
-        assert feat_r.json()["skip_design"] is True
 
     def test_feature_update_stores_design_doc(self, client, db):
         p = make_product(db)

@@ -78,7 +78,6 @@ Your working directory is /workspace. All files must be written inside /workspac
        "description": "PR #<pr_number> — <test name> fails: <root cause>. Fix: <recommendation>",
        "feature_type": "bug",
        "priority": 80,
-       "skip_design": true,
        "source": "ai",
        "status": "Approved"
      }')

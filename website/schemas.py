@@ -82,7 +82,6 @@ class FeatureCreate(BaseModel):
     depends_on:   Optional[int] = None
     source:       str = "pm"
     feature_type: str = "feature"
-    skip_design:  bool = False
     sprint_id:    Optional[int] = None
     story_points: Optional[int] = None
     due_date:     Optional[date] = None
@@ -131,7 +130,6 @@ class FeatureUpdate(BaseModel):
     review_outcome:  Optional[str]  = None
     review_notes:    Optional[str]  = None
     session_uid:     Optional[str]  = None  # review authorship — stored in feature_reviews, not on feature
-    skip_design:     Optional[bool] = None  # PM may override design requirement
     sprint_id:       Optional[int]  = None  # reassign to a different sprint
     expected_version: Optional[int] = None  # optimistic lock — if provided, update is rejected on mismatch
 
@@ -164,7 +162,6 @@ class FeatureOut(BaseModel):
     pr_url:          Optional[str]
     pr_number:       Optional[int]
     blocked_reason:  Optional[str]
-    skip_design:     bool = False
     version:         int = 0
     design_doc:      Optional[str] = None
     design_doc_path: Optional[str] = None

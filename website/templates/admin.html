@@ -2,21 +2,39 @@
 {% block title %}Admin — ProductFactory{% endblock %}
 {% block content %}
 
-<div class="page-header" style="margin-bottom:0">
-  <h1>Admin</h1>
+<div class="pf-page-header admin-page-header">
+  <div>
+    <h1>Admin</h1>
+    <p class="muted">Configure ProductFactory's runtime settings, integrations and accounts.</p>
+  </div>
 </div>
 
 {% if saved %}
-<div class="notice notice-blue admin-notice">✓ Settings saved.</div>
+<div class="notice notice-green admin-notice">
+  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+  Settings saved.
+</div>
 {% endif %}
 
 <!-- ── TAB BAR ──────────────────────────────────────────────── -->
 <div class="admin-tabs-wrap">
   <div class="tab-bar admin-tab-bar">
-    <button class="tab-btn active" onclick="adminTab('system',this)">⚙ System</button>
-    <button class="tab-btn"        onclick="adminTab('notif',this)">🔔 Notifications</button>
-    <button class="tab-btn"        onclick="adminTab('poller',this)">🤖 Poller &amp; Agent</button>
-    <button class="tab-btn"        onclick="adminTab('pms',this)">👤 PM Accounts</button>
+    <button class="tab-btn active" onclick="adminTab('system',this)">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      System
+    </button>
+    <button class="tab-btn" onclick="adminTab('notif',this)">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+      Notifications
+    </button>
+    <button class="tab-btn" onclick="adminTab('poller',this)">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4M8 16h.01M16 16h.01"/></svg>
+      Poller &amp; Agent
+    </button>
+    <button class="tab-btn" onclick="adminTab('pms',this)">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      PM Accounts
+    </button>
   </div>
 </div>
 
@@ -108,7 +126,7 @@
           <label for="a-cap">Global max sessions per day</label>
           <input type="number" id="a-cap" name="max_sessions_per_day"
                  value="{{ config.max_sessions_per_day or '' }}"
-                 placeholder="unlimited" min="1" style="width:140px">
+                 placeholder="unlimited" min="1" class="field-narrow">
           <p class="field-hint">Hard cap across all products. Per-product caps set on each product's Settings tab.</p>
         </div>
 
@@ -126,7 +144,7 @@
     <div class="settings-card-title">
       <span class="title-icon" style="background:var(--green-lt)">🤖</span>
       Poller &amp; Agent Settings
-      <span style="margin-left:8px;font-weight:400;font-size:12px;color:var(--slate)">Blank = use env var / built-in default</span>
+      <span class="settings-card-hint">Blank = use env var / built-in default</span>
     </div>
     <form method="post" action="/admin/settings/poller">
 
@@ -197,22 +215,22 @@
           <p class="field-hint">All features in a sprint are planned and implemented together in one session. This caps sprint size during AI planning.</p>
         </div>
 
-        <div class="form-group" style="grid-column:1/-1">
+        <div class="form-group form-group--full">
           <label class="toggle-label">
             <input type="checkbox" id="p-auto-merge" name="auto_merge_enabled" value="1"
                    {% if config.auto_merge_enabled %}checked{% endif %}>
             <span class="toggle-text">
               <strong>Auto Merge</strong>
-              <span class="field-hint" style="margin:0">When enabled, the Reviewer agent auto-merges PRs it marks as high-confidence approved. Low-confidence reviews stay open for human sign-off.</span>
+              <span class="field-hint field-hint--inline">When enabled, the Reviewer agent auto-merges PRs it marks as high-confidence approved. Low-confidence reviews stay open for human sign-off.</span>
             </span>
           </label>
         </div>
 
       </div>
 
-      <p class="admin-section-label" style="margin-top:24px">Agent Profile</p>
-      <div class="admin-fields-grid" style="margin-bottom:20px">
-        <div class="form-group" style="grid-column:1/-1">
+      <p class="admin-section-label admin-section-label--gap">Agent Profile</p>
+      <div class="admin-fields-grid admin-fields-grid--bottom-gap">
+        <div class="form-group form-group--full">
           <div class="profile-switcher">
             <label class="profile-option {% if config.agent_backend != 'claude' %}active{% endif %}">
               <input type="radio" name="agent_backend" value="ollama"
@@ -234,7 +252,7 @@
         </div>
       </div>
 
-      <div id="profile-ollama" class="admin-fields-grid" {% if config.agent_backend == 'claude' %}style="display:none"{% endif %}>
+      <div id="profile-ollama" class="admin-fields-grid {% if config.agent_backend == 'claude' %}hidden{% endif %}">
         <div class="form-group">
           <label for="p-ollama-host">Ollama host</label>
           <input type="text" id="p-ollama-host" name="ollama_host"
@@ -276,7 +294,7 @@
         </div>
       </div>
 
-      <div id="profile-claude" class="admin-fields-grid" {% if config.agent_backend != 'claude' %}style="display:none"{% endif %}>
+      <div id="profile-claude" class="admin-fields-grid {% if config.agent_backend != 'claude' %}hidden{% endif %}">
         <div class="form-group">
           <label for="p-claude-model">Claude model</label>
           <select id="p-claude-model" name="claude_model">
@@ -306,15 +324,18 @@
       </div>
     </form>
 
-    <div style="margin-top:1.5rem;padding-top:1.5rem;border-top:1px solid var(--border)">
-      <div class="settings-card-title" style="margin-bottom:.75rem">
-        <span class="title-icon">🔓</span> Poller Lock
+    <div class="admin-subsection">
+      <div class="settings-card-title">
+        <span class="title-icon">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+        </span>
+        Poller Lock
       </div>
-      <p class="muted" style="font-size:13px;margin-bottom:.75rem">
+      <p class="muted admin-subsection-desc">
         If the poller process crashed without releasing its lock, use this to forcefully clear it before restarting.
       </p>
-      <button type="button" class="btn btn-danger btn-sm" onclick="forceUnlockPoller()">Force-clear poller lock</button>
-      <span id="unlock-msg" style="margin-left:.75rem;font-size:13px"></span>
+      <button type="button" class="pf-btn pf-btn--sm pf-btn--danger" onclick="forceUnlockPoller()">Force-clear poller lock</button>
+      <span id="unlock-msg" class="admin-subsection-msg"></span>
     </div>
   </div>
 </div>
@@ -337,11 +358,11 @@
         {% for pm in pms %}
         <tr>
           <td>{{ pm.name }}</td>
-          <td><code style="font-size:12px">{{ pm.username }}</code></td>
+          <td><code class="pm-username">{{ pm.username }}</code></td>
           <td class="muted">{{ pm.created_at.strftime('%Y-%m-%d') }}</td>
           <td>
-            <form method="post" action="/admin/pms/{{ pm.id }}/delete" style="display:inline">
-              <button type="submit" class="btn btn-sm btn-danger"
+            <form method="post" action="/admin/pms/{{ pm.id }}/delete" class="inline-form">
+              <button type="submit" class="pf-btn pf-btn--sm pf-btn--danger"
                       onclick="return confirm('Remove {{ pm.username }}? They will lose access immediately.')">
                 Remove
               </button>
@@ -352,7 +373,7 @@
       </tbody>
     </table>
     {% else %}
-    <p class="muted" style="margin-bottom:18px">No PM accounts yet — add one below.</p>
+    <p class="muted pm-empty-msg">No PM accounts yet — add one below.</p>
     {% endif %}
 
     <details class="add-pm-details">

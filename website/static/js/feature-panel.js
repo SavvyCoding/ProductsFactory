@@ -71,7 +71,6 @@ function renderFeaturePanel(f, comments, changelog, labels, links) {
     <span class="badge badge-status-${f.status.toLowerCase()}">${escHtmlGlobal(f.status)}</span>
     ${f.feature_type !== 'feature' ? `<span class="type-badge type-${f.feature_type}">${f.feature_type}</span>` : ''}
     ${f.source === 'ai' ? '<span class="ai-badge">AI</span>' : ''}
-    ${f.skip_design ? '<span class="skip-design-badge">Skip design</span>' : ''}
     <span style="font-size:12px;color:var(--color-fg-muted);margin-left:auto">ID: ${f.id}</span>
   </div>`;
 

@@ -52,7 +52,6 @@ Your working directory is /workspace. Do NOT write application code.
      "description": "<Specific files and lines affected. What needs to change and why it matters.>",
      "feature_type": "chore",
      "priority": 40,
-     "skip_design": true,
      "source": "ai"
    }}
    ```

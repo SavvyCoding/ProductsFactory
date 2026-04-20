@@ -162,7 +162,6 @@ def create_and_approve_feature(product_id: int, name: str, desc: str) -> dict:
         "name": name,
         "description": desc,
         "source": "pm",
-        "skip_design": True,   # always skip design in test runs — coder goes straight to code
     })
     if not feat:
         sys.exit("[test_run] ERROR: could not create feature")
@@ -191,7 +190,6 @@ def fetch_batch_features(product_id: int, persona: str) -> list[dict]:
         data = pm_get(f"/api/features/approved?product_id={product_id}")
         if data:
             data = [f for f in data
-                    if f["status"] == "Approved" and not f.get("skip_design")]
     elif persona == "reviewer":
         data = pm_get(f"/api/products/{product_id}/features")
         if data:
