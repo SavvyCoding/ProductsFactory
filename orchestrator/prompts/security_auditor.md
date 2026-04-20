@@ -86,13 +86,13 @@ Your working directory is /workspace. All files must be written inside /workspac
    {{"label_id": <security_label_id>}}
    ```
 
-   d. **Create a bug-fix sub-sprint** so security bugs are worked on next.
-      First, get the feature's sprint_id from the PR's parent feature:
+   d. **Assign security bugs to the current sprint** so they are worked on next.
+      First, get the sprint_id from the PR's parent feature:
    ```bash
    FEATURE_DATA=$(curl -s {pm_api_url}/api/features/<original_feature_id>)
    SPRINT_ID=$(echo "$FEATURE_DATA" | grep -o '"sprint_id":[0-9]*' | cut -d: -f2)
    ```
-      Then create the sub-sprint (collects all bug IDs into one call):
+      Then assign to the active sprint (collects all bug IDs into one call):
    ```bash
    curl -s -X POST {pm_api_url}/api/sprints/bug-fix \
      -H "Content-Type: application/json" \
