@@ -40,7 +40,7 @@ REST API (used by poller — no auth on poller-only routes):
   GET  /api/features/overdue           — features past due_date
   PATCH /api/features/{id}/pm-status   — PM status change with transition validation
   DELETE /api/features/{id}            — delete a Rejected feature (PM only)
-  POST /api/features/reset_stuck       — reset Implementing→Approved if >2h (poller)
+  POST /api/features/reset_stuck       — reset Implementing→Approved if >45min (poller)
   POST /api/labels                     — create label
   GET  /api/products/{id}/labels       — list labels for product
   POST /api/sprints                    — create sprint
@@ -1642,7 +1642,7 @@ async def api_delete_feature(
 async def api_reset_stuck(db: AsyncSession = Depends(get_db)):
     """
     Poller calls this each cycle.
-    Resets features stuck in in-progress agent states for >2h back to their prior ready state.
+    Resets features stuck in in-progress agent states for >45min back to their prior ready state.
     """
     sys_cfg = await _get_system_config(db)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=_cfg(sys_cfg, "stuck_feature_timeout_hours"))

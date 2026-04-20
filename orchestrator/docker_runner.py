@@ -1230,9 +1230,12 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     # 5. Roll back any intermediate-state features with no PR evidence.
     #    Covers cases where agent claimed a feature but never finished it.
-    #    (Features with pr_number are left alone — they're already Reviewing.)
+    #    Also rolls back on exit_code==0 with no progress (claimed but never written session_result).
     if exit_code != 0:
         log.warning(f"Non-zero exit ({exit_code}) for {product['name']} — rolling back incomplete features")
+        _rollback_stuck_features(product["id"], persona)
+    elif attempted == 0 and persona in ("coder", "designer"):
+        log.info(f"Zero-progress exit for {product['name']} — rolling back claimed features")
         _rollback_stuck_features(product["id"], persona)
 
     # Post-session cleanup: return workspace to clean main so next session starts fresh
