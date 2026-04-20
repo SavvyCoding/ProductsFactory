@@ -84,7 +84,7 @@ Your working directory is /workspace. All files must be written inside /workspac
    BUG_ID=$(echo "$BUG_RESP" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
    ```
 
-   c. **Create a bug-fix sub-sprint** so the bugs are worked on next:
+   c. **Assign bugs to the current sprint** so they are worked on next:
    ```bash
    curl -s -X POST {pm_api_url}/api/sprints/bug-fix \
      -H "Content-Type: application/json" \
@@ -94,7 +94,7 @@ Your working directory is /workspace. All files must be written inside /workspac
        \"bug_feature_ids\": [$BUG_ID]
      }"
    ```
-   The API names the sub-sprint automatically (e.g. "Sprint 1.a"). If you filed multiple bugs, collect all IDs into the `bug_feature_ids` array.
+   This assigns bugs directly to the active sprint. If you filed multiple bugs, collect all IDs into the `bug_feature_ids` array.
 
 7. **Commit and push tests to the PR branch:**
    ```
