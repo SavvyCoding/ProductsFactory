@@ -389,7 +389,7 @@ def _heal_loop(product: dict, pattern: str) -> bool:
             non_terminal = [f for f in sprint_features if f.get("status") not in TERMINAL]
             if sprint_features and not non_terminal:
                 log.info(f"[loop-heal] All sprint features terminal - forcing sprint completion")
-                for gate in ("qa_passed", "security_clean", "retro_done"):
+                for gate in ("qa_passed", "security_clean"):
                     try:
                         client.post(f"/api/sprints/{sid}/sign-off", json={
                             "gate": gate, "value": True,
@@ -544,9 +544,15 @@ def determine_persona(product: dict) -> str:
             last_completed_sprint = None
             sprints_resp = client.get(f"/api/products/{product['id']}/sprints")
             if sprints_resp.status_code == 200:
-                completed = [s for s in sprints_resp.json() if s.get("status") == "completed"]
+                all_sprints = sprints_resp.json()
+                completed = [s for s in all_sprints if s.get("status") == "completed"]
                 if completed:
                     last_completed_sprint = max(completed, key=lambda s: s["id"])
+                # Retrospective priority check: any completed sprint with no retro doc yet
+                completed_no_retro = [s for s in completed if not s.get("retro_doc_path")]
+                if completed_no_retro:
+                    log.info(f"Completed sprint(s) missing retrospective: {[s['id'] for s in completed_no_retro]}")
+                    return "retrospective"
 
             # Fetch all product features
             feat_resp = client.get(f"/api/products/{product['id']}/features")
@@ -558,12 +564,16 @@ def determine_persona(product: dict) -> str:
                 sid = active_sprint.get("id")
                 sprint_features = [f for f in all_features if f.get("sprint_id") == sid]
 
-                # If all sprint features are terminal, complete the sprint
+                # If all sprint features are terminal, run retrospective then complete the sprint
                 non_terminal = [f for f in sprint_features if f.get("status") not in TERMINAL]
-                if not non_terminal:
-                    log.info(f"Active sprint {sid}: all features terminal - completing sprint")
+                if not non_terminal and sprint_features:
+                    retro_done = active_sprint.get("retro_doc_path")
+                    if not retro_done:
+                        log.info(f"Active sprint {sid}: all features terminal — running retrospective first")
+                        return "retrospective"
 
-                    # Single API call: auto-signs gates, generates release notes, activates next sprint
+                    # Retro is done — now complete the sprint
+                    log.info(f"Active sprint {sid}: retro complete, completing sprint")
                     complete_resp = client.post(f"/api/sprints/{sid}/force-complete")
                     if complete_resp.status_code == 200:
                         result = complete_resp.json()
@@ -571,16 +581,9 @@ def determine_persona(product: dict) -> str:
                         if result.get("release_notes"):
                             log.info(f"Release notes generated ({len(result['release_notes'])} chars)")
 
-                    # No timestamp manipulation needed — sprint's completed_at now sits
-                    # ahead of all last_{persona}_at values, so post-sprint personas
-                    # will be picked up automatically on the next cycle.
-
-                    # Clear workspace context for the new sprint
                     working_dir = product.get("working_dir")
                     if working_dir:
                         _clear_sprint_context(working_dir)
-
-                    # Next cycle will pick up the new active sprint
                     return None
 
                 # Approved features with no design doc -> product_planner writes the story
