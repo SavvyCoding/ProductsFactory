@@ -67,11 +67,12 @@ COPY website/      website/
 COPY templates/    templates/
 
 # -- Hermes plugin + skill + config + bootstrap --------------------------------
-# --chown on COPY avoids a giant recursive chown of /home/hermes (which contains
-# the Hermes venv — tens of thousands of files, minutes on Docker Desktop).
-COPY --chown=hermes:hermes deploy/hermes/config.yaml   /home/hermes/.hermes/config.yaml
-COPY --chown=hermes:hermes deploy/hermes/skills/       /home/hermes/.hermes/skills/
-COPY --chown=hermes:hermes deploy/hermes/plugins/      /home/hermes/.hermes/plugins/
+# /hermes-image-static/ is NOT under the volume mount — it always reflects
+# the image's content. bootstrap.sh syncs from here into HERMES_HOME at every
+# start, so image rebuilds are picked up on the next container restart.
+COPY --chown=hermes:hermes deploy/hermes/config.yaml   /hermes-image-static/config.yaml
+COPY --chown=hermes:hermes deploy/hermes/skills/       /hermes-image-static/skills/
+COPY --chown=hermes:hermes deploy/hermes/plugins/      /hermes-image-static/plugins/
 COPY                       deploy/hermes/bootstrap.sh  /usr/local/bin/bootstrap.sh
 
 RUN chmod +x /usr/local/bin/bootstrap.sh \

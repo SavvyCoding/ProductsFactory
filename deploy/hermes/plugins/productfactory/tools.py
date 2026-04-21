@@ -28,6 +28,8 @@ if "/app" not in sys.path:
 log = logging.getLogger("hermes.productfactory")
 
 PM_API_URL = os.environ.get("PM_API_URL", "http://pm-api:8080")
+PM_USERNAME = os.environ.get("PM_USERNAME", "admin")
+PM_PASSWORD = os.environ.get("PM_PASSWORD", "")
 REQUEST_TIMEOUT = 15
 
 
@@ -40,17 +42,34 @@ def _err(msg: str, **extra: Any) -> str:
 
 
 def _pm_client() -> httpx.Client:
-    return httpx.Client(base_url=PM_API_URL, timeout=REQUEST_TIMEOUT)
+    auth = (PM_USERNAME, PM_PASSWORD) if PM_PASSWORD else None
+    return httpx.Client(base_url=PM_API_URL, timeout=REQUEST_TIMEOUT, auth=auth)
 
 
 # ---------------------------------------------------------------------------
 # Generic PM API passthrough
 # ---------------------------------------------------------------------------
 
+import re as _re
+_FEATURE_ID_RE  = _re.compile(r"^/api/features/\d+$")
+_SPRINT_ID_RE   = _re.compile(r"^/api/sprints/\d+$")
+
+
 def pm_api(args: dict, **kwargs) -> str:
     method = args.get("method", "GET")
     path = args.get("path", "")
     body = args.get("body")
+
+    # Guard: if the model tries to GET individual features/sprints, return a
+    # helpful refusal to avoid blowing up the context window.
+    if method.upper() == "GET":
+        if _FEATURE_ID_RE.match(path):
+            return json.dumps({"ok": False, "error":
+                "Use get_features(product_id) instead of fetching individual features."})
+        if _SPRINT_ID_RE.match(path):
+            return json.dumps({"ok": False, "error":
+                "Use get_active_sprint(product_id) or get_sprints(product_id) instead."})
+
     try:
         with _pm_client() as client:
             resp = client.request(method.upper(), path, json=body)
@@ -69,27 +88,61 @@ def _pm(method: str, path: str, body: dict | None = None) -> str:
     return pm_api({"method": method, "path": path, "body": body})
 
 
+_PRODUCT_KEEP = {"id", "name", "status", "working_dir", "github_repo", "tech_stack",
+                 "run_now", "run_trainer_now", "quiet_hours_start", "quiet_hours_end",
+                 "daily_session_cap", "last_run_at", "config", "type"}
+_FEATURE_KEEP = {"id", "product_id", "sprint_id", "name", "status", "feature_type",
+                 "design_doc_path", "pr_number", "pr_url", "fix_attempts"}
+_SPRINT_KEEP  = {"id", "product_id", "phase_id", "name", "status", "goal",
+                 "completed_at", "retro_doc_path", "dod_status"}
+
+
+def _slim(obj: Any, keep: set) -> Any:
+    if isinstance(obj, list):
+        return [_slim(x, keep) for x in obj]
+    if isinstance(obj, dict):
+        return {k: v for k, v in obj.items() if k in keep}
+    return obj
+
+
+def _slim_response(raw: str, keep: set) -> str:
+    try:
+        parsed = json.loads(raw)
+        data = parsed.get("data") if isinstance(parsed, dict) else parsed
+        slimmed = _slim(data, keep)
+        if isinstance(parsed, dict):
+            parsed["data"] = slimmed
+            return json.dumps(parsed)
+        return json.dumps(slimmed)
+    except Exception:
+        return raw
+
+
 def get_products(args: dict, **kwargs) -> str:
-    return _pm("GET", "/api/products")
+    return _slim_response(_pm("GET", "/api/products"), _PRODUCT_KEEP)
 
 
 def get_active_sprint(args: dict, **kwargs) -> str:
     product_id = args.get("product_id")
-    return _pm("GET", f"/api/products/{product_id}/sprints/active")
+    return _slim_response(_pm("GET", f"/api/products/{product_id}/sprints/active"), _SPRINT_KEEP)
 
 
 def get_sprints(args: dict, **kwargs) -> str:
     product_id = args.get("product_id")
-    return _pm("GET", f"/api/products/{product_id}/sprints")
+    return _slim_response(_pm("GET", f"/api/products/{product_id}/sprints"), _SPRINT_KEEP)
 
 
 def get_features(args: dict, **kwargs) -> str:
     product_id = args.get("product_id")
-    return _pm("GET", f"/api/products/{product_id}/features")
+    return _slim_response(_pm("GET", f"/api/products/{product_id}/features"), _FEATURE_KEEP)
+
+
+_SYSCFG_KEEP = {"auto_merge_enabled", "max_open_prs", "stuck_feature_timeout_hours",
+                "poll_interval", "session_timeout_minutes", "stale_threshold_minutes"}
 
 
 def get_system_config(args: dict, **kwargs) -> str:
-    return _pm("GET", "/api/system-config")
+    return _slim_response(_pm("GET", "/api/system-config"), _SYSCFG_KEEP)
 
 
 def set_feature_status(args: dict, **kwargs) -> str:

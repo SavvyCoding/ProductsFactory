@@ -106,6 +106,8 @@ services:
       # can mount it via the matching host path.
       TMPDIR:             /hermes-staging
       AGENT_IMAGE:        ${AGENT_IMAGE:-productfactory-agent}
+      PM_USERNAME:        ${PM_USERNAME:-admin}
+      PM_PASSWORD:        ${PM_PASSWORD:?PM_PASSWORD must be set in .env}
       SESSION_TIMEOUT_MINUTES: ${SESSION_TIMEOUT_MINUTES:-90}
       STALE_THRESHOLD_MINUTES: ${STALE_THRESHOLD_MINUTES:-45}
       MAX_OPEN_PRS:       ${MAX_OPEN_PRS:-3}

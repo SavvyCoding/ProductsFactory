@@ -718,6 +718,20 @@ def _reset_workspace(working_dir: str, product_name: str) -> None:
     if not (wd / ".git").exists():
         return  # Not a git repo yet — skip
 
+    # Fix permissions on .git/logs so the current user can append (agent containers
+    # run as uid 1001, Hermes as uid 999 — files end up 644 owned by the agent).
+    logs_dir = wd / ".git" / "logs"
+    if logs_dir.exists():
+        try:
+            import stat as _stat
+            for p in logs_dir.rglob("*"):
+                try:
+                    p.chmod(p.stat().st_mode | _stat.S_IWUSR | _stat.S_IWGRP | _stat.S_IWOTH)
+                except OSError:
+                    pass
+        except Exception:
+            pass
+
     def _run(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
         """Run a git command with a hard timeout so network hangs don't freeze the poller."""
         try:
