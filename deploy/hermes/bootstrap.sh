@@ -5,7 +5,16 @@
 set -euo pipefail
 
 HERMES_HOME="${HERMES_HOME:-/home/hermes/.hermes}"
-mkdir -p "$HERMES_HOME/cron"
+mkdir -p "$HERMES_HOME/cron" "$HERMES_HOME/logs"
+
+# Sync image plugins/skills/config into the HERMES_HOME volume so that
+# rebuilding the image is picked up on the next container restart without
+# needing to wipe the volume (which would lose cron jobs and session history).
+if [ -d /hermes-image-static ]; then
+    cp -rf /hermes-image-static/plugins/ "$HERMES_HOME/"
+    cp -rf /hermes-image-static/skills/  "$HERMES_HOME/"
+    cp -f  /hermes-image-static/config.yaml "$HERMES_HOME/config.yaml"
+fi
 
 # Staging dir for temp Claude creds + GH token files. This is bind-mounted
 # from the host at the same path, so `docker run -v /hermes-staging/xxx:...`

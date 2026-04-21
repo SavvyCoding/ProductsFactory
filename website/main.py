@@ -2090,14 +2090,19 @@ async def api_plan_sprints(
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    # Block re-planning if any sprint has already completed — history is immutable.
-    completed_check = await db.execute(
-        select(Sprint.id).where(Sprint.product_id == product_id, Sprint.status == "completed").limit(1)
+    # Block re-planning if there are any active or planned sprints — those already
+    # have features assigned and changing them would conflict. Completed sprints are
+    # fine; we just create new phases/sprints for the unsprinted features.
+    active_check = await db.execute(
+        select(Sprint.id).where(
+            Sprint.product_id == product_id,
+            Sprint.status.in_(("active", "planned")),
+        ).limit(1)
     )
-    if completed_check.scalar_one_or_none() is not None:
+    if active_check.scalar_one_or_none() is not None:
         raise HTTPException(
             status_code=409,
-            detail="Cannot re-plan: one or more sprints have already completed. Add new features and assign them to planned sprints instead.",
+            detail="Cannot re-plan: an active or planned sprint exists. Complete it first, or assign features to the planned sprint.",
         )
 
     # Read max features per sprint from DB config
@@ -2163,15 +2168,16 @@ async def api_plan_sprints(
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"LLM error: {e}")
 
-    # Delete existing phases, sprints, and clear feature sprint assignments
-    await db.execute(
-        Feature.__table__.update()
-        .where(Feature.product_id == product_id, Feature.sprint_id.isnot(None))
-        .values(sprint_id=None)
+    # Count existing phases so new ones get sequential order values.
+    existing_phase_count_result = await db.execute(
+        select(func.count()).select_from(Phase).where(Phase.product_id == product_id)
     )
-    await db.execute(Sprint.__table__.delete().where(Sprint.product_id == product_id))
-    await db.execute(Phase.__table__.delete().where(Phase.product_id == product_id))
-    await db.flush()
+    phase_order_offset = existing_phase_count_result.scalar() or 0
+
+    # Check whether there are any non-completed sprints (active/planned) — they
+    # would conflict with a fresh plan. If so, we already blocked above; this is
+    # just a belt-and-suspenders flush before creating new phases/sprints.
+    # We do NOT delete completed sprints or their features — history is immutable.
 
     # Create phases → sprints → assign features
     phases_created = 0
@@ -2184,8 +2190,8 @@ async def api_plan_sprints(
             product_id=product_id,
             name=ph.get("phase_name", f"Phase {phase_idx + 1}"),
             goal=ph.get("phase_goal", ""),
-            order=phase_idx,
-            status="active" if phase_idx == 0 else "planned",
+            order=phase_order_offset + phase_idx,
+            status="active" if (phase_order_offset == 0 and phase_idx == 0) else "planned",
         )
         db.add(phase)
         await db.flush()
