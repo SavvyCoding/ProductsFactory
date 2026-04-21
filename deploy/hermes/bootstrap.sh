@@ -15,12 +15,16 @@ STAGING="${HERMES_STAGING_CONTAINER:-/hermes-staging}"
 mkdir -p "$STAGING" || true
 
 # Only register cron jobs if none exist yet (idempotent across container restarts).
+# Hermes's duration parser takes m/h/d only — use `1m` for 60-second cycles.
 if [ ! -s "$HERMES_HOME/cron/jobs.json" ] || ! grep -q "orchestrate" "$HERMES_HOME/cron/jobs.json" 2>/dev/null; then
     echo "[bootstrap] Registering orchestration cron job..."
-    hermes cron create "every 60s" "Run the orchestrate skill to advance ProductFactory sprints" || {
-        echo "[bootstrap] hermes cron create failed — check that the gateway can accept CLI commands."
-        exit 1
-    }
+    if hermes cron create "every 1m" "Run the ProductFactory orchestration cycle" \
+          --skill orchestrate --name "Orchestrate"; then
+        echo "[bootstrap] Cron registered (skill=orchestrate, toolset=productfactory)."
+    else
+        echo "[bootstrap] hermes cron create failed — gateway may still be starting, retrying next cycle."
+        # Not fatal — the gateway will start regardless; we'll register on next restart.
+    fi
 fi
 
 # Attempt initial lock acquisition — if another Hermes already holds it, exit
@@ -37,5 +41,18 @@ elif [ "$LOCK_STATUS" != "200" ] && [ "$LOCK_STATUS" != "201" ]; then
     echo "[bootstrap] Unexpected lock response: $LOCK_STATUS — continuing anyway (PM API may still be starting)."
 fi
 
+# Launch the web dashboard in the background (port 9119).
+# --insecure is required to bind to 0.0.0.0 so the host can reach it.
+# No API keys are actually stored in this deployment (local Ollama only), so
+# the "DANGEROUS" warning from the flag name is benign in our case.
+echo "[bootstrap] Starting Hermes dashboard on :9119..."
+hermes dashboard --host 0.0.0.0 --port 9119 --no-open --insecure \
+    > /home/hermes/.hermes/logs/dashboard.log 2>&1 &
+DASHBOARD_PID=$!
+echo "[bootstrap] Dashboard PID=$DASHBOARD_PID → http://localhost:9119"
+
+# Forward SIGTERM/SIGINT to the dashboard so docker stop is clean.
+trap "kill $DASHBOARD_PID 2>/dev/null || true" TERM INT
+
 # Hand off to the gateway daemon. This blocks; Docker restart policy handles crashes.
-exec hermes gateway run
+exec hermes gateway

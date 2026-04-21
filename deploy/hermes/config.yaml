@@ -1,26 +1,37 @@
 # Hermes runtime configuration for the ProductFactory orchestrator.
 # Uses the host's local Ollama server — zero API cost, fully offline.
-# Override the model name in .env via HERMES_MODEL to experiment with other
-# Gemma/Qwen/Llama variants without rebuilding the image.
+#
+# Format matches what `hermes model` writes when you save a custom
+# provider: `model:` is a DICT (not a string), with provider/base_url/api_key
+# at that nested level. `custom_providers:` is the durable registry.
 
-provider: ollama
-model: ${HERMES_MODEL:-gemma4:26b}
-# Ollama runs on the Windows/Linux host; Hermes reaches it via host-gateway.
-# docker-compose passes OLLAMA_HOST into the container (see docker-compose.yml).
-base_url: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+model:
+  default: qwen3-coder-64k:30b
+  provider: custom
+  base_url: http://host.docker.internal:11434/v1
+  api_key: ollama              # required field; Ollama ignores the value
+  api_mode: chat_completions
 
-# Hermes's own terminal (used for tool execution, not agent work).
+custom_providers:
+  - name: local-ollama
+    base_url: http://host.docker.internal:11434/v1
+    api_key: ollama
+    api_mode: chat_completions
+    model: qwen3-coder-64k:30b
+
+toolsets:
+  - hermes-cli
+  - productfactory
+
+# Plugins are opt-in — must be explicitly allow-listed here.
+# (hermes plugins enable <name> writes to this list; baking it in makes
+# the state survive volume resets + image rebuilds.)
+plugins:
+  enabled:
+    - productfactory
+
 terminal:
   backend: local
 
-# ProductFactory plugin directory is bind-mounted into the container at
-# /home/hermes/.hermes/plugins/productfactory
-plugins:
-  - productfactory
-
-# Each 60s poll cycle is bounded — we don't want open-ended reasoning.
 context:
   max_iterations: 30
-
-# Reasoning depth — "low" keeps latency down; the skill is prescriptive.
-reasoning_effort: low

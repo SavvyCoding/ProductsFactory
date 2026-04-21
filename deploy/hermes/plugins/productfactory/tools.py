@@ -1,15 +1,11 @@
 """
 Tool handlers for the ProductFactory Hermes plugin.
 
-Every handler returns a JSON string (per Hermes convention). Errors are caught
-and returned as {"error": "message"} — handlers never raise.
+Hermes dispatches tools as: handler(args: dict, **kwargs) where args is the
+JSON argument dict and kwargs may include task_id, session_id, etc.
 
-Handlers wrap existing ProductFactory modules:
-- docker_runner.run_claude_in_docker  (launch_session)
-- heartbeat.check_stale_sessions      (check_stale_sessions, kill_stale_container)
-- reconcile logic in docker_runner/poller (reconcile_prs)
-- PM REST API                         (pm_api, get_*, set_feature_status, alerts)
-- GitHub API                          (github_list_prs, github_merge_pr)
+Every handler returns a JSON string. Errors are caught and returned as
+{"error": "message"} — handlers never raise.
 """
 
 from __future__ import annotations
@@ -17,10 +13,17 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
 import subprocess
+import sys
 from typing import Any
 
 import httpx
+
+# The orchestrator package lives at /app/orchestrator inside the Hermes container.
+# Insert /app so lazy imports (launch_session, check_stale_sessions, etc.) resolve.
+if "/app" not in sys.path:
+    sys.path.insert(0, "/app")
 
 log = logging.getLogger("hermes.productfactory")
 
@@ -44,7 +47,10 @@ def _pm_client() -> httpx.Client:
 # Generic PM API passthrough
 # ---------------------------------------------------------------------------
 
-def pm_api(method: str, path: str, body: dict | None = None) -> str:
+def pm_api(args: dict, **kwargs) -> str:
+    method = args.get("method", "GET")
+    path = args.get("path", "")
+    body = args.get("body")
     try:
         with _pm_client() as client:
             resp = client.request(method.upper(), path, json=body)
@@ -58,42 +64,58 @@ def pm_api(method: str, path: str, body: dict | None = None) -> str:
         return _err(f"pm_api {method} {path} failed: {e}")
 
 
-def get_products() -> str:
-    return pm_api("GET", "/api/products")
+def _pm(method: str, path: str, body: dict | None = None) -> str:
+    """Internal helper for simple PM calls."""
+    return pm_api({"method": method, "path": path, "body": body})
 
 
-def get_active_sprint(product_id: int) -> str:
-    return pm_api("GET", f"/api/products/{product_id}/sprints/active")
+def get_products(args: dict, **kwargs) -> str:
+    return _pm("GET", "/api/products")
 
 
-def get_sprints(product_id: int) -> str:
-    return pm_api("GET", f"/api/products/{product_id}/sprints")
+def get_active_sprint(args: dict, **kwargs) -> str:
+    product_id = args.get("product_id")
+    return _pm("GET", f"/api/products/{product_id}/sprints/active")
 
 
-def get_features(product_id: int) -> str:
-    return pm_api("GET", f"/api/products/{product_id}/features")
+def get_sprints(args: dict, **kwargs) -> str:
+    product_id = args.get("product_id")
+    return _pm("GET", f"/api/products/{product_id}/sprints")
 
 
-def get_system_config() -> str:
-    return pm_api("GET", "/api/system-config")
+def get_features(args: dict, **kwargs) -> str:
+    product_id = args.get("product_id")
+    return _pm("GET", f"/api/products/{product_id}/features")
 
 
-def set_feature_status(feature_id: int, status: str, pr_number: int | None = None) -> str:
+def get_system_config(args: dict, **kwargs) -> str:
+    return _pm("GET", "/api/system-config")
+
+
+def set_feature_status(args: dict, **kwargs) -> str:
+    feature_id = args.get("feature_id")
+    status = args.get("status")
+    pr_number = args.get("pr_number")
     body: dict[str, Any] = {"status": status}
     if pr_number is not None:
         body["pr_number"] = pr_number
-    return pm_api("PATCH", f"/api/features/{feature_id}", body)
+    return _pm("PATCH", f"/api/features/{feature_id}", body)
 
 
-def reset_stuck_features() -> str:
-    return pm_api("POST", "/api/features/reset_stuck")
+def reset_stuck_features(args: dict, **kwargs) -> str:
+    return _pm("POST", "/api/features/reset_stuck")
 
 
-def poller_heartbeat() -> str:
-    return pm_api("POST", "/api/poller/heartbeat")
+def poller_heartbeat(args: dict, **kwargs) -> str:
+    pid = os.getpid()
+    host = f"hermes-{socket.gethostname()}"
+    return _pm("POST", "/api/poller/heartbeat", {"pid": pid, "host": host})
 
 
-def alert(severity: str, message: str, product_name: str | None = None) -> str:
+def alert(args: dict, **kwargs) -> str:
+    severity = args.get("severity", "info")
+    message = args.get("message", "")
+    product_name = args.get("product_name")
     try:
         from orchestrator.alerts import send_alert  # type: ignore
         send_alert(severity, message, product_name)
@@ -106,14 +128,13 @@ def alert(severity: str, message: str, product_name: str | None = None) -> str:
 # Docker / session management
 # ---------------------------------------------------------------------------
 
-def launch_session(product_id: int, persona: str) -> str:
+def launch_session(args: dict, **kwargs) -> str:
     """
     Spawn the agent Docker container for the given product+persona. Blocks until
     it exits. Returns exit_code and features_pushed count.
-
-    Wraps docker_runner.run_claude_in_docker — all the heavy lifting (feature
-    claiming, git reset, creds mount, live-poll, post-coder chain) lives there.
     """
+    product_id = args.get("product_id")
+    persona = args.get("persona")
     try:
         from orchestrator.docker_runner import run_claude_in_docker  # type: ignore
         with _pm_client() as client:
@@ -122,15 +143,14 @@ def launch_session(product_id: int, persona: str) -> str:
             return _err(f"product {product_id} not found", status=product_resp.status_code)
         product = product_resp.json()
         exit_code = run_claude_in_docker(product, persona=persona)
-        # features_pushed/attempted counts are recorded in DB by docker_runner;
-        # surface the exit code only — Hermes can look up session details if needed.
         return _ok({"exit_code": exit_code, "product_id": product_id, "persona": persona})
     except Exception as e:
         log.exception("launch_session failed")
         return _err(f"launch_session crashed: {e}")
 
 
-def kill_stale_container(product_id: int) -> str:
+def kill_stale_container(args: dict, **kwargs) -> str:
+    product_id = args.get("product_id")
     try:
         result = subprocess.run(
             ["docker", "ps", "--filter", f"name=pf-{product_id}-", "--format", "{{.Names}}"],
@@ -145,12 +165,7 @@ def kill_stale_container(product_id: int) -> str:
         return _err(f"kill_stale_container failed: {e}")
 
 
-def check_stale_sessions() -> str:
-    """
-    For every ready product, kill the agent container if progress.md hasn't been
-    pushed to GitHub in >STALE_THRESHOLD_MINUTES. Only fires when a container is
-    actually running (see heartbeat._container_running).
-    """
+def check_stale_sessions(args: dict, **kwargs) -> str:
     try:
         from orchestrator.heartbeat import check_stale_sessions as _check  # type: ignore
         with _pm_client() as client:
@@ -165,16 +180,11 @@ def check_stale_sessions() -> str:
 # PR reconciliation (per-product)
 # ---------------------------------------------------------------------------
 
-def reconcile_prs(product_id: int | None) -> str:
-    """
-    Reconcile merged + in-flight PRs for one product. Mirrors the poller's
-    reconcile_merged_prs + reconcile_in_flight_prs called together. Pass null
-    to run reset_stuck_features only.
-    """
+def reconcile_prs(args: dict, **kwargs) -> str:
+    product_id = args.get("product_id")
     try:
         if product_id is None:
-            return reset_stuck_features()
-        # Import here to avoid hard dependency at plugin load time.
+            return reset_stuck_features({})
         from orchestrator.github_client import reconcile_merged_prs, reconcile_in_flight_prs  # type: ignore
         with _pm_client() as client:
             product_resp = client.get(f"/api/products/{product_id}")
@@ -194,7 +204,6 @@ def reconcile_prs(product_id: int | None) -> str:
 # ---------------------------------------------------------------------------
 
 def _github_context(product_id: int) -> tuple[str, str] | None:
-    """Return (repo_slug, github_pat) or None if unavailable."""
     try:
         with _pm_client() as client:
             product = client.get(f"/api/products/{product_id}").json()
@@ -209,7 +218,9 @@ def _github_context(product_id: int) -> tuple[str, str] | None:
         return None
 
 
-def github_list_prs(product_id: int, state: str = "open") -> str:
+def github_list_prs(args: dict, **kwargs) -> str:
+    product_id = args.get("product_id")
+    state = args.get("state", "open")
     ctx = _github_context(product_id)
     if ctx is None:
         return _err("github context unavailable (missing repo or PAT)")
@@ -227,7 +238,9 @@ def github_list_prs(product_id: int, state: str = "open") -> str:
         return _err(f"github_list_prs failed: {e}")
 
 
-def github_merge_pr(product_id: int, pr_number: int) -> str:
+def github_merge_pr(args: dict, **kwargs) -> str:
+    product_id = args.get("product_id")
+    pr_number = args.get("pr_number")
     ctx = _github_context(product_id)
     if ctx is None:
         return _err("github context unavailable")

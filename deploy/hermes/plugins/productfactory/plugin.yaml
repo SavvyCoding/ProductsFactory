@@ -1,0 +1,4 @@
+name: productfactory
+version: 0.1.0
+description: "ProductFactory orchestration tools — drives sprint pipelines by spawning Docker agent containers via the PM REST API."
+author: "ProductFactory"
