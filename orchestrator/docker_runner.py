@@ -718,19 +718,20 @@ def _reset_workspace(working_dir: str, product_name: str) -> None:
     if not (wd / ".git").exists():
         return  # Not a git repo yet — skip
 
-    # Fix permissions on .git/logs so the current user can append (agent containers
-    # run as uid 1001, Hermes as uid 999 — files end up 644 owned by the agent).
-    logs_dir = wd / ".git" / "logs"
-    if logs_dir.exists():
-        try:
-            import stat as _stat
-            for p in logs_dir.rglob("*"):
-                try:
-                    p.chmod(p.stat().st_mode | _stat.S_IWUSR | _stat.S_IWGRP | _stat.S_IWOTH)
-                except OSError:
-                    pass
-        except Exception:
-            pass
+    # Fix workspace + .git/log permissions so Hermes (uid 999) can reset files that
+    # agent containers (uid 1001) created.  p.chmod() from uid 999 fails on alien-owned
+    # files, so we run a throwaway alpine container as root via the Docker socket.
+    try:
+        host_base = os.environ.get("PRODUCTS_BASE_DIR", "").rstrip("/\\")
+        rel = str(wd.relative_to("/products"))
+        host_wd_path = f"{host_base}/{rel}"
+        subprocess.run(
+            ["docker", "run", "--rm", "-v", f"{host_wd_path}:/ws",
+             "alpine", "sh", "-c", "chmod -R a+w /ws 2>/dev/null || true"],
+            capture_output=True, timeout=30,
+        )
+    except Exception:
+        pass
 
     def _run(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
         """Run a git command with a hard timeout so network hangs don't freeze the poller."""

@@ -119,7 +119,26 @@ def _slim_response(raw: str, keep: set) -> str:
 
 
 def get_products(args: dict, **kwargs) -> str:
-    return _slim_response(_pm("GET", "/api/products"), _PRODUCT_KEEP)
+    raw = _slim_response(_pm("GET", "/api/products"), _PRODUCT_KEEP)
+    # Augment each ready product with its active_sprint_id so the orchestrator
+    # can call check-dod without a separate round-trip.
+    try:
+        parsed = json.loads(raw)
+        products = parsed.get("data") if isinstance(parsed, dict) else parsed
+        if isinstance(products, list):
+            with _pm_client() as client:
+                for p in products:
+                    if p.get("status") in ("ready", "running"):
+                        r = client.get(f"/api/products/{p['id']}/sprints/active")
+                        sprint = r.json() if r.is_success else None
+                        p["active_sprint_id"] = sprint["id"] if sprint else None
+            if isinstance(parsed, dict):
+                parsed["data"] = products
+                return json.dumps(parsed)
+            return json.dumps(products)
+    except Exception:
+        pass
+    return raw
 
 
 def get_active_sprint(args: dict, **kwargs) -> str:
@@ -134,7 +153,22 @@ def get_sprints(args: dict, **kwargs) -> str:
 
 def get_features(args: dict, **kwargs) -> str:
     product_id = args.get("product_id")
-    return _slim_response(_pm("GET", f"/api/products/{product_id}/features"), _FEATURE_KEEP)
+    raw = _slim_response(_pm("GET", f"/api/products/{product_id}/features"), _FEATURE_KEEP)
+    # Only return non-terminal features — terminal ones (Pushed/Deferred/Rejected/Reverted)
+    # are irrelevant to orchestration decisions and bloat the context window.
+    try:
+        parsed = json.loads(raw)
+        data = parsed.get("data") if isinstance(parsed, dict) else parsed
+        if isinstance(data, list):
+            _TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted"}
+            data = [f for f in data if f.get("status") not in _TERMINAL]
+            if isinstance(parsed, dict):
+                parsed["data"] = data
+                return json.dumps(parsed)
+            return json.dumps(data)
+    except Exception:
+        pass
+    return raw
 
 
 _SYSCFG_KEEP = {"auto_merge_enabled", "max_open_prs", "stuck_feature_timeout_hours",
@@ -143,6 +177,161 @@ _SYSCFG_KEEP = {"auto_merge_enabled", "max_open_prs", "stuck_feature_timeout_hou
 
 def get_system_config(args: dict, **kwargs) -> str:
     return _slim_response(_pm("GET", "/api/system-config"), _SYSCFG_KEEP)
+
+
+def run_cycle(args: dict, **kwargs) -> str:
+    """
+    Run a complete orchestration cycle in Python:
+    1. Heartbeat (returns 409_stop if lock stolen)
+    2. Kill stale containers
+    3. Reset stuck features
+    4. DoD checks + PR reconciliation for all ready products
+    5. Find next product + determine action
+    6. If action==launch_session: return {action, product_id, persona}
+    7. If action==plan_sprints: call plan-sprints and return {action: "exit"}
+    8. If nothing to do: return {action: "exit"}
+    """
+    try:
+        # 1. Heartbeat
+        hb = json.loads(poller_heartbeat({}, **kwargs))
+        if not hb.get("ok") or hb.get("status") == 409:
+            return _ok({"action": "409_stop", "reason": "Lock stolen"})
+
+        # 2. Stale containers
+        check_stale_sessions({}, **kwargs)
+
+        # 3. Reset stuck
+        reset_stuck_features({}, **kwargs)
+
+        # 4. Per-product preflight
+        products_raw = json.loads(get_products({}, **kwargs))
+        products_data = products_raw.get("data") if isinstance(products_raw, dict) else products_raw
+        products = products_data if isinstance(products_data, list) else []
+        ready = [p for p in products if p.get("status") in ("ready", "running")]
+
+        with _pm_client() as client:
+            for p in ready:
+                sid = p.get("active_sprint_id")
+                if sid:
+                    try:
+                        client.post(f"/api/sprints/{sid}/check-dod")
+                    except Exception:
+                        pass
+
+        for p in ready:
+            try:
+                reconcile_prs({"product_id": p["id"]}, **kwargs)
+            except Exception:
+                pass
+
+        # 5. Find next work
+        # Priority 1: reviewer work across all products
+        reviewer_raw = json.loads(_pm("GET", "/api/features/next-for-persona?persona=reviewer"))
+        reviewer_feature = (reviewer_raw.get("data") if isinstance(reviewer_raw, dict) else reviewer_raw)
+        if reviewer_feature and isinstance(reviewer_feature, dict):
+            pid = reviewer_feature.get("product_id")
+            if any(p["id"] == pid and p.get("status") in ("ready", "running") for p in products):
+                return _ok({"action": "launch_session", "product_id": pid, "persona": "reviewer"})
+
+        # Priority 2: round-robin product
+        next_raw = json.loads(_pm("GET", "/api/products/next"))
+        next_product = (next_raw.get("data") if isinstance(next_raw, dict) else next_raw)
+        if not next_product or not isinstance(next_product, dict):
+            return _ok({"action": "exit", "reason": "No products need work"})
+
+        product_id = next_product["id"]
+        action_raw = json.loads(determine_next_action({"product_id": product_id}, **kwargs))
+        action_data = action_raw.get("data") if isinstance(action_raw, dict) else action_raw
+        if not isinstance(action_data, dict):
+            return _ok({"action": "exit", "reason": "determine_next_action returned nothing"})
+
+        action = action_data.get("action")
+        if action == "plan_sprints":
+            _pm("POST", f"/api/products/{product_id}/plan-sprints")
+            return _ok({"action": "exit", "reason": f"Planned sprints for product {product_id}"})
+        elif action == "launch_session":
+            persona = action_data.get("persona", "planner")
+            # Clear run_now before launching
+            _pm("PATCH", f"/api/products/{product_id}", {"run_now": False})
+            return _ok({"action": "launch_session", "product_id": product_id, "persona": persona,
+                        "reason": action_data.get("reason", "")})
+        else:
+            return _ok({"action": "exit", "reason": action_data.get("reason", "nothing to do")})
+
+    except Exception as e:
+        log.exception("run_cycle failed")
+        return _err(f"run_cycle crashed: {e}")
+
+
+def determine_next_action(args: dict, **kwargs) -> str:
+    """
+    Deterministic persona decision tree for a product.
+    Returns {"action": "launch_session"|"plan_sprints"|"exit", "persona": ..., "reason": ...}.
+    Call this after preflight to get the exact action to take.
+    """
+    product_id = args.get("product_id")
+    _TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted"}
+    _IN_AGENT = {"Designing", "Implementing", "Reviewing"}
+
+    try:
+        with _pm_client() as client:
+            features_resp  = client.get(f"/api/products/{product_id}/features")
+            sprint_resp    = client.get(f"/api/products/{product_id}/sprints/active")
+            syscfg_resp    = client.get("/api/system-config")
+            prs_resp       = client.get(f"/api/products/{product_id}/github/prs?state=open")
+
+        features = features_resp.json() if features_resp.is_success else []
+        active_sprint = sprint_resp.json() if sprint_resp.is_success else None
+        sys_cfg = syscfg_resp.json() if syscfg_resp.is_success else {}
+        prs = prs_resp.json() if prs_resp.is_success else []
+        max_prs = sys_cfg.get("max_open_prs", 3)
+
+        # No active sprint
+        if active_sprint is None:
+            unsprinted = [f for f in features
+                          if f.get("status") == "Approved" and f.get("sprint_id") is None]
+            if unsprinted:
+                return _ok({"action": "plan_sprints", "product_id": product_id,
+                            "reason": f"{len(unsprinted)} Approved features have no sprint; call pm_api POST /api/products/{product_id}/plan-sprints"})
+            return _ok({"action": "launch_session", "persona": "planner",
+                        "product_id": product_id, "reason": "No active sprint, no approved features — planner generates backlog"})
+
+        sid = active_sprint["id"]
+        sprint_features = [f for f in features if f.get("sprint_id") == sid]
+        non_terminal = [f for f in sprint_features if f.get("status") not in _TERMINAL]
+
+        if not non_terminal:
+            return _ok({"action": "exit", "reason": "All sprint features terminal; retrospective handles this via priority 3"})
+
+        reviewing = [f for f in non_terminal if f.get("status") == "Reviewing" and f.get("pr_number")]
+        if reviewing:
+            return _ok({"action": "launch_session", "persona": "reviewer",
+                        "product_id": product_id, "reason": f"{len(reviewing)} features in Reviewing with PR"})
+
+        approved_no_design = [f for f in non_terminal
+                              if f.get("status") == "Approved" and not f.get("design_doc_path")]
+        if approved_no_design:
+            return _ok({"action": "launch_session", "persona": "product_planner",
+                        "product_id": product_id, "reason": f"{len(approved_no_design)} Approved features need design docs"})
+
+        codeable = [f for f in non_terminal
+                    if f.get("status") in ("Designed",)
+                    or (f.get("status") == "Approved" and f.get("design_doc_path"))]
+        if codeable:
+            open_pr_count = len(prs) if isinstance(prs, list) else 0
+            if open_pr_count >= max_prs:
+                return _ok({"action": "exit", "reason": f"PR gate: {open_pr_count} open PRs >= max {max_prs}"})
+            return _ok({"action": "launch_session", "persona": "coder",
+                        "product_id": product_id, "reason": f"{len(codeable)} features ready to code"})
+
+        in_agent_stuck = [f for f in non_terminal if f.get("status") in _IN_AGENT]
+        if in_agent_stuck:
+            return _ok({"action": "exit", "reason": f"{len(in_agent_stuck)} features stuck in agent state; reset_stuck will handle"})
+
+        return _ok({"action": "exit", "reason": "No actionable work found"})
+
+    except Exception as e:
+        return _err(f"determine_next_action failed: {e}")
 
 
 def set_feature_status(args: dict, **kwargs) -> str:
@@ -181,6 +370,22 @@ def alert(args: dict, **kwargs) -> str:
 # Docker / session management
 # ---------------------------------------------------------------------------
 
+_PERSONA_ALIASES = {
+    "developer": "coder",
+    "dev": "coder",
+    "coding": "coder",
+    "programmer": "coder",
+    "writer": "documenter",
+    "retro": "retrospective",
+    "design": "designer",
+    "planner": "planner",
+    "qa": "qa_tester",
+    "tester": "qa_tester",
+    "security": "security_auditor",
+    "auditor": "security_auditor",
+}
+
+
 def launch_session(args: dict, **kwargs) -> str:
     """
     Spawn the agent Docker container for the given product+persona. Blocks until
@@ -188,6 +393,10 @@ def launch_session(args: dict, **kwargs) -> str:
     """
     product_id = args.get("product_id")
     persona = args.get("persona")
+    # Normalise persona — model sometimes renames known personas (e.g. "developer" for "coder")
+    if persona in _PERSONA_ALIASES:
+        log.warning("launch_session: aliasing persona %r → %r", persona, _PERSONA_ALIASES[persona])
+        persona = _PERSONA_ALIASES[persona]
     try:
         from orchestrator.docker_runner import run_claude_in_docker  # type: ignore
         with _pm_client() as client:
@@ -195,6 +404,25 @@ def launch_session(args: dict, **kwargs) -> str:
         if not product_resp.is_success:
             return _err(f"product {product_id} not found", status=product_resp.status_code)
         product = product_resp.json()
+
+        # Guard: if called with "planner" but there are Approved unsprinted features,
+        # the model should have called plan-sprints instead. Do it automatically.
+        if persona == "planner":
+            with _pm_client() as client:
+                active_sprint_resp = client.get(f"/api/products/{product_id}/sprints/active")
+                features_resp = client.get(f"/api/products/{product_id}/features")
+            active_sprint = active_sprint_resp.json() if active_sprint_resp.is_success else None
+            if active_sprint is None:
+                features = features_resp.json() if features_resp.is_success else []
+                if isinstance(features, list):
+                    _TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted"}
+                    unsprinted = [f for f in features
+                                  if f.get("status") == "Approved" and f.get("sprint_id") is None
+                                  and f.get("status") not in _TERMINAL]
+                    if unsprinted:
+                        log.info("launch_session(planner) intercepted: calling plan-sprints for %d Approved unsprinted features", len(unsprinted))
+                        return _pm("POST", f"/api/products/{product_id}/plan-sprints")
+
         exit_code = run_claude_in_docker(product, persona=persona)
         return _ok({"exit_code": exit_code, "product_id": product_id, "persona": persona})
     except Exception as e:

@@ -81,6 +81,11 @@ services:
       dockerfile: deploy/docker/Dockerfile.hermes
     image: productfactory-hermes
     container_name: pf-hermes
+    # Docker Desktop for Windows: the socket is owned by root:root (GID 0).
+    # Add hermes to GID 0 so it can reach the Docker daemon.
+    # On Linux hosts the dockerhost group (GID 998) usually matches — this is harmless there.
+    group_add:
+      - "0"
     # host.docker.internal resolves to the host on Docker Desktop; on Linux we
     # still need the extra_hosts mapping below to reach the host's Ollama.
     extra_hosts:

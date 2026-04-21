@@ -2542,14 +2542,17 @@ async def api_poller_heartbeat(
     body: schemas.PollerHeartbeatRequest,
     db:   AsyncSession = Depends(get_db),
 ):
-    """Refresh heartbeat. Returns 404 if this pid+host no longer holds the lock."""
+    """Refresh heartbeat. Returns 404 if this host no longer holds the lock.
+    Matches on host only (not pid) because Hermes runs multiple processes in one
+    container — bootstrap acquires with its bash PID, cron sessions use Python PID.
+    """
     now = datetime.now(timezone.utc)
     result = await db.execute(
         text("""
             UPDATE system_config
-               SET poller_heartbeat_at = :now
+               SET poller_heartbeat_at = :now,
+                   poller_pid          = :pid
              WHERE id = 1
-               AND poller_pid  = :pid
                AND poller_host = :host
             RETURNING id
         """),
