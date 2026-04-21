@@ -448,6 +448,9 @@ def launch_session(args: dict, **kwargs) -> str:
         t.start()
         return _ok({"status": "launched", "product_id": product_id, "persona": persona,
                     "note": "container started in background — run_cycle will skip if already running"})
+    except Exception as e:
+        log.exception("launch_session failed")
+        return _err(f"launch_session crashed: {e}")
 
 
 def kill_stale_container(args: dict, **kwargs) -> str:
