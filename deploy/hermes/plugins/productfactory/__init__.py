@@ -188,4 +188,19 @@ def register(ctx) -> None:
         tools.github_merge_pr,
     )
 
-    log.info("productfactory plugin registered 15 tools in toolset %r", TOOLSET)
+    _register_tool(ctx, "determine_next_action",
+        "Deterministic persona decision tree. Returns {action, persona, reason}. Call after preflight to get the exact action.",
+        {"type": "object",
+         "properties": {"product_id": {"type": "integer"}},
+         "required": ["product_id"]},
+        tools.determine_next_action,
+    )
+
+    _register_tool(ctx, "run_cycle",
+        "Run a complete orchestration cycle: heartbeat, stale checks, DoD, reconcile, find next work. "
+        "Returns {action: launch_session|exit|409_stop, product_id?, persona?, reason}.",
+        {"type": "object", "properties": {}},
+        tools.run_cycle,
+    )
+
+    log.info("productfactory plugin registered 17 tools in toolset %r", TOOLSET)
