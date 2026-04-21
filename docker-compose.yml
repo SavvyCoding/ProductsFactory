@@ -128,6 +128,10 @@ services:
       - ${HERMES_STAGING_HOST}:/hermes-staging
       # Persist Hermes cron jobs + memory across restarts
       - hermes_home:/home/hermes/.hermes
+    ports:
+      # Hermes web dashboard (config, sessions, cron, memory inspection).
+      # Browse http://localhost:9119 once the container is up.
+      - "9119:9119"
     depends_on:
       web:
         condition: service_started
