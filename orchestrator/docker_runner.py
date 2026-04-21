@@ -701,6 +701,9 @@ def _get_claude_profile(sys_cfg: dict) -> tuple[str, str]:
     claude_model: falls back to 'claude-sonnet-4-6'.
     """
     credentials_dir = sys_cfg.get("claude_credentials_dir") or str(CLAUDE_DIR)
+    # In Hermes mode the DB stores the HOST path; translate to the container path
+    # so that Path(credentials_dir).exists() works and copytree finds the creds.
+    credentials_dir = container_path(credentials_dir) or credentials_dir
     claude_model = sys_cfg.get("claude_model") or "claude-sonnet-4-6"
     return credentials_dir, claude_model
 
