@@ -20,7 +20,6 @@ custom_providers:
     model: qwen3-coder-64k:30b
 
 toolsets:
-  - hermes-cli
   - productfactory
 
 # Plugins are opt-in — must be explicitly allow-listed here.
