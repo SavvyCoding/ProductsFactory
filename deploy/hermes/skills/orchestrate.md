@@ -8,7 +8,7 @@ You are the ProductFactory orchestrator. Once per minute you run this procedure.
 
 ## Tools available
 - `run_cycle()` — runs preflight + finds next work. Returns `{action, product_id?, persona?, reason}`.
-- `launch_session(product_id, persona)` — spawn agent container, wait for it. Returns `{exit_code}`.
+- `launch_session(product_id, persona)` — spawn agent container in the background and return immediately.
 - `alert(severity, message, product_name?)` — send alert webhook.
 
 ## Procedure (exactly 2 steps)

@@ -197,13 +197,23 @@ def run_cycle(args: dict, **kwargs) -> str:
         if not hb.get("ok") or hb.get("status") == 409:
             return _ok({"action": "409_stop", "reason": "Lock stolen"})
 
-        # 2. Stale containers
+        # 2. Check for running agent containers — if any, skip this cycle
+        running = subprocess.run(
+            ["docker", "ps", "--filter", "name=pf-", "--filter", "status=running",
+             "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        active = [n for n in running.stdout.strip().splitlines() if n and n != "pf-hermes"]
+        if active:
+            return _ok({"action": "exit", "reason": f"Agent container(s) already running: {active}"})
+
+        # 3. Stale containers
         check_stale_sessions({}, **kwargs)
 
-        # 3. Reset stuck
+        # 4. Reset stuck
         reset_stuck_features({}, **kwargs)
 
-        # 4. Per-product preflight
+        # 5. Per-product preflight
         products_raw = json.loads(get_products({}, **kwargs))
         products_data = products_raw.get("data") if isinstance(products_raw, dict) else products_raw
         products = products_data if isinstance(products_data, list) else []
@@ -388,12 +398,14 @@ _PERSONA_ALIASES = {
 
 def launch_session(args: dict, **kwargs) -> str:
     """
-    Spawn the agent Docker container for the given product+persona. Blocks until
-    it exits. Returns exit_code and features_pushed count.
+    Spawn the agent Docker container for the given product+persona.
+    Returns immediately — the container runs in a background daemon thread.
+    The next run_cycle() call will detect the running container and skip re-launching.
     """
+    import threading
+
     product_id = args.get("product_id")
     persona = args.get("persona")
-    # Normalise persona — model sometimes renames known personas (e.g. "developer" for "coder")
     if persona in _PERSONA_ALIASES:
         log.warning("launch_session: aliasing persona %r → %r", persona, _PERSONA_ALIASES[persona])
         persona = _PERSONA_ALIASES[persona]
@@ -405,8 +417,7 @@ def launch_session(args: dict, **kwargs) -> str:
             return _err(f"product {product_id} not found", status=product_resp.status_code)
         product = product_resp.json()
 
-        # Guard: if called with "planner" but there are Approved unsprinted features,
-        # the model should have called plan-sprints instead. Do it automatically.
+        # Guard: planner with unsprinted Approved features → call plan-sprints instead
         if persona == "planner":
             with _pm_client() as client:
                 active_sprint_resp = client.get(f"/api/products/{product_id}/sprints/active")
@@ -420,14 +431,23 @@ def launch_session(args: dict, **kwargs) -> str:
                                   if f.get("status") == "Approved" and f.get("sprint_id") is None
                                   and f.get("status") not in _TERMINAL]
                     if unsprinted:
-                        log.info("launch_session(planner) intercepted: calling plan-sprints for %d Approved unsprinted features", len(unsprinted))
+                        log.info("launch_session(planner) intercepted: calling plan-sprints for %d features", len(unsprinted))
                         return _pm("POST", f"/api/products/{product_id}/plan-sprints")
 
-        exit_code = run_claude_in_docker(product, persona=persona)
-        return _ok({"exit_code": exit_code, "product_id": product_id, "persona": persona})
-    except Exception as e:
-        log.exception("launch_session failed")
-        return _err(f"launch_session crashed: {e}")
+        # Fire and forget — run_claude_in_docker blocks for up to SESSION_TIMEOUT minutes.
+        # We return immediately so the Hermes cron session doesn't time out.
+        def _run():
+            try:
+                exit_code = run_claude_in_docker(product, persona=persona)
+                log.info("launch_session background: product=%s persona=%s exit=%d",
+                         product_id, persona, exit_code)
+            except Exception:
+                log.exception("launch_session background thread crashed")
+
+        t = threading.Thread(target=_run, daemon=True, name=f"session-{product_id}-{persona}")
+        t.start()
+        return _ok({"status": "launched", "product_id": product_id, "persona": persona,
+                    "note": "container started in background — run_cycle will skip if already running"})
 
 
 def kill_stale_container(args: dict, **kwargs) -> str:
