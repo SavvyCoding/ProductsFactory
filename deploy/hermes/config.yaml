@@ -4,7 +4,7 @@
 # Gemma/Qwen/Llama variants without rebuilding the image.
 
 provider: ollama
-model: ${HERMES_MODEL:-gemma3:27b}
+model: ${HERMES_MODEL:-gemma4:26b}
 # Ollama runs on the Windows/Linux host; Hermes reaches it via host-gateway.
 # docker-compose passes OLLAMA_HOST into the container (see docker-compose.yml).
 base_url: ${OLLAMA_HOST:-http://host.docker.internal:11434}

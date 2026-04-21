@@ -88,7 +88,7 @@ services:
     environment:
       # Hermes LLM backend — local Ollama, no API keys needed.
       OLLAMA_HOST:        ${OLLAMA_HOST:-http://host.docker.internal:11434}
-      HERMES_MODEL:       ${HERMES_MODEL:-gemma3:27b}
+      HERMES_MODEL:       ${HERMES_MODEL:-gemma4:26b}
       PM_API_URL:         http://pm-api:8080
       PM_API_URL_CONTAINER: http://pm-api:8080
       PRODUCTS_BASE_DIR:  ${PRODUCTS_BASE_DIR:?PRODUCTS_BASE_DIR must be set in .env}
