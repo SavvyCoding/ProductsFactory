@@ -1,0 +1,24 @@
+# Hermes runtime configuration for the ProductFactory orchestrator.
+# Keeps LLM cost low (~$0.001/cycle) — only the OUTER decision loop runs through
+# Hermes. Agent sessions (the expensive Claude work) still run inside Docker
+# agent containers as before.
+
+provider: anthropic
+model: claude-haiku-4-5-20251001
+base_url: https://api.anthropic.com/v1
+
+# Hermes's own terminal (used for tool execution, not agent work).
+terminal:
+  backend: local
+
+# ProductFactory plugin directory is bind-mounted into the container at
+# /home/hermes/.hermes/plugins/productfactory
+plugins:
+  - productfactory
+
+# Each 60s poll cycle is bounded — we don't want open-ended reasoning.
+context:
+  max_iterations: 30
+
+# Reasoning depth — "low" keeps latency and cost down; the skill is prescriptive.
+reasoning_effort: low

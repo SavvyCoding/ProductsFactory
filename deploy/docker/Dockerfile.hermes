@@ -1,0 +1,63 @@
+# ProductFactory Hermes orchestrator image.
+# Runs the Hermes agent (github.com/nousresearch/hermes-agent) as a persistent
+# gateway. A 60s cron fires the orchestrate.md skill, which uses the
+# productfactory plugin (deploy/hermes/plugins/productfactory) to call the PM
+# API and spawn agent containers via the Docker socket mount.
+
+FROM python:3.12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HERMES_HOME=/home/hermes/.hermes
+
+# -- System deps ---------------------------------------------------------------
+# - git, openssh-client: workspace git ops + ssh-keygen for greenfield
+# - curl, ca-certificates, gnupg: TLS + apt key for Docker repo
+# - Docker CLI only (daemon access via /var/run/docker.sock)
+# - Node.js 22 + Hermes agent (installed globally via npm)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git curl openssh-client ca-certificates gnupg \
+ && install -m 0755 -d /etc/apt/keyrings \
+ && curl -fsSL https://download.docker.com/linux/debian/gpg \
+      | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" \
+      > /etc/apt/sources.list.d/docker.list \
+ && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli \
+ && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && npm install -g @nousresearch/hermes-agent \
+ && rm -rf /var/lib/apt/lists/*
+
+# -- Non-root user -------------------------------------------------------------
+# GID 998 matches the Docker group GID on most Linux hosts. On Docker Desktop
+# for Windows the socket is owned by the "docker" group inside the VM; this
+# mapping works for both. Override at runtime with --group-add if needed.
+RUN groupadd -g 998 dockerhost \
+ && useradd -u 999 -m -s /bin/bash hermes \
+ && usermod -aG dockerhost hermes
+
+WORKDIR /app
+
+# -- Python deps for the plugin (httpx + existing orchestrator modules) --------
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# -- ProductFactory code (plugin imports orchestrator.docker_runner etc.) ------
+COPY orchestrator/ orchestrator/
+COPY website/      website/
+COPY templates/    templates/
+
+# -- Hermes plugin + skill + config + bootstrap --------------------------------
+COPY deploy/hermes/config.yaml          /home/hermes/.hermes/config.yaml
+COPY deploy/hermes/skills/              /home/hermes/.hermes/skills/
+COPY deploy/hermes/plugins/             /home/hermes/.hermes/plugins/
+COPY deploy/hermes/bootstrap.sh         /usr/local/bin/bootstrap.sh
+
+RUN chmod +x /usr/local/bin/bootstrap.sh \
+ && chown -R hermes:hermes /home/hermes /app
+
+USER hermes
+
+ENTRYPOINT ["/usr/local/bin/bootstrap.sh"]

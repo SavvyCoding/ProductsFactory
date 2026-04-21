@@ -18,6 +18,10 @@ htmlcov/
 
 # Logs
 *.log
+
+# Runtime lock/PID files (poller wrapper + single-instance guard)
+orchestrator/poller.pid
+orchestrator/wrapper.pid
 *.log.[0-9]*
 orchestrator/poller.log
 orchestrator/poller_boot.log

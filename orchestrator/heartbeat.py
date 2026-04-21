@@ -24,10 +24,12 @@ STALE_THRESHOLD_MIN  = int(os.environ.get("STALE_THRESHOLD_MINUTES", "45"))
 def check_stale_sessions(products: list[dict]):
     """
     For each product with status=ready, check when progress.md was last pushed.
-    If >STALE_THRESHOLD_MIN minutes ago, kill the container and alert PM.
+    If >STALE_THRESHOLD_MIN minutes ago AND a container is actually running, kill it and alert PM.
     """
     for product in products:
         if product["status"] != "ready":
+            continue
+        if not _container_running(product):
             continue
         last_push = _get_progress_last_push(product)
         if last_push is None:
@@ -60,6 +62,19 @@ def _get_progress_last_push(product: dict) -> datetime | None:
     except Exception as e:
         log.warning(f"_get_progress_last_push failed: {e}")
     return None
+
+
+def _container_running(product: dict) -> bool:
+    """Return True if a Docker container is currently running for this product."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--filter", f"name=pf-{product['id']}-", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return bool(result.stdout.strip())
+    except Exception:
+        return False
 
 
 def _kill_container(product: dict):
