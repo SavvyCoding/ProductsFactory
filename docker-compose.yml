@@ -81,8 +81,14 @@ services:
       dockerfile: deploy/docker/Dockerfile.hermes
     image: productfactory-hermes
     container_name: pf-hermes
+    # host.docker.internal resolves to the host on Docker Desktop; on Linux we
+    # still need the extra_hosts mapping below to reach the host's Ollama.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set in .env for Hermes}
+      # Hermes LLM backend — local Ollama, no API keys needed.
+      OLLAMA_HOST:        ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      HERMES_MODEL:       ${HERMES_MODEL:-gemma3:27b}
       PM_API_URL:         http://pm-api:8080
       PM_API_URL_CONTAINER: http://pm-api:8080
       PRODUCTS_BASE_DIR:  ${PRODUCTS_BASE_DIR:?PRODUCTS_BASE_DIR must be set in .env}

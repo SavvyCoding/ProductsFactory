@@ -1,11 +1,13 @@
 # Hermes runtime configuration for the ProductFactory orchestrator.
-# Keeps LLM cost low (~$0.001/cycle) — only the OUTER decision loop runs through
-# Hermes. Agent sessions (the expensive Claude work) still run inside Docker
-# agent containers as before.
+# Uses the host's local Ollama server — zero API cost, fully offline.
+# Override the model name in .env via HERMES_MODEL to experiment with other
+# Gemma/Qwen/Llama variants without rebuilding the image.
 
-provider: anthropic
-model: claude-haiku-4-5-20251001
-base_url: https://api.anthropic.com/v1
+provider: ollama
+model: ${HERMES_MODEL:-gemma3:27b}
+# Ollama runs on the Windows/Linux host; Hermes reaches it via host-gateway.
+# docker-compose passes OLLAMA_HOST into the container (see docker-compose.yml).
+base_url: ${OLLAMA_HOST:-http://host.docker.internal:11434}
 
 # Hermes's own terminal (used for tool execution, not agent work).
 terminal:
@@ -20,5 +22,5 @@ plugins:
 context:
   max_iterations: 30
 
-# Reasoning depth — "low" keeps latency and cost down; the skill is prescriptive.
+# Reasoning depth — "low" keeps latency down; the skill is prescriptive.
 reasoning_effort: low

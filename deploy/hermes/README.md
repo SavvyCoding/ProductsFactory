@@ -37,17 +37,34 @@ deploy/hermes/
 ## First-time setup
 
 ```bash
-# 1. Build the Hermes image (also builds the agent image if not cached)
+# 1. Make sure Ollama is running on the host with the Gemma model pulled
+ollama pull gemma3:27b   # or any model you prefer — override with HERMES_MODEL
+
+# 2. Build the Hermes image
 bash deploy/docker/build.sh --hermes
 
-# 2. Set ANTHROPIC_API_KEY + PRODUCTS_BASE_DIR in .env (see .env.example)
+# 3. Set PRODUCTS_BASE_DIR in .env (see .env.example). No API keys needed —
+#    Hermes reaches host Ollama via host.docker.internal:11434.
 
-# 3. Start Hermes alongside pm-api + postgres
+# 4. Start Hermes alongside pm-api + postgres
 docker compose --profile hermes up -d
 
-# 4. Watch it run
+# 5. Watch it run
 docker logs -f pf-hermes
 ```
+
+## LLM backend
+
+Hermes uses local Ollama (zero API cost). The default model is `gemma3:27b`
+(matches the existing ollama_agent.py designer model). Override via `.env`:
+
+```
+HERMES_MODEL=gemma3:27b          # or qwen2.5:14b, llama3.1:70b, etc.
+OLLAMA_HOST=http://host.docker.internal:11434
+```
+
+On a Linux deployment, `host.docker.internal` resolves via the `extra_hosts:
+host-gateway` entry in docker-compose.yml. No change needed.
 
 ## Expected log pattern (first 60s)
 
