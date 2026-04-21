@@ -1,6 +1,7 @@
 # ProductFactory — Infrastructure services
-# Runs: PostgreSQL + PM website
-# The poller runs natively on Windows (see deploy/windows/start_poller.ps1)
+# Runs: PostgreSQL + PM website + Hermes orchestrator
+# (Legacy Windows poller still works via deploy/windows/start_poller.ps1 for
+# host-mode fallback; Hermes is the preferred production path.)
 #
 # Start:  docker compose up -d
 # Logs:   docker compose logs -f
@@ -67,6 +68,53 @@ services:
       - productfactory-net   # agent containers reach pm-api via host-gateway:8080
     restart: unless-stopped
 
+  # ── Hermes orchestrator (replaces the Windows poller) ──────────────────────
+  # Opt-in via `--profile hermes` — keeps the legacy Windows poller path
+  # available for hosts that haven't migrated yet.
+  #
+  # Hermes runs a persistent gateway daemon; a 60s cron fires the orchestrate.md
+  # skill, which drives the ProductFactory sprint pipeline via custom tools.
+  hermes:
+    profiles: ["hermes"]
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.hermes
+    image: productfactory-hermes
+    container_name: pf-hermes
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set in .env for Hermes}
+      PM_API_URL:         http://pm-api:8080
+      PM_API_URL_CONTAINER: http://pm-api:8080
+      PRODUCTS_BASE_DIR:  ${PRODUCTS_BASE_DIR:?PRODUCTS_BASE_DIR must be set in .env}
+      PRODUCTS_MOUNT_PATH: /products
+      CLAUDE_DIR:         /home/hermes/.claude
+      SSH_DIR:            /home/hermes/.ssh
+      AGENT_IMAGE:        ${AGENT_IMAGE:-productfactory-agent}
+      SESSION_TIMEOUT_MINUTES: ${SESSION_TIMEOUT_MINUTES:-90}
+      STALE_THRESHOLD_MINUTES: ${STALE_THRESHOLD_MINUTES:-45}
+      MAX_OPEN_PRS:       ${MAX_OPEN_PRS:-3}
+      MAX_FEATURES_PER_RUN: ${MAX_FEATURES_PER_RUN:-1}
+    volumes:
+      # Docker socket — Hermes spawns agent containers via the host daemon.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Product working directories — Hermes translates host paths to /products
+      # for its own file ops but passes the host path verbatim when launching
+      # agent containers (Docker Desktop handles Win→Linux path translation).
+      - ${PRODUCTS_BASE_DIR}:/products
+      # Claude OAuth creds (read-only — docker_runner copies to temp before mount)
+      - ${CLAUDE_DIR:-~/.claude}:/home/hermes/.claude:ro
+      # SSH deploy keys (read-only)
+      - ${SSH_DIR:-~/.ssh}:/home/hermes/.ssh:ro
+      # Persist Hermes cron jobs + memory across restarts
+      - hermes_home:/home/hermes/.hermes
+    depends_on:
+      web:
+        condition: service_started
+    networks:
+      - pf-internal
+      - productfactory-net
+    restart: unless-stopped
+
   # ── Caddy HTTPS reverse proxy (opt-in via `--profile tls`) ──────────────────
   # Terminates TLS in front of the PM website and sets security headers.
   # Default CADDY_SITE=localhost uses Caddy's internal CA (run `caddy trust`
@@ -109,3 +157,6 @@ volumes:
     name: productfactory-caddy-data
   caddy_config:
     name: productfactory-caddy-config
+  # Hermes ~/.hermes — cron jobs, memory, session history
+  hermes_home:
+    name: productfactory-hermes-home

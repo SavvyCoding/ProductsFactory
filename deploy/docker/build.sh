@@ -10,14 +10,17 @@
 set -euo pipefail
 
 IMAGE_TAG="productfactory-agent"
+HERMES_TAG="productfactory-hermes"
 NO_CACHE=""
 RUN_TEST=false
+BUILD_HERMES=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --no-cache) NO_CACHE="--no-cache" ;;
         --test)     RUN_TEST=true ;;
         --tag)      IMAGE_TAG="$2"; shift ;;
+        --hermes)   BUILD_HERMES=true ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
     shift
@@ -61,12 +64,26 @@ else
     echo "[3/3] Skipping smoke test (run with --test to verify)"
 fi
 
+# ── 4. Optional Hermes orchestrator image ─────────────────────────────────────
+if [ "$BUILD_HERMES" = true ]; then
+    echo ""
+    echo "[4/4] Building Hermes orchestrator image: ${HERMES_TAG}"
+    docker build \
+        $NO_CACHE \
+        --file deploy/docker/Dockerfile.hermes \
+        --tag "${HERMES_TAG}" \
+        --tag "${HERMES_TAG}:$(date +%Y%m%d)" \
+        --label "productfactory.built=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        .
+    echo "      Built: ${HERMES_TAG}"
+fi
+
 echo ""
 echo "=== Done ==="
 echo "Agent image: ${IMAGE_TAG}"
+[ "$BUILD_HERMES" = true ] && echo "Hermes image: ${HERMES_TAG}"
 echo ""
 echo "Next steps:"
 echo "  1. Start infrastructure:  docker compose up -d  (from repo root)"
-echo "  2. Start poller:          bash deploy/install.sh  (or run start_poller.ps1)"
-echo ""
-echo "Or run the full setup:  bash deploy/install.sh"
+echo "  2a. Hermes orchestrator:  docker compose --profile hermes up -d hermes"
+echo "  2b. (or legacy) Poller:   bash deploy/install.sh  (or run start_poller.ps1)"
