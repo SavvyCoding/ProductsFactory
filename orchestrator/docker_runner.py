@@ -824,7 +824,9 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # Re-install templates after reset — git clean may have removed untracked template files.
     # force=False ensures we never overwrite files the agent has customised and committed.
     try:
-        install_templates(product, PM_API_URL, force=False)
+        # Pass product dict with the container-side working_dir so Path(...).exists() works
+        # when docker_runner runs inside Hermes (where the DB stores the host/Windows path).
+        install_templates({**product, "working_dir": working_dir}, PM_API_URL, force=False)
     except Exception as _te:
         log.warning(f"Could not re-install templates for {product.get('name')}: {_te}")
 

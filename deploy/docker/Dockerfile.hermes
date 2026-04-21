@@ -80,4 +80,7 @@ RUN chmod +x /usr/local/bin/bootstrap.sh \
 USER hermes
 WORKDIR /home/hermes
 
+# Allow git to operate on NTFS/Docker-mounted product dirs (owned by root inside container).
+RUN git config --global --add safe.directory '*'
+
 ENTRYPOINT ["/usr/local/bin/bootstrap.sh"]

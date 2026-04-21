@@ -74,7 +74,9 @@ TERMINAL = {Pushed, Deferred, Rejected, Reverted}
 
 1. Fetch `active_sprint` and `features`.
 2. If no active sprint:
-   - Find Approved features with `sprint_id == null`. If ≥1 exists, create a new sprint via `pm_api("POST", "/api/sprints", {...})` and assign them; return null (next cycle picks up).
+   - Find Approved features with `sprint_id == null`. If ≥1 exists:
+     - Call `pm_api("POST", "/api/products/{product_id}/plan-sprints", {})` to auto-create sprints from approved features.
+     - Return null — exit cycle. Next cycle will pick up the new sprint.
    - Else check post-sprint maintenance gating (see "Maintenance personas" below).
    - Else return persona = "planner".
 
