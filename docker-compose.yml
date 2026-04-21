@@ -91,10 +91,20 @@ services:
       HERMES_MODEL:       ${HERMES_MODEL:-gemma4:26b}
       PM_API_URL:         http://pm-api:8080
       PM_API_URL_CONTAINER: http://pm-api:8080
+      # Path duality — orchestrator/paths.py uses both *_HOST and container
+      # values to translate between the Hermes filesystem and `docker run -v`
+      # mount sources (which are resolved by the Docker daemon on the host).
       PRODUCTS_BASE_DIR:  ${PRODUCTS_BASE_DIR:?PRODUCTS_BASE_DIR must be set in .env}
       PRODUCTS_MOUNT_PATH: /products
+      CLAUDE_DIR_HOST:    ${CLAUDE_DIR:-~/.claude}
       CLAUDE_DIR:         /home/hermes/.claude
+      SSH_DIR_HOST:       ${SSH_DIR:-~/.ssh}
       SSH_DIR:            /home/hermes/.ssh
+      HERMES_STAGING_HOST: ${HERMES_STAGING_HOST:?HERMES_STAGING_HOST must be set in .env (host tmpdir for creds staging)}
+      HERMES_STAGING_CONTAINER: /hermes-staging
+      # Python's tempfile.mkdtemp lands in /hermes-staging so `docker run -v`
+      # can mount it via the matching host path.
+      TMPDIR:             /hermes-staging
       AGENT_IMAGE:        ${AGENT_IMAGE:-productfactory-agent}
       SESSION_TIMEOUT_MINUTES: ${SESSION_TIMEOUT_MINUTES:-90}
       STALE_THRESHOLD_MINUTES: ${STALE_THRESHOLD_MINUTES:-45}
@@ -103,14 +113,19 @@ services:
     volumes:
       # Docker socket — Hermes spawns agent containers via the host daemon.
       - /var/run/docker.sock:/var/run/docker.sock
-      # Product working directories — Hermes translates host paths to /products
-      # for its own file ops but passes the host path verbatim when launching
-      # agent containers (Docker Desktop handles Win→Linux path translation).
+      # Product working directories — Hermes uses /products for its own file
+      # ops but passes the host path verbatim when launching agents.
       - ${PRODUCTS_BASE_DIR}:/products
-      # Claude OAuth creds (read-only — docker_runner copies to temp before mount)
+      # Claude OAuth creds (read-only — docker_runner copies to staging and
+      # patches settings.json there before mounting into the agent).
       - ${CLAUDE_DIR:-~/.claude}:/home/hermes/.claude:ro
       # SSH deploy keys (read-only)
       - ${SSH_DIR:-~/.ssh}:/home/hermes/.ssh:ro
+      # Staging dir — bind-mounted from host at the same logical location so
+      # that `docker run -v ${HERMES_STAGING_HOST}/xxx:/...` resolves for both
+      # the Hermes Python process (as /hermes-staging/xxx) and the Docker
+      # daemon (as the host path). This is how temp creds reach spawned agents.
+      - ${HERMES_STAGING_HOST}:/hermes-staging
       # Persist Hermes cron jobs + memory across restarts
       - hermes_home:/home/hermes/.hermes
     depends_on:

@@ -7,6 +7,13 @@ set -euo pipefail
 HERMES_HOME="${HERMES_HOME:-/home/hermes/.hermes}"
 mkdir -p "$HERMES_HOME/cron"
 
+# Staging dir for temp Claude creds + GH token files. This is bind-mounted
+# from the host at the same path, so `docker run -v /hermes-staging/xxx:...`
+# resolves correctly both for Hermes (local write) and the Docker daemon
+# (host read).
+STAGING="${HERMES_STAGING_CONTAINER:-/hermes-staging}"
+mkdir -p "$STAGING" || true
+
 # Only register cron jobs if none exist yet (idempotent across container restarts).
 if [ ! -s "$HERMES_HOME/cron/jobs.json" ] || ! grep -q "orchestrate" "$HERMES_HOME/cron/jobs.json" 2>/dev/null; then
     echo "[bootstrap] Registering orchestration cron job..."

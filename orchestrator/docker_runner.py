@@ -25,6 +25,7 @@ import httpx
 
 from orchestrator.prompts import build_prompt
 from orchestrator.alerts import send_alert
+from orchestrator.paths import host_path, container_path, in_hermes_mode
 from templates.renderer import install_templates
 
 log = logging.getLogger("poller.docker")
@@ -803,7 +804,11 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     persona: 'designer', 'coder', 'reviewer', or None (uses legacy routing).
     """
     session_uid = str(uuid.uuid4())[:8]
-    working_dir = product["working_dir"]
+    # working_dir_host  = what the Docker daemon sees (Windows path from DB)
+    # working_dir       = what THIS Python process sees (translated to /products/... inside Hermes,
+    #                     unchanged in host-mode). Used for every subsequent file op.
+    working_dir_host = product["working_dir"]
+    working_dir = container_path(working_dir_host)
 
     # Always reset workspace to clean main before starting a new session.
     # This discards any half-baked code from failed/incomplete previous sessions.
@@ -914,7 +919,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     deploy_key = _get_deploy_key_path(product, effective_ssh_dir)
     ssh_mount = []
     if deploy_key:
-        ssh_mount = ["-v", f"{deploy_key}:/home/agent/.ssh/id_ed25519:ro"]
+        ssh_mount = ["-v", f"{host_path(deploy_key)}:/home/agent/.ssh/id_ed25519:ro"]
 
     # GH_TOKEN — write to a 0600 temp file and bind-mount at /run/secrets/gh_token.
     # The agent_cmd wrapper (below) sources it into GH_TOKEN at runtime, so `gh` CLI
@@ -931,7 +936,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 os.chmod(gh_token_file, 0o600)
             except Exception:
                 pass  # Windows: NTFS perms don't map cleanly; 0600 is best-effort
-            gh_mount = ["-v", f"{gh_token_file}:/run/secrets/gh_token:ro"]
+            gh_mount = ["-v", f"{host_path(gh_token_file)}:/run/secrets/gh_token:ro"]
         except Exception as e:
             log.warning(f"Could not write gh token file: {e} — agent will have no gh auth")
             if gh_token_file:
@@ -997,18 +1002,18 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             (Path(_tmp_claude_dir) / "session-env").mkdir(exist_ok=True)
             # Mount read-write — safe because mount_dir is a temp copy, not the original.
             # The harness must be able to write to session-env/ at runtime.
-            claude_mount = ["-v", f"{mount_dir}:/home/agent/.claude"]
+            claude_mount = ["-v", f"{host_path(mount_dir)}:/home/agent/.claude"]
         else:
             # Fallback: direct mount — keep read-only to protect original credentials.
             # session-env writes will fail but that's better than exposing originals as rw.
-            claude_mount = ["-v", f"{mount_dir}:/home/agent/.claude:ro"]
+            claude_mount = ["-v", f"{host_path(mount_dir)}:/home/agent/.claude:ro"]
             log.warning("Mounting original .claude dir read-only — Bash tool may be broken")
 
         # Also mount .claude.json (sits alongside .claude/ in the host home dir)
         creds_parent = str(Path(creds_src).parent)
         claude_json_src = str(Path(creds_parent) / ".claude.json")
         if Path(claude_json_src).exists():
-            claude_mount += ["-v", f"{claude_json_src}:/home/agent/.claude.json:ro"]
+            claude_mount += ["-v", f"{host_path(claude_json_src)}:/home/agent/.claude.json:ro"]
         else:
             # Restore from backup inside the .claude dir
             backup_dir = Path(mount_dir) / "backups"
@@ -1016,7 +1021,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 backups = sorted(backup_dir.glob(".claude.json.backup.*"))
                 if backups and _tmp_claude_dir:
                     shutil.copy2(str(backups[-1]), str(Path(_tmp_claude_dir) / ".claude.json"))
-                    claude_mount += ["-v", f"{_tmp_claude_dir}/.claude.json:/home/agent/.claude.json:ro"]
+                    claude_mount += ["-v", f"{host_path(_tmp_claude_dir)}/.claude.json:/home/agent/.claude.json:ro"]
                     log.info(f"Restored .claude.json from backup: {backups[-1].name}")
 
         # --dangerously-skip-permissions works now that container runs as non-root
@@ -1060,7 +1065,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         "--tmpfs", "/home/agent/.config:rw,size=100m,uid=1001,gid=1001",
         "--tmpfs", "/home/agent/.local:rw,size=500m,uid=1001,gid=1001",
         # Volume mounts — unaffected by --read-only
-        "-v", f"{working_dir}:/workspace",
+        "-v", f"{working_dir_host}:/workspace",
         *claude_mount,                             # OAuth session (claude backend only)
         *ssh_mount,                                # deploy key :ro (not whole .ssh dir)
         *gh_mount,                                 # GH_TOKEN via file at /run/secrets/gh_token (not env)
