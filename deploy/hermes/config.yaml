@@ -6,7 +6,7 @@
 # at that nested level. `custom_providers:` is the durable registry.
 
 model:
-  default: qwen3-coder-64k:30b
+  default: qwen3-coder-nothinker:30b
   provider: custom
   base_url: http://host.docker.internal:11434/v1
   api_key: ollama              # required field; Ollama ignores the value
@@ -17,7 +17,7 @@ custom_providers:
     base_url: http://host.docker.internal:11434/v1
     api_key: ollama
     api_mode: chat_completions
-    model: qwen3-coder-64k:30b
+    model: qwen3-coder-nothinker:30b
 
 toolsets:
   - productfactory
