@@ -38,7 +38,7 @@ deploy/hermes/
 
 ```bash
 # 1. Make sure Ollama is running on the host with the Gemma model pulled
-ollama pull gemma3:27b   # or any model you prefer — override with HERMES_MODEL
+ollama pull gemma4:26b   # or any model you prefer — override with HERMES_MODEL
 
 # 2. Build the Hermes image
 bash deploy/docker/build.sh --hermes
@@ -55,11 +55,11 @@ docker logs -f pf-hermes
 
 ## LLM backend
 
-Hermes uses local Ollama (zero API cost). The default model is `gemma3:27b`
-(matches the existing ollama_agent.py designer model). Override via `.env`:
+Hermes uses local Ollama (zero API cost). The default model is `gemma4:26b`.
+Override via `.env`:
 
 ```
-HERMES_MODEL=gemma3:27b          # or qwen2.5:14b, llama3.1:70b, etc.
+HERMES_MODEL=gemma4:26b          # or gemma3:27b, qwen3-coder:30b, etc.
 OLLAMA_HOST=http://host.docker.internal:11434
 ```
 
