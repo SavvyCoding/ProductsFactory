@@ -1,17 +1,17 @@
 """
-Host ↔ container path translation for Hermes-mode orchestration.
+Host ↔ container path translation for orchestrator-container mode.
 
 When the poller runs on the Windows host (legacy mode), every path used by
 docker_runner is already a valid host path — `docker run -v {path}:/...` just
 works. These translators are no-ops.
 
-When the poller runs inside the Hermes container, there are two path spaces:
+When the poller runs inside the orchestrator container, there are two path spaces:
 
 - **Host paths** — what the Docker daemon sees (e.g. `C:/Users/digvi/.../Calculator`
   on Windows, `/home/user/products/Calculator` on Linux). These are what
   `docker run -v` mount sources must be.
-- **Container paths** — what Hermes's Python process sees through its bind
-  mounts (`/products/Calculator`, `/home/hermes/.claude`, `/home/hermes/.ssh`).
+- **Container paths** — what the orchestrator Python process sees through its
+  bind mounts (`/products/Calculator`, `/home/orchestrator/.claude`, etc).
   These are what `open()`, `Path.mkdir()`, subprocess `cwd=` need.
 
 This module exposes:
@@ -22,17 +22,17 @@ This module exposes:
   loaded from the DB) to the container-side path for local file ops.
 
 Both are no-ops if the relevant env vars aren't set. This lets the same
-docker_runner.py work in both host-mode and Hermes-mode.
+docker_runner.py work in both host-mode and container-mode.
 
-Required env vars when running inside Hermes:
-    PRODUCTS_BASE_DIR      — host path root (same as before)
-    PRODUCTS_MOUNT_PATH    — container mount point for products root
-    CLAUDE_DIR_HOST        — host path of Claude creds dir
-    CLAUDE_DIR             — container mount point (same env var reused)
-    SSH_DIR_HOST           — host path of SSH dir
-    SSH_DIR                — container mount point
-    HERMES_STAGING_HOST    — host path of the /tmp staging dir
-    HERMES_STAGING_CONTAINER — container mount point for staging (TMPDIR lives here)
+Required env vars when running inside the orchestrator container:
+    PRODUCTS_BASE_DIR           — host path root (same as before)
+    PRODUCTS_MOUNT_PATH         — container mount point for products root
+    CLAUDE_DIR_HOST             — host path of Claude creds dir
+    CLAUDE_DIR                  — container mount point (same env var reused)
+    SSH_DIR_HOST                — host path of SSH dir
+    SSH_DIR                     — container mount point
+    ORCHESTRATOR_STAGING_HOST      — host path of the /tmp staging dir
+    ORCHESTRATOR_STAGING_CONTAINER — container mount point (TMPDIR lives here)
 """
 
 from __future__ import annotations
@@ -44,22 +44,22 @@ def _norm(p: str) -> str:
     return str(p).replace("\\", "/").rstrip("/")
 
 
-# Pre-compute mappings once on import. None if not in Hermes mode.
+# Pre-compute mappings once on import. None if not in container mode.
 def _build_mappings() -> list[tuple[str, str]]:
     """Return list of (container_prefix, host_prefix) pairs, longest prefix first."""
     pairs: list[tuple[str, str]] = []
     mapping_env = [
-        ("PRODUCTS_MOUNT_PATH",      "PRODUCTS_BASE_DIR"),
-        ("CLAUDE_DIR",               "CLAUDE_DIR_HOST"),
-        ("SSH_DIR",                  "SSH_DIR_HOST"),
-        ("HERMES_STAGING_CONTAINER", "HERMES_STAGING_HOST"),
+        ("PRODUCTS_MOUNT_PATH",            "PRODUCTS_BASE_DIR"),
+        ("CLAUDE_DIR",                     "CLAUDE_DIR_HOST"),
+        ("SSH_DIR",                        "SSH_DIR_HOST"),
+        ("ORCHESTRATOR_STAGING_CONTAINER", "ORCHESTRATOR_STAGING_HOST"),
     ]
     for cvar, hvar in mapping_env:
         c = _norm(os.environ.get(cvar, ""))
         h = _norm(os.environ.get(hvar, ""))
         if c and h and c != h:
             pairs.append((c, h))
-    # Longest prefix first so /home/hermes/.claude matches before /home
+    # Longest prefix first so /home/orchestrator/.claude matches before /home
     pairs.sort(key=lambda x: len(x[0]), reverse=True)
     return pairs
 
@@ -95,6 +95,10 @@ def container_path(path) -> str:
     return str(path)
 
 
-def in_hermes_mode() -> bool:
+def in_container_mode() -> bool:
     """True if at least one host↔container mapping is configured."""
     return bool(_C2H)
+
+
+# Backwards-compat alias (some callers still use the hermes-era name).
+in_hermes_mode = in_container_mode

@@ -63,7 +63,10 @@ def _find_bash() -> list[str]:
 
 BASH_CMD = _find_bash()
 
-# Map persona → model
+# Map persona → model. Note: only tool-capable Ollama models can run agent
+# loops (gemma3 returns 400 "does not support tools"). Qwen3-coder is the only
+# tool-capable model commonly pulled locally, so default both roles to it
+# unless a dedicated instruction model (that supports tools) is configured.
 MODEL = DESIGNER_MODEL if AGENT_PERSONA in ("designer", "reviewer") else CODER_MODEL
 
 CHAT_URL = f"{OLLAMA_HOST}/v1/chat/completions"
@@ -415,10 +418,22 @@ def run_agent(initial_prompt: str) -> int:
         _log("Proceeding anyway — Ollama may still be starting up...")
 
     system_prompt = (
-        "You are an autonomous software agent. You have access to tools: bash, read_file, "
-        "write_file, http_request, and task_done. Work step-by-step, using one or more tools "
-        "per response. Always call task_done when you have completed all work. "
-        f"When in doubt about a path, check with bash('ls {WORKSPACE_DIR}') first."
+        "You are an autonomous software agent. Tools available: bash, read_file, "
+        "write_file, http_request, task_done.\n\n"
+        "RULES (follow strictly):\n"
+        "1. Call tools with structured `tool_calls`, not embedded JSON in text.\n"
+        "2. Work ONE step at a time. After each tool result, decide the next step.\n"
+        "3. You MUST call `task_done` before you stop. Acceptable statuses:\n"
+        "   - success: all assigned work done\n"
+        "   - blocked: cannot proceed (include a one-line reason in `summary`)\n"
+        "   - incomplete: partial progress (include what's done in `summary`)\n"
+        "4. If a command fails, read the error and fix ONE thing. Do not re-run the same "
+        "failing command twice.\n"
+        "5. Prefer `bash` for git, curl, echo, ls — not read_file/write_file (which are for "
+        "simple reads/writes only).\n"
+        "6. Keep outputs short. Use `head -N` or `grep` to limit output from large files.\n\n"
+        f"Your working directory is {WORKSPACE_DIR}. If unsure about a path, "
+        f"run `bash('ls {WORKSPACE_DIR}')` first."
     )
 
     backend = _OllamaBackend(
