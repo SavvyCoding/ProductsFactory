@@ -4,8 +4,44 @@ import os
 from pathlib import Path
 
 
+# Appended to every persona prompt when backend == "ollama".
+# Local 30B models (qwen3-coder, gemma3) need stronger reinforcement on:
+#   - calling task_done() before exit
+#   - sticking to the assigned feature list (not querying for more work)
+#   - output format (one JSON line per feature, no wrapping)
+# Safe to include for Claude too — just slightly more verbose.
+_OLLAMA_ADDENDUM = """
 
-def build_prompt(product: dict, session_uid: str, persona: str | None = None, max_features: int | None = None) -> str:
+---
+
+## ⚡ Execution contract (read this carefully)
+
+You are running on a local model with a hard turn limit. Follow these rules:
+
+1. **Work through the assigned features in order. Do NOT query the API for more work.** If the assigned list is empty, call `task_done(status="success", summary="no work")` immediately.
+
+2. **After finishing each feature**, append ONE JSON line to `/workspace/session_result.json`. Format:
+   ```
+   {"id": <feature_id>, "status": "<exact_status>", ...}
+   ```
+   - One JSON object per line. No arrays. No `{"features": [...]}` wrapping.
+   - Use `bash('echo \\'{"id":N,"status":"X"}\\' >> /workspace/session_result.json')`.
+
+3. **Commit and push at the end** — use `bash` with `git add`, `git commit`, `git push`.
+
+4. **Call `task_done()` BEFORE your turn budget runs out.** If you cannot finish:
+   ```
+   task_done(status="blocked", summary="<one-line reason>")
+   ```
+   Exiting without calling `task_done()` counts as a failure.
+
+5. **One tool call per turn is fine** — don't try to batch. Use `bash` for shell commands including `echo >>`, `git`, `curl`.
+
+6. If a step produces an error, read the error carefully and adjust ONE thing at a time. Do not loop on the same failing command.
+"""
+
+
+def build_prompt(product: dict, session_uid: str, persona: str | None = None, max_features: int | None = None, backend: str = "claude") -> str:
     """
     Returns the full Claude prompt string for this product session.
 
@@ -89,4 +125,10 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
     }
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)
+
+    # Append Ollama-specific reinforcement when running on a local model.
+    # Harmless but slightly verbose for Claude; portable.
+    if backend == "ollama":
+        template = template + _OLLAMA_ADDENDUM
+
     return template

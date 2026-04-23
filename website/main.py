@@ -2271,21 +2271,55 @@ async def api_start_session(body: schemas.SessionCreate, db: AsyncSession = Depe
 
 
 @app.get("/api/sessions/active")
-async def api_active_session(product_id: int | None = None, db: AsyncSession = Depends(get_db)):
+async def api_active_session(
+    product_id: int | None = None,
+    started_after: datetime | None = None,
+    db: AsyncSession = Depends(get_db),
+):
     """
-    Returns the currently running session(s) — ended_at IS NULL.
-    Poller calls this before launching a container to avoid duplicates.
+    Returns running session(s) — ended_at IS NULL.
+    started_after: only include sessions started after this UTC timestamp (ISO string).
     If product_id is given, returns the active session for that product (or null).
     Without product_id, returns all active sessions.
     """
     q = select(DBSession).where(DBSession.ended_at.is_(None))
     if product_id is not None:
         q = q.where(DBSession.product_id == product_id)
+    if started_after is not None:
+        q = q.where(DBSession.started_at >= started_after)
     result = await db.execute(q)
     sessions = result.scalars().all()
     if product_id is not None:
         return sessions[0] if sessions else None
     return sessions
+
+
+@app.get("/api/products/{product_id}/sessions/audit")
+async def api_session_audit(product_id: int, limit: int = 10, db: AsyncSession = Depends(get_db)):
+    """
+    Returns the last N completed sessions for a product, ordered newest-first.
+    Used by the orchestrator to detect looping (same persona, no progress) before launching.
+    """
+    q = (
+        select(DBSession)
+        .where(DBSession.product_id == product_id, DBSession.ended_at.is_not(None))
+        .order_by(DBSession.started_at.desc())
+        .limit(limit)
+    )
+    result = await db.execute(q)
+    sessions = result.scalars().all()
+    return [
+        {
+            "id":                 s.id,
+            "persona":            s.persona,
+            "exit_code":          s.exit_code,
+            "features_attempted": s.features_attempted,
+            "features_pushed":    s.features_pushed,
+            "started_at":         s.started_at.isoformat() if s.started_at else None,
+            "ended_at":           s.ended_at.isoformat() if s.ended_at else None,
+        }
+        for s in sessions
+    ]
 
 
 @app.patch("/api/sessions/{session_id}", response_model=schemas.SessionOut)

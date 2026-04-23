@@ -25,7 +25,7 @@ import httpx
 
 from orchestrator.prompts import build_prompt
 from orchestrator.alerts import send_alert
-from orchestrator.paths import host_path, container_path, in_hermes_mode
+from orchestrator.paths import host_path, container_path, in_container_mode
 from templates.renderer import install_templates
 
 log = logging.getLogger("poller.docker")
@@ -886,7 +886,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # Inject previous session summary for continuity.
     product["_prev_session_summary"] = _read_session_summary(working_dir)
 
-    prompt = build_prompt(product, session_uid, persona=persona, max_features=effective_max_features)
+    prompt = build_prompt(product, session_uid, persona=persona, max_features=effective_max_features, backend=effective_backend)
 
     # Guard: check DB for an already-running session for this product.
     # Cross-check with docker ps — if the container is gone, auto-close the stale DB record.
@@ -987,15 +987,31 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         claude_mount = []
         log.info(f"Using Ollama backend — host={effective_ollama_host} persona={persona}")
     else:
-        # Claude backend: copy credentials to a temp dir and mount the copy
+        # Claude backend: SELECTIVELY copy only auth-essential files to a temp dir.
+        # A full copytree of ~/.claude races with the host's active Claude Code
+        # (which writes sessions/, history.jsonl, projects/, cache/ constantly)
+        # and causes 9P filesystem RPC hangs on Docker Desktop for Windows.
+        # We only need credentials + settings; per-session state is generated
+        # fresh inside the agent container.
         creds_src, claude_model = _get_claude_profile(sys_cfg)
+        # Files to copy verbatim from the host .claude dir. Everything else
+        # (sessions/, history.jsonl, projects/, cache/, plugins/, etc.) is
+        # skipped to avoid races with the host's live Claude Code process.
+        _AUTH_FILES = [".credentials.json", "settings.json", "settings.local.json"]
         try:
             _tmp_claude_dir = tempfile.mkdtemp(prefix="pf_claude_creds_")
             src_path = Path(creds_src)
             if src_path.exists():
-                # Copy contents into the temp dir
-                shutil.copytree(str(src_path), _tmp_claude_dir, dirs_exist_ok=True)
-                log.info(f"Copied Claude credentials from {creds_src} to {_tmp_claude_dir}")
+                copied: list[str] = []
+                for name in _AUTH_FILES:
+                    src_file = src_path / name
+                    if src_file.exists() and src_file.is_file():
+                        try:
+                            shutil.copy2(str(src_file), str(Path(_tmp_claude_dir) / name))
+                            copied.append(name)
+                        except Exception as ce:
+                            log.warning(f"Could not copy {name}: {ce}")
+                log.info(f"Copied Claude auth files ({copied}) from {creds_src} to {_tmp_claude_dir}")
                 # Ensure settings.json has the permissions + model we want
                 import json as _json
                 settings_path = Path(_tmp_claude_dir) / "settings.json"
@@ -1016,12 +1032,26 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
         mount_dir = _tmp_claude_dir or creds_src
 
-        # Pre-create session-env/ so the Claude Code harness can write session state.
-        # Without this directory the harness fails to initialise and the Bash tool is broken.
+        # Pre-create subdirectories the Claude Code harness expects to write to,
+        # and make them world-writable so the agent UID (1001) can use them.
+        # mkdtemp creates 0700 dirs owned by the orchestrator user (UID 999) —
+        # agent can't write there without this chmod.
         if _tmp_claude_dir:
-            (Path(_tmp_claude_dir) / "session-env").mkdir(exist_ok=True)
+            for _sub in ("session-env", "todos", "projects", "shell-snapshots",
+                         "statsig", "sessions"):
+                _sub_path = Path(_tmp_claude_dir) / _sub
+                _sub_path.mkdir(exist_ok=True)
+            try:
+                # 0777 on the root + all children so any UID inside the container can write.
+                os.chmod(_tmp_claude_dir, 0o777)
+                for _child in Path(_tmp_claude_dir).rglob("*"):
+                    try:
+                        os.chmod(_child, 0o777 if _child.is_dir() else 0o666)
+                    except Exception:
+                        pass
+            except Exception as _ce:
+                log.warning(f"chmod on staged claude dir failed: {_ce}")
             # Mount read-write — safe because mount_dir is a temp copy, not the original.
-            # The harness must be able to write to session-env/ at runtime.
             claude_mount = ["-v", f"{host_path(mount_dir)}:/home/agent/.claude"]
         else:
             # Fallback: direct mount — keep read-only to protect original credentials.
@@ -1029,20 +1059,19 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             claude_mount = ["-v", f"{host_path(mount_dir)}:/home/agent/.claude:ro"]
             log.warning("Mounting original .claude dir read-only — Bash tool may be broken")
 
-        # Also mount .claude.json (sits alongside .claude/ in the host home dir)
+        # Also include .claude.json (sits alongside .claude/ in the host home dir).
+        # Copy it INTO the staged dir rather than bind-mounting from host — the
+        # live file is rewritten constantly by the host's Claude Code and would
+        # race with the container mount.
         creds_parent = str(Path(creds_src).parent)
-        claude_json_src = str(Path(creds_parent) / ".claude.json")
-        if Path(claude_json_src).exists():
-            claude_mount += ["-v", f"{host_path(claude_json_src)}:/home/agent/.claude.json:ro"]
-        else:
-            # Restore from backup inside the .claude dir
-            backup_dir = Path(mount_dir) / "backups"
-            if backup_dir.exists():
-                backups = sorted(backup_dir.glob(".claude.json.backup.*"))
-                if backups and _tmp_claude_dir:
-                    shutil.copy2(str(backups[-1]), str(Path(_tmp_claude_dir) / ".claude.json"))
-                    claude_mount += ["-v", f"{host_path(_tmp_claude_dir)}/.claude.json:/home/agent/.claude.json:ro"]
-                    log.info(f"Restored .claude.json from backup: {backups[-1].name}")
+        claude_json_src_host = Path(creds_parent) / ".claude.json"
+        if _tmp_claude_dir and claude_json_src_host.exists():
+            try:
+                _staged_cj = Path(_tmp_claude_dir) / ".claude.json"
+                shutil.copy2(str(claude_json_src_host), str(_staged_cj))
+                claude_mount += ["-v", f"{host_path(_staged_cj)}:/home/agent/.claude.json:ro"]
+            except Exception as ce:
+                log.warning(f"Could not stage .claude.json: {ce}")
 
         # --dangerously-skip-permissions works now that container runs as non-root
         agent_cmd = ["claude", "--dangerously-skip-permissions", "-p", prompt]
@@ -1222,36 +1251,42 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 pass
 
     # ── Post-exit reconciliation (runs regardless of exit code) ─────────────────
-    # 1. Read session_result.json ONCE — shared between auto_merge and reconcile so
-    #    the file isn't deleted before auto_merge can act on it.
-    _session_features = _read_session_result(working_dir)
+    _session_features: list = []
+    attempted = 0
+    pushed = 0
+    try:
+        # 1. Read session_result.json ONCE — shared between auto_merge and reconcile so
+        #    the file isn't deleted before auto_merge can act on it.
+        _session_features = _read_session_result(working_dir)
 
-    # 2. Auto-merge BEFORE reconcile so merge/re-queue decisions override raw agent state.
-    if exit_code == 0 and persona == "reviewer" and product.get("_auto_merge_enabled"):
-        _session_features = _auto_merge_approved(product, _session_features)
+        # 2. Auto-merge BEFORE reconcile so merge/re-queue decisions override raw agent state.
+        if exit_code == 0 and persona == "reviewer" and product.get("_auto_merge_enabled"):
+            _session_features = _auto_merge_approved(product, _session_features)
 
-    # 3. Apply status updates (deletes session_result.json at end).
-    _reconcile_session_result(working_dir, product["id"], exit_code, features=_session_features, persona=persona)
+        # 3. Apply status updates (deletes session_result.json at end).
+        _reconcile_session_result(working_dir, product["id"], exit_code, features=_session_features, persona=persona)
 
-    # 4. Record session end in DB — include feature counts.
-    if session_id is not None:
         assigned_ids = {f["id"] for f in product.get("_assigned_features", [])}
         attempted = len(assigned_ids)
-        # Count only assigned features that progressed (not stale entries from prior sessions)
         pushed = sum(1 for f in _session_features
                      if isinstance(f, dict)
                      and f.get("id") in assigned_ids
                      and f.get("status") in ("Pushed", "Reviewing", "Reviewed", "Designed"))
-        try:
-            with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-                client.patch(f"/api/sessions/{session_id}", json={
-                    "ended_at":  datetime.now(timezone.utc).isoformat(),
-                    "exit_code": exit_code,
-                    "features_attempted": attempted,
-                    "features_pushed": pushed,
-                })
-        except Exception as e:
-            log.warning(f"Could not update session record: {e}")
+    except Exception:
+        log.exception(f"Post-exit reconciliation failed for {product.get('name')}")
+    finally:
+        # 4. Always record session end — guaranteed even if reconciliation raises.
+        if session_id is not None:
+            try:
+                with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                    client.patch(f"/api/sessions/{session_id}", json={
+                        "ended_at":          datetime.now(timezone.utc).isoformat(),
+                        "exit_code":         exit_code,
+                        "features_attempted": attempted,
+                        "features_pushed":   pushed,
+                    })
+            except Exception as e:
+                log.warning(f"Could not update session record: {e}")
 
     # 5. Roll back any intermediate-state features with no PR evidence.
     #    Covers cases where agent claimed a feature but never finished it.

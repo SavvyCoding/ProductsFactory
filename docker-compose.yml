@@ -1,7 +1,7 @@
 # ProductFactory — Infrastructure services
-# Runs: PostgreSQL + PM website + Hermes orchestrator
+# Runs: PostgreSQL + PM website + Orchestrator container
 # (Legacy Windows poller still works via deploy/windows/start_poller.ps1 for
-# host-mode fallback; Hermes is the preferred production path.)
+# host-mode fallback; the orchestrator container is the preferred path.)
 #
 # Start:  docker compose up -d
 # Logs:   docker compose logs -f
@@ -68,48 +68,33 @@ services:
       - productfactory-net   # agent containers reach pm-api via host-gateway:8080
     restart: unless-stopped
 
-  # ── Hermes orchestrator (replaces the Windows poller) ──────────────────────
-  # Opt-in via `--profile hermes` — keeps the legacy Windows poller path
-  # available for hosts that haven't migrated yet.
-  #
-  # Hermes runs a persistent gateway daemon; a 60s cron fires the orchestrate.md
-  # skill, which drives the ProductFactory sprint pipeline via custom tools.
-  hermes:
-    profiles: ["hermes"]
+  # ── Orchestrator (replaces the Windows poller) ──────────────────────────────
+  # Opt-in via `--profile orchestrator`. Runs a simple Python loop that calls
+  # run_cycle() every 60s to launch agent containers. No LLM — deterministic.
+  # Claude is reserved for agent personas (coder, designer, reviewer).
+  orchestrator:
+    profiles: ["orchestrator"]
     build:
       context: .
-      dockerfile: deploy/docker/Dockerfile.hermes
-    image: productfactory-hermes
-    container_name: pf-hermes
-    # Docker Desktop for Windows: the socket is owned by root:root (GID 0).
-    # Add hermes to GID 0 so it can reach the Docker daemon.
-    # On Linux hosts the dockerhost group (GID 998) usually matches — this is harmless there.
+      dockerfile: deploy/docker/Dockerfile.orchestrator
+    image: productfactory-orchestrator
+    container_name: pf-orchestrator
+    # Docker Desktop for Windows: socket is owned by root:root (GID 0).
     group_add:
       - "0"
-    # host.docker.internal resolves to the host on Docker Desktop; on Linux we
-    # still need the extra_hosts mapping below to reach the host's Ollama.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      # Hermes LLM backend — local Ollama, no API keys needed.
-      OLLAMA_HOST:        ${OLLAMA_HOST:-http://host.docker.internal:11434}
-      HERMES_MODEL:       ${HERMES_MODEL:-gemma4:26b}
       PM_API_URL:         http://pm-api:8080
-      PM_API_URL_CONTAINER: http://pm-api:8080
-      # Path duality — orchestrator/paths.py uses both *_HOST and container
-      # values to translate between the Hermes filesystem and `docker run -v`
-      # mount sources (which are resolved by the Docker daemon on the host).
       PRODUCTS_BASE_DIR:  ${PRODUCTS_BASE_DIR:?PRODUCTS_BASE_DIR must be set in .env}
       PRODUCTS_MOUNT_PATH: /products
       CLAUDE_DIR_HOST:    ${CLAUDE_DIR:-~/.claude}
-      CLAUDE_DIR:         /home/hermes/.claude
+      CLAUDE_DIR:         /home/orchestrator/.claude
       SSH_DIR_HOST:       ${SSH_DIR:-~/.ssh}
-      SSH_DIR:            /home/hermes/.ssh
-      HERMES_STAGING_HOST: ${HERMES_STAGING_HOST:?HERMES_STAGING_HOST must be set in .env (host tmpdir for creds staging)}
-      HERMES_STAGING_CONTAINER: /hermes-staging
-      # Python's tempfile.mkdtemp lands in /hermes-staging so `docker run -v`
-      # can mount it via the matching host path.
-      TMPDIR:             /hermes-staging
+      SSH_DIR:            /home/orchestrator/.ssh
+      ORCHESTRATOR_STAGING_HOST: ${ORCHESTRATOR_STAGING_HOST:?ORCHESTRATOR_STAGING_HOST must be set in .env (host tmpdir for creds staging)}
+      ORCHESTRATOR_STAGING_CONTAINER: /orchestrator-staging
+      TMPDIR:             /orchestrator-staging
       AGENT_IMAGE:        ${AGENT_IMAGE:-productfactory-agent}
       PM_USERNAME:        ${PM_USERNAME:-admin}
       PM_PASSWORD:        ${PM_PASSWORD:?PM_PASSWORD must be set in .env}
@@ -117,28 +102,21 @@ services:
       STALE_THRESHOLD_MINUTES: ${STALE_THRESHOLD_MINUTES:-45}
       MAX_OPEN_PRS:       ${MAX_OPEN_PRS:-3}
       MAX_FEATURES_PER_RUN: ${MAX_FEATURES_PER_RUN:-1}
+      ORCHESTRATION_CYCLE_SECONDS: ${ORCHESTRATION_CYCLE_SECONDS:-60}
+      # Agent backend — `ollama` for local/offline/TOS-compliant, `claude` for API
+      AGENT_BACKEND:      ${AGENT_BACKEND:-ollama}
+      # Hardcoded — we explicitly want host.docker.internal inside the container
+      # regardless of what the host shell's OLLAMA_HOST is set to (which may be
+      # 0.0.0.0 for a local Ollama server listener).
+      OLLAMA_HOST:        http://host.docker.internal:11434
+      DESIGNER_MODEL:     ${DESIGNER_MODEL:-gemma3:27b}
+      CODER_MODEL:        ${CODER_MODEL:-qwen3-coder:30b}
     volumes:
-      # Docker socket — Hermes spawns agent containers via the host daemon.
       - /var/run/docker.sock:/var/run/docker.sock
-      # Product working directories — Hermes uses /products for its own file
-      # ops but passes the host path verbatim when launching agents.
       - ${PRODUCTS_BASE_DIR}:/products
-      # Claude OAuth creds (read-only — docker_runner copies to staging and
-      # patches settings.json there before mounting into the agent).
-      - ${CLAUDE_DIR:-~/.claude}:/home/hermes/.claude:ro
-      # SSH deploy keys (read-only)
-      - ${SSH_DIR:-~/.ssh}:/home/hermes/.ssh:ro
-      # Staging dir — bind-mounted from host at the same logical location so
-      # that `docker run -v ${HERMES_STAGING_HOST}/xxx:/...` resolves for both
-      # the Hermes Python process (as /hermes-staging/xxx) and the Docker
-      # daemon (as the host path). This is how temp creds reach spawned agents.
-      - ${HERMES_STAGING_HOST}:/hermes-staging
-      # Persist Hermes cron jobs + memory across restarts
-      - hermes_home:/home/hermes/.hermes
-    ports:
-      # Hermes web dashboard (config, sessions, cron, memory inspection).
-      # Browse http://localhost:9119 once the container is up.
-      - "9119:9119"
+      - ${CLAUDE_DIR:-~/.claude}:/home/orchestrator/.claude:ro
+      - ${SSH_DIR:-~/.ssh}:/home/orchestrator/.ssh:ro
+      - ${ORCHESTRATOR_STAGING_HOST}:/orchestrator-staging
     depends_on:
       web:
         condition: service_started
@@ -189,6 +167,3 @@ volumes:
     name: productfactory-caddy-data
   caddy_config:
     name: productfactory-caddy-config
-  # Hermes ~/.hermes — cron jobs, memory, session history
-  hermes_home:
-    name: productfactory-hermes-home

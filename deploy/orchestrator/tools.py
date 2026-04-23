@@ -25,7 +25,7 @@ import httpx
 if "/app" not in sys.path:
     sys.path.insert(0, "/app")
 
-log = logging.getLogger("hermes.productfactory")
+log = logging.getLogger("orchestrator.tools")
 
 PM_API_URL = os.environ.get("PM_API_URL", "http://pm-api:8080")
 PM_USERNAME = os.environ.get("PM_USERNAME", "admin")
@@ -203,7 +203,7 @@ def run_cycle(args: dict, **kwargs) -> str:
              "--format", "{{.Names}}"],
             capture_output=True, text=True, timeout=10,
         )
-        active = [n for n in running.stdout.strip().splitlines() if n and n != "pf-hermes"]
+        active = [n for n in running.stdout.strip().splitlines() if n and n != "pf-orchestrator"]
         if active:
             return _ok({"action": "exit", "reason": f"Agent container(s) already running: {active}"})
 
@@ -263,8 +263,14 @@ def run_cycle(args: dict, **kwargs) -> str:
             persona = action_data.get("persona", "planner")
             # Clear run_now before launching
             _pm("PATCH", f"/api/products/{product_id}", {"run_now": False})
-            return _ok({"action": "launch_session", "product_id": product_id, "persona": persona,
-                        "reason": action_data.get("reason", "")})
+            # Launch directly — we run as a deterministic orchestrator, no LLM
+            # multi-turn reasoning needed.
+            launch_result = json.loads(launch_session(
+                {"product_id": product_id, "persona": persona}, **kwargs
+            ))
+            return _ok({"action": "launched", "product_id": product_id, "persona": persona,
+                        "reason": action_data.get("reason", ""),
+                        "launch": launch_result})
         else:
             return _ok({"action": "exit", "reason": action_data.get("reason", "nothing to do")})
 
@@ -360,7 +366,7 @@ def reset_stuck_features(args: dict, **kwargs) -> str:
 
 def poller_heartbeat(args: dict, **kwargs) -> str:
     pid = os.getpid()
-    host = f"hermes-{socket.gethostname()}"
+    host = f"orchestrator-{socket.gethostname()}"
     return _pm("POST", "/api/poller/heartbeat", {"pid": pid, "host": host})
 
 
@@ -395,25 +401,42 @@ _PERSONA_ALIASES = {
     "auditor": "security_auditor",
 }
 
+# Launch-lock: prevents duplicate launches for the same product while
+# docker_runner is doing setup (workspace sync, feature assign) before it
+# POSTs /api/sessions. Without this, run_cycle re-launches every 60s because
+# it sees neither an active container nor an active DB session yet.
+import threading as _threading
+_LAUNCH_LOCK = _threading.Lock()
+_LAUNCHING: set[int] = set()
+
 
 def launch_session(args: dict, **kwargs) -> str:
     """
     Spawn the agent Docker container for the given product+persona.
     Returns immediately — the container runs in a background daemon thread.
-    The next run_cycle() call will detect the running container and skip re-launching.
+    A launch-lock prevents the same product from being launched concurrently
+    while docker_runner is still in its setup phase.
     """
-    import threading
-
     product_id = args.get("product_id")
     persona = args.get("persona")
     if persona in _PERSONA_ALIASES:
         log.warning("launch_session: aliasing persona %r → %r", persona, _PERSONA_ALIASES[persona])
         persona = _PERSONA_ALIASES[persona]
+
+    # Short-circuit if a launch for this product is already in flight.
+    with _LAUNCH_LOCK:
+        if product_id in _LAUNCHING:
+            log.info("launch_session: product %s already launching, skipping", product_id)
+            return _ok({"status": "already_launching", "product_id": product_id})
+        _LAUNCHING.add(product_id)
+
     try:
         from orchestrator.docker_runner import run_claude_in_docker  # type: ignore
         with _pm_client() as client:
             product_resp = client.get(f"/api/products/{product_id}")
         if not product_resp.is_success:
+            with _LAUNCH_LOCK:
+                _LAUNCHING.discard(product_id)
             return _err(f"product {product_id} not found", status=product_resp.status_code)
         product = product_resp.json()
 
@@ -432,10 +455,11 @@ def launch_session(args: dict, **kwargs) -> str:
                                   and f.get("status") not in _TERMINAL]
                     if unsprinted:
                         log.info("launch_session(planner) intercepted: calling plan-sprints for %d features", len(unsprinted))
+                        with _LAUNCH_LOCK:
+                            _LAUNCHING.discard(product_id)
                         return _pm("POST", f"/api/products/{product_id}/plan-sprints")
 
         # Fire and forget — run_claude_in_docker blocks for up to SESSION_TIMEOUT minutes.
-        # We return immediately so the Hermes cron session doesn't time out.
         def _run():
             try:
                 exit_code = run_claude_in_docker(product, persona=persona)
@@ -443,12 +467,17 @@ def launch_session(args: dict, **kwargs) -> str:
                          product_id, persona, exit_code)
             except Exception:
                 log.exception("launch_session background thread crashed")
+            finally:
+                with _LAUNCH_LOCK:
+                    _LAUNCHING.discard(product_id)
 
-        t = threading.Thread(target=_run, daemon=True, name=f"session-{product_id}-{persona}")
+        t = _threading.Thread(target=_run, daemon=True, name=f"session-{product_id}-{persona}")
         t.start()
         return _ok({"status": "launched", "product_id": product_id, "persona": persona,
                     "note": "container started in background — run_cycle will skip if already running"})
     except Exception as e:
+        with _LAUNCH_LOCK:
+            _LAUNCHING.discard(product_id)
         log.exception("launch_session failed")
         return _err(f"launch_session crashed: {e}")
 
