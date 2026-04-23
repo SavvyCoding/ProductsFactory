@@ -96,11 +96,29 @@ class AgentLoop:
             finish_reason = message.get("finish_reason", "")
 
             if not tool_calls:
-                if finish_reason in ("stop", "end_turn", ""):
-                    self.log("Agent finished without calling task_done — exit=2 (incomplete)")
+                # Local models frequently produce a text-only "plan" response
+                # then stop. Rather than bailing out, nudge them to continue.
+                # Only give up after 3 consecutive no-tool turns OR if the
+                # model explicitly said it's done without calling task_done.
+                nudge_count = getattr(self, "_nudge_count", 0) + 1
+                self._nudge_count = nudge_count
+                if nudge_count >= 3:
+                    self.log(f"Agent produced {nudge_count} text-only turns without a tool call — exit=2 (incomplete)")
                     return 2
-                self.log(f"No tool calls and finish_reason={finish_reason!r} — exit=2 (incomplete)")
-                return 2
+                self.log(f"No tool call in response (nudge {nudge_count}/3) — reminding agent to use tools")
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "You just produced text without calling a tool. "
+                        "You MUST use a tool call to make progress. "
+                        "Call `bash`, `read_file`, `write_file`, or `http_request` to do work, "
+                        "or call `task_done(status=\"success\"|\"blocked\"|\"incomplete\", summary=\"...\")` "
+                        "to finish the session."
+                    ),
+                })
+                continue
+            # Reset the nudge counter whenever the agent successfully calls tools.
+            self._nudge_count = 0
 
             # Dispatch each tool call and collect results.
             session_done = False
