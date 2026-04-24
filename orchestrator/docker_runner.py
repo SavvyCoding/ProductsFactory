@@ -190,9 +190,10 @@ def _apply_session_entry(client: httpx.Client, entry: dict) -> bool:
     if status is not None and status not in _VALID_FEATURE_STATUSES:
         log.warning(f"[progress] Skipping feature #{fid} entry with unknown status '{status}' — agent bug?")
         return False
-    # Guard: Reviewing entries MUST carry pr_number — without it the feature will
-    # get stuck (auto-merge can't find the PR, reconcile_merged_prs can't find it).
-    # Fall back to parsing pr_number from pr_url if the agent forgot to include it.
+    # Contract: Reviewing entries MUST carry pr_number (from the field or
+    # embedded in pr_url). Without it the feature gets stuck (auto-merge has
+    # nothing to merge). Previously we warned and let it through; now we
+    # REJECT and bump fix_attempts so repeated violations auto-Block.
     if entry.get("status") == "Reviewing" and not entry.get("pr_number"):
         pr_url = entry.get("pr_url", "")
         import re as _re
@@ -201,10 +202,24 @@ def _apply_session_entry(client: httpx.Client, entry: dict) -> bool:
             entry = dict(entry, pr_number=int(m.group(1)))
             log.info(f"[progress] Feature #{fid}: extracted pr_number={entry['pr_number']} from pr_url")
         else:
-            log.warning(
-                f"[progress] Feature #{fid} transitioning to Reviewing without pr_number — "
-                "feature may get stuck. Agent should include pr_number in session_result.json."
-            )
+            log.warning(f"[progress] REJECTING feature #{fid} — Reviewing without pr_number (agent contract violation)")
+            try:
+                cur = client.get(f"/api/features/{fid}").json()
+                attempts = int(cur.get("fix_attempts") or 0) + 1
+                patch = {"fix_attempts": attempts}
+                if attempts >= 5:
+                    patch.update({"status": "Blocked",
+                                  "blocked_reason": "Agent kept marking Reviewing without a real PR number"})
+                client.patch(f"/api/features/{fid}", json=patch)
+            except Exception:
+                pass
+            return False
+
+    # Contract: Reviewed entries MUST carry review_outcome. Without it the
+    # auto-merge path can't decide whether to merge.
+    if entry.get("status") == "Reviewed" and not entry.get("review_outcome"):
+        log.warning(f"[progress] REJECTING feature #{fid} — Reviewed without review_outcome")
+        return False
     # Guard: never downgrade a feature's status
     _PROGRESS_RANK = {
         "Pending": 0, "Approved": 1, "Designing": 2, "Designed": 3,
@@ -433,7 +448,27 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
         if entry.get("confidence", "low") != "high":
             log.info(f"[auto-merge] Feature #{fid} approved (low-confidence) — merging via sprint flow")
 
-        # PR is open + high confidence — attempt merge
+        # PR is open + high confidence — attempt merge.
+        # First, try to update the PR branch with main (GitHub's "Update branch"
+        # button, REST endpoint /update-branch). If the PR branch is behind main
+        # or has conflicts, this rebases/merges main into the branch so the
+        # subsequent merge PUT succeeds. 422 = already up-to-date (ok to ignore).
+        try:
+            upd = httpx.put(
+                f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}/update-branch",
+                headers=gh_headers, timeout=15,
+            )
+            if upd.status_code in (202, 200):
+                log.info(f"[auto-merge] PR #{pr_number} branch updated — waiting 5s for GitHub to recompute mergeability")
+                import time as _t
+                _t.sleep(5)
+            elif upd.status_code == 422:
+                log.info(f"[auto-merge] PR #{pr_number} already up-to-date with base")
+            else:
+                log.warning(f"[auto-merge] update-branch returned {upd.status_code} for PR #{pr_number}: {upd.text[:120]}")
+        except Exception as _ue:
+            log.warning(f"[auto-merge] update-branch failed for PR #{pr_number}: {_ue} — proceeding to merge anyway")
+
         log.info(f"[auto-merge] Merging PR #{pr_number} for feature #{fid} (high-confidence)")
         try:
             resp = httpx.put(
@@ -694,17 +729,48 @@ def _claim_features(features: list[dict], persona: str | None) -> None:
         log.warning(f"[claim] Could not connect to PM API: {e}")
 
 
-def _get_claude_profile(sys_cfg: dict) -> tuple[str, str]:
+# Persona → cost tier. Heavy personas make architectural decisions or write
+# production code; light personas summarise, document, or generate text. The
+# default mapping keeps heavy work on Sonnet and light work on Haiku (~5x
+# cheaper, ~3x faster). Override per-persona via sys_cfg.claude_model_map.
+_HEAVY_PERSONAS = {"coder", "reviewer", "designer", "security_auditor", "qa_tester"}
+_LIGHT_PERSONAS = {"planner", "product_planner", "documenter", "retrospective",
+                   "analytics", "recommender", "devops", "refactorer"}
+
+
+def _model_for_persona(sys_cfg: dict, persona: str | None) -> str:
     """
-    Returns (credentials_dir, claude_model) from system config with sensible defaults.
-    credentials_dir: falls back to CLAUDE_DIR env var.
-    claude_model: falls back to 'claude-sonnet-4-6'.
+    Resolution order:
+      1. sys_cfg.claude_model_map[persona]  (explicit per-persona override)
+      2. sys_cfg.claude_model_heavy / claude_model_light  (tier override)
+      3. sys_cfg.claude_model  (single-model fallback, legacy behaviour)
+      4. Hardcoded default: Sonnet for heavy, Haiku for light, Sonnet for unknown
+    """
+    pmap = sys_cfg.get("claude_model_map") or {}
+    if isinstance(pmap, dict) and persona and pmap.get(persona):
+        return pmap[persona]
+    if persona in _HEAVY_PERSONAS:
+        return (sys_cfg.get("claude_model_heavy")
+                or sys_cfg.get("claude_model")
+                or "claude-sonnet-4-6")
+    if persona in _LIGHT_PERSONAS:
+        return (sys_cfg.get("claude_model_light")
+                or sys_cfg.get("claude_model")
+                or "claude-haiku-4-5-20251001")
+    # Unknown persona — safer to use the more capable model.
+    return (sys_cfg.get("claude_model") or "claude-sonnet-4-6")
+
+
+def _get_claude_profile(sys_cfg: dict, persona: str | None = None) -> tuple[str, str]:
+    """
+    Returns (credentials_dir, claude_model) from system config.
+    Model is persona-aware — heavy personas (coder/reviewer/etc.) get Sonnet;
+    light personas (planner/documenter/etc.) get Haiku. Configurable via
+    sys_cfg.claude_model_map, claude_model_heavy, claude_model_light.
     """
     credentials_dir = sys_cfg.get("claude_credentials_dir") or str(CLAUDE_DIR)
-    # In Hermes mode the DB stores the HOST path; translate to the container path
-    # so that Path(credentials_dir).exists() works and copytree finds the creds.
     credentials_dir = container_path(credentials_dir) or credentials_dir
-    claude_model = sys_cfg.get("claude_model") or "claude-sonnet-4-6"
+    claude_model = _model_for_persona(sys_cfg, persona)
     return credentials_dir, claude_model
 
 
@@ -993,7 +1059,8 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         # and causes 9P filesystem RPC hangs on Docker Desktop for Windows.
         # We only need credentials + settings; per-session state is generated
         # fresh inside the agent container.
-        creds_src, claude_model = _get_claude_profile(sys_cfg)
+        creds_src, claude_model = _get_claude_profile(sys_cfg, persona=persona)
+        log.info("Claude model for persona=%s: %s", persona, claude_model)
         # Files to copy verbatim from the host .claude dir. Everything else
         # (sessions/, history.jsonl, projects/, cache/, plugins/, etc.) is
         # skipped to avoid races with the host's live Claude Code process.
@@ -1129,8 +1196,8 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     log.info(f"docker run: session={session_uid} product={product['name']}")
 
-    # Record session start — include container_id, persona, backend upfront so
-    # the DB is queryable immediately (used by active-session guard on next poll).
+    # Record session start with FSM status=starting. PM API sets expected_deadline
+    # based on SESSION_TIMEOUT_MINUTES so watchdog can authoritatively time it out.
     session_id: int | None = None
     container_name = f"pf-{product['id']}-{session_uid}"
     try:
@@ -1141,6 +1208,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 "container_id": container_name,
                 "persona":      persona,
                 "backend":      effective_backend,
+                "status":       "starting",
             })
             resp.raise_for_status()
             session_id = resp.json()["id"]
@@ -1177,6 +1245,21 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 capture_output=True,
             )
         threading.Thread(target=_fix_workspace_perms, daemon=True).start()
+
+        # Heartbeat thread — POST /api/sessions/{id}/heartbeat every 30s so the
+        # watchdog knows the session is alive. When the main wait() returns
+        # (container exited, timed out, killed), _hb_stop fires and the loop exits.
+        _hb_stop = threading.Event()
+        def _send_heartbeat():
+            while not _hb_stop.wait(30):
+                if session_id is None:
+                    continue
+                try:
+                    httpx.post(f"{PM_API_URL}/api/sessions/{session_id}/heartbeat", timeout=5)
+                except Exception:
+                    pass  # transient failures are fine; watchdog has grace period
+        if session_id is not None:
+            threading.Thread(target=_send_heartbeat, daemon=True).start()
 
         def _stream_logs():
             buffer: list[str] = []
@@ -1219,6 +1302,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         else:
             exit_code = process.returncode
         finally:
+            _hb_stop.set()         # stop heartbeat thread
             _poll_stop.set()       # signal live-poll thread to stop
             log_thread.join(timeout=10)
             if log_thread.is_alive():
@@ -1278,8 +1362,12 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         # 4. Always record session end — guaranteed even if reconciliation raises.
         if session_id is not None:
             try:
+                # FSM transition: exit_code=0 → ended, non-zero → killed (watchdog
+                # may have already set status=killed if it was the one that fired).
+                end_status = "ended" if exit_code == 0 else "killed"
                 with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
                     client.patch(f"/api/sessions/{session_id}", json={
+                        "status":            end_status,
                         "ended_at":          datetime.now(timezone.utc).isoformat(),
                         "exit_code":         exit_code,
                         "features_attempted": attempted,

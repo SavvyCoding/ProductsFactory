@@ -2264,10 +2264,115 @@ async def api_remove_feature_link(feature_id: int, link_id: int, db: AsyncSessio
 
 @app.post("/api/sessions", response_model=schemas.SessionOut, status_code=201)
 async def api_start_session(body: schemas.SessionCreate, db: AsyncSession = Depends(get_db)):
-    session = DBSession(**body.model_dump())
+    # Compute expected_deadline from SESSION_TIMEOUT_MINUTES so the watchdog can
+    # kill past-deadline sessions without parsing docker output.
+    from datetime import timedelta
+    timeout_min = int(os.environ.get("SESSION_TIMEOUT_MINUTES", "90"))
+    now = datetime.now(timezone.utc)
+    payload = body.model_dump()
+    payload.setdefault("status", "pending")
+    payload["expected_deadline"] = now + timedelta(minutes=timeout_min)
+    session = DBSession(**payload)
     db.add(session)
     await db.flush()
+    await db.execute(text(
+        "INSERT INTO session_events (session_id, event, detail) VALUES (:sid, 'launched', :detail)"
+    ), {"sid": session.id, "detail": f"persona={session.persona} backend={session.backend}"})
     return session
+
+
+@app.post("/api/sessions/{session_id}/heartbeat")
+async def api_session_heartbeat(session_id: int, db: AsyncSession = Depends(get_db)):
+    """Agent calls this periodically; watchdog reads heartbeat_at to detect hangs."""
+    session = await db.get(DBSession, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    now = datetime.now(timezone.utc)
+    was_pre_running = session.status in ("pending", "starting")
+    session.heartbeat_at = now
+    if was_pre_running:
+        session.status = "running"
+        await db.execute(text(
+            "INSERT INTO session_events (session_id, event, detail) VALUES (:sid, 'running', NULL)"
+        ), {"sid": session_id})
+    return {"ok": True, "heartbeat_at": session.heartbeat_at.isoformat()}
+
+
+@app.get("/api/sessions/watchdog/targets")
+async def api_watchdog_targets(db: AsyncSession = Depends(get_db)):
+    """
+    Returns sessions the watchdog should kill. Two conditions:
+      1. Past expected_deadline (hard timeout)
+      2. status=running but no heartbeat in 15m (after 15m grace period since started_at)
+
+    Caller (watchdog) is responsible for actually killing the container
+    (via docker kill) and POSTing back to /kill to close the DB record.
+    """
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    heartbeat_grace = timedelta(minutes=15)
+
+    q = select(DBSession).where(
+        DBSession.status.in_(["pending", "starting", "running"]),
+        DBSession.ended_at.is_(None),
+    )
+    result = await db.execute(q)
+    kill_list = []
+    for s in result.scalars().all():
+        reason = None
+        if s.expected_deadline and now > s.expected_deadline:
+            reason = f"timeout (deadline {s.expected_deadline.isoformat()})"
+        elif s.started_at and (now - s.started_at) > heartbeat_grace:
+            last_hb = s.heartbeat_at or s.started_at
+            if (now - last_hb) > heartbeat_grace:
+                reason = f"no heartbeat in {int((now - last_hb).total_seconds() / 60)}m"
+        if reason:
+            kill_list.append({
+                "id":            s.id,
+                "product_id":    s.product_id,
+                "persona":       s.persona,
+                "container_id":  s.container_id,
+                "session_uid":   s.session_uid,
+                "reason":        reason,
+            })
+    return kill_list
+
+
+@app.post("/api/sessions/{session_id}/kill")
+async def api_session_kill(
+    session_id: int,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """Close a session as killed. Watchdog calls after running docker kill."""
+    session = await db.get(DBSession, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    session.status = "killed"
+    session.kill_reason = body.get("reason", "watchdog")
+    session.ended_at = datetime.now(timezone.utc)
+    session.exit_code = -1
+    # Audit log
+    await db.execute(text(
+        "INSERT INTO session_events (session_id, event, detail) VALUES (:sid, 'killed', :detail)"
+    ), {"sid": session_id, "detail": session.kill_reason})
+    return {"ok": True}
+
+
+@app.get("/api/sessions/{session_id}/events")
+async def api_session_events(session_id: int, db: AsyncSession = Depends(get_db)):
+    """Return the lifecycle event timeline for one session, oldest first."""
+    result = await db.execute(text("""
+        SELECT id, event, detail, created_at
+          FROM session_events
+         WHERE session_id = :sid
+         ORDER BY created_at ASC
+    """), {"sid": session_id})
+    return [
+        {"id": r.id, "event": r.event, "detail": r.detail,
+         "created_at": r.created_at.isoformat() if r.created_at else None}
+        for r in result.fetchall()
+    ]
 
 
 @app.get("/api/sessions/active")
@@ -2282,7 +2387,13 @@ async def api_active_session(
     If product_id is given, returns the active session for that product (or null).
     Without product_id, returns all active sessions.
     """
-    q = select(DBSession).where(DBSession.ended_at.is_(None))
+    # "Active" = ended_at not yet set AND FSM status indicates a live session.
+    # Without the status filter, orphaned rows (where the container died but
+    # ended_at was never written) would be mis-classified as active forever.
+    q = select(DBSession).where(
+        DBSession.ended_at.is_(None),
+        DBSession.status.in_(["pending", "starting", "running"]),
+    )
     if product_id is not None:
         q = q.where(DBSession.product_id == product_id)
     if started_after is not None:
@@ -2330,8 +2441,17 @@ async def api_end_session(
     session = await db.get(DBSession, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    for field, value in body.model_dump(exclude_unset=True).items():
+    body_fields = body.model_dump(exclude_unset=True)
+    was_open = session.ended_at is None
+    for field, value in body_fields.items():
         setattr(session, field, value)
+    # Emit lifecycle event on close transition.
+    if was_open and session.ended_at is not None:
+        ev = "killed" if session.status == "killed" else "ended"
+        detail = f"exit={session.exit_code} pushed={session.features_pushed}"
+        await db.execute(text(
+            "INSERT INTO session_events (session_id, event, detail) VALUES (:sid, :ev, :d)"
+        ), {"sid": session_id, "ev": ev, "d": detail})
     return session
 
 

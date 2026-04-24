@@ -197,21 +197,35 @@ def run_cycle(args: dict, **kwargs) -> str:
         if not hb.get("ok") or hb.get("status") == 409:
             return _ok({"action": "409_stop", "reason": "Lock stolen"})
 
-        # 2. Check for running agent containers — if any, skip this cycle
-        running = subprocess.run(
-            ["docker", "ps", "--filter", "name=pf-", "--filter", "status=running",
-             "--format", "{{.Names}}"],
-            capture_output=True, text=True, timeout=10,
-        )
-        active = [n for n in running.stdout.strip().splitlines() if n and n != "pf-orchestrator"]
-        if active:
-            return _ok({"action": "exit", "reason": f"Agent container(s) already running: {active}"})
+        # 2. WATCHDOG — DB-authoritative. Asks PM API for sessions past their
+        # expected_deadline or without a recent heartbeat, then kills their
+        # docker containers and closes the DB records. No mtime parsing, no
+        # RunningFor string matching, no GitHub API calls. Single source of
+        # truth: the `sessions` table.
+        try:
+            with _pm_client() as client:
+                wd_resp = client.get("/api/sessions/watchdog/targets")
+            if wd_resp.is_success:
+                targets = wd_resp.json()
+                for t in targets:
+                    name = t.get("container_id") or f"pf-{t['product_id']}-{t.get('session_uid','')}"
+                    reason = t.get("reason", "watchdog")
+                    log.warning("[watchdog] killing session %s container=%s reason=%s",
+                                t["id"], name, reason)
+                    subprocess.run(["docker", "kill", name], capture_output=True, timeout=10)
+                    with _pm_client() as client:
+                        client.post(f"/api/sessions/{t['id']}/kill", json={"reason": reason})
+        except Exception:
+            log.exception("[watchdog] failed")
 
-        # 3. Stale containers
-        check_stale_sessions({}, **kwargs)
-
-        # 4. Reset stuck
         reset_stuck_features({}, **kwargs)
+
+        # 3. Active containers are tracked per-product via the DB and the
+        # per-product launch_lock. We no longer short-circuit globally on
+        # "any pf-* running" — that blocks other products unnecessarily.
+        # The round-robin product selection below already picks products that
+        # don't have active sessions; the launch_lock prevents double-spawn
+        # for a given product. No global guard needed.
 
         # 5. Per-product preflight
         products_raw = json.loads(get_products({}, **kwargs))
@@ -241,7 +255,14 @@ def run_cycle(args: dict, **kwargs) -> str:
         if reviewer_feature and isinstance(reviewer_feature, dict):
             pid = reviewer_feature.get("product_id")
             if any(p["id"] == pid and p.get("status") in ("ready", "running") for p in products):
-                return _ok({"action": "launch_session", "product_id": pid, "persona": "reviewer"})
+                # Actually spawn the reviewer container (consistent with the
+                # launch_session branch below — run_cycle is single-call).
+                launch_result = json.loads(launch_session(
+                    {"product_id": pid, "persona": "reviewer"}, **kwargs
+                ))
+                return _ok({"action": "launched", "product_id": pid, "persona": "reviewer",
+                            "reason": f"reviewer work for feature {reviewer_feature.get('id')}",
+                            "launch": launch_result})
 
         # Priority 2: round-robin product
         next_raw = json.loads(_pm("GET", "/api/products/next"))
@@ -294,13 +315,16 @@ def determine_next_action(args: dict, **kwargs) -> str:
             features_resp  = client.get(f"/api/products/{product_id}/features")
             sprint_resp    = client.get(f"/api/products/{product_id}/sprints/active")
             syscfg_resp    = client.get("/api/system-config")
-            prs_resp       = client.get(f"/api/products/{product_id}/github/prs?state=open")
+            # Use the dedicated /open_pr_count endpoint — /github/prs?state=open
+            # doesn't exist (returns 404), which silently broke the PR cap gate.
+            prs_resp       = client.get(f"/api/products/{product_id}/open_pr_count")
 
         features = features_resp.json() if features_resp.is_success else []
         active_sprint = sprint_resp.json() if sprint_resp.is_success else None
         sys_cfg = syscfg_resp.json() if syscfg_resp.is_success else {}
-        prs = prs_resp.json() if prs_resp.is_success else []
-        max_prs = sys_cfg.get("max_open_prs", 3)
+        prs_data = prs_resp.json() if prs_resp.is_success else {}
+        open_pr_count = prs_data.get("count", 0) if isinstance(prs_data, dict) else 0
+        max_prs = sys_cfg.get("max_open_prs") or int(os.environ.get("MAX_OPEN_PRS", "3"))
 
         # No active sprint
         if active_sprint is None:
@@ -309,6 +333,16 @@ def determine_next_action(args: dict, **kwargs) -> str:
             if unsprinted:
                 return _ok({"action": "plan_sprints", "product_id": product_id,
                             "reason": f"{len(unsprinted)} Approved features have no sprint; call pm_api POST /api/products/{product_id}/plan-sprints"})
+            # Backpressure: don't generate more features if backlog is already deep.
+            # Counts ALL Approved features regardless of sprint, because planner
+            # creates unsprinted Approved features — reaching cap means coder is
+            # behind and making more ideas will just pile up more "Approved" work.
+            all_approved = [f for f in features if f.get("status") == "Approved"]
+            max_pending = (sys_cfg.get("max_pending_approved")
+                           or int(os.environ.get("MAX_PENDING_APPROVED", "10")))
+            if len(all_approved) >= max_pending:
+                return _ok({"action": "exit",
+                            "reason": f"Planner gated: {len(all_approved)} Approved features already pending (cap {max_pending})"})
             return _ok({"action": "launch_session", "persona": "planner",
                         "product_id": product_id, "reason": "No active sprint, no approved features — planner generates backlog"})
 
@@ -334,7 +368,6 @@ def determine_next_action(args: dict, **kwargs) -> str:
                     if f.get("status") in ("Designed",)
                     or (f.get("status") == "Approved" and f.get("design_doc_path"))]
         if codeable:
-            open_pr_count = len(prs) if isinstance(prs, list) else 0
             if open_pr_count >= max_prs:
                 return _ok({"action": "exit", "reason": f"PR gate: {open_pr_count} open PRs >= max {max_prs}"})
             return _ok({"action": "launch_session", "persona": "coder",
@@ -423,7 +456,23 @@ def launch_session(args: dict, **kwargs) -> str:
         log.warning("launch_session: aliasing persona %r → %r", persona, _PERSONA_ALIASES[persona])
         persona = _PERSONA_ALIASES[persona]
 
-    # Short-circuit if a launch for this product is already in flight.
+    # DB-backed guard: survives orchestrator restarts (the in-memory
+    # _LAUNCHING set doesn't). If the product already has a session in
+    # pending/starting/running state, do NOT launch a second one.
+    try:
+        with _pm_client() as client:
+            active = client.get("/api/sessions/active", params={"product_id": product_id})
+        if active.is_success and active.json():
+            existing = active.json()
+            log.info("launch_session: product %s already has active session %s (status=%s) — skipping",
+                     product_id, existing.get("id"), existing.get("status"))
+            return _ok({"status": "already_active", "product_id": product_id,
+                        "existing_session_id": existing.get("id")})
+    except Exception:
+        pass  # PM API transient — fall through to in-memory lock
+
+    # In-memory lock catches the narrow window where two launches race
+    # before either has created a DB session record.
     with _LAUNCH_LOCK:
         if product_id in _LAUNCHING:
             log.info("launch_session: product %s already launching, skipping", product_id)

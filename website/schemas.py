@@ -197,6 +197,7 @@ class SessionCreate(BaseModel):
     container_id: Optional[str] = None   # set at launch time: pf-{id}-{uid}
     persona:      Optional[str] = None
     backend:      Optional[str] = None   # "claude" | "ollama"
+    status:       Optional[str] = None   # FSM default handled server-side
 
 
 class SessionEnd(BaseModel):
@@ -210,6 +211,8 @@ class SessionEnd(BaseModel):
     tokens_output:      Optional[int]      = None
     cost_usd:           Optional[float]    = None
     persona:            Optional[str]      = None
+    status:             Optional[str]      = None   # FSM transition on close
+    kill_reason:        Optional[str]      = None
 
 
 class SessionOut(BaseModel):
