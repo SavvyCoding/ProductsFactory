@@ -115,6 +115,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${PRODUCTS_BASE_DIR}:/products
       - ${CLAUDE_DIR:-~/.claude}:/home/orchestrator/.claude:ro
+      # .claude.json sits alongside .claude/ on the host and is required by Claude Code
+      # for initialisation. Without it, claude -p hangs waiting for onboarding input.
+      - ${CLAUDE_CONFIG_JSON:-~/.claude.json}:/home/orchestrator/.claude.json:ro
       - ${SSH_DIR:-~/.ssh}:/home/orchestrator/.ssh:ro
       - ${ORCHESTRATOR_STAGING_HOST}:/orchestrator-staging
     depends_on:

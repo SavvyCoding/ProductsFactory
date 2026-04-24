@@ -94,7 +94,33 @@ async function toggleHistoryRow(row) {
         </div>`).join('') + `</div>`;
     }
 
-    body.innerHTML = metaHtml + actHtml + rvHtml;
+    // Lifecycle events timeline (launched → running → ended/killed)
+    let evHtml = '';
+    try {
+      const er = await fetch('/api/sessions/' + sid + '/events');
+      if (er.ok) {
+        const events = await er.json();
+        if (events.length) {
+          const EVENT_ICON = {launched:'🚀', running:'▶️', heartbeat:'💓',
+                              ended:'✅', killed:'⛔', orphaned:'👻', reconciled:'🔄'};
+          evHtml = `<div class="hist-section-title">Lifecycle events (${events.length})</div>
+            <div class="hist-events">` +
+            events.map(e => {
+              const icon = EVENT_ICON[e.event] || '•';
+              const t = fmtTime(e.created_at) || '';
+              const detail = e.detail ? `<span class="hist-event-detail">${escHtmlGlobal(e.detail)}</span>` : '';
+              return `<div class="hist-event-row">
+                <span class="hist-event-icon">${icon}</span>
+                <span class="hist-event-name">${escHtmlGlobal(e.event)}</span>
+                ${detail}
+                <span class="hist-event-time">${t.slice(11)}</span>
+              </div>`;
+            }).join('') + `</div>`;
+        }
+      }
+    } catch(e) { /* non-fatal */ }
+
+    body.innerHTML = metaHtml + evHtml + actHtml + rvHtml;
   } catch(e) {
     document.getElementById('hist-detail-body-' + sid).innerHTML =
       `<span style="color:var(--red)">Failed to load details: ${escHtmlGlobal(String(e))}</span>`;
