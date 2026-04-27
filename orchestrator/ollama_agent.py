@@ -33,6 +33,7 @@ import httpx
 # ── Config ────────────────────────────────────────────────────────────────────
 
 OLLAMA_HOST    = os.environ.get("OLLAMA_HOST",    "http://host.docker.internal:11434")
+OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "")  # required for Ollama Cloud, empty locally
 DESIGNER_MODEL = os.environ.get("DESIGNER_MODEL", "gemma3:27b")
 CODER_MODEL    = os.environ.get("CODER_MODEL",    "qwen3-coder:30b")
 AGENT_PERSONA  = os.environ.get("AGENT_PERSONA",  "coder")
@@ -63,11 +64,14 @@ def _find_bash() -> list[str]:
 
 BASH_CMD = _find_bash()
 
-# Map persona → model. Note: only tool-capable Ollama models can run agent
-# loops (gemma3 returns 400 "does not support tools"). Qwen3-coder is the only
-# tool-capable model commonly pulled locally, so default both roles to it
-# unless a dedicated instruction model (that supports tools) is configured.
-MODEL = DESIGNER_MODEL if AGENT_PERSONA in ("designer", "reviewer") else CODER_MODEL
+# Model selection. The orchestrator pre-resolves the per-persona model and
+# passes it via OLLAMA_MODEL. Fall back to the legacy designer/coder split
+# only if OLLAMA_MODEL is unset (e.g. when test_run.py runs locally).
+_EXPLICIT_MODEL = os.environ.get("OLLAMA_MODEL", "").strip()
+if _EXPLICIT_MODEL:
+    MODEL = _EXPLICIT_MODEL
+else:
+    MODEL = DESIGNER_MODEL if AGENT_PERSONA in ("designer", "reviewer") else CODER_MODEL
 
 CHAT_URL = f"{OLLAMA_HOST}/v1/chat/completions"
 
@@ -335,11 +339,16 @@ class _OllamaBackend:
     tool-call parsing for models that don't use the structured tool_calls field.
     """
 
-    def __init__(self, model: str, chat_url: str, timeout: int, retry_sleep: int) -> None:
+    def __init__(self, model: str, chat_url: str, timeout: int, retry_sleep: int,
+                 api_key: str = "") -> None:
         self.model = model
         self.chat_url = chat_url
         self.timeout = timeout
         self.retry_sleep = retry_sleep
+        # Ollama Cloud requires Bearer auth; local Ollama ignores it.
+        self.headers = {"Content-Type": "application/json"}
+        if api_key:
+            self.headers["Authorization"] = f"Bearer {api_key}"
 
     def __call__(self, messages: list[dict], tools: list[dict]) -> dict:
         payload = {
@@ -354,27 +363,41 @@ class _OllamaBackend:
             },
         }
 
-        # Retry up to 3× on 500 (quantized models sometimes emit malformed XML).
-        for attempt in range(3):
+        # Retry up to 5× with exponential backoff on transient errors.
+        # Cloud/local Ollama can hit 5xx, 429 (rate limit), or socket errors —
+        # treat them all as retryable. Only 4xx other than 429 is non-retryable.
+        import time as _time
+        _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+        last_err: str | None = None
+        for attempt in range(5):
             try:
-                resp = httpx.post(self.chat_url, json=payload, timeout=self.timeout)
+                resp = httpx.post(self.chat_url, json=payload,
+                                  headers=self.headers, timeout=self.timeout)
                 resp.raise_for_status()
                 data = resp.json()
                 break
             except httpx.TimeoutException:
-                raise RuntimeError(
-                    f"Ollama request timed out ({self.timeout}s) — model may be stuck"
-                )
+                last_err = f"timeout after {self.timeout}s"
+                _log(f"WARNING: Ollama timeout (attempt {attempt+1}/5)")
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 500 and attempt < 2:
-                    _log(f"WARNING: Ollama 500 on attempt {attempt+1}, retrying… "
-                         f"({e.response.text[:200]})")
-                    import time as _time
-                    _time.sleep(self.retry_sleep)
-                    continue
-                raise RuntimeError(
-                    f"Ollama API returned {e.response.status_code}: {e.response.text[:500]}"
-                )
+                code = e.response.status_code
+                body = e.response.text[:300]
+                last_err = f"HTTP {code}: {body}"
+                if code in _RETRYABLE_STATUS:
+                    _log(f"WARNING: Ollama {code} (attempt {attempt+1}/5): {body[:120]}")
+                else:
+                    raise RuntimeError(f"Ollama non-retryable {code}: {body}")
+            except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as e:
+                last_err = f"network: {type(e).__name__}: {e}"
+                _log(f"WARNING: Ollama network error (attempt {attempt+1}/5): {last_err}")
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {e}"
+                _log(f"WARNING: Ollama unexpected error (attempt {attempt+1}/5): {last_err}")
+            # Exponential backoff: 2s, 4s, 8s, 16s, then give up
+            if attempt < 4:
+                _time.sleep(self.retry_sleep * (2 ** attempt))
+        else:
+            raise RuntimeError(f"Ollama failed after 5 retries: {last_err}")
         else:
             raise RuntimeError("Ollama 500 persisted after 3 attempts — giving up")
 
@@ -395,6 +418,47 @@ class _OllamaBackend:
         }
 
 
+def _start_self_heartbeat() -> None:
+    """
+    Start a background daemon thread that POSTs heartbeats from inside the agent
+    container. Survives orchestrator restarts (the orchestrator's heartbeat
+    thread dies when its container restarts; ours doesn't).
+    Requires PM_API_URL + SESSION_UID + product_id resolution via /api/sessions/active.
+    """
+    import threading, time
+    if not PM_API_URL or SESSION_UID == "local":
+        return  # No PM API or running standalone — nothing to heartbeat
+    def _hb_loop():
+        # First, resolve session_id from session_uid by querying PM API.
+        session_id = None
+        for _ in range(10):
+            try:
+                resp = httpx.get(f"{PM_API_URL}/api/sessions/active", timeout=5)
+                if resp.is_success:
+                    sessions = resp.json()
+                    for s in sessions if isinstance(sessions, list) else []:
+                        if s.get("session_uid") == SESSION_UID:
+                            session_id = s.get("id")
+                            break
+                if session_id:
+                    break
+            except Exception:
+                pass
+            time.sleep(3)
+        if not session_id:
+            _log(f"WARNING: self-heartbeat could not find session for uid={SESSION_UID}")
+            return
+        _log(f"Self-heartbeat thread started for session_id={session_id}")
+        while True:
+            try:
+                httpx.post(f"{PM_API_URL}/api/sessions/{session_id}/heartbeat", timeout=5)
+            except Exception:
+                pass  # transient — watchdog has 15min grace
+            time.sleep(30)
+    t = threading.Thread(target=_hb_loop, daemon=True, name="agent-heartbeat")
+    t.start()
+
+
 def run_agent(initial_prompt: str) -> int:
     """Returns 0 on clean exit, 1 on error, 2 on incomplete.
 
@@ -404,15 +468,16 @@ def run_agent(initial_prompt: str) -> int:
     from orchestrator.agent_loop import AgentLoop
 
     _log(f"Starting — model={MODEL} persona={AGENT_PERSONA} max_turns={MAX_TURNS}")
+    _start_self_heartbeat()
 
     # Best-effort reachability probe — don't abort on failure since Ollama may
-    # still be starting up (e.g. WSL container on Windows Docker Desktop).
+    # still be starting up. Send Bearer auth for Cloud, ignored locally.
+    _probe_headers = {"Authorization": f"Bearer {OLLAMA_API_KEY}"} if OLLAMA_API_KEY else {}
     try:
-        resp = httpx.get(f"{OLLAMA_HOST}/api/tags", timeout=10)
+        resp = httpx.get(f"{OLLAMA_HOST}/api/tags", headers=_probe_headers, timeout=10)
         available = [m["name"] for m in resp.json().get("models", [])]
         if MODEL not in available and not any(MODEL in m for m in available):
-            _log(f"WARNING: model '{MODEL}' not found in Ollama. Available: {available}")
-            _log(f"Pull it with: ollama pull {MODEL}")
+            _log(f"WARNING: model '{MODEL}' not found at {OLLAMA_HOST}. Available: {available[:10]}")
     except Exception as e:
         _log(f"WARNING: Could not reach Ollama at {OLLAMA_HOST}: {e}")
         _log("Proceeding anyway — Ollama may still be starting up...")
@@ -429,8 +494,13 @@ def run_agent(initial_prompt: str) -> int:
         "   - incomplete: partial progress (include what's done in `summary`)\n"
         "4. If a command fails, read the error and fix ONE thing. Do not re-run the same "
         "failing command twice.\n"
-        "5. Prefer `bash` for git, curl, echo, ls — not read_file/write_file (which are for "
-        "simple reads/writes only).\n"
+        "5. **Tool selection — critical for efficiency:**\n"
+        "   - Use `write_file` for ANY code edit. Read the file with `read_file`, "
+        "modify the content in your response, write the new version with `write_file`. "
+        "ONE write replaces 10+ sed/awk turns and avoids indentation breakage.\n"
+        "   - Use `bash` for git, curl, gh, pytest, ls, mkdir, mv, rm.\n"
+        "   - Do NOT use `sed -i` or `awk -i` to edit code — they corrupt indentation "
+        "in Python and waste turns.\n"
         "6. Keep outputs short. Use `head -N` or `grep` to limit output from large files.\n\n"
         f"Your working directory is {WORKSPACE_DIR}. If unsure about a path, "
         f"run `bash('ls {WORKSPACE_DIR}')` first."
@@ -439,6 +509,7 @@ def run_agent(initial_prompt: str) -> int:
     backend = _OllamaBackend(
         model=MODEL, chat_url=CHAT_URL,
         timeout=OLLAMA_TIMEOUT, retry_sleep=RETRY_SLEEP,
+        api_key=OLLAMA_API_KEY,
     )
     loop = AgentLoop(
         backend=backend,

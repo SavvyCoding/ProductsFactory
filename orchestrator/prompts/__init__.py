@@ -1,7 +1,51 @@
 """Prompt builder — selects the right template and fills in product context."""
 
 import os
+import re
 from pathlib import Path
+
+
+def _read_reviewer_patterns(working_dir: str, max_patterns: int = 10) -> str:
+    """
+    Extract `Pattern:` lines that reviewers wrote into session_summary.md and
+    format them as a markdown block for injection into agent prompts.
+
+    The 200-char-per-line cap and 10-pattern total cap keep prompt growth
+    bounded (~2 KB max) regardless of how long the file gets.
+    """
+    if not working_dir:
+        return ""
+    summary = Path(working_dir) / "session_summary.md"
+    if not summary.exists():
+        return ""
+    try:
+        text = summary.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    patterns: list[str] = []
+    seen: set[str] = set()
+    # Walk reversed so the newest patterns survive when we hit the cap.
+    for line in reversed(text.splitlines()):
+        m = re.match(r"^\s*Pattern:\s*(.+)$", line.strip())
+        if not m:
+            continue
+        body = m.group(1).strip()[:200]
+        if body in seen:
+            continue
+        seen.add(body)
+        patterns.append(body)
+        if len(patterns) >= max_patterns:
+            break
+    if not patterns:
+        return ""
+    patterns.reverse()  # chronological — oldest first, newest last
+    bullets = "\n".join(f"- {p}" for p in patterns)
+    return (
+        "## Known patterns from prior sessions\n\n"
+        "Past reviewers recorded these insights about this codebase. "
+        "Read them BEFORE making changes — they prevent recurring failures.\n\n"
+        f"{bullets}\n\n---\n"
+    )
 
 
 # Appended to every persona prompt when backend == "ollama".
@@ -122,6 +166,7 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
             f"## Previous session context\n\n{prev}\n\n---\n" if prev else ""
         ),
         "{product_memory}": _memory_content,
+        "{reviewer_patterns}": _read_reviewer_patterns(_working_dir),
     }
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)
