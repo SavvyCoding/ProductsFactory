@@ -689,7 +689,12 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         return
 
     def _run(cmd: list[str], **kw) -> _sp.CompletedProcess:
-        return _sp.run(cmd, cwd=working_dir, capture_output=True, text=True, timeout=120, **kw)
+        # Pop timeout from kw so the caller's override doesn't collide with the
+        # default we pass into _sp.run. Without this, e.g. _run(..., timeout=180)
+        # raises TypeError("got multiple values for keyword argument 'timeout'")
+        # — which crashes the whole pipeline before our diagnostic checks run.
+        timeout = kw.pop("timeout", 120)
+        return _sp.run(cmd, cwd=working_dir, capture_output=True, text=True, timeout=timeout, **kw)
 
     # 1. Detect changes (any modified, added, deleted, or untracked files in tracked paths)
     status = _run(["git", "status", "--porcelain"])
