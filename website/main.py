@@ -1676,7 +1676,9 @@ async def api_next_feature_for_persona(
     """
     Returns the next feature for a given persona to work on.
     - designer: Approved features with no design doc yet
-    - coder:    Designed features OR Approved with existing design doc
+    - coder:    Designed features, Approved with existing design doc, OR
+                Implementing features with review_outcome=changes_requested
+                (rework after reviewer requested changes)
     - reviewer: Reviewing features that have a PR number
     Optional product_id filter scopes to a single product.
     Returns null if nothing to do.
@@ -1688,7 +1690,8 @@ async def api_next_feature_for_persona(
     elif persona == "coder":
         q = q.where(
             (Feature.status == "Designed") |
-            ((Feature.status == "Approved") & (Feature.design_doc_path.isnot(None)))
+            ((Feature.status == "Approved") & (Feature.design_doc_path.isnot(None))) |
+            ((Feature.status == "Implementing") & (Feature.review_outcome == "changes_requested"))
         )
     elif persona == "reviewer":
         q = q.where(Feature.status == "Reviewing", Feature.pr_number.isnot(None))
