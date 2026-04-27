@@ -10,6 +10,7 @@ Security model:
   - pm-api resolves to Windows host via host-gateway (PM website in Docker)
 """
 
+import json
 import os
 import shlex
 import shutil
@@ -516,6 +517,213 @@ def _parse_repo_slug(github_repo: str) -> str:
     return m.group(1) if m else github_repo
 
 
+def _format_agent_event(line: str) -> str | None:
+    """
+    Parse one stream-json event from `claude -p --output-format stream-json --verbose`
+    into a single readable log line. Falls back to the raw line if it isn't JSON
+    (so Ollama agent's plain-text output still flows through unchanged).
+
+    Returns None for events worth dropping (init noise) so we don't spam the log.
+    """
+    try:
+        ev = json.loads(line)
+        if not isinstance(ev, dict):
+            return line
+    except (json.JSONDecodeError, ValueError):
+        return line
+
+    t = ev.get("type")
+
+    if t == "system":
+        sub = ev.get("subtype", "")
+        sid = (ev.get("session_id") or "?")[:8]
+        model = ev.get("model", "?")
+        return f"[system:{sub}] sid={sid} model={model}"
+
+    if t == "assistant":
+        msg = ev.get("message") or {}
+        out: list[str] = []
+        for block in (msg.get("content") or []):
+            if not isinstance(block, dict):
+                continue
+            bt = block.get("type")
+            if bt == "text":
+                txt = (block.get("text") or "").strip().replace("\n", " ⏎ ")
+                if txt:
+                    out.append(f"[text] {txt[:300]}")
+            elif bt == "tool_use":
+                name = block.get("name", "?")
+                inp = block.get("input") or {}
+                # Surface the most distinguishing input field per tool
+                if name == "Bash":
+                    summary = (inp.get("command") or "")[:200]
+                elif name in ("Read", "Edit", "Write", "NotebookEdit"):
+                    summary = inp.get("file_path") or inp.get("path") or ""
+                elif name == "Grep":
+                    summary = f"pattern={(inp.get('pattern') or '')[:80]} path={inp.get('path') or ''}"
+                elif name in ("Glob",):
+                    summary = inp.get("pattern") or ""
+                else:
+                    summary = json.dumps(inp, default=str)[:200]
+                out.append(f"[tool] {name}({summary})")
+        return " | ".join(out) if out else None
+
+    if t == "user":
+        # tool_result feedback — we only surface a one-line summary; full content
+        # is too large to log per-event.
+        msg = ev.get("message") or {}
+        for block in (msg.get("content") or []):
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            content = block.get("content", "")
+            if isinstance(content, list):
+                content = " ".join(
+                    c.get("text", "") if isinstance(c, dict) else str(c)
+                    for c in content
+                )
+            content = str(content).strip()
+            tag = "tool_err" if block.get("is_error") else "tool_ok"
+            first = content.split("\n", 1)[0][:200]
+            return f"[{tag}] {first}"
+        return None
+
+    if t == "result":
+        sub = ev.get("subtype", "")
+        cost = ev.get("total_cost_usd")
+        turns = ev.get("num_turns")
+        dur = ev.get("duration_ms")
+        return f"[result:{sub}] turns={turns} cost=${cost} duration={dur}ms"
+
+    # Unknown event type — log a short summary so we don't lose anything.
+    return f"[{t}] {json.dumps(ev, default=str)[:300]}"
+
+
+def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
+                              assigned_features: list[dict]) -> None:
+    """
+    Deterministic git+gh pipeline run after the coder LLM exits cleanly.
+    The coder ONLY writes code; this function does the ceremony:
+      1. Detect if there are any changes in the workspace
+      2. Create branch coder/{session_uid}
+      3. git add + commit + push
+      4. gh pr create
+      5. Append one Reviewing entry per assigned feature to session_result.json
+         (the existing reconcile loop will then PATCH each feature → Reviewing
+         with the same pr_number, and the auto-merge logic later picks it up)
+
+    Single PR for all assigned features in this session — simpler than per-feature
+    branches and matches how human devs typically batch related changes.
+    """
+    import subprocess as _sp
+    import json as _json
+    import re as _re
+
+    pname = product.get("name", "?")
+    if not assigned_features:
+        log.info(f"[post-coder] {pname}: no assigned features — skipping commit/PR")
+        return
+
+    def _run(cmd: list[str], **kw) -> _sp.CompletedProcess:
+        return _sp.run(cmd, cwd=working_dir, capture_output=True, text=True, timeout=120, **kw)
+
+    # 1. Detect changes (any modified, added, deleted, or untracked files in tracked paths)
+    status = _run(["git", "status", "--porcelain"])
+    changed = [ln for ln in status.stdout.splitlines() if ln.strip()
+               and not ln.endswith("session_result.json")
+               and not ln.endswith("session_summary.md")
+               and "/Temp/" not in ln and "/Results/" not in ln]
+    if not changed:
+        log.warning(f"[post-coder] {pname}: agent exited 0 but no code changes — skipping PR")
+        # Mark features Blocked so they don't loop in Implementing forever
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                for f in assigned_features:
+                    client.patch(f"/api/features/{f['id']}", json={
+                        "status": "Blocked",
+                        "blocked_reason": f"Coder session {session_uid} exited 0 with no code changes",
+                    })
+        except Exception:
+            pass
+        return
+    log.info(f"[post-coder] {pname}: {len(changed)} changed file(s) detected")
+
+    # 2. Create branch
+    feat_ids = [f["id"] for f in assigned_features]
+    branch = f"coder/{session_uid}"
+    _run(["git", "checkout", "-b", branch])
+
+    # 3. Add + commit + push
+    _run(["git", "add", "-A"])
+    feat_summary = ", ".join(f"#{i}" for i in feat_ids)
+    commit_msg = f"feat: implement features {feat_summary} [coder-{session_uid}]"
+    commit_result = _run(["git", "commit", "-m", commit_msg])
+    if commit_result.returncode != 0:
+        log.warning(f"[post-coder] {pname}: git commit failed: {commit_result.stderr.strip()[:200]}")
+        return
+
+    push_result = _run(["git", "push", "-u", "origin", branch], timeout=180)
+    if push_result.returncode != 0:
+        log.warning(f"[post-coder] {pname}: git push failed: {push_result.stderr.strip()[:300]}")
+        return
+    log.info(f"[post-coder] {pname}: pushed branch {branch}")
+
+    # 4. Open PR via gh CLI. GH_TOKEN must be in env for `gh` to authenticate.
+    gh_token = _get_gh_token()
+    if not gh_token:
+        log.warning(f"[post-coder] {pname}: no GH_TOKEN — cannot open PR. Branch pushed; PM must open manually.")
+        return
+
+    # Build PR body — include feature names so PM can review at a glance
+    feat_lines = []
+    for f in assigned_features:
+        name = f.get("name", f"Feature {f['id']}")
+        feat_lines.append(f"- Closes #{f['id']}: {name}")
+    pr_body = (
+        f"Automated PR from coder session `{session_uid}`.\n\n"
+        f"## Features\n" + "\n".join(feat_lines) + "\n\n"
+        f"_This PR was generated by the ProductFactory coder agent. The agent "
+        f"writes code; the orchestrator handles git + PR ceremony deterministically._"
+    )
+    pr_title = (f"feat: {assigned_features[0].get('name', 'changes')}"
+                if len(assigned_features) == 1
+                else f"feat: implement {feat_summary} [{session_uid}]")
+
+    pr_env = dict(os.environ)
+    pr_env["GH_TOKEN"] = gh_token
+    pr_result = _sp.run(
+        ["gh", "pr", "create", "--base", "main", "--head", branch,
+         "--title", pr_title, "--body", pr_body],
+        cwd=working_dir, capture_output=True, text=True, env=pr_env, timeout=60,
+    )
+    if pr_result.returncode != 0:
+        log.warning(f"[post-coder] {pname}: gh pr create failed: {pr_result.stderr.strip()[:300]}")
+        return
+
+    # gh prints the PR URL on stdout
+    pr_url = pr_result.stdout.strip().splitlines()[-1]
+    m = _re.search(r"/pull/(\d+)", pr_url)
+    if not m:
+        log.warning(f"[post-coder] {pname}: could not parse PR number from gh output: {pr_url[:200]}")
+        return
+    pr_number = int(m.group(1))
+    log.info(f"[post-coder] {pname}: opened PR #{pr_number} — {pr_url}")
+
+    # 5. Append session_result.json entries — one Reviewing per assigned feature.
+    sr_path = Path(working_dir) / "session_result.json"
+    try:
+        with sr_path.open("a", encoding="utf-8") as f:
+            for feat in assigned_features:
+                f.write(_json.dumps({
+                    "id":         feat["id"],
+                    "status":     "Reviewing",
+                    "pr_number":  pr_number,
+                    "pr_url":     pr_url,
+                }) + "\n")
+        log.info(f"[post-coder] {pname}: wrote {len(assigned_features)} entries to session_result.json")
+    except Exception as e:
+        log.warning(f"[post-coder] {pname}: failed to append session_result.json: {e}")
+
+
 def _get_gh_token() -> str | None:
     """Fetch GitHub PAT from system config for GH_TOKEN injection into agent containers."""
     try:
@@ -927,6 +1135,18 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # Read all runtime settings from sys_cfg (DB → env var → built-in default).
     # Never rely on module-level constants after this point.
     effective_ollama_host    = sys_cfg.get("ollama_host")    or OLLAMA_HOST    or "http://host.docker.internal:11434"
+    effective_ollama_api_key = sys_cfg.get("ollama_api_key") or os.environ.get("OLLAMA_API_KEY", "")
+
+    # Per-persona Ollama model resolution (mirrors Claude routing). Order:
+    #   1. sys_cfg.ollama_model_map[persona]  — explicit override
+    #   2. legacy designer_model / coder_model split
+    _ollama_map = sys_cfg.get("ollama_model_map") or {}
+    if isinstance(_ollama_map, dict) and persona and _ollama_map.get(persona):
+        effective_persona_model = _ollama_map[persona]
+    elif persona in ("designer", "reviewer"):
+        effective_persona_model = sys_cfg.get("designer_model") or DESIGNER_MODEL or "qwen3-coder:30b"
+    else:
+        effective_persona_model = sys_cfg.get("coder_model") or CODER_MODEL or "qwen3-coder:30b"
     effective_designer_model = sys_cfg.get("designer_model") or DESIGNER_MODEL or "gemma3:27b"
     effective_coder_model    = sys_cfg.get("coder_model")    or CODER_MODEL    or "qwen3-coder:30b"
     effective_ollama_timeout = int(sys_cfg.get("ollama_timeout") or os.environ.get("OLLAMA_TIMEOUT", "600"))
@@ -1042,6 +1262,10 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         agent_cmd = ["python", "//app/ollama_agent.py", "-p", prompt]
         ollama_env = [
             "-e", f"OLLAMA_HOST={effective_ollama_host}",
+            "-e", f"OLLAMA_API_KEY={effective_ollama_api_key}",
+            # OLLAMA_MODEL is the resolved per-persona model — agent uses this
+            # if set; otherwise falls back to DESIGNER_MODEL/CODER_MODEL split.
+            "-e", f"OLLAMA_MODEL={effective_persona_model}",
             "-e", f"DESIGNER_MODEL={effective_designer_model}",
             "-e", f"CODER_MODEL={effective_coder_model}",
             "-e", f"MAX_FEATURES_PER_SPRINT={effective_max_features}",
@@ -1051,7 +1275,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         ]
         # Ollama backend: no Claude OAuth mount needed
         claude_mount = []
-        log.info(f"Using Ollama backend — host={effective_ollama_host} persona={persona}")
+        log.info(f"Using Ollama backend — host={effective_ollama_host} persona={persona} model={effective_persona_model}")
     else:
         # Claude backend: SELECTIVELY copy only auth-essential files to a temp dir.
         # A full copytree of ~/.claude races with the host's active Claude Code
@@ -1130,18 +1354,29 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         # Copy it INTO the staged dir rather than bind-mounting from host — the
         # live file is rewritten constantly by the host's Claude Code and would
         # race with the container mount.
+        # Mount RW (not :ro): the claude CLI needs to update this file on init
+        # (telemetry, project state). On read-only mounts it hits EROFS, stops
+        # emitting debug logs, and hangs in epoll_wait — silently. The staged
+        # copy is per-session disposable, so writes here never reach the host.
         creds_parent = str(Path(creds_src).parent)
         claude_json_src_host = Path(creds_parent) / ".claude.json"
         if _tmp_claude_dir and claude_json_src_host.exists():
             try:
                 _staged_cj = Path(_tmp_claude_dir) / ".claude.json"
                 shutil.copy2(str(claude_json_src_host), str(_staged_cj))
-                claude_mount += ["-v", f"{host_path(_staged_cj)}:/home/agent/.claude.json:ro"]
+                claude_mount += ["-v", f"{host_path(_staged_cj)}:/home/agent/.claude.json"]
             except Exception as ce:
                 log.warning(f"Could not stage .claude.json: {ce}")
 
-        # --dangerously-skip-permissions works now that container runs as non-root
-        agent_cmd = ["claude", "--dangerously-skip-permissions", "-p", prompt]
+        # --dangerously-skip-permissions works now that container runs as non-root.
+        # --output-format stream-json + --verbose turns claude -p into a streaming
+        # NDJSON emitter (one event per line: assistant turns, tool_use, tool_result,
+        # final result). Without this, claude -p only prints the FINAL message at
+        # session end, so the orchestrator's _stream_logs reader sees nothing for
+        # the entire run — no observability into what the agent is doing.
+        agent_cmd = ["claude", "--dangerously-skip-permissions",
+                     "--output-format", "stream-json", "--verbose",
+                     "-p", prompt]
         ollama_env = [
             "-e", f"MAX_FEATURES_PER_SPRINT={effective_max_features}",
             "-e", f"CLAUDE_MODEL={claude_model}",
@@ -1265,8 +1500,22 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             buffer: list[str] = []
             for raw_line in process.stdout:
                 line = raw_line.rstrip("\n")
-                log.debug(f"[agent] {line}")
-                buffer.append(line)
+                if not line:
+                    continue
+                formatted = _format_agent_event(line)
+                if formatted is None:
+                    continue
+                # Surface tool calls, errors, and the final result at INFO so they
+                # appear in `docker logs pf-orchestrator`. Routine assistant text
+                # stays at DEBUG. PM API session log buffer gets everything.
+                if any(token in formatted for token in (
+                    "[tool]", "[tool_err]", "[result:", "WARNING:", "ERROR",
+                    "Traceback", "non-retryable", "exit=2", "task_done",
+                )):
+                    log.info(f"[agent] {formatted}")
+                else:
+                    log.debug(f"[agent] {formatted}")
+                buffer.append(formatted)
                 if len(buffer) >= 10:
                     _post_log_lines(product["id"], buffer)
                     buffer = []
@@ -1339,6 +1588,18 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     attempted = 0
     pushed = 0
     try:
+        # 0. Coder ceremony — if a coder session exited cleanly, run the
+        # deterministic commit/push/PR pipeline. Coders only write code; Python
+        # handles git + gh, which makes the LLM's job 10× simpler and more
+        # reliable. The pipeline appends Reviewing entries to session_result.json
+        # so the existing reconcile picks them up below.
+        if exit_code == 0 and persona == "coder":
+            try:
+                _run_post_coder_pipeline(product, session_uid, working_dir,
+                                         product.get("_assigned_features", []))
+            except Exception:
+                log.exception(f"Post-coder pipeline failed for {product.get('name')}")
+
         # 1. Read session_result.json ONCE — shared between auto_merge and reconcile so
         #    the file isn't deleted before auto_merge can act on it.
         _session_features = _read_session_result(working_dir)

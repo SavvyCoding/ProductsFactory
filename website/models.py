@@ -207,9 +207,11 @@ class SystemConfig(Base):
 
     # ── Agent / Ollama settings ───────────────────────────────────────────────
     agent_backend:     Mapped[Optional[str]] = mapped_column(Text)   # "claude" | "ollama"
-    ollama_host:       Mapped[Optional[str]] = mapped_column(Text)   # default http://host.docker.internal:11434
-    designer_model:    Mapped[Optional[str]] = mapped_column(Text)   # default gemma3:27b
-    coder_model:       Mapped[Optional[str]] = mapped_column(Text)   # default qwen3-coder:30b
+    ollama_host:       Mapped[Optional[str]] = mapped_column(Text)   # http://host.docker.internal:11434 (local) or https://ollama.com (cloud)
+    ollama_api_key:    Mapped[Optional[str]] = mapped_column(Text)   # required for Ollama Cloud, ignored locally
+    designer_model:    Mapped[Optional[str]] = mapped_column(Text)   # legacy: 'designer'/'reviewer' personas
+    coder_model:       Mapped[Optional[str]] = mapped_column(Text)   # legacy: everything else
+    ollama_model_map:  Mapped[Optional[dict]] = mapped_column(JSONB) # explicit persona → ollama model
     ollama_timeout:    Mapped[Optional[int]] = mapped_column(Integer) # default 300s
     bash_timeout:      Mapped[Optional[int]] = mapped_column(Integer) # default 180s
     max_turns:         Mapped[Optional[int]] = mapped_column(Integer) # default 80

@@ -105,10 +105,11 @@ services:
       ORCHESTRATION_CYCLE_SECONDS: ${ORCHESTRATION_CYCLE_SECONDS:-60}
       # Agent backend — `ollama` for local/offline/TOS-compliant, `claude` for API
       AGENT_BACKEND:      ${AGENT_BACKEND:-ollama}
-      # Hardcoded — we explicitly want host.docker.internal inside the container
-      # regardless of what the host shell's OLLAMA_HOST is set to (which may be
-      # 0.0.0.0 for a local Ollama server listener).
-      OLLAMA_HOST:        http://host.docker.internal:11434
+      # OLLAMA_HOST: leave overridable via .env so we can switch between local
+      # Ollama (http://host.docker.internal:11434) and Ollama Cloud
+      # (https://ollama.com) without recompose. Default is local for back-compat.
+      OLLAMA_HOST:        ${OLLAMA_HOST_OVERRIDE:-http://host.docker.internal:11434}
+      OLLAMA_API_KEY:     ${OLLAMA_API_KEY:-}
       DESIGNER_MODEL:     ${DESIGNER_MODEL:-gemma3:27b}
       CODER_MODEL:        ${CODER_MODEL:-qwen3-coder:30b}
     volumes:
