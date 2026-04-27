@@ -710,20 +710,45 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         except Exception:
             pass
         return
-    log.info(f"[post-coder] {pname}: {len(changed)} changed file(s) detected")
+    log.info(f"[post-coder] {pname}: {len(changed)} changed file(s) detected — sample: {changed[:3]}")
 
-    # 2. Create branch
+    def _fmt_err(r) -> str:
+        """Render a CompletedProcess for diagnostic logging — git often prints
+        useful info on stdout, not stderr (e.g. 'nothing to commit')."""
+        out = (r.stdout or "").strip()
+        err = (r.stderr or "").strip()
+        return f"rc={r.returncode} stdout={out[:300]!r} stderr={err[:300]!r}"
+
+    # 2. Create branch (fail fast if branch already exists or checkout fails)
     feat_ids = [f["id"] for f in assigned_features]
     branch = f"coder/{session_uid}"
-    _run(["git", "checkout", "-b", branch])
+    co = _run(["git", "checkout", "-b", branch])
+    if co.returncode != 0:
+        log.warning(f"[post-coder] {pname}: git checkout -b {branch} failed — {_fmt_err(co)}")
+        return
 
     # 3. Add + commit + push
-    _run(["git", "add", "-A"])
+    add_r = _run(["git", "add", "-A"])
+    if add_r.returncode != 0:
+        log.warning(f"[post-coder] {pname}: git add -A failed — {_fmt_err(add_r)}")
+        return
+    # Sanity: was anything actually staged? `diff --cached --quiet` exits 1 if
+    # there are staged changes, 0 if none. Catches the "porcelain showed lines
+    # but add staged nothing" scenario (e.g. all changes inside a submodule or
+    # excluded path) so we surface a clear error instead of an empty stderr.
+    cached = _run(["git", "diff", "--cached", "--quiet"])
+    if cached.returncode == 0:
+        ls = _run(["git", "status", "--porcelain"])
+        log.warning(
+            f"[post-coder] {pname}: nothing staged after `git add -A` "
+            f"despite {len(changed)} porcelain entries. status={ls.stdout.strip()[:400]!r}"
+        )
+        return
     feat_summary = ", ".join(f"#{i}" for i in feat_ids)
     commit_msg = f"feat: implement features {feat_summary} [coder-{session_uid}]"
     commit_result = _run(["git", "commit", "-m", commit_msg])
     if commit_result.returncode != 0:
-        log.warning(f"[post-coder] {pname}: git commit failed: {commit_result.stderr.strip()[:200]}")
+        log.warning(f"[post-coder] {pname}: git commit failed — {_fmt_err(commit_result)}")
         return
 
     push_result = _run(["git", "push", "-u", "origin", branch], timeout=180)
