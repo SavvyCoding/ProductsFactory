@@ -558,6 +558,30 @@ def _parse_repo_slug(github_repo: str) -> str:
     return m.group(1) if m else github_repo
 
 
+import re as _re_secrets
+
+# Patterns for credentials that must never appear in logs. Anything matching
+# is replaced with ***REDACTED*** before lines are sent to docker stdout or
+# POSTed to the PM API session log buffer. List grows as new auth schemes are
+# discovered in the wild — over-redaction is fine; under-redaction is not.
+_SECRET_PATTERNS = [
+    _re_secrets.compile(r'gh[psoua]_[A-Za-z0-9]{20,}'),                                    # GitHub classic + variants
+    _re_secrets.compile(r'github_pat_[A-Za-z0-9_]{20,}'),                                  # GitHub fine-grained
+    _re_secrets.compile(r'sk-ant-(?:oat|ort|api|admin)[A-Za-z0-9_\-]{20,}'),               # Anthropic
+    _re_secrets.compile(r'sk-[A-Za-z0-9]{20,}'),                                           # Generic OpenAI-shape
+    _re_secrets.compile(r'AKIA[A-Z0-9]{16}'),                                              # AWS access key id
+    _re_secrets.compile(r'xox[bpasr]-[A-Za-z0-9-]+'),                                      # Slack tokens
+    _re_secrets.compile(r'(Bearer\s+)[A-Za-z0-9_.\-=]{12,}', _re_secrets.IGNORECASE),       # HTTP Bearer
+]
+
+
+def _redact_secrets(s: str) -> str:
+    """Strip credential-shaped substrings before logging."""
+    for pat in _SECRET_PATTERNS:
+        s = pat.sub('***REDACTED***', s)
+    return s
+
+
 def _format_agent_event(line: str) -> str | None:
     """
     Parse one stream-json event from `claude -p --output-format stream-json --verbose`
@@ -1550,6 +1574,11 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 formatted = _format_agent_event(line)
                 if formatted is None:
                     continue
+                # Strip credential-shaped substrings (GH PATs, Anthropic API
+                # keys, Bearer tokens, etc.) before they hit docker stdout or
+                # the PM API session-log buffer. Catches the case where the
+                # agent inlines a token literal into a Bash command.
+                formatted = _redact_secrets(formatted)
                 # Surface tool calls, errors, and the final result at INFO so they
                 # appear in `docker logs pf-orchestrator`. Routine assistant text
                 # stays at DEBUG. PM API session log buffer gets everything.
