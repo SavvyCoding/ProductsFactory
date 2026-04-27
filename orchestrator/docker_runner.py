@@ -262,18 +262,29 @@ def _apply_session_entry(client: httpx.Client, entry: dict) -> bool:
     if entry.get("status") == "Reviewed" and not entry.get("review_outcome"):
         log.warning(f"[progress] REJECTING feature #{fid} — Reviewed without review_outcome")
         return False
-    # Guard: never downgrade a feature's status
+    # Guard: never downgrade a feature's status — except for review-driven
+    # backward transitions, which are part of the normal pipeline:
+    #   - Reviewing → Implementing  (reviewer requested changes; coder reworks)
+    #   - Reviewed  → Implementing  (post-approval issue caught; coder reworks)
+    # Without this allowlist the reviewer's "changes_requested" PATCH gets
+    # silently dropped because Implementing(4) < Reviewing(5), and the feature
+    # sits in Reviewing forever — `next-for-persona` keeps handing it back to
+    # the reviewer, producing an infinite review loop on the same PR.
     _PROGRESS_RANK = {
         "Pending": 0, "Approved": 1, "Designing": 2, "Designed": 3,
         "Implementing": 4, "Reviewing": 5, "Reviewed": 6, "Pushed": 7,
         "Blocked": 2, "Deferred": 7, "Rejected": 7, "Reverted": 0,
     }
+    _ALLOWED_BACKWARD = {("Reviewing", "Implementing"), ("Reviewed", "Implementing")}
     if status:
         try:
             current_resp = client.get(f"/api/features/{fid}")
             if current_resp.status_code == 200:
                 current_status = current_resp.json().get("status", "")
-                if _PROGRESS_RANK.get(current_status, 0) > _PROGRESS_RANK.get(status, 0):
+                if (
+                    _PROGRESS_RANK.get(current_status, 0) > _PROGRESS_RANK.get(status, 0)
+                    and (current_status, status) not in _ALLOWED_BACKWARD
+                ):
                     log.debug(f"[progress] Feature #{fid}: skipping downgrade {current_status} → {status}")
                     return False
         except Exception:
