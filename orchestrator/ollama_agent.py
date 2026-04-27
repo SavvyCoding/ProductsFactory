@@ -349,6 +349,10 @@ class _OllamaBackend:
         self.headers = {"Content-Type": "application/json"}
         if api_key:
             self.headers["Authorization"] = f"Bearer {api_key}"
+        # Token accumulators for end-of-session metrics PATCH.
+        self.total_input_tokens  = 0
+        self.total_output_tokens = 0
+        self.call_count          = 0
 
     def __call__(self, messages: list[dict], tools: list[dict]) -> dict:
         payload = {
@@ -398,8 +402,15 @@ class _OllamaBackend:
                 _time.sleep(self.retry_sleep * (2 ** attempt))
         else:
             raise RuntimeError(f"Ollama failed after 5 retries: {last_err}")
-        else:
-            raise RuntimeError("Ollama 500 persisted after 3 attempts — giving up")
+
+        # Track token usage for session-end metrics PATCH. Ollama's OpenAI-
+        # compatible endpoint returns prompt_tokens / completion_tokens per
+        # call; we accumulate so the History tab cost column shows real
+        # totals (cost stays None — Ollama Cloud doesn't return $ per call).
+        _u = data.get("usage") or {}
+        self.total_input_tokens  += int(_u.get("prompt_tokens") or 0)
+        self.total_output_tokens += int(_u.get("completion_tokens") or 0)
+        self.call_count          += 1
 
         choice = data["choices"][0]
         message: dict = choice["message"]
@@ -519,7 +530,50 @@ def run_agent(initial_prompt: str) -> int:
         system_prompt=system_prompt,
         log=_log,
     )
-    return loop.run(initial_prompt)
+    rc = loop.run(initial_prompt)
+
+    # Persist token totals onto the session record so the PM History tab
+    # shows real numbers for Ollama runs (cost_usd stays None — Ollama
+    # Cloud doesn't return $ per call). Best-effort: skip if PM API
+    # unreachable or session_id not found, since the agent has already
+    # done its real work.
+    _patch_session_metrics(
+        input_tokens=backend.total_input_tokens,
+        output_tokens=backend.total_output_tokens,
+        call_count=backend.call_count,
+    )
+    return rc
+
+
+def _patch_session_metrics(input_tokens: int, output_tokens: int, call_count: int) -> None:
+    """End-of-run PATCH /api/sessions/{id} with accumulated Ollama token totals."""
+    if not PM_API_URL or SESSION_UID == "local":
+        _log(f"[metrics] skipping PATCH: PM_API_URL or SESSION_UID unset "
+             f"(turns={call_count}, in={input_tokens}, out={output_tokens})")
+        return
+    if input_tokens == 0 and output_tokens == 0:
+        return
+    try:
+        resp = httpx.get(f"{PM_API_URL}/api/sessions/active", timeout=5)
+        sessions = resp.json() if resp.is_success else []
+        session_id = next(
+            (s.get("id") for s in (sessions if isinstance(sessions, list) else [])
+             if s.get("session_uid") == SESSION_UID),
+            None,
+        )
+        if session_id is None:
+            _log(f"[metrics] could not resolve session_id for uid={SESSION_UID}; "
+                 f"in={input_tokens} out={output_tokens} turns={call_count}")
+            return
+        httpx.patch(
+            f"{PM_API_URL}/api/sessions/{session_id}",
+            json={"tokens_input": input_tokens, "tokens_output": output_tokens},
+            timeout=5,
+        )
+        _log(f"[metrics] session_id={session_id} tokens_in={input_tokens} "
+             f"tokens_out={output_tokens} turns={call_count}")
+    except Exception as e:
+        _log(f"[metrics] PATCH failed: {e}")
 
 
 def _try_parse_tool_calls_from_content(content: str) -> list[dict]:

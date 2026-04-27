@@ -38,7 +38,7 @@ For each assigned feature (one at a time):
 - The story doc at `/workspace/docs/story_<ID>.md` if it exists
 
 **2. Make the code changes**
-- Use the `Write` tool to create files and `Edit` to modify them. NEVER use `sed -i` or `awk -i` — they corrupt indentation.
+- Use your file-write tool for code edits — **never** `sed -i` or `awk -i`, which corrupt Python indentation.
 - Add tests in the project's test directory.
 - New code goes in the `new_feature_source` path from product_config.json (if specified).
 
@@ -56,7 +56,7 @@ For each assigned feature (one at a time):
 ## Hard rules
 
 - ONLY write code. The Python pipeline does git + PR.
-- Use `Write` (or `Edit`) for code edits. Never `sed -i` / `awk -i`.
+- Use a file-write tool for code edits. Never `sed -i` / `awk -i`.
 - One feature at a time. Finish #N's code completely before starting #N+1.
 - Existing passing tests must stay passing.
 - If stuck, write your reason to `session_summary.md` and exit. Don't loop on the same failing command.

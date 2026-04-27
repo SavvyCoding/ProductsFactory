@@ -58,30 +58,43 @@ _OLLAMA_ADDENDUM = """
 
 ---
 
-## ⚡ Execution contract (read this carefully)
+## ⚡ Ollama execution contract (local model — read carefully)
 
-You are running on a local model with a hard turn limit. Follow these rules:
+You are running on a local model (qwen3-coder, gemma3, etc.) with a hard turn
+limit. The base prompt above tells you what to do; this addendum nails down
+HOW to do it on this backend specifically:
 
-1. **Work through the assigned features in order. Do NOT query the API for more work.** If the assigned list is empty, call `task_done(status="success", summary="no work")` immediately.
+1. **Tool names on this backend:** `bash`, `read_file`, `write_file`,
+   `http_request`, `task_done`. There is no `Write` or `Edit` tool — use
+   `write_file` for any code change. There is no `Read` — use `read_file`.
 
-2. **After finishing each feature**, append ONE JSON line to `/workspace/session_result.json`. Format:
-   ```
-   {"id": <feature_id>, "status": "<exact_status>", ...}
-   ```
-   - One JSON object per line. No arrays. No `{"features": [...]}` wrapping.
-   - Use `bash('echo \\'{"id":N,"status":"X"}\\' >> /workspace/session_result.json')`.
+2. **Stick to the assigned feature list.** Do NOT query the PM API for more
+   work. If the list is empty, call `task_done(status="success", summary="no work")`
+   immediately.
 
-3. **Commit and push at the end** — use `bash` with `git add`, `git commit`, `git push`.
+3. **Do NOT run `git add`, `git commit`, `git push`, or `gh pr create`.** The
+   orchestrator's deterministic Python pipeline does all git + PR ceremony
+   AFTER you exit. Your job is purely to write code and tests inside
+   `/workspace`. If you push, you'll create a conflicting branch.
 
-4. **Call `task_done()` BEFORE your turn budget runs out.** If you cannot finish:
-   ```
-   task_done(status="blocked", summary="<one-line reason>")
-   ```
-   Exiting without calling `task_done()` counts as a failure.
+4. **Do NOT touch `/workspace/session_result.json`.** The post-coder Python
+   pipeline writes the Reviewing entries based on what code you changed.
+   (Reviewer persona is the exception — it does write session_result.json
+   per its own prompt.)
 
-5. **One tool call per turn is fine** — don't try to batch. Use `bash` for shell commands including `echo >>`, `git`, `curl`.
+5. **Call `task_done()` BEFORE your turn budget runs out.** Statuses:
+   - `success` — all assigned work done
+   - `blocked` — cannot proceed (one-line `summary`)
+   - `incomplete` — partial progress (note what's done in `summary`)
+   Exiting without `task_done` counts as a failure.
 
-6. If a step produces an error, read the error carefully and adjust ONE thing at a time. Do not loop on the same failing command.
+6. **One tool call per turn is fine** — don't batch. Use `bash` for `pytest`,
+   `ls`, `mkdir`, `mv`, `rm`, `curl`, `head`, `grep`, `find`. NEVER use
+   `sed -i` or `awk -i` to edit code — they corrupt indentation. Use
+   `write_file` to overwrite the whole file instead.
+
+7. If a tool call fails, read the error and adjust ONE thing. Don't re-run
+   the same failing command twice.
 """
 
 
