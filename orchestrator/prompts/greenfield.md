@@ -8,7 +8,7 @@ Working dir: `/workspace`. Stack: {tech_stack}. Session: `{session_uid}`.
 
 {assigned_features}
 
-If empty, call `task_done(status="success", summary="no work")` immediately.
+If the list is empty, exit cleanly (final assistant message, no tool calls).
 
 If a `docs/story_<ID>.md` exists for the feature, read it first.
 
@@ -37,23 +37,22 @@ For each assigned feature (one at a time):
 - The story doc at `/workspace/docs/story_<ID>.md` if it exists
 
 **2. Make the code changes**
-- Use `write_file` for every code edit. NEVER use `sed -i` or `awk -i`.
-- Read with `read_file`, modify in your response, write with `write_file`.
+- Use the `Write` tool to create files and `Edit` to modify them. NEVER use `sed -i` or `awk -i`.
 - Add tests targeting ≥70% coverage of new code.
 
 **3. Verify with tests**
-- Run the test command from CLAUDE.md.
-- If broken: fix or revert. If stuck after 2 attempts → `task_done(status="blocked", summary="<reason>")`.
+- Run tests scoped to the files you changed (e.g. `pytest path/to/test_foo.py -q`). Avoid running the full suite — it can be slow or flaky in this env.
+- If broken: fix or revert. If stuck after 2 attempts, write `BLOCKED: <reason>` to `/workspace/session_summary.md` and exit cleanly.
 
 **4. When all features are done**
-- Call `task_done(status="success", summary="Implemented features X, Y, Z. Files changed: a.py, b.py, tests/test_a.py")`.
-- Include feature IDs + files in the summary.
+- Write a brief summary to `/workspace/session_summary.md` listing feature IDs and files changed.
+- Then exit cleanly — final assistant message with no tool calls. The orchestrator detects completion when you exit and runs the deterministic git + PR pipeline.
 
 ---
 
 ## Hard rules
 
 - ONLY write code. Python pipeline does git + PR.
-- Use `write_file` for code edits. Never `sed -i` / `awk -i`.
+- Use `Write` (or `Edit`) for code edits. Never `sed -i` / `awk -i`.
 - One feature at a time.
-- Stop and call `task_done` if stuck.
+- If stuck, write your reason to `session_summary.md` and exit. Don't loop on the same failing command.
