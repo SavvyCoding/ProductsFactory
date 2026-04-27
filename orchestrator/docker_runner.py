@@ -31,6 +31,47 @@ from templates.renderer import install_templates
 
 log = logging.getLogger("poller.docker")
 
+
+# Self-heartbeat shell snippet for Claude-backend containers. Runs in the
+# background inside the agent container; POSTs heartbeats every 30s. This
+# survives orchestrator restarts — the orchestrator's per-session heartbeat
+# thread dies when its container recreates, but this one runs inside the
+# agent and lives as long as the agent does. When claude exits, the parent
+# `sh -c` exits and the backgrounded subshell is reaped.
+#
+# Resolves session_id from $SESSION_UID via the PM API on startup (up to
+# ~30s of retry); silently no-ops if it can't find the session.
+#
+# Ollama backend already has its own self-heartbeat in ollama_agent.py
+# (Python thread), so we only inject this for the claude binary path.
+_AGENT_HEARTBEAT_SH = r'''
+(
+  set +e
+  _SID=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    _SID="$(curl -s "$PM_API_URL/api/sessions/active" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    ds = json.load(sys.stdin)
+    for s in ds:
+        if s.get('session_uid') == '$SESSION_UID':
+            print(s.get('id', ''))
+            break
+except Exception:
+    pass
+" 2>/dev/null)"
+    [ -n "$_SID" ] && break
+    sleep 3
+  done
+  if [ -n "$_SID" ]; then
+    while :; do
+      curl -s -X POST "$PM_API_URL/api/sessions/$_SID/heartbeat" >/dev/null 2>&1
+      sleep 30
+    done
+  fi
+) &
+'''.strip()
+
 CLAUDE_DIR  = Path(os.environ.get("CLAUDE_DIR",  ""))   # configurable via system_config.claude_credentials_dir
 SSH_DIR     = Path(os.environ.get("SSH_DIR",     ""))   # configurable via system_config.ssh_keys_dir
 AGENT_IMAGE = os.environ.get("AGENT_IMAGE", "productfactory-agent")
@@ -1387,12 +1428,16 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # If GH_TOKEN is provided via file mount, wrap agent_cmd so it's exported to the
     # agent's env at startup. Using `sh -c ... exec cmd` keeps the token out of
     # `docker inspect` while still making it available to gh CLI inside the container.
+    # For the Claude backend, also start the self-heartbeat loop in the background so
+    # the session survives orchestrator restarts (Ollama has its own in-Python).
     if gh_mount:
         quoted = " ".join(shlex.quote(a) for a in agent_cmd)
+        prelude = '[ -r /run/secrets/gh_token ] && export GH_TOKEN="$(cat /run/secrets/gh_token)"; '
+        if effective_backend == "claude":
+            prelude += _AGENT_HEARTBEAT_SH + " "
         agent_cmd = [
             "sh", "-c",
-            '[ -r /run/secrets/gh_token ] && export GH_TOKEN="$(cat /run/secrets/gh_token)"; '
-            f'exec {quoted}',
+            prelude + f'exec {quoted}',
         ]
 
     cmd = [
