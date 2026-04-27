@@ -1606,12 +1606,30 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         if session_id is not None:
             threading.Thread(target=_send_heartbeat, daemon=True).start()
 
+        # Captured from the final claude -p `result` event so we can persist
+        # cost / turn count / token totals onto the session record at end.
+        # Claude only — Ollama agent doesn't emit a result event in this shape.
+        session_meta: dict = {}
+
         def _stream_logs():
             buffer: list[str] = []
             for raw_line in process.stdout:
                 line = raw_line.rstrip("\n")
                 if not line:
                     continue
+                # Fast-path: capture the single result event that closes a
+                # claude stream-json session (one per session). Cheap string
+                # check first so we don't JSON-parse every assistant turn twice.
+                if '"type":"result"' in line:
+                    try:
+                        _ev = json.loads(line)
+                        if isinstance(_ev, dict) and _ev.get("type") == "result":
+                            session_meta["cost_usd"] = _ev.get("total_cost_usd")
+                            _u = _ev.get("usage") if isinstance(_ev.get("usage"), dict) else {}
+                            session_meta["tokens_input"]  = _u.get("input_tokens")
+                            session_meta["tokens_output"] = _u.get("output_tokens")
+                    except (json.JSONDecodeError, ValueError):
+                        pass
                 formatted = _format_agent_event(line)
                 if formatted is None:
                     continue
@@ -1742,13 +1760,18 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 # may have already set status=killed if it was the one that fired).
                 end_status = "ended" if exit_code == 0 else "killed"
                 with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-                    client.patch(f"/api/sessions/{session_id}", json={
+                    patch_body = {
                         "status":            end_status,
                         "ended_at":          datetime.now(timezone.utc).isoformat(),
                         "exit_code":         exit_code,
                         "features_attempted": attempted,
                         "features_pushed":   pushed,
-                    })
+                    }
+                    # Merge captured cost/token totals from the claude result
+                    # event (None values dropped — they'd overwrite anything
+                    # an earlier reconcile already set).
+                    patch_body.update({k: v for k, v in session_meta.items() if v is not None})
+                    client.patch(f"/api/sessions/{session_id}", json=patch_body)
             except Exception as e:
                 log.warning(f"Could not update session record: {e}")
 
