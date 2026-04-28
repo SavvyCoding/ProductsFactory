@@ -355,3 +355,20 @@
   .history-table th:nth-child(4),
   .history-table td:nth-child(4) { display: none; }
 }
+
+
+/* History tokens column — show input/output side-by-side, monospace digits */
+.hist-tokens {
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+.hist-tokens .tok-in,
+.hist-tokens .tok-out {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-right: 4px;
+}
+.hist-tokens .tok-in  { color: var(--color-fg-muted); background: var(--color-canvas-subtle); }
+.hist-tokens .tok-out { color: var(--color-accent-fg); background: var(--color-accent-subtle); }

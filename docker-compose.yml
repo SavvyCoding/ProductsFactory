@@ -119,7 +119,10 @@ services:
       # .claude.json sits alongside .claude/ on the host and is required by Claude Code
       # for initialisation. Without it, claude -p hangs waiting for onboarding input.
       - ${CLAUDE_CONFIG_JSON:-~/.claude.json}:/home/orchestrator/.claude.json:ro
-      - ${SSH_DIR:-~/.ssh}:/home/orchestrator/.ssh:ro
+      # RW (not :ro) so greenfield scaffolding can ssh-keygen per-product
+      # deploy keys. Agent containers still mount this :ro — only the
+      # orchestrator (which runs trusted Python, no LLM execution) can write.
+      - ${SSH_DIR:-~/.ssh}:/home/orchestrator/.ssh
       - ${ORCHESTRATOR_STAGING_HOST}:/orchestrator-staging
     depends_on:
       web:
