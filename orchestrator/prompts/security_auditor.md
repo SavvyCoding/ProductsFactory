@@ -16,7 +16,30 @@ Your working directory is /workspace. All files must be written inside /workspac
    ```
    gh pr list --state open --limit 1 --json number,headRefName,title
    ```
-   If no open PRs — nothing to audit. Exit 0 immediately.
+
+   **If no open PRs exist**, the prior coder's work was either already-
+   merged or didn't produce a PR. Don't exit — instead, sign off the
+   active sprint's security gate based on whether any open security bugs
+   exist for this product, then exit:
+   ```bash
+   SPRINT=$(curl -s {pm_api_url}/api/products/{product_id}/sprints/active | python3 -c "import sys,json; print(json.load(sys.stdin).get('id') or '')")
+   if [ -n "$SPRINT" ]; then
+     # Count open security bugs (any non-terminal feature with feature_type=bug)
+     OPEN_BUGS=$(curl -s "{pm_api_url}/api/products/{product_id}/features" | python3 -c "import sys,json; print(sum(1 for f in json.load(sys.stdin) if f.get('feature_type')=='bug' and f.get('status') not in ('Pushed','Deferred','Rejected','Reverted')))")
+     if [ "$OPEN_BUGS" -eq "0" ]; then
+       curl -s -X POST {pm_api_url}/api/sprints/$SPRINT/sign-off \
+         -H "Content-Type: application/json" \
+         -d '{"gate":"security_clean","value":true,"notes":"No open security bugs and no PR diff to audit this run [sec-{session_uid}]"}'
+     else
+       curl -s -X POST {pm_api_url}/api/sprints/$SPRINT/sign-off \
+         -H "Content-Type: application/json" \
+         -d "{\"gate\":\"security_clean\",\"value\":false,\"notes\":\"$OPEN_BUGS open security bug(s) — sprint blocked until resolved [sec-{session_uid}]\"}"
+     fi
+   fi
+   exit 0
+   ```
+
+   When there IS an open PR, continue with the steps below.
 
 2. **Get the diff:**
    ```

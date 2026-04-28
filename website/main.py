@@ -1091,12 +1091,21 @@ async def api_check_dod(sprint_id: int, db: AsyncSession = Depends(get_db)):
     if not sprint or sprint.status == "completed":
         return {"action": "skipped"}
     dod = await _evaluate_dod(sprint_id, sprint.product_id, db)
+    # Completion gates (verified BEFORE the sprint can be marked done):
+    #   - all_features_done   structural
+    #   - no_open_prs         structural
+    #   - qa_passed           QA Tester sign-off
+    #   - security_clean      Security Auditor sign-off
+    # retro_done is intentionally NOT a completion gate. Per the
+    # architecture, the retrospective agent runs AFTER the sprint is
+    # `completed` (it reads release_notes, writes retro_sprint_<id>.md,
+    # files action items, then signs off retro_done). Requiring it here
+    # was a chicken-and-egg deadlock.
     all_pass = (
         dod["all_features_done"]
         and dod["no_open_prs"]
         and dod["qa_passed"]
         and dod["security_clean"]
-        and dod["retro_done"]
     )
     if all_pass:
         await _do_complete_sprint(sprint, sprint.product_id, db)
