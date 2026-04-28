@@ -1,0 +1,68 @@
+# ProductFactory orchestrator image.
+# Runs a simple Python loop that calls run_cycle() every 60s to launch
+# agent containers. No LLM, no framework — just deterministic orchestration.
+# Claude is reserved for agent personas (coder, designer, reviewer).
+
+FROM python:3.12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app
+
+# -- System deps ---------------------------------------------------------------
+# - git, openssh-client: workspace git ops + ssh-keygen for greenfield
+# - curl, ca-certificates, gnupg: TLS + apt key for Docker repo
+# - Docker CLI only (daemon access via /var/run/docker.sock)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git curl openssh-client ca-certificates gnupg bash \
+ && install -m 0755 -d /etc/apt/keyrings \
+ && curl -fsSL https://download.docker.com/linux/debian/gpg \
+      | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" \
+      > /etc/apt/sources.list.d/docker.list \
+ && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+ && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+ && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli gh \
+ && rm -rf /var/lib/apt/lists/*
+
+# -- Non-root user -------------------------------------------------------------
+# GID 998 matches the Docker group GID on most Linux hosts.
+RUN groupadd -g 998 dockerhost \
+ && useradd -u 999 -m -s /bin/bash orchestrator \
+ && usermod -aG dockerhost orchestrator
+
+WORKDIR /app
+
+# -- Python deps ---------------------------------------------------------------
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# -- ProductFactory code -------------------------------------------------------
+COPY orchestrator/ orchestrator/
+COPY website/      website/
+COPY templates/    templates/
+
+# -- Orchestration loop + tools ------------------------------------------------
+COPY deploy/orchestrator/orchestrate.py  /app/orchestrate.py
+COPY deploy/orchestrator/tools.py        /app/orchestrator_runtime.py
+COPY deploy/orchestrator/bootstrap.sh    /usr/local/bin/bootstrap.sh
+
+RUN chmod +x /usr/local/bin/bootstrap.sh \
+ && chown -R orchestrator:orchestrator /app
+
+USER orchestrator
+WORKDIR /app
+
+# Allow git to operate on NTFS/Docker-mounted product dirs (owned by root inside container).
+# Set author identity so the post-coder pipeline can git commit without
+# "Author identity unknown" errors.
+RUN git config --global --add safe.directory '*' \
+ && git config --global user.email "orchestrator@productfactory.local" \
+ && git config --global user.name  "ProductFactory Orchestrator"
+
+ENTRYPOINT ["/usr/local/bin/bootstrap.sh"]

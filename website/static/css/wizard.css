@@ -486,3 +486,221 @@
 [data-theme="dark"] .path-preview {
   background: var(--color-canvas-inset);
 }
+
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Redesigned wizard (2026-04): wider modal, hero vision, stack & UI pickers
+   ───────────────────────────────────────────────────────────────────────── */
+
+/* Wider modal box for the wizard so the vision step has room to breathe */
+.modal-box.modal-box--wizard {
+  max-width: min(1100px, 95vw);
+  width: 95vw;
+  max-height: 95vh;
+}
+
+/* Vision step: hero textarea covers the full modal width.
+   The shared .voice-field is display:flex which collapses to fit-content
+   by default — override to a block so the textarea (width: 100%) fills it. */
+.wizard-vision--hero {
+  margin-block: 16px;
+  width: 100%;
+}
+.wizard-vision--hero .voice-field {
+  display: block;
+  position: relative;
+  width: 100%;
+}
+.vision-textarea-large {
+  width: 100%;
+  min-height: 320px;
+  box-sizing: border-box;
+  font-size: 16px;
+  line-height: 1.55;
+  padding: 16px 48px 16px 16px;  /* right padding leaves room for voice button */
+  border-radius: 8px;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-canvas-default);
+  resize: vertical;
+  font-family: inherit;
+  display: block;
+}
+.vision-textarea-large:focus {
+  outline: 2px solid var(--color-accent-emphasis);
+  outline-offset: -1px;
+}
+.wizard-vision--hero .voice-btn {
+  top: 12px;
+  right: 12px;
+}
+
+/* AI recommendation cards (used on Stack and UI Template steps) */
+.stack-recommendation:empty,
+.ui-recommendation:empty { display: none; }
+
+.stack-recommendation,
+.ui-recommendation {
+  margin: 8px 0 16px;
+  padding: 14px 16px;
+  background: var(--color-accent-subtle);
+  border: 1px solid var(--color-accent-emphasis);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.recommendation-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--color-accent-fg);
+}
+.recommendation-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+.recommendation-reason {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--color-fg-default);
+}
+.recommendation-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Stack picker: grouped, card-style options */
+.stack-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: 420px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.stack-group-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-fg-muted);
+  margin-bottom: 6px;
+}
+.stack-options-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+.stack-option {
+  padding: 10px 12px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 6px;
+  cursor: pointer;
+  background: var(--color-canvas-default);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.stack-option:hover { border-color: var(--color-accent-emphasis); }
+.stack-option.selected {
+  border-color: var(--color-accent-emphasis);
+  background: var(--color-accent-subtle);
+  box-shadow: 0 0 0 1px var(--color-accent-emphasis) inset;
+}
+.stack-option.recommended-badge::before {
+  content: "★ Recommended";
+  font-size: 10px;
+  color: var(--color-accent-fg);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  margin-bottom: 2px;
+}
+.stack-option-label { font-weight: 600; font-size: 14px; }
+.stack-option-desc  { font-size: 12px; color: var(--color-fg-muted); line-height: 1.4; }
+
+/* Database picker: simple chip row */
+.db-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.db-option {
+  padding: 8px 14px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 13px;
+  background: var(--color-canvas-default);
+  transition: all 0.15s;
+}
+.db-option:hover { border-color: var(--color-accent-emphasis); }
+.db-option.selected {
+  border-color: var(--color-accent-emphasis);
+  background: var(--color-accent-subtle);
+  font-weight: 600;
+}
+
+/* UI template gallery: 2-3 column grid of preview cards */
+.ui-template-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  margin-top: 8px;
+}
+.ui-template-card {
+  padding: 14px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  cursor: pointer;
+  background: var(--color-canvas-default);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.ui-template-card:hover { border-color: var(--color-accent-emphasis); }
+.ui-template-card.selected {
+  border-color: var(--color-accent-emphasis);
+  background: var(--color-accent-subtle);
+  box-shadow: 0 0 0 1px var(--color-accent-emphasis) inset;
+}
+.ui-template-card.recommended-badge::before {
+  content: "★ Recommended";
+  font-size: 10px;
+  color: var(--color-accent-fg);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  margin-bottom: 2px;
+}
+.ui-template-name  { font-weight: 600; font-size: 14px; }
+.ui-template-desc  { font-size: 12px; color: var(--color-fg-muted); line-height: 1.4; }
+
+/* Step indicator: hide individual steps cleanly when not applicable */
+.wizard-step.hidden { display: none; }
+
+/* Dark theme parity */
+[data-theme="dark"] .stack-option,
+[data-theme="dark"] .ui-template-card,
+[data-theme="dark"] .db-option {
+  background: var(--color-canvas-subtle);
+  border-color: var(--color-border-default);
+}
+[data-theme="dark"] .stack-option.selected,
+[data-theme="dark"] .ui-template-card.selected,
+[data-theme="dark"] .db-option.selected {
+  border-color: var(--color-accent-fg);
+  background: var(--color-accent-subtle);
+}
+[data-theme="dark"] .stack-recommendation,
+[data-theme="dark"] .ui-recommendation {
+  background: var(--color-accent-subtle);
+  border-color: var(--color-accent-fg);
+}
+[data-theme="dark"] .vision-textarea-large {
+  background: var(--color-canvas-subtle);
+  border-color: var(--color-border-default);
+  color: var(--color-fg-default);
+}

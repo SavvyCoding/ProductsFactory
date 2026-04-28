@@ -268,6 +268,28 @@
 }
 
 
+/* ── Lifecycle event timeline ────────────────────────────── */
+.hist-events {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-xs);
+}
+.hist-event-row {
+  display: grid;
+  grid-template-columns: 20px 90px 1fr 72px;
+  gap: 8px;
+  padding: 2px 6px;
+  border-left: 2px solid var(--color-border, #e5e7eb);
+  align-items: baseline;
+}
+.hist-event-icon  { text-align: center; }
+.hist-event-name  { font-weight: 600; color: var(--color-fg, #1f2937); }
+.hist-event-detail{ color: var(--color-fg-subtle, #6b7280); font-family: inherit; }
+.hist-event-time  { color: var(--color-fg-subtle, #6b7280); text-align: right; }
+
+
 /* ── Reviews ─────────────────────────────────────────────── */
 .hist-reviews {
   display: flex;
