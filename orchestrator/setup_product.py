@@ -19,6 +19,7 @@ from pathlib import Path
 
 import httpx
 
+from orchestrator.paths import container_path
 from templates.renderer import install_templates
 
 log = logging.getLogger("poller.setup")
@@ -41,7 +42,9 @@ def discover_and_populate(product: dict):
     3. Sets status → 'ready' for brownfield (existing repo, intentionally registered),
        or 'discovered' for greenfield (PM reviews scaffold before agents run).
     """
-    working_dir = Path(product["working_dir"])
+    # Translate host path → container path when running in container mode
+    # (no-op in legacy host poller). DB still holds the host path.
+    working_dir = Path(container_path(product["working_dir"]))
     if not working_dir.exists():
         log.error(f"Working dir does not exist: {working_dir}")
         _update_product(product["id"], {"status": "error"})

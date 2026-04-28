@@ -19,6 +19,8 @@ from pathlib import Path
 
 import httpx
 
+from orchestrator.paths import container_path
+
 log = logging.getLogger("poller.scaffold")
 
 
@@ -37,7 +39,11 @@ def scaffold_greenfield(product: dict, system_config: dict, pm_api_url: str, ssh
     org             = system_config.get("github_org", "")
     pat             = system_config.get("github_pat", "")
     ssh_key_name    = system_config.get("github_ssh_key_name", "productfactory-deploy")
-    working_dir     = Path(product["working_dir"])
+    # working_dir in the DB is the HOST path (so docker run -v can use it).
+    # When we run inside the orchestrator container we must translate to the
+    # container-side mount point for local FS ops (mkdir / git init / file
+    # writes); container_path is a no-op in legacy host-poller mode.
+    working_dir     = Path(container_path(product["working_dir"]))
 
     if not org or not pat or not github_repo_name:
         log.error(f"Scaffold: missing config for product {product['id']} — marking error")
@@ -48,6 +54,16 @@ def scaffold_greenfield(product: dict, system_config: dict, pm_api_url: str, ssh
         # ① Create GitHub repo
         log.info(f"Scaffold [{product_name}]: creating GitHub repo {org}/{github_repo_name}")
         ssh_url, actual_owner = _create_github_repo(org, github_repo_name, pat)
+        # Use HTTPS+PAT for the remote URL instead of SSH. Reasons:
+        #  - The orchestrator container has no default-named SSH key, so
+        #    git fetch from `git@github.com:…` fails with "Permission denied".
+        #  - The agent container's per-product key is mounted as ~/.ssh/id_ed25519
+        #    (default name) and works for SSH, BUT switching all internal paths
+        #    to HTTPS+PAT keeps orchestrator + agent on the same protocol and
+        #    matches the working brownfield convention.
+        # Trade-off: PAT lands in .git/config — same security posture as
+        # brownfield products today; secret-redaction in log streams scrubs it.
+        https_url = f"https://x-access-token:{pat}@github.com/{actual_owner}/{github_repo_name}.git"
 
         # ② Generate deploy key on host
         key_slug = github_repo_name.lower().replace("-", "_").replace(".", "_")
@@ -72,18 +88,50 @@ def scaffold_greenfield(product: dict, system_config: dict, pm_api_url: str, ssh
         # `remote add` fails if origin already exists — use set-url as a fallback so the
         # scaffold re-runs cleanly.
         add = subprocess.run(
-            ["git", "remote", "add", "origin", ssh_url],
+            ["git", "remote", "add", "origin", https_url],
             cwd=working_dir, capture_output=True,
         )
         if add.returncode != 0:
             subprocess.run(
-                ["git", "remote", "set-url", "origin", ssh_url],
+                ["git", "remote", "set-url", "origin", https_url],
                 cwd=working_dir, check=True, capture_output=True,
             )
 
         # ⑥ Write scaffold files
         _write_readme(working_dir, product_name)
         _write_product_config(working_dir, vision, preferred_stack, org, github_repo_name)
+
+        # ⑥a Initial commit + push so `main` exists on GitHub. Without this,
+        # the first coder session pushes its feature branch BEFORE main has a
+        # ref upstream — `gh pr create` then fails with "No commits between
+        # main and …, Base ref must be a branch" and features sit in
+        # Implementing indefinitely. Pushing main here closes the race.
+        try:
+            # Need a committer identity for `git commit` to succeed.
+            subprocess.run(["git", "config", "user.email", "orchestrator@productfactory.local"],
+                           cwd=working_dir, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "ProductFactory Orchestrator"],
+                           cwd=working_dir, capture_output=True)
+            subprocess.run(["git", "add", "README.md", "product_config.json"],
+                           cwd=working_dir, check=True, capture_output=True)
+            commit = subprocess.run(
+                ["git", "commit", "-m", "chore: initial scaffold"],
+                cwd=working_dir, capture_output=True, text=True,
+            )
+            # If nothing to commit (re-running scaffold over an existing repo) skip push.
+            if commit.returncode == 0:
+                push = subprocess.run(
+                    ["git", "push", "-u", "origin", "main"],
+                    cwd=working_dir, capture_output=True, text=True, timeout=60,
+                )
+                if push.returncode != 0:
+                    log.warning(f"Scaffold [{product_name}]: initial push failed: {push.stderr.strip()[:300]}")
+                else:
+                    log.info(f"Scaffold [{product_name}]: pushed initial main commit")
+            else:
+                log.info(f"Scaffold [{product_name}]: no initial commit needed ({commit.stdout.strip()[:120]})")
+        except Exception as ce:
+            log.warning(f"Scaffold [{product_name}]: initial commit/push step failed (non-fatal): {ce}")
 
         # ⑦ Create AI-suggested features as Pending
         for i, feat in enumerate(suggested_features or []):
