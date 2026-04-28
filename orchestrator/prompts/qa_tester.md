@@ -16,7 +16,28 @@ Your working directory is /workspace. All files must be written inside /workspac
    ```
    gh pr list --state open --limit 1 --json number,headRefName,title,body
    ```
-   If no open PRs exist — nothing to test. Exit 0 immediately.
+
+   **If no open PRs exist**, the prior coder's work was either
+   already-merged or didn't produce a PR. Don't exit — instead, run the
+   full test suite against `main` and sign off the active sprint's QA
+   gate based on the result, then exit:
+   ```bash
+   git checkout main && git pull --ff-only
+   # Run the test command from CLAUDE.md (typically `pytest`)
+   <test_command> 2>&1 | tail -50
+   # If exit 0 — sign off qa_passed=true for the active sprint:
+   SPRINT=$(curl -s {pm_api_url}/api/products/{product_id}/sprints/active | python3 -c "import sys,json; print(json.load(sys.stdin).get('id') or '')")
+   if [ -n "$SPRINT" ]; then
+     curl -s -X POST {pm_api_url}/api/sprints/$SPRINT/sign-off \
+       -H "Content-Type: application/json" \
+       -d '{"gate":"qa_passed","value":true,"notes":"Full suite green on main — no open PR to add coverage for this run [qa-{session_uid}]"}'
+   fi
+   # If non-zero — sign off qa_passed=false with a note pointing at the
+   # failing tests, then exit. Don't try to file bugs from main; that's
+   # the security_auditor / regression flow.
+   ```
+
+   When there IS an open PR, continue with the steps below.
 
 2. **Check out the PR branch:**
    ```
