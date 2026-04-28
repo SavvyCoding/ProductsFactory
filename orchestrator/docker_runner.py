@@ -15,6 +15,7 @@ import os
 import shlex
 import shutil
 import tempfile
+import time
 import uuid
 import subprocess
 import logging
@@ -698,6 +699,43 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     if not assigned_features:
         log.info(f"[post-coder] {pname}: no assigned features — skipping commit/PR")
         return
+
+    # Symphony-style: this pipeline is a *fallback* now. Strong models open
+    # their own PRs and write Reviewing entries to session_result.json. If
+    # every assigned feature already has a Reviewing entry with pr_number,
+    # the agent did the work — skip the deterministic ceremony.
+    try:
+        sr_path = Path(working_dir) / "session_result.json"
+        already_handled: set[int] = set()
+        if sr_path.exists():
+            for ln in sr_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    e = _json.loads(ln)
+                except Exception:
+                    continue
+                if (isinstance(e, dict) and e.get("status") == "Reviewing"
+                        and isinstance(e.get("pr_number"), int)
+                        and isinstance(e.get("id"), int)):
+                    already_handled.add(e["id"])
+        assigned_ids = {f["id"] for f in assigned_features}
+        if assigned_ids and assigned_ids.issubset(already_handled):
+            log.info(
+                f"[post-coder] {pname}: agent opened PRs for all "
+                f"{len(assigned_ids)} assigned features — skipping fallback pipeline"
+            )
+            return
+        if already_handled & assigned_ids:
+            # Partial coverage — pipeline still runs for the unhandled ones,
+            # but log so the operator can see the split.
+            log.info(
+                f"[post-coder] {pname}: agent handled {sorted(already_handled & assigned_ids)}; "
+                f"running fallback for {sorted(assigned_ids - already_handled)}"
+            )
+    except Exception:
+        log.exception(f"[post-coder] {pname}: agent-handled detection failed — running pipeline")
 
     def _run(cmd: list[str], **kw) -> _sp.CompletedProcess:
         # Pop timeout from kw so the caller's override doesn't collide with the
@@ -1611,12 +1649,23 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         # Claude only — Ollama agent doesn't emit a result event in this shape.
         session_meta: dict = {}
 
+        # Stall detection (Symphony pattern): track timestamp of the last
+        # event seen on the agent's stdout. A separate watchdog thread kills
+        # the container if no event arrives within stall_timeout. Distinct
+        # from session_timeout: that's the upper bound on a productive run;
+        # stall detects stuck-but-alive containers (Ollama 500s, hung pytest,
+        # claude waiting on a hung child) much sooner.
+        stall_state = {"last_event_at": time.monotonic()}
+        _stall_kill = threading.Event()  # signal the wait loop that we killed for stall
+
         def _stream_logs():
             buffer: list[str] = []
             for raw_line in process.stdout:
                 line = raw_line.rstrip("\n")
                 if not line:
                     continue
+                # Bump the stall timer on every non-empty event line.
+                stall_state["last_event_at"] = time.monotonic()
                 # Fast-path: capture the single result event that closes a
                 # claude stream-json session (one per session). Cheap string
                 # check first so we don't JSON-parse every assistant turn twice.
@@ -1658,6 +1707,36 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         log_thread = threading.Thread(target=_stream_logs, daemon=True)
         log_thread.start()
 
+        # Stall watchdog (Symphony pattern). Runs alongside session_timeout:
+        #   - session_timeout (90 min default) — upper bound on a productive run
+        #   - stall_timeout (5 min default)    — no agent events for this long
+        # The stall window is much shorter, so a hung pytest / Ollama 500-loop /
+        # silent claude child gets caught at minute 5 instead of minute 90.
+        # Disabled when stall_timeout_minutes <= 0.
+        stall_timeout_seconds = int(sys_cfg.get("stall_timeout_minutes")
+                                    or os.environ.get("STALL_TIMEOUT_MINUTES", "5")) * 60
+        _stall_stop = threading.Event()
+        def _stall_watchdog():
+            if stall_timeout_seconds <= 0:
+                return
+            while not _stall_stop.wait(30):  # check every 30s
+                idle = time.monotonic() - stall_state["last_event_at"]
+                if idle > stall_timeout_seconds:
+                    log.warning(
+                        f"[stall] {product.get('name')}: no agent events for "
+                        f"{int(idle)}s (>{stall_timeout_seconds}s) — killing container"
+                    )
+                    _stall_kill.set()
+                    try:
+                        subprocess.run(
+                            ["docker", "kill", f"pf-{product['id']}-{session_uid}"],
+                            capture_output=True, timeout=30,
+                        )
+                    except Exception:
+                        log.exception("[stall] docker kill failed")
+                    return
+        threading.Thread(target=_stall_watchdog, daemon=True).start()
+
         # Live-poll session_result.json while container runs — applies DB updates in real-time
         # as the agent writes phase transitions (Implementing → Reviewing, Blocked, etc.).
         _poll_stop = threading.Event()
@@ -1683,9 +1762,17 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             exit_code = 1
         else:
             exit_code = process.returncode
+            # Distinguish a stall-kill (we killed the container due to no events)
+            # from a normal exit so the alert + exit_code reflect reality.
+            if _stall_kill.is_set():
+                send_alert("warning",
+                           f"{product['name']}: agent stalled (no events for "
+                           f"{stall_timeout_seconds//60}m) — killed by stall watchdog")
+                exit_code = 1
         finally:
             _hb_stop.set()         # stop heartbeat thread
             _poll_stop.set()       # signal live-poll thread to stop
+            _stall_stop.set()      # stop stall watchdog
             log_thread.join(timeout=10)
             if log_thread.is_alive():
                 log.warning(f"[{product.get('name')}] log_thread did not exit after 10s — orphaned (daemon)")
