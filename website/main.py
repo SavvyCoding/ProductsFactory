@@ -2226,6 +2226,23 @@ async def api_delete_sprint(sprint_id: int, db: AsyncSession = Depends(get_db), 
     await db.delete(sprint)
 
 
+@app.post("/product/{product_id}/plan-sprints")
+async def plan_sprints_form(
+    product_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Form-style wrapper around api_plan_sprints used by the product detail
+    page's "Auto-Plan Phases" button. Redirects back to the product page on
+    success; FastAPI's default error rendering handles 4xx from the wrapped
+    endpoint so the PM still sees the reason if planning is rejected."""
+    try:
+        await api_plan_sprints(product_id, db, "")
+    except HTTPException:
+        raise
+    return RedirectResponse(f"/product/{product_id}", status_code=303)
+
+
 @app.post("/api/products/{product_id}/plan-sprints")
 async def api_plan_sprints(
     product_id: int,
