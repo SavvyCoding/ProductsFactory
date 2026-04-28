@@ -546,6 +546,7 @@
         <th>Persona</th>
         <th>Duration</th>
         <th>Features</th>
+        <th>Tokens</th>
         <th>Cost</th>
         <th>Status</th>
       </tr>
@@ -597,6 +598,12 @@
         {% endif %}
       </td>
       <td>{{ s.features_pushed }}/{{ s.features_attempted }} pushed</td>
+      <td class="hist-tokens">
+        {% if s.tokens_input or s.tokens_output %}
+          <span class="tok-in" title="Input tokens">↓ {{ '{:,}'.format(s.tokens_input or 0) }}</span>
+          <span class="tok-out" title="Output tokens">↑ {{ '{:,}'.format(s.tokens_output or 0) }}</span>
+        {% else %}—{% endif %}
+      </td>
       <td>
         {% if s.cost_usd %}${{ '%.4f'|format(s.cost_usd) }}{% else %}—{% endif %}
       </td>
@@ -611,7 +618,7 @@
       </td>
     </tr>
     <tr class="history-detail-row" id="hist-detail-{{ s.id }}" style="display:none">
-      <td colspan="7">
+      <td colspan="8">
         <div class="hist-detail-body" id="hist-detail-body-{{ s.id }}">
           <span class="hist-detail-loading">Loading…</span>
         </div>

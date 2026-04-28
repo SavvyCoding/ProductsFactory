@@ -179,6 +179,94 @@ def get_system_config(args: dict, **kwargs) -> str:
     return _slim_response(_pm("GET", "/api/system-config"), _SYSCFG_KEEP)
 
 
+def _discover_registered_products(products: list, **kwargs) -> int:
+    """
+    For every product in `registered` status, run discovery (reads working
+    dir, installs CLAUDE.md / AGENT_WORKFLOW.md / ARCHITECTURE.md templates,
+    detects tech stack, sets status). For greenfield products discover_and_
+    populate sets status='discovered' which requires a manual PM gate; we
+    auto-promote that to 'ready' here so wizard-submitted products run end
+    to end without an extra click — the wizard submission IS the PM intent.
+
+    Ported from the legacy host poller (poller.py:1225-1228).
+    Returns the count of products discovered.
+    """
+    pending = [p for p in products if p.get("status") == "registered"]
+    if not pending:
+        return 0
+    try:
+        from orchestrator.setup_product import discover_and_populate
+    except Exception:
+        log.exception("[discover] could not import setup_product")
+        return 0
+
+    n = 0
+    for product in pending:
+        try:
+            log.info("[discover] starting product=%s name=%s",
+                     product.get("id"), product.get("name"))
+            discover_and_populate(product)
+            n += 1
+            # discover_and_populate has already PATCH'd the product. Re-fetch
+            # to see the resulting status — if greenfield ('discovered'),
+            # bump to 'ready' so the orchestrator picks it up next cycle.
+            with _pm_client() as client:
+                resp = client.get(f"/api/products/{product['id']}")
+                if resp.is_success and resp.json().get("status") == "discovered":
+                    client.patch(f"/api/products/{product['id']}",
+                                 json={"status": "ready"})
+                    log.info("[discover] auto-promoted greenfield product=%s discovered → ready",
+                             product.get("id"))
+        except Exception:
+            log.exception("[discover] failed for product=%s", product.get("id"))
+    return n
+
+
+def _scaffold_greenfield_pending(products: list, **kwargs) -> int:
+    """
+    For every product in `greenfield_pending`, invoke the host-side
+    scaffold helper that creates the GitHub repo, generates the deploy
+    key, writes initial files, and flips the product to `registered`.
+
+    Ported from the legacy host poller (poller.py:1216) — was lost when
+    the orchestrator moved into a container. Returns the number scaffolded.
+    """
+    pending = [p for p in products if p.get("status") == "greenfield_pending"]
+    if not pending:
+        return 0
+    try:
+        from pathlib import Path as _Path
+        from orchestrator.greenfield_scaffold import scaffold_greenfield
+    except Exception:
+        log.exception("[scaffold] could not import greenfield_scaffold")
+        return 0
+
+    # Resolve SSH_DIR inside the orchestrator container.
+    ssh_dir = _Path(os.environ.get("SSH_DIR", "/home/orchestrator/.ssh"))
+    if not ssh_dir.exists():
+        log.error("[scaffold] SSH_DIR=%s does not exist — cannot generate deploy keys", ssh_dir)
+        return 0
+
+    # system_config supplies github_org / github_pat / github_ssh_key_name.
+    try:
+        with _pm_client() as client:
+            sys_cfg = client.get("/api/system-config").json()
+    except Exception:
+        log.exception("[scaffold] could not fetch system-config")
+        return 0
+
+    scaffolded = 0
+    for product in pending:
+        try:
+            log.info("[scaffold] starting product=%s name=%s",
+                     product.get("id"), product.get("name"))
+            scaffold_greenfield(product, sys_cfg, PM_API_URL, ssh_dir)
+            scaffolded += 1
+        except Exception:
+            log.exception("[scaffold] failed for product=%s", product.get("id"))
+    return scaffolded
+
+
 def run_cycle(args: dict, **kwargs) -> str:
     """
     Run a complete orchestration cycle in Python:
@@ -231,6 +319,31 @@ def run_cycle(args: dict, **kwargs) -> str:
         products_raw = json.loads(get_products({}, **kwargs))
         products_data = products_raw.get("data") if isinstance(products_raw, dict) else products_raw
         products = products_data if isinstance(products_data, list) else []
+
+        # 5a. Scaffold greenfield_pending products (creates GitHub repo, deploy
+        # key, initial files, flips status → registered).
+        try:
+            n = _scaffold_greenfield_pending(products, **kwargs)
+            if n:
+                products_raw = json.loads(get_products({}, **kwargs))
+                products_data = products_raw.get("data") if isinstance(products_raw, dict) else products_raw
+                products = products_data if isinstance(products_data, list) else []
+        except Exception:
+            log.exception("[scaffold] greenfield_pending pass failed")
+
+        # 5b. Discover registered products (reads working_dir, installs agent
+        # templates, detects stack, flips status → ready). Auto-promotes
+        # greenfield 'discovered' → 'ready' so wizard-submitted products run
+        # without a separate PM approval click.
+        try:
+            n = _discover_registered_products(products, **kwargs)
+            if n:
+                products_raw = json.loads(get_products({}, **kwargs))
+                products_data = products_raw.get("data") if isinstance(products_raw, dict) else products_raw
+                products = products_data if isinstance(products_data, list) else []
+        except Exception:
+            log.exception("[discover] registered pass failed")
+
         ready = [p for p in products if p.get("status") in ("ready", "running")]
 
         with _pm_client() as client:
