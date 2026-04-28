@@ -50,19 +50,21 @@
 
 <!-- ── ADD PRODUCT WIZARD MODAL ──────────────────────────── -->
 <div class="modal-overlay" id="add-product-modal" onclick="if(event.target===this)closeWizard()">
-  <div class="modal-box">
+  <div class="modal-box modal-box--wizard">
     <button class="modal-close" onclick="closeWizard()" aria-label="Close">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
     </button>
 
-    <!-- Steps indicator -->
+    <!-- Steps indicator (greenfield: 5; brownfield: 2). UI step (#4) hidden when stack has no web component. -->
     <div class="wizard-steps" id="wizard-steps">
       <div class="wizard-step active" id="ws-1">1 · Type</div>
-      <div class="wizard-step" id="ws-2">2 · Details</div>
-      <div class="wizard-step" id="ws-3">3 · Vision</div>
+      <div class="wizard-step" id="ws-2">2 · Vision</div>
+      <div class="wizard-step" id="ws-3">3 · Stack</div>
+      <div class="wizard-step" id="ws-4">4 · UI</div>
+      <div class="wizard-step" id="ws-5">5 · Details</div>
     </div>
 
-    <!-- ── STEP 1: type picker ── -->
+    <!-- ── STEP 1: type picker ───────────────────────────────────────────── -->
     <div class="wizard-panel active" id="wp-1">
       <h2 class="wizard-title">What are you building?</h2>
       <p class="muted wizard-sub">Choose the product type to get started.</p>
@@ -72,14 +74,14 @@
             <svg class="icon icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2v20M2 12h20M5 5l14 14M19 5 5 19"/></svg>
           </div>
           <div class="type-pick-title">New Greenfield</div>
-          <div class="type-pick-desc">Scaffold a brand-new product from scratch — Claude creates the repo, stack, and initial code.</div>
+          <div class="type-pick-desc">Scaffold a brand-new product from scratch — agent creates the repo, stack, and initial code.</div>
         </div>
         <div class="type-pick-card" id="pick-brownfield" onclick="selectType('brownfield')" tabindex="0">
           <div class="type-pick-icon">
             <svg class="icon icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 21V8l9-5 9 5v13"/><path d="M9 21V12h6v9"/></svg>
           </div>
           <div class="type-pick-title">Existing Repo</div>
-          <div class="type-pick-desc">Register an existing codebase. Claude will analyse it and start implementing features.</div>
+          <div class="type-pick-desc">Register an existing codebase. Agent will analyse it and start implementing features.</div>
         </div>
       </div>
       <div class="wizard-footer">
@@ -88,7 +90,7 @@
       </div>
     </div>
 
-    <!-- ── STEP 2a: greenfield meta ── -->
+    <!-- ── STEP 2 (greenfield): VISION ───────────────────────────────────── -->
     <div class="wizard-panel" id="wp-2-greenfield">
       {% if not products_root_dir %}
       <div class="notice notice-amber wizard-notice">
@@ -96,7 +98,72 @@
         <a href="/admin">Set the products root directory and GitHub details</a> first.
       </div>
       {% endif %}
-      <h2 class="wizard-title">Product details</h2>
+      <h2 class="wizard-title">Describe your product</h2>
+      <p class="muted wizard-sub">In plain English. The recommendation engine reads this — be as specific as you can about who it's for, what it does, and why it's needed.</p>
+      <div class="form-group wizard-vision wizard-vision--hero">
+        <div class="voice-field">
+          <textarea id="gf-vision" rows="14" class="vision-textarea-large"
+                    placeholder="Example: A team time-tracking app for small consultancies (5–20 people). Project managers log billable hours per client and export PDF invoices. Mobile-friendly. Slack integration so people can log time with /track. Goal: reduce the weekly invoice prep time from 3 hours to 30 minutes."></textarea>
+          <button type="button" class="voice-btn" id="voice-btn-vision"
+                  onclick="startVoice('gf-vision', this)" title="Voice input" aria-label="Voice input">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="gf-actions">
+        <button type="button" class="pf-btn pf-btn--accent" id="articulate-btn" onclick="articulateVision()">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3v4M3 5h4M19 17v4M17 19h4M11 4 9 10l-6 2 6 2 2 6 2-6 6-2-6-2z"/></svg>
+          Articulate Vision
+        </button>
+        <span class="muted gf-status" id="articulate-status"></span>
+      </div>
+      <div class="wizard-footer">
+        <button class="pf-btn pf-btn--secondary" onclick="wizardBack()">← Back</button>
+        <button class="pf-btn pf-btn--primary" onclick="wizardToStack()">Next: Recommend stack →</button>
+      </div>
+    </div>
+
+    <!-- ── STEP 3 (greenfield): STACK ────────────────────────────────────── -->
+    <div class="wizard-panel" id="wp-3-stack">
+      <h2 class="wizard-title">Pick a tech stack</h2>
+      <p class="muted wizard-sub">We'll suggest one based on your vision. Browse the full list if you'd rather pick yourself.</p>
+      <div class="stack-recommendation" id="stack-recommendation"></div>
+      <div class="form-group">
+        <label>All stacks</label>
+        <div class="stack-picker" id="stack-picker">
+          <div class="muted">Loading…</div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Database</label>
+        <div class="db-picker" id="db-picker">
+          <div class="muted">Loading…</div>
+        </div>
+      </div>
+      <div class="wizard-footer">
+        <button class="pf-btn pf-btn--secondary" onclick="wizardBack()">← Back</button>
+        <button class="pf-btn pf-btn--primary" id="stack-next-btn" onclick="wizardToUI()">Next →</button>
+      </div>
+    </div>
+
+    <!-- ── STEP 4 (greenfield, only if web): UI TEMPLATE ─────────────────── -->
+    <div class="wizard-panel" id="wp-4-ui">
+      <h2 class="wizard-title">Pick a UI / UX style</h2>
+      <p class="muted wizard-sub">Sets the visual language the coder agent will follow when scaffolding. You can override later.</p>
+      <div class="ui-recommendation" id="ui-recommendation"></div>
+      <div class="ui-template-gallery" id="ui-template-gallery">
+        <div class="muted">Loading…</div>
+      </div>
+      <div class="wizard-footer">
+        <button class="pf-btn pf-btn--secondary" onclick="wizardBack()">← Back</button>
+        <button class="pf-btn pf-btn--primary" id="ui-next-btn" onclick="wizardToDetails()">Next →</button>
+      </div>
+    </div>
+
+    <!-- ── STEP 5 (greenfield): DETAILS + BACKLOG ─────────────────────────── -->
+    <div class="wizard-panel" id="wp-5-details">
+      <h2 class="wizard-title">Last details</h2>
+      <p class="muted wizard-sub">Name your product and optionally generate an initial backlog from your vision.</p>
       <div class="form-group">
         <label for="gf-name">Product name</label>
         <input type="text" id="gf-name" placeholder="My Awesome App" autocomplete="off">
@@ -109,83 +176,11 @@
           <span id="path-preview-text">{{ products_root_dir or '{root}' }}/<span class="highlight">my-awesome-app</span></span>
         </div>
       </div>
-      <div class="form-group">
-        <label for="gf-stack">Tech stack</label>
-        <select id="gf-stack" onchange="onStackChange(this)">
-          <optgroup label="Python">
-            <option value="python+postgresql">Python + PostgreSQL</option>
-            <option value="python+mysql">Python + MySQL</option>
-            <option value="python+mongodb">Python + MongoDB</option>
-            <option value="python+redis">Python + Redis</option>
-            <option value="python+sqlite">Python + SQLite</option>
-          </optgroup>
-          <optgroup label="Node.js">
-            <option value="node+postgresql">Node.js + PostgreSQL</option>
-            <option value="node+mongodb">Node.js + MongoDB</option>
-            <option value="node+mysql">Node.js + MySQL</option>
-            <option value="node+redis">Node.js + Redis</option>
-          </optgroup>
-          <optgroup label="Full-stack">
-            <option value="nextjs+postgresql">Next.js + PostgreSQL</option>
-            <option value="nextjs+mongodb">Next.js + MongoDB</option>
-            <option value="react+node+postgresql">React + Node.js + PostgreSQL</option>
-            <option value="react+node+mongodb">React + Node.js + MongoDB</option>
-          </optgroup>
-          <optgroup label="Go">
-            <option value="go+postgresql">Go + PostgreSQL</option>
-            <option value="go+mysql">Go + MySQL</option>
-            <option value="go+redis">Go + Redis</option>
-          </optgroup>
-          <optgroup label="Other">
-            <option value="other">Other (specify below)</option>
-          </optgroup>
-        </select>
-        <input type="text" id="gf-stack-other" class="hidden gf-stack-other-input" placeholder="e.g. Rust + PostgreSQL" autocomplete="off">
-      </div>
-      <div class="wizard-footer">
-        <button class="pf-btn pf-btn--secondary" onclick="wizardBack()">← Back</button>
-        <button class="pf-btn pf-btn--primary" onclick="wizardNext2()">Next →</button>
-      </div>
-    </div>
-
-    <!-- ── STEP 2b: brownfield path ── -->
-    <div class="wizard-panel" id="wp-2-brownfield">
-      <h2 class="wizard-title">Register existing repository</h2>
-      <div class="form-group">
-        <label for="bf-working-dir">Path to repository</label>
-        <input type="text" id="bf-working-dir" placeholder="C:/path/to/existing/repo" autocomplete="off">
-        <p class="field-hint">ProductFactory will auto-discover the stack and install agent workflow templates.</p>
-      </div>
-      <div class="wizard-footer">
-        <button class="pf-btn pf-btn--secondary" onclick="wizardBack()">← Back</button>
-        <button class="pf-btn pf-btn--primary" onclick="submitBrownfield()">Register →</button>
-      </div>
-    </div>
-
-    <!-- ── STEP 3: vision & AI suggestions ── -->
-    <div class="wizard-panel" id="wp-3">
-      <h2 class="wizard-title">Vision &amp; initial features</h2>
-      <div class="form-group wizard-vision">
-        <label for="gf-vision">Vision / goal</label>
-        <div class="voice-field">
-          <textarea id="gf-vision" rows="5"
-                    placeholder="Describe what this product does, who it's for, and its core value proposition…"></textarea>
-          <button type="button" class="voice-btn" id="voice-btn-vision"
-                  onclick="startVoice('gf-vision', this)" title="Voice input" aria-label="Voice input">
-            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>
-          </button>
-        </div>
-      </div>
       <div class="gf-actions">
-        <button type="button" class="pf-btn pf-btn--accent" id="articulate-btn" onclick="articulateVision()">
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3v4M3 5h4M19 17v4M17 19h4M11 4 9 10l-6 2 6 2 2 6 2-6 6-2-6-2z"/></svg>
-          Articulate Vision
-        </button>
         <button type="button" class="pf-btn pf-btn--secondary" id="suggest-btn" onclick="suggestFeatures()">
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10M7 12h10M7 16h6"/></svg>
-          Generate Full Backlog
+          Generate Full Backlog (optional)
         </button>
-        <span class="muted gf-status" id="articulate-status"></span>
         <span class="muted gf-status" id="suggest-status"></span>
       </div>
       <div id="gf-suggestions" class="ai-suggestions hidden">
@@ -206,12 +201,28 @@
       </div>
     </div>
 
+    <!-- ── STEP 2 (brownfield): PATH ─────────────────────────────────────── -->
+    <div class="wizard-panel" id="wp-2-brownfield">
+      <h2 class="wizard-title">Register existing repository</h2>
+      <div class="form-group">
+        <label for="bf-working-dir">Path to repository</label>
+        <input type="text" id="bf-working-dir" placeholder="C:/path/to/existing/repo" autocomplete="off">
+        <p class="field-hint">ProductFactory will auto-discover the stack and install agent workflow templates.</p>
+      </div>
+      <div class="wizard-footer">
+        <button class="pf-btn pf-btn--secondary" onclick="wizardBack()">← Back</button>
+        <button class="pf-btn pf-btn--primary" onclick="submitBrownfield()">Register →</button>
+      </div>
+    </div>
+
     <!-- Hidden form for actual submission -->
     <form method="post" action="/product/register/greenfield" id="gf-hidden-form" class="hidden">
-      <input type="hidden" name="product_name"      id="gf-h-name">
-      <input type="hidden" name="github_repo_name"  id="gf-h-repo">
-      <input type="hidden" name="preferred_stack"   id="gf-h-stack">
-      <input type="hidden" name="vision"            id="gf-h-vision">
+      <input type="hidden" name="product_name"       id="gf-h-name">
+      <input type="hidden" name="github_repo_name"   id="gf-h-repo">
+      <input type="hidden" name="preferred_stack"    id="gf-h-stack">
+      <input type="hidden" name="database"           id="gf-h-database">
+      <input type="hidden" name="ui_template"        id="gf-h-ui-template">
+      <input type="hidden" name="vision"             id="gf-h-vision">
       <input type="hidden" name="suggested_features" id="gf-h-suggestions" value="[]">
     </form>
     <form method="post" action="/product/register" id="bf-hidden-form" class="hidden">

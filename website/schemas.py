@@ -326,6 +326,17 @@ class ArticulateRequest(BaseModel):
     preferred_stack: str = "python"
 
 
+class RecommendStackRequest(BaseModel):
+    """Wizard step 3: given a finalised vision, recommend a tech stack."""
+    vision: str
+
+
+class RecommendUITemplateRequest(BaseModel):
+    """Wizard step 4: given vision + chosen stack, recommend a UI template."""
+    vision:   str
+    stack_id: str
+
+
 # ── Misc ─────────────────────────────────────────────────────────────────────
 
 class ResetStuckResult(BaseModel):
