@@ -1130,11 +1130,30 @@ async def _evaluate_dod(sprint_id: int, product_id: int, db: AsyncSession) -> di
     all_features_done = all(f.status in terminal for f in sprint_features) if sprint_features else False
     no_open_prs = all(f.pr_number is None or f.status == "Pushed" for f in sprint_features)
 
+    # security_clean: auto-clear stale `false` once all bugs in the sprint are
+    # terminal. The auditor records a snapshot at the moment it ran; if it
+    # filed a security bug and marked security_clean=false, that snapshot
+    # stays false forever even after the bug is fixed and merged. Result: the
+    # sprint deadlocks on a gate that's already structurally satisfied.
+    # Rule:
+    #   persisted=True  → True (auditor explicitly cleared)
+    #   persisted=False → recompute: True iff the sprint has bug features and
+    #                     all of them are terminal; else False
+    #   persisted=None  → False (auditor never ran — gate requires sign-off)
+    _sc_persisted = persisted.get("security_clean")
+    if _sc_persisted is True:
+        security_clean = True
+    elif _sc_persisted is False:
+        _sprint_bugs = [f for f in sprint_features if f.feature_type == "bug"]
+        security_clean = bool(_sprint_bugs) and all(f.status in terminal for f in _sprint_bugs)
+    else:
+        security_clean = False
+
     return {
         "all_features_done": all_features_done,
         "no_open_prs":       no_open_prs,
         "qa_passed":         bool(persisted.get("qa_passed")),
-        "security_clean":    bool(persisted.get("security_clean")),
+        "security_clean":    security_clean,
         "retro_done":        bool(persisted.get("retro_done")),
         "feature_count":     len(sprint_features),
         "features_terminal": sum(1 for f in sprint_features if f.status in terminal),
