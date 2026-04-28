@@ -81,7 +81,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
 # Pin to a specific version so agent behaviour is reproducible across builds.
 # To upgrade: update the version tag here and rebuild with deploy/docker/build.sh.
 # Check latest version at: https://www.npmjs.com/package/@anthropic-ai/claude-code
-RUN npm install -g @anthropic-ai/claude-code@1.0.24
+RUN npm install -g @anthropic-ai/claude-code@latest
 
 # ── Layer 7: Go 1.22 ─────────────────────────────────────────────────────────
 ENV GOVERSION=1.22.4
@@ -129,8 +129,10 @@ RUN git config --global --add safe.directory /workspace && \
            git config --global --add safe.directory /workspace" agent
 
 # ── Layer 11: Ollama agent runner ─────────────────────────────────────────────
+# Copy the full orchestrator package so ollama_agent can import agent_loop etc.
+COPY orchestrator/ /app/orchestrator/
 COPY orchestrator/ollama_agent.py /app/ollama_agent.py
-RUN chmod a+rx /app/ollama_agent.py && \
+RUN chmod -R a+rx /app/orchestrator /app/ollama_agent.py && \
     pyenv global 3.12.4 && pip install --no-cache-dir httpx
 
 # ── Layer 12: Verify installation ────────────────────────────────────────────

@@ -10,6 +10,7 @@ Security model:
   - pm-api resolves to Windows host via host-gateway (PM website in Docker)
 """
 
+import json
 import os
 import shlex
 import shutil
@@ -25,9 +26,51 @@ import httpx
 
 from orchestrator.prompts import build_prompt
 from orchestrator.alerts import send_alert
+from orchestrator.paths import host_path, container_path, in_container_mode
 from templates.renderer import install_templates
 
 log = logging.getLogger("poller.docker")
+
+
+# Self-heartbeat shell snippet for Claude-backend containers. Runs in the
+# background inside the agent container; POSTs heartbeats every 30s. This
+# survives orchestrator restarts — the orchestrator's per-session heartbeat
+# thread dies when its container recreates, but this one runs inside the
+# agent and lives as long as the agent does. When claude exits, the parent
+# `sh -c` exits and the backgrounded subshell is reaped.
+#
+# Resolves session_id from $SESSION_UID via the PM API on startup (up to
+# ~30s of retry); silently no-ops if it can't find the session.
+#
+# Ollama backend already has its own self-heartbeat in ollama_agent.py
+# (Python thread), so we only inject this for the claude binary path.
+_AGENT_HEARTBEAT_SH = r'''
+(
+  set +e
+  _SID=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    _SID="$(curl -s "$PM_API_URL/api/sessions/active" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    ds = json.load(sys.stdin)
+    for s in ds:
+        if s.get('session_uid') == '$SESSION_UID':
+            print(s.get('id', ''))
+            break
+except Exception:
+    pass
+" 2>/dev/null)"
+    [ -n "$_SID" ] && break
+    sleep 3
+  done
+  if [ -n "$_SID" ]; then
+    while :; do
+      curl -s -X POST "$PM_API_URL/api/sessions/$_SID/heartbeat" >/dev/null 2>&1
+      sleep 30
+    done
+  fi
+) &
+'''.strip()
 
 CLAUDE_DIR  = Path(os.environ.get("CLAUDE_DIR",  ""))   # configurable via system_config.claude_credentials_dir
 SSH_DIR     = Path(os.environ.get("SSH_DIR",     ""))   # configurable via system_config.ssh_keys_dir
@@ -189,9 +232,10 @@ def _apply_session_entry(client: httpx.Client, entry: dict) -> bool:
     if status is not None and status not in _VALID_FEATURE_STATUSES:
         log.warning(f"[progress] Skipping feature #{fid} entry with unknown status '{status}' — agent bug?")
         return False
-    # Guard: Reviewing entries MUST carry pr_number — without it the feature will
-    # get stuck (auto-merge can't find the PR, reconcile_merged_prs can't find it).
-    # Fall back to parsing pr_number from pr_url if the agent forgot to include it.
+    # Contract: Reviewing entries MUST carry pr_number (from the field or
+    # embedded in pr_url). Without it the feature gets stuck (auto-merge has
+    # nothing to merge). Previously we warned and let it through; now we
+    # REJECT and bump fix_attempts so repeated violations auto-Block.
     if entry.get("status") == "Reviewing" and not entry.get("pr_number"):
         pr_url = entry.get("pr_url", "")
         import re as _re
@@ -200,22 +244,47 @@ def _apply_session_entry(client: httpx.Client, entry: dict) -> bool:
             entry = dict(entry, pr_number=int(m.group(1)))
             log.info(f"[progress] Feature #{fid}: extracted pr_number={entry['pr_number']} from pr_url")
         else:
-            log.warning(
-                f"[progress] Feature #{fid} transitioning to Reviewing without pr_number — "
-                "feature may get stuck. Agent should include pr_number in session_result.json."
-            )
-    # Guard: never downgrade a feature's status
+            log.warning(f"[progress] REJECTING feature #{fid} — Reviewing without pr_number (agent contract violation)")
+            try:
+                cur = client.get(f"/api/features/{fid}").json()
+                attempts = int(cur.get("fix_attempts") or 0) + 1
+                patch = {"fix_attempts": attempts}
+                if attempts >= 5:
+                    patch.update({"status": "Blocked",
+                                  "blocked_reason": "Agent kept marking Reviewing without a real PR number"})
+                client.patch(f"/api/features/{fid}", json=patch)
+            except Exception:
+                pass
+            return False
+
+    # Contract: Reviewed entries MUST carry review_outcome. Without it the
+    # auto-merge path can't decide whether to merge.
+    if entry.get("status") == "Reviewed" and not entry.get("review_outcome"):
+        log.warning(f"[progress] REJECTING feature #{fid} — Reviewed without review_outcome")
+        return False
+    # Guard: never downgrade a feature's status — except for review-driven
+    # backward transitions, which are part of the normal pipeline:
+    #   - Reviewing → Implementing  (reviewer requested changes; coder reworks)
+    #   - Reviewed  → Implementing  (post-approval issue caught; coder reworks)
+    # Without this allowlist the reviewer's "changes_requested" PATCH gets
+    # silently dropped because Implementing(4) < Reviewing(5), and the feature
+    # sits in Reviewing forever — `next-for-persona` keeps handing it back to
+    # the reviewer, producing an infinite review loop on the same PR.
     _PROGRESS_RANK = {
         "Pending": 0, "Approved": 1, "Designing": 2, "Designed": 3,
         "Implementing": 4, "Reviewing": 5, "Reviewed": 6, "Pushed": 7,
         "Blocked": 2, "Deferred": 7, "Rejected": 7, "Reverted": 0,
     }
+    _ALLOWED_BACKWARD = {("Reviewing", "Implementing"), ("Reviewed", "Implementing")}
     if status:
         try:
             current_resp = client.get(f"/api/features/{fid}")
             if current_resp.status_code == 200:
                 current_status = current_resp.json().get("status", "")
-                if _PROGRESS_RANK.get(current_status, 0) > _PROGRESS_RANK.get(status, 0):
+                if (
+                    _PROGRESS_RANK.get(current_status, 0) > _PROGRESS_RANK.get(status, 0)
+                    and (current_status, status) not in _ALLOWED_BACKWARD
+                ):
                     log.debug(f"[progress] Feature #{fid}: skipping downgrade {current_status} → {status}")
                     return False
         except Exception:
@@ -432,7 +501,27 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
         if entry.get("confidence", "low") != "high":
             log.info(f"[auto-merge] Feature #{fid} approved (low-confidence) — merging via sprint flow")
 
-        # PR is open + high confidence — attempt merge
+        # PR is open + high confidence — attempt merge.
+        # First, try to update the PR branch with main (GitHub's "Update branch"
+        # button, REST endpoint /update-branch). If the PR branch is behind main
+        # or has conflicts, this rebases/merges main into the branch so the
+        # subsequent merge PUT succeeds. 422 = already up-to-date (ok to ignore).
+        try:
+            upd = httpx.put(
+                f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}/update-branch",
+                headers=gh_headers, timeout=15,
+            )
+            if upd.status_code in (202, 200):
+                log.info(f"[auto-merge] PR #{pr_number} branch updated — waiting 5s for GitHub to recompute mergeability")
+                import time as _t
+                _t.sleep(5)
+            elif upd.status_code == 422:
+                log.info(f"[auto-merge] PR #{pr_number} already up-to-date with base")
+            else:
+                log.warning(f"[auto-merge] update-branch returned {upd.status_code} for PR #{pr_number}: {upd.text[:120]}")
+        except Exception as _ue:
+            log.warning(f"[auto-merge] update-branch failed for PR #{pr_number}: {_ue} — proceeding to merge anyway")
+
         log.info(f"[auto-merge] Merging PR #{pr_number} for feature #{fid} (high-confidence)")
         try:
             resp = httpx.put(
@@ -478,6 +567,267 @@ def _parse_repo_slug(github_repo: str) -> str:
     import re
     m = re.search(r"[:/]([^/]+/[^/]+?)(?:\.git)?$", github_repo)
     return m.group(1) if m else github_repo
+
+
+import re as _re_secrets
+
+# Patterns for credentials that must never appear in logs. Anything matching
+# is replaced with ***REDACTED*** before lines are sent to docker stdout or
+# POSTed to the PM API session log buffer. List grows as new auth schemes are
+# discovered in the wild — over-redaction is fine; under-redaction is not.
+_SECRET_PATTERNS = [
+    _re_secrets.compile(r'gh[psoua]_[A-Za-z0-9]{20,}'),                                    # GitHub classic + variants
+    _re_secrets.compile(r'github_pat_[A-Za-z0-9_]{20,}'),                                  # GitHub fine-grained
+    _re_secrets.compile(r'sk-ant-(?:oat|ort|api|admin)[A-Za-z0-9_\-]{20,}'),               # Anthropic
+    _re_secrets.compile(r'sk-[A-Za-z0-9]{20,}'),                                           # Generic OpenAI-shape
+    _re_secrets.compile(r'AKIA[A-Z0-9]{16}'),                                              # AWS access key id
+    _re_secrets.compile(r'xox[bpasr]-[A-Za-z0-9-]+'),                                      # Slack tokens
+    _re_secrets.compile(r'(Bearer\s+)[A-Za-z0-9_.\-=]{12,}', _re_secrets.IGNORECASE),       # HTTP Bearer
+]
+
+
+def _redact_secrets(s: str) -> str:
+    """Strip credential-shaped substrings before logging."""
+    for pat in _SECRET_PATTERNS:
+        s = pat.sub('***REDACTED***', s)
+    return s
+
+
+def _format_agent_event(line: str) -> str | None:
+    """
+    Parse one stream-json event from `claude -p --output-format stream-json --verbose`
+    into a single readable log line. Falls back to the raw line if it isn't JSON
+    (so Ollama agent's plain-text output still flows through unchanged).
+
+    Returns None for events worth dropping (init noise) so we don't spam the log.
+    """
+    try:
+        ev = json.loads(line)
+        if not isinstance(ev, dict):
+            return line
+    except (json.JSONDecodeError, ValueError):
+        return line
+
+    t = ev.get("type")
+
+    if t == "system":
+        sub = ev.get("subtype", "")
+        sid = (ev.get("session_id") or "?")[:8]
+        model = ev.get("model", "?")
+        return f"[system:{sub}] sid={sid} model={model}"
+
+    if t == "assistant":
+        msg = ev.get("message") or {}
+        out: list[str] = []
+        for block in (msg.get("content") or []):
+            if not isinstance(block, dict):
+                continue
+            bt = block.get("type")
+            if bt == "text":
+                txt = (block.get("text") or "").strip().replace("\n", " ⏎ ")
+                if txt:
+                    out.append(f"[text] {txt[:300]}")
+            elif bt == "tool_use":
+                name = block.get("name", "?")
+                inp = block.get("input") or {}
+                # Surface the most distinguishing input field per tool
+                if name == "Bash":
+                    summary = (inp.get("command") or "")[:200]
+                elif name in ("Read", "Edit", "Write", "NotebookEdit"):
+                    summary = inp.get("file_path") or inp.get("path") or ""
+                elif name == "Grep":
+                    summary = f"pattern={(inp.get('pattern') or '')[:80]} path={inp.get('path') or ''}"
+                elif name in ("Glob",):
+                    summary = inp.get("pattern") or ""
+                else:
+                    summary = json.dumps(inp, default=str)[:200]
+                out.append(f"[tool] {name}({summary})")
+        return " | ".join(out) if out else None
+
+    if t == "user":
+        # tool_result feedback — we only surface a one-line summary; full content
+        # is too large to log per-event.
+        msg = ev.get("message") or {}
+        for block in (msg.get("content") or []):
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            content = block.get("content", "")
+            if isinstance(content, list):
+                content = " ".join(
+                    c.get("text", "") if isinstance(c, dict) else str(c)
+                    for c in content
+                )
+            content = str(content).strip()
+            tag = "tool_err" if block.get("is_error") else "tool_ok"
+            first = content.split("\n", 1)[0][:200]
+            return f"[{tag}] {first}"
+        return None
+
+    if t == "result":
+        sub = ev.get("subtype", "")
+        cost = ev.get("total_cost_usd")
+        turns = ev.get("num_turns")
+        dur = ev.get("duration_ms")
+        return f"[result:{sub}] turns={turns} cost=${cost} duration={dur}ms"
+
+    # Unknown event type — log a short summary so we don't lose anything.
+    return f"[{t}] {json.dumps(ev, default=str)[:300]}"
+
+
+def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
+                              assigned_features: list[dict]) -> None:
+    """
+    Deterministic git+gh pipeline run after the coder LLM exits cleanly.
+    The coder ONLY writes code; this function does the ceremony:
+      1. Detect if there are any changes in the workspace
+      2. Create branch coder/{session_uid}
+      3. git add + commit + push
+      4. gh pr create
+      5. Append one Reviewing entry per assigned feature to session_result.json
+         (the existing reconcile loop will then PATCH each feature → Reviewing
+         with the same pr_number, and the auto-merge logic later picks it up)
+
+    Single PR for all assigned features in this session — simpler than per-feature
+    branches and matches how human devs typically batch related changes.
+    """
+    import subprocess as _sp
+    import json as _json
+    import re as _re
+
+    pname = product.get("name", "?")
+    if not assigned_features:
+        log.info(f"[post-coder] {pname}: no assigned features — skipping commit/PR")
+        return
+
+    def _run(cmd: list[str], **kw) -> _sp.CompletedProcess:
+        # Pop timeout from kw so the caller's override doesn't collide with the
+        # default we pass into _sp.run. Without this, e.g. _run(..., timeout=180)
+        # raises TypeError("got multiple values for keyword argument 'timeout'")
+        # — which crashes the whole pipeline before our diagnostic checks run.
+        timeout = kw.pop("timeout", 120)
+        return _sp.run(cmd, cwd=working_dir, capture_output=True, text=True, timeout=timeout, **kw)
+
+    # 1. Detect changes (any modified, added, deleted, or untracked files in tracked paths)
+    status = _run(["git", "status", "--porcelain"])
+    changed = [ln for ln in status.stdout.splitlines() if ln.strip()
+               and not ln.endswith("session_result.json")
+               and not ln.endswith("session_summary.md")
+               and "/Temp/" not in ln and "/Results/" not in ln]
+    if not changed:
+        log.warning(f"[post-coder] {pname}: agent exited 0 but no code changes — skipping PR")
+        # Mark features Blocked so they don't loop in Implementing forever
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                for f in assigned_features:
+                    client.patch(f"/api/features/{f['id']}", json={
+                        "status": "Blocked",
+                        "blocked_reason": f"Coder session {session_uid} exited 0 with no code changes",
+                    })
+        except Exception:
+            pass
+        return
+    log.info(f"[post-coder] {pname}: {len(changed)} changed file(s) detected — sample: {changed[:3]}")
+
+    def _fmt_err(r) -> str:
+        """Render a CompletedProcess for diagnostic logging — git often prints
+        useful info on stdout, not stderr (e.g. 'nothing to commit')."""
+        out = (r.stdout or "").strip()
+        err = (r.stderr or "").strip()
+        return f"rc={r.returncode} stdout={out[:300]!r} stderr={err[:300]!r}"
+
+    # 2. Create branch (fail fast if branch already exists or checkout fails)
+    feat_ids = [f["id"] for f in assigned_features]
+    branch = f"coder/{session_uid}"
+    co = _run(["git", "checkout", "-b", branch])
+    if co.returncode != 0:
+        log.warning(f"[post-coder] {pname}: git checkout -b {branch} failed — {_fmt_err(co)}")
+        return
+
+    # 3. Add + commit + push
+    add_r = _run(["git", "add", "-A"])
+    if add_r.returncode != 0:
+        log.warning(f"[post-coder] {pname}: git add -A failed — {_fmt_err(add_r)}")
+        return
+    # Sanity: was anything actually staged? `diff --cached --quiet` exits 1 if
+    # there are staged changes, 0 if none. Catches the "porcelain showed lines
+    # but add staged nothing" scenario (e.g. all changes inside a submodule or
+    # excluded path) so we surface a clear error instead of an empty stderr.
+    cached = _run(["git", "diff", "--cached", "--quiet"])
+    if cached.returncode == 0:
+        ls = _run(["git", "status", "--porcelain"])
+        log.warning(
+            f"[post-coder] {pname}: nothing staged after `git add -A` "
+            f"despite {len(changed)} porcelain entries. status={ls.stdout.strip()[:400]!r}"
+        )
+        return
+    feat_summary = ", ".join(f"#{i}" for i in feat_ids)
+    commit_msg = f"feat: implement features {feat_summary} [coder-{session_uid}]"
+    commit_result = _run(["git", "commit", "-m", commit_msg])
+    if commit_result.returncode != 0:
+        log.warning(f"[post-coder] {pname}: git commit failed — {_fmt_err(commit_result)}")
+        return
+
+    push_result = _run(["git", "push", "-u", "origin", branch], timeout=180)
+    if push_result.returncode != 0:
+        log.warning(f"[post-coder] {pname}: git push failed: {push_result.stderr.strip()[:300]}")
+        return
+    log.info(f"[post-coder] {pname}: pushed branch {branch}")
+
+    # 4. Open PR via gh CLI. GH_TOKEN must be in env for `gh` to authenticate.
+    gh_token = _get_gh_token()
+    if not gh_token:
+        log.warning(f"[post-coder] {pname}: no GH_TOKEN — cannot open PR. Branch pushed; PM must open manually.")
+        return
+
+    # Build PR body — include feature names so PM can review at a glance
+    feat_lines = []
+    for f in assigned_features:
+        name = f.get("name", f"Feature {f['id']}")
+        feat_lines.append(f"- Closes #{f['id']}: {name}")
+    pr_body = (
+        f"Automated PR from coder session `{session_uid}`.\n\n"
+        f"## Features\n" + "\n".join(feat_lines) + "\n\n"
+        f"_This PR was generated by the ProductFactory coder agent. The agent "
+        f"writes code; the orchestrator handles git + PR ceremony deterministically._"
+    )
+    pr_title = (f"feat: {assigned_features[0].get('name', 'changes')}"
+                if len(assigned_features) == 1
+                else f"feat: implement {feat_summary} [{session_uid}]")
+
+    pr_env = dict(os.environ)
+    pr_env["GH_TOKEN"] = gh_token
+    pr_result = _sp.run(
+        ["gh", "pr", "create", "--base", "main", "--head", branch,
+         "--title", pr_title, "--body", pr_body],
+        cwd=working_dir, capture_output=True, text=True, env=pr_env, timeout=60,
+    )
+    if pr_result.returncode != 0:
+        log.warning(f"[post-coder] {pname}: gh pr create failed: {pr_result.stderr.strip()[:300]}")
+        return
+
+    # gh prints the PR URL on stdout
+    pr_url = pr_result.stdout.strip().splitlines()[-1]
+    m = _re.search(r"/pull/(\d+)", pr_url)
+    if not m:
+        log.warning(f"[post-coder] {pname}: could not parse PR number from gh output: {pr_url[:200]}")
+        return
+    pr_number = int(m.group(1))
+    log.info(f"[post-coder] {pname}: opened PR #{pr_number} — {pr_url}")
+
+    # 5. Append session_result.json entries — one Reviewing per assigned feature.
+    sr_path = Path(working_dir) / "session_result.json"
+    try:
+        with sr_path.open("a", encoding="utf-8") as f:
+            for feat in assigned_features:
+                f.write(_json.dumps({
+                    "id":         feat["id"],
+                    "status":     "Reviewing",
+                    "pr_number":  pr_number,
+                    "pr_url":     pr_url,
+                }) + "\n")
+        log.info(f"[post-coder] {pname}: wrote {len(assigned_features)} entries to session_result.json")
+    except Exception as e:
+        log.warning(f"[post-coder] {pname}: failed to append session_result.json: {e}")
 
 
 def _get_gh_token() -> str | None:
@@ -693,14 +1043,48 @@ def _claim_features(features: list[dict], persona: str | None) -> None:
         log.warning(f"[claim] Could not connect to PM API: {e}")
 
 
-def _get_claude_profile(sys_cfg: dict) -> tuple[str, str]:
+# Persona → cost tier. Heavy personas make architectural decisions or write
+# production code; light personas summarise, document, or generate text. The
+# default mapping keeps heavy work on Sonnet and light work on Haiku (~5x
+# cheaper, ~3x faster). Override per-persona via sys_cfg.claude_model_map.
+_HEAVY_PERSONAS = {"coder", "reviewer", "designer", "security_auditor", "qa_tester"}
+_LIGHT_PERSONAS = {"planner", "product_planner", "documenter", "retrospective",
+                   "analytics", "recommender", "devops", "refactorer"}
+
+
+def _model_for_persona(sys_cfg: dict, persona: str | None) -> str:
     """
-    Returns (credentials_dir, claude_model) from system config with sensible defaults.
-    credentials_dir: falls back to CLAUDE_DIR env var.
-    claude_model: falls back to 'claude-sonnet-4-6'.
+    Resolution order:
+      1. sys_cfg.claude_model_map[persona]  (explicit per-persona override)
+      2. sys_cfg.claude_model_heavy / claude_model_light  (tier override)
+      3. sys_cfg.claude_model  (single-model fallback, legacy behaviour)
+      4. Hardcoded default: Sonnet for heavy, Haiku for light, Sonnet for unknown
+    """
+    pmap = sys_cfg.get("claude_model_map") or {}
+    if isinstance(pmap, dict) and persona and pmap.get(persona):
+        return pmap[persona]
+    if persona in _HEAVY_PERSONAS:
+        return (sys_cfg.get("claude_model_heavy")
+                or sys_cfg.get("claude_model")
+                or "claude-sonnet-4-6")
+    if persona in _LIGHT_PERSONAS:
+        return (sys_cfg.get("claude_model_light")
+                or sys_cfg.get("claude_model")
+                or "claude-haiku-4-5-20251001")
+    # Unknown persona — safer to use the more capable model.
+    return (sys_cfg.get("claude_model") or "claude-sonnet-4-6")
+
+
+def _get_claude_profile(sys_cfg: dict, persona: str | None = None) -> tuple[str, str]:
+    """
+    Returns (credentials_dir, claude_model) from system config.
+    Model is persona-aware — heavy personas (coder/reviewer/etc.) get Sonnet;
+    light personas (planner/documenter/etc.) get Haiku. Configurable via
+    sys_cfg.claude_model_map, claude_model_heavy, claude_model_light.
     """
     credentials_dir = sys_cfg.get("claude_credentials_dir") or str(CLAUDE_DIR)
-    claude_model = sys_cfg.get("claude_model") or "claude-sonnet-4-6"
+    credentials_dir = container_path(credentials_dir) or credentials_dir
+    claude_model = _model_for_persona(sys_cfg, persona)
     return credentials_dir, claude_model
 
 
@@ -713,6 +1097,21 @@ def _reset_workspace(working_dir: str, product_name: str) -> None:
     wd = Path(working_dir)
     if not (wd / ".git").exists():
         return  # Not a git repo yet — skip
+
+    # Fix workspace + .git/log permissions so Hermes (uid 999) can reset files that
+    # agent containers (uid 1001) created.  p.chmod() from uid 999 fails on alien-owned
+    # files, so we run a throwaway alpine container as root via the Docker socket.
+    try:
+        host_base = os.environ.get("PRODUCTS_BASE_DIR", "").rstrip("/\\")
+        rel = str(wd.relative_to("/products"))
+        host_wd_path = f"{host_base}/{rel}"
+        subprocess.run(
+            ["docker", "run", "--rm", "-v", f"{host_wd_path}:/ws",
+             "alpine", "sh", "-c", "chmod -R a+w /ws 2>/dev/null || true"],
+            capture_output=True, timeout=30,
+        )
+    except Exception:
+        pass
 
     def _run(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
         """Run a git command with a hard timeout so network hangs don't freeze the poller."""
@@ -803,7 +1202,11 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     persona: 'designer', 'coder', 'reviewer', or None (uses legacy routing).
     """
     session_uid = str(uuid.uuid4())[:8]
-    working_dir = product["working_dir"]
+    # working_dir_host  = what the Docker daemon sees (Windows path from DB)
+    # working_dir       = what THIS Python process sees (translated to /products/... inside Hermes,
+    #                     unchanged in host-mode). Used for every subsequent file op.
+    working_dir_host = product["working_dir"]
+    working_dir = container_path(working_dir_host)
 
     # Always reset workspace to clean main before starting a new session.
     # This discards any half-baked code from failed/incomplete previous sessions.
@@ -816,7 +1219,9 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # Re-install templates after reset — git clean may have removed untracked template files.
     # force=False ensures we never overwrite files the agent has customised and committed.
     try:
-        install_templates(product, PM_API_URL, force=False)
+        # Pass product dict with the container-side working_dir so Path(...).exists() works
+        # when docker_runner runs inside Hermes (where the DB stores the host/Windows path).
+        install_templates({**product, "working_dir": working_dir}, PM_API_URL, force=False)
     except Exception as _te:
         log.warning(f"Could not re-install templates for {product.get('name')}: {_te}")
 
@@ -836,6 +1241,18 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # Read all runtime settings from sys_cfg (DB → env var → built-in default).
     # Never rely on module-level constants after this point.
     effective_ollama_host    = sys_cfg.get("ollama_host")    or OLLAMA_HOST    or "http://host.docker.internal:11434"
+    effective_ollama_api_key = sys_cfg.get("ollama_api_key") or os.environ.get("OLLAMA_API_KEY", "")
+
+    # Per-persona Ollama model resolution (mirrors Claude routing). Order:
+    #   1. sys_cfg.ollama_model_map[persona]  — explicit override
+    #   2. legacy designer_model / coder_model split
+    _ollama_map = sys_cfg.get("ollama_model_map") or {}
+    if isinstance(_ollama_map, dict) and persona and _ollama_map.get(persona):
+        effective_persona_model = _ollama_map[persona]
+    elif persona in ("designer", "reviewer"):
+        effective_persona_model = sys_cfg.get("designer_model") or DESIGNER_MODEL or "qwen3-coder:30b"
+    else:
+        effective_persona_model = sys_cfg.get("coder_model") or CODER_MODEL or "qwen3-coder:30b"
     effective_designer_model = sys_cfg.get("designer_model") or DESIGNER_MODEL or "gemma3:27b"
     effective_coder_model    = sys_cfg.get("coder_model")    or CODER_MODEL    or "qwen3-coder:30b"
     effective_ollama_timeout = int(sys_cfg.get("ollama_timeout") or os.environ.get("OLLAMA_TIMEOUT", "600"))
@@ -861,7 +1278,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # Inject previous session summary for continuity.
     product["_prev_session_summary"] = _read_session_summary(working_dir)
 
-    prompt = build_prompt(product, session_uid, persona=persona, max_features=effective_max_features)
+    prompt = build_prompt(product, session_uid, persona=persona, max_features=effective_max_features, backend=effective_backend)
 
     # Guard: check DB for an already-running session for this product.
     # Cross-check with docker ps — if the container is gone, auto-close the stale DB record.
@@ -914,7 +1331,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     deploy_key = _get_deploy_key_path(product, effective_ssh_dir)
     ssh_mount = []
     if deploy_key:
-        ssh_mount = ["-v", f"{deploy_key}:/home/agent/.ssh/id_ed25519:ro"]
+        ssh_mount = ["-v", f"{host_path(deploy_key)}:/home/agent/.ssh/id_ed25519:ro"]
 
     # GH_TOKEN — write to a 0600 temp file and bind-mount at /run/secrets/gh_token.
     # The agent_cmd wrapper (below) sources it into GH_TOKEN at runtime, so `gh` CLI
@@ -931,7 +1348,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 os.chmod(gh_token_file, 0o600)
             except Exception:
                 pass  # Windows: NTFS perms don't map cleanly; 0600 is best-effort
-            gh_mount = ["-v", f"{gh_token_file}:/run/secrets/gh_token:ro"]
+            gh_mount = ["-v", f"{host_path(gh_token_file)}:/run/secrets/gh_token:ro"]
         except Exception as e:
             log.warning(f"Could not write gh token file: {e} — agent will have no gh auth")
             if gh_token_file:
@@ -951,6 +1368,10 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         agent_cmd = ["python", "//app/ollama_agent.py", "-p", prompt]
         ollama_env = [
             "-e", f"OLLAMA_HOST={effective_ollama_host}",
+            "-e", f"OLLAMA_API_KEY={effective_ollama_api_key}",
+            # OLLAMA_MODEL is the resolved per-persona model — agent uses this
+            # if set; otherwise falls back to DESIGNER_MODEL/CODER_MODEL split.
+            "-e", f"OLLAMA_MODEL={effective_persona_model}",
             "-e", f"DESIGNER_MODEL={effective_designer_model}",
             "-e", f"CODER_MODEL={effective_coder_model}",
             "-e", f"MAX_FEATURES_PER_SPRINT={effective_max_features}",
@@ -960,17 +1381,34 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         ]
         # Ollama backend: no Claude OAuth mount needed
         claude_mount = []
-        log.info(f"Using Ollama backend — host={effective_ollama_host} persona={persona}")
+        log.info(f"Using Ollama backend — host={effective_ollama_host} persona={persona} model={effective_persona_model}")
     else:
-        # Claude backend: copy credentials to a temp dir and mount the copy
-        creds_src, claude_model = _get_claude_profile(sys_cfg)
+        # Claude backend: SELECTIVELY copy only auth-essential files to a temp dir.
+        # A full copytree of ~/.claude races with the host's active Claude Code
+        # (which writes sessions/, history.jsonl, projects/, cache/ constantly)
+        # and causes 9P filesystem RPC hangs on Docker Desktop for Windows.
+        # We only need credentials + settings; per-session state is generated
+        # fresh inside the agent container.
+        creds_src, claude_model = _get_claude_profile(sys_cfg, persona=persona)
+        log.info("Claude model for persona=%s: %s", persona, claude_model)
+        # Files to copy verbatim from the host .claude dir. Everything else
+        # (sessions/, history.jsonl, projects/, cache/, plugins/, etc.) is
+        # skipped to avoid races with the host's live Claude Code process.
+        _AUTH_FILES = [".credentials.json", "settings.json", "settings.local.json"]
         try:
             _tmp_claude_dir = tempfile.mkdtemp(prefix="pf_claude_creds_")
             src_path = Path(creds_src)
             if src_path.exists():
-                # Copy contents into the temp dir
-                shutil.copytree(str(src_path), _tmp_claude_dir, dirs_exist_ok=True)
-                log.info(f"Copied Claude credentials from {creds_src} to {_tmp_claude_dir}")
+                copied: list[str] = []
+                for name in _AUTH_FILES:
+                    src_file = src_path / name
+                    if src_file.exists() and src_file.is_file():
+                        try:
+                            shutil.copy2(str(src_file), str(Path(_tmp_claude_dir) / name))
+                            copied.append(name)
+                        except Exception as ce:
+                            log.warning(f"Could not copy {name}: {ce}")
+                log.info(f"Copied Claude auth files ({copied}) from {creds_src} to {_tmp_claude_dir}")
                 # Ensure settings.json has the permissions + model we want
                 import json as _json
                 settings_path = Path(_tmp_claude_dir) / "settings.json"
@@ -991,36 +1429,60 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
         mount_dir = _tmp_claude_dir or creds_src
 
-        # Pre-create session-env/ so the Claude Code harness can write session state.
-        # Without this directory the harness fails to initialise and the Bash tool is broken.
+        # Pre-create subdirectories the Claude Code harness expects to write to,
+        # and make them world-writable so the agent UID (1001) can use them.
+        # mkdtemp creates 0700 dirs owned by the orchestrator user (UID 999) —
+        # agent can't write there without this chmod.
         if _tmp_claude_dir:
-            (Path(_tmp_claude_dir) / "session-env").mkdir(exist_ok=True)
+            for _sub in ("session-env", "todos", "projects", "shell-snapshots",
+                         "statsig", "sessions"):
+                _sub_path = Path(_tmp_claude_dir) / _sub
+                _sub_path.mkdir(exist_ok=True)
+            try:
+                # 0777 on the root + all children so any UID inside the container can write.
+                os.chmod(_tmp_claude_dir, 0o777)
+                for _child in Path(_tmp_claude_dir).rglob("*"):
+                    try:
+                        os.chmod(_child, 0o777 if _child.is_dir() else 0o666)
+                    except Exception:
+                        pass
+            except Exception as _ce:
+                log.warning(f"chmod on staged claude dir failed: {_ce}")
             # Mount read-write — safe because mount_dir is a temp copy, not the original.
-            # The harness must be able to write to session-env/ at runtime.
-            claude_mount = ["-v", f"{mount_dir}:/home/agent/.claude"]
+            claude_mount = ["-v", f"{host_path(mount_dir)}:/home/agent/.claude"]
         else:
             # Fallback: direct mount — keep read-only to protect original credentials.
             # session-env writes will fail but that's better than exposing originals as rw.
-            claude_mount = ["-v", f"{mount_dir}:/home/agent/.claude:ro"]
+            claude_mount = ["-v", f"{host_path(mount_dir)}:/home/agent/.claude:ro"]
             log.warning("Mounting original .claude dir read-only — Bash tool may be broken")
 
-        # Also mount .claude.json (sits alongside .claude/ in the host home dir)
+        # Also include .claude.json (sits alongside .claude/ in the host home dir).
+        # Copy it INTO the staged dir rather than bind-mounting from host — the
+        # live file is rewritten constantly by the host's Claude Code and would
+        # race with the container mount.
+        # Mount RW (not :ro): the claude CLI needs to update this file on init
+        # (telemetry, project state). On read-only mounts it hits EROFS, stops
+        # emitting debug logs, and hangs in epoll_wait — silently. The staged
+        # copy is per-session disposable, so writes here never reach the host.
         creds_parent = str(Path(creds_src).parent)
-        claude_json_src = str(Path(creds_parent) / ".claude.json")
-        if Path(claude_json_src).exists():
-            claude_mount += ["-v", f"{claude_json_src}:/home/agent/.claude.json:ro"]
-        else:
-            # Restore from backup inside the .claude dir
-            backup_dir = Path(mount_dir) / "backups"
-            if backup_dir.exists():
-                backups = sorted(backup_dir.glob(".claude.json.backup.*"))
-                if backups and _tmp_claude_dir:
-                    shutil.copy2(str(backups[-1]), str(Path(_tmp_claude_dir) / ".claude.json"))
-                    claude_mount += ["-v", f"{_tmp_claude_dir}/.claude.json:/home/agent/.claude.json:ro"]
-                    log.info(f"Restored .claude.json from backup: {backups[-1].name}")
+        claude_json_src_host = Path(creds_parent) / ".claude.json"
+        if _tmp_claude_dir and claude_json_src_host.exists():
+            try:
+                _staged_cj = Path(_tmp_claude_dir) / ".claude.json"
+                shutil.copy2(str(claude_json_src_host), str(_staged_cj))
+                claude_mount += ["-v", f"{host_path(_staged_cj)}:/home/agent/.claude.json"]
+            except Exception as ce:
+                log.warning(f"Could not stage .claude.json: {ce}")
 
-        # --dangerously-skip-permissions works now that container runs as non-root
-        agent_cmd = ["claude", "--dangerously-skip-permissions", "-p", prompt]
+        # --dangerously-skip-permissions works now that container runs as non-root.
+        # --output-format stream-json + --verbose turns claude -p into a streaming
+        # NDJSON emitter (one event per line: assistant turns, tool_use, tool_result,
+        # final result). Without this, claude -p only prints the FINAL message at
+        # session end, so the orchestrator's _stream_logs reader sees nothing for
+        # the entire run — no observability into what the agent is doing.
+        agent_cmd = ["claude", "--dangerously-skip-permissions",
+                     "--output-format", "stream-json", "--verbose",
+                     "-p", prompt]
         ollama_env = [
             "-e", f"MAX_FEATURES_PER_SPRINT={effective_max_features}",
             "-e", f"CLAUDE_MODEL={claude_model}",
@@ -1031,12 +1493,16 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # If GH_TOKEN is provided via file mount, wrap agent_cmd so it's exported to the
     # agent's env at startup. Using `sh -c ... exec cmd` keeps the token out of
     # `docker inspect` while still making it available to gh CLI inside the container.
+    # For the Claude backend, also start the self-heartbeat loop in the background so
+    # the session survives orchestrator restarts (Ollama has its own in-Python).
     if gh_mount:
         quoted = " ".join(shlex.quote(a) for a in agent_cmd)
+        prelude = '[ -r /run/secrets/gh_token ] && export GH_TOKEN="$(cat /run/secrets/gh_token)"; '
+        if effective_backend == "claude":
+            prelude += _AGENT_HEARTBEAT_SH + " "
         agent_cmd = [
             "sh", "-c",
-            '[ -r /run/secrets/gh_token ] && export GH_TOKEN="$(cat /run/secrets/gh_token)"; '
-            f'exec {quoted}',
+            prelude + f'exec {quoted}',
         ]
 
     cmd = [
@@ -1060,7 +1526,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         "--tmpfs", "/home/agent/.config:rw,size=100m,uid=1001,gid=1001",
         "--tmpfs", "/home/agent/.local:rw,size=500m,uid=1001,gid=1001",
         # Volume mounts — unaffected by --read-only
-        "-v", f"{working_dir}:/workspace",
+        "-v", f"{working_dir_host}:/workspace",
         *claude_mount,                             # OAuth session (claude backend only)
         *ssh_mount,                                # deploy key :ro (not whole .ssh dir)
         *gh_mount,                                 # GH_TOKEN via file at /run/secrets/gh_token (not env)
@@ -1075,8 +1541,8 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     log.info(f"docker run: session={session_uid} product={product['name']}")
 
-    # Record session start — include container_id, persona, backend upfront so
-    # the DB is queryable immediately (used by active-session guard on next poll).
+    # Record session start with FSM status=starting. PM API sets expected_deadline
+    # based on SESSION_TIMEOUT_MINUTES so watchdog can authoritatively time it out.
     session_id: int | None = None
     container_name = f"pf-{product['id']}-{session_uid}"
     try:
@@ -1087,6 +1553,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 "container_id": container_name,
                 "persona":      persona,
                 "backend":      effective_backend,
+                "status":       "starting",
             })
             resp.raise_for_status()
             session_id = resp.json()["id"]
@@ -1124,12 +1591,64 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             )
         threading.Thread(target=_fix_workspace_perms, daemon=True).start()
 
+        # Heartbeat thread — POST /api/sessions/{id}/heartbeat every 30s so the
+        # watchdog knows the session is alive. When the main wait() returns
+        # (container exited, timed out, killed), _hb_stop fires and the loop exits.
+        _hb_stop = threading.Event()
+        def _send_heartbeat():
+            while not _hb_stop.wait(30):
+                if session_id is None:
+                    continue
+                try:
+                    httpx.post(f"{PM_API_URL}/api/sessions/{session_id}/heartbeat", timeout=5)
+                except Exception:
+                    pass  # transient failures are fine; watchdog has grace period
+        if session_id is not None:
+            threading.Thread(target=_send_heartbeat, daemon=True).start()
+
+        # Captured from the final claude -p `result` event so we can persist
+        # cost / turn count / token totals onto the session record at end.
+        # Claude only — Ollama agent doesn't emit a result event in this shape.
+        session_meta: dict = {}
+
         def _stream_logs():
             buffer: list[str] = []
             for raw_line in process.stdout:
                 line = raw_line.rstrip("\n")
-                log.debug(f"[agent] {line}")
-                buffer.append(line)
+                if not line:
+                    continue
+                # Fast-path: capture the single result event that closes a
+                # claude stream-json session (one per session). Cheap string
+                # check first so we don't JSON-parse every assistant turn twice.
+                if '"type":"result"' in line:
+                    try:
+                        _ev = json.loads(line)
+                        if isinstance(_ev, dict) and _ev.get("type") == "result":
+                            session_meta["cost_usd"] = _ev.get("total_cost_usd")
+                            _u = _ev.get("usage") if isinstance(_ev.get("usage"), dict) else {}
+                            session_meta["tokens_input"]  = _u.get("input_tokens")
+                            session_meta["tokens_output"] = _u.get("output_tokens")
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                formatted = _format_agent_event(line)
+                if formatted is None:
+                    continue
+                # Strip credential-shaped substrings (GH PATs, Anthropic API
+                # keys, Bearer tokens, etc.) before they hit docker stdout or
+                # the PM API session-log buffer. Catches the case where the
+                # agent inlines a token literal into a Bash command.
+                formatted = _redact_secrets(formatted)
+                # Surface tool calls, errors, and the final result at INFO so they
+                # appear in `docker logs pf-orchestrator`. Routine assistant text
+                # stays at DEBUG. PM API session log buffer gets everything.
+                if any(token in formatted for token in (
+                    "[tool]", "[tool_err]", "[result:", "WARNING:", "ERROR",
+                    "Traceback", "non-retryable", "exit=2", "task_done",
+                )):
+                    log.info(f"[agent] {formatted}")
+                else:
+                    log.debug(f"[agent] {formatted}")
+                buffer.append(formatted)
                 if len(buffer) >= 10:
                     _post_log_lines(product["id"], buffer)
                     buffer = []
@@ -1165,6 +1684,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         else:
             exit_code = process.returncode
         finally:
+            _hb_stop.set()         # stop heartbeat thread
             _poll_stop.set()       # signal live-poll thread to stop
             log_thread.join(timeout=10)
             if log_thread.is_alive():
@@ -1197,36 +1717,63 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 pass
 
     # ── Post-exit reconciliation (runs regardless of exit code) ─────────────────
-    # 1. Read session_result.json ONCE — shared between auto_merge and reconcile so
-    #    the file isn't deleted before auto_merge can act on it.
-    _session_features = _read_session_result(working_dir)
+    _session_features: list = []
+    attempted = 0
+    pushed = 0
+    try:
+        # 0. Coder ceremony — if a coder session exited cleanly, run the
+        # deterministic commit/push/PR pipeline. Coders only write code; Python
+        # handles git + gh, which makes the LLM's job 10× simpler and more
+        # reliable. The pipeline appends Reviewing entries to session_result.json
+        # so the existing reconcile picks them up below.
+        if exit_code == 0 and persona == "coder":
+            try:
+                _run_post_coder_pipeline(product, session_uid, working_dir,
+                                         product.get("_assigned_features", []))
+            except Exception:
+                log.exception(f"Post-coder pipeline failed for {product.get('name')}")
 
-    # 2. Auto-merge BEFORE reconcile so merge/re-queue decisions override raw agent state.
-    if exit_code == 0 and persona == "reviewer" and product.get("_auto_merge_enabled"):
-        _session_features = _auto_merge_approved(product, _session_features)
+        # 1. Read session_result.json ONCE — shared between auto_merge and reconcile so
+        #    the file isn't deleted before auto_merge can act on it.
+        _session_features = _read_session_result(working_dir)
 
-    # 3. Apply status updates (deletes session_result.json at end).
-    _reconcile_session_result(working_dir, product["id"], exit_code, features=_session_features, persona=persona)
+        # 2. Auto-merge BEFORE reconcile so merge/re-queue decisions override raw agent state.
+        if exit_code == 0 and persona == "reviewer" and product.get("_auto_merge_enabled"):
+            _session_features = _auto_merge_approved(product, _session_features)
 
-    # 4. Record session end in DB — include feature counts.
-    if session_id is not None:
+        # 3. Apply status updates (deletes session_result.json at end).
+        _reconcile_session_result(working_dir, product["id"], exit_code, features=_session_features, persona=persona)
+
         assigned_ids = {f["id"] for f in product.get("_assigned_features", [])}
         attempted = len(assigned_ids)
-        # Count only assigned features that progressed (not stale entries from prior sessions)
         pushed = sum(1 for f in _session_features
                      if isinstance(f, dict)
                      and f.get("id") in assigned_ids
                      and f.get("status") in ("Pushed", "Reviewing", "Reviewed", "Designed"))
-        try:
-            with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-                client.patch(f"/api/sessions/{session_id}", json={
-                    "ended_at":  datetime.now(timezone.utc).isoformat(),
-                    "exit_code": exit_code,
-                    "features_attempted": attempted,
-                    "features_pushed": pushed,
-                })
-        except Exception as e:
-            log.warning(f"Could not update session record: {e}")
+    except Exception:
+        log.exception(f"Post-exit reconciliation failed for {product.get('name')}")
+    finally:
+        # 4. Always record session end — guaranteed even if reconciliation raises.
+        if session_id is not None:
+            try:
+                # FSM transition: exit_code=0 → ended, non-zero → killed (watchdog
+                # may have already set status=killed if it was the one that fired).
+                end_status = "ended" if exit_code == 0 else "killed"
+                with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                    patch_body = {
+                        "status":            end_status,
+                        "ended_at":          datetime.now(timezone.utc).isoformat(),
+                        "exit_code":         exit_code,
+                        "features_attempted": attempted,
+                        "features_pushed":   pushed,
+                    }
+                    # Merge captured cost/token totals from the claude result
+                    # event (None values dropped — they'd overwrite anything
+                    # an earlier reconcile already set).
+                    patch_body.update({k: v for k, v in session_meta.items() if v is not None})
+                    client.patch(f"/api/sessions/{session_id}", json=patch_body)
+            except Exception as e:
+                log.warning(f"Could not update session record: {e}")
 
     # 5. Roll back any intermediate-state features with no PR evidence.
     #    Covers cases where agent claimed a feature but never finished it.

@@ -42,6 +42,7 @@ class Product(Base):
     name:            Mapped[Optional[str]] = mapped_column(Text)
     github_repo:     Mapped[Optional[str]] = mapped_column(Text)
     tech_stack:      Mapped[Optional[List[str]]] = mapped_column(ARRAY(String))
+    ui_template:     Mapped[Optional[str]] = mapped_column(Text)  # picked at wizard time for web stacks
     type:            Mapped[str]           = mapped_column(Text, nullable=False, default="greenfield")
     status:          Mapped[str]           = mapped_column(Text, nullable=False, default="registered")
     analysis_status: Mapped[str]           = mapped_column(Text, nullable=False, default="pending")
@@ -141,7 +142,36 @@ class Session(Base):
     persona:             Mapped[Optional[str]]  = mapped_column(String(32))
     backend:             Mapped[Optional[str]]  = mapped_column(String(16))  # "claude" | "ollama"
 
+    # FSM — canonical lifecycle state. Watchdog/reconciler/harvester drive
+    # transitions. Never parse docker output or file mtimes; consult these.
+    status:              Mapped[str]            = mapped_column(Text, nullable=False, default="pending")
+    heartbeat_at:        Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    expected_deadline:   Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    kill_reason:         Mapped[Optional[str]]  = mapped_column(Text)
+
     product: Mapped["Product"] = relationship("Product", back_populates="sessions")
+
+
+SESSION_STATUSES = (
+    "pending",    # DB row created, docker run not yet started
+    "starting",   # docker run launched, container not yet visible
+    "running",    # container live, agent working
+    "wrapping",   # agent exited, harvester applying results
+    "ended",      # clean close, exit_code=0
+    "killed",     # watchdog/timeout/external SIGKILL
+    "orphaned",   # DB says running but no container found; reconciler recovers
+)
+
+
+class SessionEvent(Base):
+    """Lifecycle audit log — every transition + watchdog action written here."""
+    __tablename__ = "session_events"
+
+    id:         Mapped[int]       = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[int]       = mapped_column(Integer, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
+    event:      Mapped[str]       = mapped_column(Text, nullable=False)
+    detail:     Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime]  = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class SystemConfig(Base):
@@ -178,13 +208,18 @@ class SystemConfig(Base):
 
     # ── Agent / Ollama settings ───────────────────────────────────────────────
     agent_backend:     Mapped[Optional[str]] = mapped_column(Text)   # "claude" | "ollama"
-    ollama_host:       Mapped[Optional[str]] = mapped_column(Text)   # default http://host.docker.internal:11434
-    designer_model:    Mapped[Optional[str]] = mapped_column(Text)   # default gemma3:27b
-    coder_model:       Mapped[Optional[str]] = mapped_column(Text)   # default qwen3-coder:30b
+    ollama_host:       Mapped[Optional[str]] = mapped_column(Text)   # http://host.docker.internal:11434 (local) or https://ollama.com (cloud)
+    ollama_api_key:    Mapped[Optional[str]] = mapped_column(Text)   # required for Ollama Cloud, ignored locally
+    designer_model:    Mapped[Optional[str]] = mapped_column(Text)   # legacy: 'designer'/'reviewer' personas
+    coder_model:       Mapped[Optional[str]] = mapped_column(Text)   # legacy: everything else
+    ollama_model_map:  Mapped[Optional[dict]] = mapped_column(JSONB) # explicit persona → ollama model
     ollama_timeout:    Mapped[Optional[int]] = mapped_column(Integer) # default 300s
     bash_timeout:      Mapped[Optional[int]] = mapped_column(Integer) # default 180s
     max_turns:         Mapped[Optional[int]] = mapped_column(Integer) # default 80
-    claude_model:            Mapped[Optional[str]] = mapped_column(Text)   # default claude-sonnet-4-6
+    claude_model:            Mapped[Optional[str]] = mapped_column(Text)   # legacy single-model fallback
+    claude_model_heavy:      Mapped[Optional[str]] = mapped_column(Text)   # coder/reviewer/designer/etc  (default Sonnet)
+    claude_model_light:      Mapped[Optional[str]] = mapped_column(Text)   # planner/documenter/etc       (default Haiku)
+    claude_model_map:        Mapped[Optional[dict]] = mapped_column(JSONB) # explicit per-persona override
     claude_credentials_dir:  Mapped[Optional[str]] = mapped_column(Text)   # default C:/Users/digvi/.claude
     ssh_keys_dir:            Mapped[Optional[str]] = mapped_column(Text)   # default: SSH_DIR env var
 

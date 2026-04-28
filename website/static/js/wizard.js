@@ -1,17 +1,35 @@
-// ── WIZARD STATE ──────────────────────────────────────────
-let wizardType = null;
-let wizardStep = 1;
+// ── WIZARD STATE ────────────────────────────────────────────────────────────
+// New flow:  Type → Vision → Stack → (UI Template if web) → Details
+// Brownfield: Type → Path
+let wizardType   = null;
+let wizardStep   = 1;          // current step number
+let catalog      = null;       // {stacks, databases, ui_templates} from /api/wizard/catalog
+let selectedStack    = null;   // stack id (e.g. "python_fastapi")
+let selectedDb       = "postgresql";
+let selectedUITemplate = "agent_choose";
+let stackRecommendation = null;  // {recommended, alternatives, database, reasoning}
+let uiRecommendation    = null;  // {recommended, reasoning}
 
+// ── BASIC OPEN/CLOSE ────────────────────────────────────────────────────────
 function openWizard() {
-  wizardType = null; wizardStep = 1;
-  document.querySelectorAll('.wizard-panel').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.wizard-step').forEach(s => { s.classList.remove('active','done'); });
+  wizardType = null;
+  wizardStep = 1;
+  selectedStack = null;
+  selectedDb = "postgresql";
+  selectedUITemplate = "agent_choose";
+  stackRecommendation = null;
+  uiRecommendation = null;
+  selectedSuggestions = [];
+  resetStepIndicators();
+  hideAllPanels();
   document.getElementById('wp-1').classList.add('active');
   document.getElementById('ws-1').classList.add('active');
   document.getElementById('step1-next').disabled = true;
   document.querySelectorAll('.type-pick-card').forEach(c => c.classList.remove('selected'));
   document.getElementById('add-product-modal').classList.add('open');
   document.body.style.overflow = 'hidden';
+  // Pre-fetch catalogue so the Stack/UI steps render instantly when reached.
+  if (!catalog) loadCatalog();
 }
 function closeWizard() {
   document.getElementById('add-product-modal').classList.remove('open');
@@ -26,90 +44,425 @@ function selectType(type) {
   document.getElementById('step1-next').disabled = false;
 }
 
-function showPanel(id) {
+function hideAllPanels() {
   document.querySelectorAll('.wizard-panel').forEach(p => p.classList.remove('active'));
+}
+function showPanel(id) {
+  hideAllPanels();
   document.getElementById(id).classList.add('active');
 }
+function resetStepIndicators() {
+  document.querySelectorAll('.wizard-step').forEach(s => {
+    s.classList.remove('active', 'done', 'hidden');
+  });
+}
+function setStepIndicator(activeIdx) {
+  // Mark steps 1..activeIdx-1 as 'done', activeIdx as 'active', rest plain.
+  for (let i = 1; i <= 5; i++) {
+    const el = document.getElementById('ws-' + i);
+    if (!el) continue;
+    el.classList.remove('active', 'done');
+    if (i < activeIdx)      el.classList.add('done');
+    else if (i === activeIdx) el.classList.add('active');
+  }
+}
+function setUIStepVisible(visible) {
+  // Step 4 is conditional on the selected stack having a web component.
+  const ws4 = document.getElementById('ws-4');
+  if (!ws4) return;
+  ws4.classList.toggle('hidden', !visible);
+}
 
+// ── STEP 1 → 2 ──────────────────────────────────────────────────────────────
 function wizardNext() {
   if (!wizardType) return;
-  document.getElementById('ws-1').classList.remove('active');
-  document.getElementById('ws-1').classList.add('done');
-  document.getElementById('ws-2').classList.add('active');
+  if (wizardType === 'brownfield') {
+    // Brownfield: skip ahead — only Type → Path. Hide the step indicators
+    // we won't use so the visual count matches the actual flow.
+    ['ws-2','ws-3','ws-4','ws-5'].forEach(id => document.getElementById(id).classList.add('hidden'));
+    showPanel('wp-2-brownfield');
+    return;
+  }
+  // Greenfield: go to Vision step
+  setStepIndicator(2);
+  setUIStepVisible(true);  // visible by default until a non-web stack is picked
   wizardStep = 2;
-  showPanel(wizardType === 'greenfield' ? 'wp-2-greenfield' : 'wp-2-brownfield');
-  document.getElementById('ws-3').style.display = wizardType === 'greenfield' ? '' : 'none';
+  showPanel('wp-2-greenfield');
 }
 
-function wizardNext2() {
-  const name = document.getElementById('gf-name').value.trim();
-  const repo = document.getElementById('gf-repo').value.trim();
-  if (!name) { document.getElementById('gf-name').focus(); showToast('error', 'Product name is required.'); return; }
-  if (!repo)  { document.getElementById('gf-repo').focus(); showToast('error', 'GitHub repo name is required.'); return; }
-  document.getElementById('ws-2').classList.remove('active');
-  document.getElementById('ws-2').classList.add('done');
-  document.getElementById('ws-3').classList.add('active');
+// ── STEP 2 → 3 (greenfield) ─────────────────────────────────────────────────
+async function wizardToStack() {
+  const vision = document.getElementById('gf-vision').value.trim();
+  if (vision.length < 20) {
+    showToast('warn', 'Please write at least a couple of sentences about your product before we can suggest a stack.');
+    document.getElementById('gf-vision').focus();
+    return;
+  }
+  setStepIndicator(3);
   wizardStep = 3;
-  showPanel('wp-3');
+  showPanel('wp-3-stack');
+  // Render the picker from the cached catalogue (fetch first if needed)
+  if (!catalog) await loadCatalog();
+  renderStackPicker();
+  renderDbPicker();
+  // Fire AI recommendation in the background. Vision-driven; non-blocking.
+  fetchStackRecommendation(vision);
 }
 
+// ── STEP 3 → 4 or 5 (greenfield) ────────────────────────────────────────────
+async function wizardToUI() {
+  if (!selectedStack) {
+    showToast('warn', 'Pick a stack first.');
+    return;
+  }
+  const stackOpt = catalog.stacks.flatMap(g => g.options).find(o => o.id === selectedStack);
+  const isWeb = !!(stackOpt && stackOpt.has_web_ui);
+  setUIStepVisible(isWeb);
+  if (!isWeb) {
+    // Skip UI step entirely
+    selectedUITemplate = "";
+    setStepIndicator(5);
+    wizardStep = 5;
+    showPanel('wp-5-details');
+    return;
+  }
+  setStepIndicator(4);
+  wizardStep = 4;
+  showPanel('wp-4-ui');
+  renderUITemplateGallery();
+  const vision = document.getElementById('gf-vision').value.trim();
+  fetchUIRecommendation(vision, selectedStack);
+}
+
+// ── STEP 4 → 5 (greenfield) ─────────────────────────────────────────────────
+function wizardToDetails() {
+  if (!selectedUITemplate) selectedUITemplate = "agent_choose";
+  setStepIndicator(5);
+  wizardStep = 5;
+  showPanel('wp-5-details');
+}
+
+// ── BACK (greenfield + brownfield) ──────────────────────────────────────────
 function wizardBack() {
-  if (wizardStep === 2) {
-    document.getElementById('ws-2').classList.remove('active','done');
-    document.getElementById('ws-1').classList.remove('done');
-    document.getElementById('ws-1').classList.add('active');
-    wizardStep = 1;
+  // Brownfield: only Type → Path, so back from path goes to step 1.
+  if (wizardType === 'brownfield') {
     showPanel('wp-1');
+    ['ws-2','ws-3','ws-4','ws-5'].forEach(id => document.getElementById(id).classList.remove('hidden'));
+    return;
+  }
+  // Greenfield: walk backwards through the steps.
+  if (wizardStep === 5) {
+    // Back from Details → either UI (if web) or Stack
+    const stackOpt = catalog && catalog.stacks.flatMap(g => g.options).find(o => o.id === selectedStack);
+    const isWeb = !!(stackOpt && stackOpt.has_web_ui);
+    if (isWeb) { setStepIndicator(4); wizardStep = 4; showPanel('wp-4-ui'); }
+    else       { setStepIndicator(3); wizardStep = 3; showPanel('wp-3-stack'); }
+  } else if (wizardStep === 4) {
+    setStepIndicator(3);
+    wizardStep = 3;
+    showPanel('wp-3-stack');
   } else if (wizardStep === 3) {
-    document.getElementById('ws-3').classList.remove('active','done');
-    document.getElementById('ws-2').classList.remove('done');
-    document.getElementById('ws-2').classList.add('active');
+    setStepIndicator(2);
     wizardStep = 2;
     showPanel('wp-2-greenfield');
+  } else if (wizardStep === 2) {
+    setStepIndicator(1);
+    wizardStep = 1;
+    showPanel('wp-1');
   }
 }
 
-function submitBrownfield() {
-  const dir = document.getElementById('bf-working-dir').value.trim();
-  if (!dir) { document.getElementById('bf-working-dir').focus(); showToast('error', 'Path is required.'); return; }
-  document.getElementById('bf-h-working-dir').value = dir;
-  document.getElementById('bf-hidden-form').submit();
-}
-
-function submitGreenfield() {
-  const vision = document.getElementById('gf-vision').value.trim();
-  if (!vision) { document.getElementById('gf-vision').focus(); showToast('error', 'Vision is required.'); return; }
-  const sel   = document.getElementById('gf-stack');
-  let stack = sel.value;
-  if (stack === 'other') {
-    stack = document.getElementById('gf-stack-other').value.trim();
-    if (!stack) { showToast('error', 'Please specify the tech stack.'); return; }
+// ── CATALOGUE LOADER ────────────────────────────────────────────────────────
+async function loadCatalog() {
+  try {
+    const resp = await fetch('/api/wizard/catalog');
+    if (!resp.ok) throw new Error('Could not load wizard catalog');
+    catalog = await resp.json();
+  } catch (err) {
+    showToast('error', err.message);
+    catalog = { stacks: [], databases: [], ui_templates: [] };
   }
-  document.getElementById('gf-h-name').value         = document.getElementById('gf-name').value.trim();
-  document.getElementById('gf-h-repo').value         = document.getElementById('gf-repo').value.trim();
-  document.getElementById('gf-h-stack').value        = stack;
-  document.getElementById('gf-h-vision').value       = vision;
-  document.getElementById('gf-h-suggestions').value  = document.getElementById('gf-suggestions-json').value;
-  document.getElementById('gf-hidden-form').submit();
 }
 
-// ── STACK DROPDOWN ────────────────────────────────────────
-function onStackChange(sel) {
-  const other = document.getElementById('gf-stack-other');
-  other.style.display = sel.value === 'other' ? 'block' : 'none';
+// ── STACK PICKER RENDER ─────────────────────────────────────────────────────
+function renderStackPicker() {
+  const root = document.getElementById('stack-picker');
+  if (!catalog || !catalog.stacks.length) {
+    root.innerHTML = '<div class="muted">No stacks configured.</div>';
+    return;
+  }
+  root.innerHTML = catalog.stacks.map(group => `
+    <div class="stack-group">
+      <div class="stack-group-label">${escHtml(group.label)}</div>
+      <div class="stack-options-grid">
+        ${group.options.map(opt => `
+          <div class="stack-option ${selectedStack === opt.id ? 'selected' : ''} ${stackRecommendation && stackRecommendation.recommended === opt.id ? 'recommended-badge' : ''}"
+               data-stack-id="${escAttrSafe(opt.id)}"
+               onclick="selectStack(${escAttr(JSON.stringify(opt.id))})">
+            <div class="stack-option-label">${escHtml(opt.label)}</div>
+            <div class="stack-option-desc">${escHtml(opt.description)}</div>
+          </div>`).join('')}
+      </div>
+    </div>`).join('');
 }
 
-// ── PATH PREVIEW ──────────────────────────────────────────
+function renderDbPicker() {
+  const root = document.getElementById('db-picker');
+  if (!catalog || !catalog.databases.length) {
+    root.innerHTML = '<div class="muted">No database options configured.</div>';
+    return;
+  }
+  root.innerHTML = catalog.databases.map(opt => `
+    <div class="db-option ${selectedDb === opt.id ? 'selected' : ''}"
+         data-db-id="${escAttrSafe(opt.id)}"
+         title="${escAttrSafe(opt.description)}"
+         onclick="selectDb(${escAttr(JSON.stringify(opt.id))})">
+      ${escHtml(opt.label)}
+    </div>`).join('');
+}
+
+function selectStack(stackId) {
+  selectedStack = stackId;
+  document.querySelectorAll('.stack-option').forEach(el => {
+    el.classList.toggle('selected', el.dataset.stackId === stackId);
+  });
+}
+
+function selectDb(dbId) {
+  selectedDb = dbId;
+  document.querySelectorAll('.db-option').forEach(el => {
+    el.classList.toggle('selected', el.dataset.dbId === dbId);
+  });
+}
+
+// ── STACK AI RECOMMENDATION ─────────────────────────────────────────────────
+async function fetchStackRecommendation(vision) {
+  const card = document.getElementById('stack-recommendation');
+  card.innerHTML = `
+    <div class="recommendation-label">Asking AI for a recommendation…</div>
+    <div class="recommendation-reason muted">This usually takes 5–10 seconds.</div>
+  `;
+  try {
+    const resp = await fetch('/api/wizard/recommend-stack', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin',
+      body: JSON.stringify({ vision }),
+    });
+    if (!resp.ok) throw new Error((await resp.json()).detail || 'AI error');
+    stackRecommendation = await resp.json();
+    renderStackRecommendation();
+    // Auto-select the recommended stack + database; user can override.
+    if (!selectedStack) selectStack(stackRecommendation.recommended);
+    if (stackRecommendation.database) selectDb(stackRecommendation.database);
+    renderStackPicker();   // re-render so the recommended-badge appears
+  } catch (err) {
+    card.innerHTML = `<div class="recommendation-label">Recommendation unavailable</div>
+      <div class="recommendation-reason muted">${escHtml(err.message)} — pick a stack from the list below.</div>`;
+  }
+}
+
+function renderStackRecommendation() {
+  const card = document.getElementById('stack-recommendation');
+  if (!stackRecommendation || !catalog) return;
+  const opt = catalog.stacks.flatMap(g => g.options).find(o => o.id === stackRecommendation.recommended);
+  if (!opt) { card.innerHTML = ''; return; }
+  const dbOpt = catalog.databases.find(d => d.id === stackRecommendation.database);
+  card.innerHTML = `
+    <div class="recommendation-label">★ Recommended for your vision</div>
+    <div class="recommendation-title">${escHtml(opt.label)}${dbOpt ? ' + ' + escHtml(dbOpt.label) : ''}</div>
+    <div class="recommendation-reason">${escHtml(stackRecommendation.reasoning || '')}</div>
+    <div class="recommendation-actions">
+      <button class="pf-btn pf-btn--primary" onclick="selectStack(${escAttr(JSON.stringify(opt.id))}); ${dbOpt ? 'selectDb(' + escAttr(JSON.stringify(dbOpt.id)) + ');' : ''} showToast('success', 'Recommendation applied.')">Use this</button>
+      <button class="pf-btn pf-btn--secondary" onclick="document.getElementById('stack-picker').scrollIntoView({behavior:'smooth'})">Browse all options</button>
+    </div>
+  `;
+}
+
+// ── UI TEMPLATE GALLERY ─────────────────────────────────────────────────────
+function renderUITemplateGallery() {
+  const root = document.getElementById('ui-template-gallery');
+  if (!catalog || !catalog.ui_templates.length) {
+    root.innerHTML = '<div class="muted">No UI templates configured.</div>';
+    return;
+  }
+  root.innerHTML = catalog.ui_templates.map(tpl => `
+    <div class="ui-template-card ${selectedUITemplate === tpl.id ? 'selected' : ''} ${uiRecommendation && uiRecommendation.recommended === tpl.id ? 'recommended-badge' : ''}"
+         data-ui-id="${escAttrSafe(tpl.id)}"
+         onclick="selectUITemplate(${escAttr(JSON.stringify(tpl.id))})">
+      <div class="ui-template-name">${escHtml(tpl.label)}</div>
+      <div class="ui-template-desc">${escHtml(tpl.description)}</div>
+    </div>`).join('');
+}
+
+function selectUITemplate(tplId) {
+  selectedUITemplate = tplId;
+  document.querySelectorAll('.ui-template-card').forEach(el => {
+    el.classList.toggle('selected', el.dataset.uiId === tplId);
+  });
+}
+
+async function fetchUIRecommendation(vision, stackId) {
+  const card = document.getElementById('ui-recommendation');
+  card.innerHTML = `
+    <div class="recommendation-label">Asking AI for a UI recommendation…</div>
+    <div class="recommendation-reason muted">A few seconds.</div>
+  `;
+  try {
+    const resp = await fetch('/api/wizard/recommend-ui-template', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin',
+      body: JSON.stringify({ vision, stack_id: stackId }),
+    });
+    if (!resp.ok) throw new Error((await resp.json()).detail || 'AI error');
+    uiRecommendation = await resp.json();
+    const tpl = catalog.ui_templates.find(t => t.id === uiRecommendation.recommended);
+    if (!tpl) { card.innerHTML = ''; return; }
+    card.innerHTML = `
+      <div class="recommendation-label">★ Recommended UI</div>
+      <div class="recommendation-title">${escHtml(tpl.label)}</div>
+      <div class="recommendation-reason">${escHtml(uiRecommendation.reasoning || '')}</div>
+      <div class="recommendation-actions">
+        <button class="pf-btn pf-btn--primary" onclick="selectUITemplate(${escAttr(JSON.stringify(tpl.id))}); showToast('success', 'Recommendation applied.')">Use this</button>
+      </div>`;
+    if (selectedUITemplate === 'agent_choose') selectUITemplate(tpl.id);
+    renderUITemplateGallery();
+  } catch (err) {
+    card.innerHTML = `<div class="recommendation-label">Recommendation unavailable</div>
+      <div class="recommendation-reason muted">${escHtml(err.message)} — pick one from the gallery.</div>`;
+  }
+}
+
+// ── PATH PREVIEW ────────────────────────────────────────────────────────────
 function updatePathPreview() {
-  const repoInput  = document.getElementById('gf-repo');
-  const previewEl  = document.getElementById('path-preview-text');
-  const root       = document.getElementById('path-preview').dataset.root || '{root}';
+  const repoInput = document.getElementById('gf-repo');
+  const previewEl = document.getElementById('path-preview-text');
+  const root      = document.getElementById('path-preview').dataset.root || '{root}';
   if (!repoInput || !previewEl) return;
   const repo = repoInput.value || 'my-awesome-app';
   previewEl.innerHTML = root + '/<span class="highlight">' + escHtml(repo) + '</span>';
 }
 
-// ── SEARCH & FILTER ───────────────────────────────────────
+// ── SUBMISSIONS ─────────────────────────────────────────────────────────────
+function submitBrownfield() {
+  const dir = document.getElementById('bf-working-dir').value.trim();
+  if (!dir) {
+    document.getElementById('bf-working-dir').focus();
+    showToast('error', 'Path is required.');
+    return;
+  }
+  document.getElementById('bf-h-working-dir').value = dir;
+  document.getElementById('bf-hidden-form').submit();
+}
+
+function submitGreenfield() {
+  const name   = document.getElementById('gf-name').value.trim();
+  const repo   = document.getElementById('gf-repo').value.trim();
+  const vision = document.getElementById('gf-vision').value.trim();
+  if (!name)   { showToast('error', 'Product name is required.');     document.getElementById('gf-name').focus(); return; }
+  if (!repo)   { showToast('error', 'GitHub repo name is required.'); document.getElementById('gf-repo').focus(); return; }
+  if (!vision) { showToast('error', 'Vision is required.');           wizardStep = 2; showPanel('wp-2-greenfield'); return; }
+  if (!selectedStack) { showToast('error', 'Pick a stack first.');    wizardStep = 3; showPanel('wp-3-stack'); return; }
+  document.getElementById('gf-h-name').value         = name;
+  document.getElementById('gf-h-repo').value         = repo;
+  document.getElementById('gf-h-stack').value        = selectedStack;
+  document.getElementById('gf-h-database').value     = selectedDb || '';
+  document.getElementById('gf-h-ui-template').value  = selectedUITemplate || '';
+  document.getElementById('gf-h-vision').value       = vision;
+  document.getElementById('gf-h-suggestions').value  = document.getElementById('gf-suggestions-json').value;
+  document.getElementById('gf-hidden-form').submit();
+}
+
+// ── ARTICULATE VISION ───────────────────────────────────────────────────────
+async function articulateVision() {
+  const textarea = document.getElementById('gf-vision');
+  const vision   = textarea.value.trim();
+  if (vision.length < 10) { showToast('warn', 'Please enter a brief description first.'); return; }
+  const btn      = document.getElementById('articulate-btn');
+  const status   = document.getElementById('articulate-status');
+  btn.disabled = true; btn.textContent = '⏳ Articulating…'; status.textContent = '';
+  try {
+    const resp = await fetch('/api/articulate/vision', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin',
+      body: JSON.stringify({ vision, preferred_stack: selectedStack || 'unspecified' }),
+    });
+    if (!resp.ok) throw new Error((await resp.json()).detail || 'Server error');
+    textarea.value = (await resp.json()).vision;
+    status.textContent = '✓ Done';
+    showToast('success', 'Vision articulated.');
+  } catch (err) {
+    status.textContent = '✗ ' + err.message;
+    showToast('error', err.message);
+  } finally {
+    btn.disabled = false; btn.textContent = '✦ Articulate Vision';
+  }
+}
+
+// ── AI FEATURE SUGGESTIONS ──────────────────────────────────────────────────
+let selectedSuggestions = [];
+
+async function suggestFeatures() {
+  const vision = document.getElementById('gf-vision').value.trim();
+  if (vision.length < 20) { showToast('warn', 'Vision is too short to generate a backlog.'); return; }
+  if (!selectedStack)     { showToast('warn', 'Pick a stack first (step 3).'); return; }
+  const btn    = document.getElementById('suggest-btn');
+  const panel  = document.getElementById('gf-suggestions');
+  const grid   = document.getElementById('suggestions-grid');
+  const hint   = document.getElementById('suggestions-hint');
+  const status = document.getElementById('suggest-status');
+  btn.disabled = true; btn.textContent = '⏳ Generating backlog…'; status.textContent = 'This takes ~15s for a full backlog…';
+  selectedSuggestions = []; updateSuggestionsJson();
+  try {
+    const resp = await fetch('/api/recommend/features', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin',
+      body: JSON.stringify({ vision, preferred_stack: selectedStack }),
+    });
+    if (!resp.ok) throw new Error(resp.status === 501 ? 'ANTHROPIC_API_KEY not configured' : 'Server error');
+    const data = await resp.json();
+    panel.classList.remove('hidden');
+    selectedSuggestions = [...data.features];
+    updateSuggestionsJson();
+    grid.innerHTML = data.features.map((f, i) => `
+      <div class="suggestion-card selected" id="sc-${i}" onclick="toggleSuggestion(${i}, ${escAttr(JSON.stringify(f))})">
+        <div class="suggestion-name">${escHtml(f.name)}</div>
+        <div class="suggestion-desc">${escHtml(f.description || '')}</div>
+        <span class="suggestion-tag">✓ Selected</span>
+      </div>`).join('');
+    hint.textContent = `${data.features.length} features — all selected. Click any to deselect.`;
+    showToast('success', `Full backlog ready: ${data.features.length} features.`);
+  } catch (err) {
+    panel.classList.remove('hidden');
+    grid.innerHTML = `<div class="notice notice-amber" style="grid-column:1/-1">${escHtml(err.message)}</div>`;
+    hint.textContent = '';
+    showToast('error', err.message);
+  } finally {
+    btn.disabled = false; btn.textContent = '📋 Generate Full Backlog (optional)'; status.textContent = '';
+  }
+}
+
+function toggleSuggestion(idx, feature) {
+  const card = document.getElementById('sc-' + idx);
+  const pos  = selectedSuggestions.findIndex(f => f.name === feature.name);
+  if (pos >= 0) {
+    selectedSuggestions.splice(pos, 1);
+    card.classList.remove('selected');
+    card.querySelector('.suggestion-tag').textContent = 'Click to select';
+  } else {
+    selectedSuggestions.push(feature);
+    card.classList.add('selected');
+    card.querySelector('.suggestion-tag').textContent = '✓ Selected';
+  }
+  updateSuggestionsJson();
+  document.getElementById('suggest-status').textContent =
+    selectedSuggestions.length ? `${selectedSuggestions.length} selected` : '';
+}
+
+function updateSuggestionsJson() {
+  document.getElementById('gf-suggestions-json').value = JSON.stringify(selectedSuggestions);
+}
+
+// ── SEARCH & FILTER (unchanged) ─────────────────────────────────────────────
 let activeFilter = 'all';
 
 function setFilter(filter, el) {
@@ -151,7 +504,7 @@ function filterProducts() {
   if (el) el.textContent = visible;
 }
 
-// ── RELATIVE TIME ─────────────────────────────────────────
+// ── RELATIVE TIME (unchanged) ───────────────────────────────────────────────
 function relTime(isoStr) {
   const diff = (Date.now() - new Date(isoStr).getTime()) / 1000;
   if (diff < 60) return 'just now';
@@ -177,7 +530,7 @@ function staleDotClass(isoStr) {
   });
 })();
 
-// ── VOICE INPUT ───────────────────────────────────────────
+// ── VOICE INPUT (unchanged) ─────────────────────────────────────────────────
 const speechSupported = 'webkitSpeechRecognition' in window || 'SpeechRecognition' in window;
 if (!speechSupported) document.querySelectorAll('.voice-btn').forEach(b => b.style.display = 'none');
 let activeRecognition = null;
@@ -213,103 +566,17 @@ function startVoice(targetId, btn) {
   rec.start();
 }
 
-// ── ARTICULATE VISION ─────────────────────────────────────
-async function articulateVision() {
-  const textarea = document.getElementById('gf-vision');
-  const vision   = textarea.value.trim();
-  if (vision.length < 10) { showToast('warn', 'Please enter a brief description first.'); return; }
-  const sel   = document.getElementById('gf-stack');
-  const stack = sel.value === 'other' ? (document.getElementById('gf-stack-other').value || 'other') : sel.value;
-  const btn   = document.getElementById('articulate-btn');
-  const status = document.getElementById('articulate-status');
-  btn.disabled = true; btn.textContent = '⏳ Articulating…'; status.textContent = '';
-  try {
-    const resp = await fetch('/api/articulate/vision', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ vision, preferred_stack: stack })
-    });
-    if (!resp.ok) throw new Error((await resp.json()).detail || 'Server error');
-    textarea.value = (await resp.json()).vision;
-    status.textContent = '✓ Done';
-    showToast('success', 'Vision articulated.');
-  } catch (err) {
-    status.textContent = '✗ ' + err.message;
-    showToast('error', err.message);
-  } finally {
-    btn.disabled = false; btn.textContent = '✦ Articulate Vision';
-  }
-}
-
-// ── AI FEATURE SUGGESTIONS ────────────────────────────────
-let selectedSuggestions = [];
-
-async function suggestFeatures() {
-  const vision = document.getElementById('gf-vision').value.trim();
-  const sel    = document.getElementById('gf-stack');
-  const stack  = sel.value === 'other' ? (document.getElementById('gf-stack-other').value || 'other') : sel.value;
-  if (vision.length < 20) { showToast('warn', 'Please describe the product vision first.'); return; }
-  const btn    = document.getElementById('suggest-btn');
-  const panel  = document.getElementById('gf-suggestions');
-  const grid   = document.getElementById('suggestions-grid');
-  const hint   = document.getElementById('suggestions-hint');
-  const status = document.getElementById('suggest-status');
-  btn.disabled = true; btn.textContent = '⏳ Generating backlog…'; status.textContent = 'This takes ~15s for a full backlog...';
-  selectedSuggestions = []; updateSuggestionsJson();
-  try {
-    const resp = await fetch('/api/recommend/features', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ vision, preferred_stack: stack })
-    });
-    if (!resp.ok) throw new Error(resp.status === 501 ? 'ANTHROPIC_API_KEY not configured' : 'Server error');
-    const data = await resp.json();
-    panel.classList.remove('hidden');
-    selectedSuggestions = [...data.features];
-    updateSuggestionsJson();
-    grid.innerHTML = data.features.map((f, i) => `
-      <div class="suggestion-card selected" id="sc-${i}" onclick="toggleSuggestion(${i}, ${escAttr(JSON.stringify(f))})">
-        <div class="suggestion-name">${escHtml(f.name)}</div>
-        <div class="suggestion-desc">${escHtml(f.description || '')}</div>
-        <span class="suggestion-tag">✓ Selected</span>
-      </div>`).join('');
-    hint.textContent = `${data.features.length} features — all selected. Click any to deselect.`;
-    showToast('success', `Full backlog ready: ${data.features.length} features.`);
-  } catch (err) {
-    panel.classList.remove('hidden');
-    grid.innerHTML = `<div class="notice notice-amber" style="grid-column:1/-1">${escHtml(err.message)}</div>`;
-    hint.textContent = '';
-    showToast('error', err.message);
-  } finally {
-    btn.disabled = false; btn.textContent = '📋 Generate Full Backlog'; status.textContent = '';
-  }
-}
-
-function toggleSuggestion(idx, feature) {
-  const card = document.getElementById('sc-' + idx);
-  const pos  = selectedSuggestions.findIndex(f => f.name === feature.name);
-  if (pos >= 0) {
-    selectedSuggestions.splice(pos, 1);
-    card.classList.remove('selected');
-    card.querySelector('.suggestion-tag').textContent = 'Click to select';
-  } else {
-    selectedSuggestions.push(feature);
-    card.classList.add('selected');
-    card.querySelector('.suggestion-tag').textContent = '✓ Selected';
-  }
-  updateSuggestionsJson();
-  document.getElementById('suggest-status').textContent =
-    selectedSuggestions.length ? `${selectedSuggestions.length} selected` : '';
-}
-
-function updateSuggestionsJson() {
-  document.getElementById('gf-suggestions-json').value = JSON.stringify(selectedSuggestions);
-}
-
-// ── UTILITIES ─────────────────────────────────────────────
+// ── UTILITIES ───────────────────────────────────────────────────────────────
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 function escAttr(s) {
+  // Inline-event embedding helper (wraps in single quotes; escapes inner singles).
   return "'" + String(s).replace(/'/g, "\\'") + "'";
+}
+function escAttrSafe(s) {
+  // Plain HTML-attribute string (no surrounding quotes).
+  return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
 }
 
 // Handle ?filter= query param

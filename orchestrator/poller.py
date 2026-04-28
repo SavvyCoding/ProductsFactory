@@ -267,6 +267,44 @@ def get_next_reviewer_product(products: list[dict]) -> tuple[dict | None, str | 
     return None, None
 
 
+def get_next_retro_product(products: list[dict]) -> dict | None:
+    """
+    Check if any ready product has a sprint needing a retrospective:
+    - Active sprint where all features are terminal and retro_doc_path is not set
+    - OR a completed sprint with no retro_doc_path
+    Returns the product dict or None.
+    """
+    TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted"}
+    ready = [p for p in products if p["status"] == "ready"]
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            for product in ready:
+                pid = product["id"]
+                active_resp = client.get(f"/api/products/{pid}/sprints/active")
+                if active_resp.status_code == 200 and active_resp.json():
+                    sprint = active_resp.json()
+                    if not sprint.get("retro_doc_path"):
+                        feat_resp = client.get(f"/api/products/{pid}/features")
+                        features = feat_resp.json() if feat_resp.status_code == 200 else []
+                        sprint_features = [f for f in features if f.get("sprint_id") == sprint["id"]]
+                        non_terminal = [f for f in sprint_features if f.get("status") not in TERMINAL]
+                        if sprint_features and not non_terminal:
+                            return product
+                    continue  # active sprint not yet done — retro not due
+                # No active sprint — check for completed sprint missing retro
+                sprints_resp = client.get(f"/api/products/{pid}/sprints")
+                if sprints_resp.status_code == 200:
+                    completed_no_retro = [
+                        s for s in sprints_resp.json()
+                        if s.get("status") == "completed" and not s.get("retro_doc_path")
+                    ]
+                    if completed_no_retro:
+                        return product
+    except httpx.HTTPError as e:
+        log.error(f"get_next_retro_product failed: {e}")
+    return None
+
+
 # Post-sprint personas — run once after each sprint completes, in this order.
 # Agents write last_{persona}_at on completion; the poller compares that timestamp
 # against the sprint's completed_at to decide if the persona is due again.
@@ -1215,6 +1253,7 @@ def main():
 
             # ⑦a Reviewer-first: any product with a Reviewing feature + PR takes priority
             reviewer_product, reviewer_persona = get_next_reviewer_product(products)
+            retro_product = get_next_retro_product(products)
             if any(p.get("run_trainer_now") for p in products if p["status"] == "ready"):
                 # ⑦a2 On-demand trainer: a PM requested a showcase video
                 product = next(p for p in products if p["status"] == "ready" and p.get("run_trainer_now"))
@@ -1225,6 +1264,10 @@ def main():
                 product = reviewer_product
                 persona = "reviewer"
                 log.info(f"Reviewer-first: {product['name']} has Reviewing features with PRs")
+            elif retro_product:
+                product = retro_product
+                persona = "retrospective"
+                log.info(f"Retro-first: {product['name']} has sprint needing retrospective")
             else:
                 # ⑦b Normal round-robin for designer/coder work
                 product = get_next_product(products)

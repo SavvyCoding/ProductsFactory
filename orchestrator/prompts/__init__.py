@@ -1,11 +1,104 @@
 """Prompt builder — selects the right template and fills in product context."""
 
 import os
+import re
 from pathlib import Path
 
 
+def _read_reviewer_patterns(working_dir: str, max_patterns: int = 10) -> str:
+    """
+    Extract `Pattern:` lines that reviewers wrote into session_summary.md and
+    format them as a markdown block for injection into agent prompts.
 
-def build_prompt(product: dict, session_uid: str, persona: str | None = None, max_features: int | None = None) -> str:
+    The 200-char-per-line cap and 10-pattern total cap keep prompt growth
+    bounded (~2 KB max) regardless of how long the file gets.
+    """
+    if not working_dir:
+        return ""
+    summary = Path(working_dir) / "session_summary.md"
+    if not summary.exists():
+        return ""
+    try:
+        text = summary.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    patterns: list[str] = []
+    seen: set[str] = set()
+    # Walk reversed so the newest patterns survive when we hit the cap.
+    for line in reversed(text.splitlines()):
+        m = re.match(r"^\s*Pattern:\s*(.+)$", line.strip())
+        if not m:
+            continue
+        body = m.group(1).strip()[:200]
+        if body in seen:
+            continue
+        seen.add(body)
+        patterns.append(body)
+        if len(patterns) >= max_patterns:
+            break
+    if not patterns:
+        return ""
+    patterns.reverse()  # chronological — oldest first, newest last
+    bullets = "\n".join(f"- {p}" for p in patterns)
+    return (
+        "## Known patterns from prior sessions\n\n"
+        "Past reviewers recorded these insights about this codebase. "
+        "Read them BEFORE making changes — they prevent recurring failures.\n\n"
+        f"{bullets}\n\n---\n"
+    )
+
+
+# Appended to every persona prompt when backend == "ollama".
+# Local 30B models (qwen3-coder, gemma3) need stronger reinforcement on:
+#   - calling task_done() before exit
+#   - sticking to the assigned feature list (not querying for more work)
+#   - output format (one JSON line per feature, no wrapping)
+# Safe to include for Claude too — just slightly more verbose.
+_OLLAMA_ADDENDUM = """
+
+---
+
+## ⚡ Ollama execution contract (local model — read carefully)
+
+You are running on a local model (qwen3-coder, gemma3, etc.) with a hard turn
+limit. The base prompt above tells you what to do; this addendum nails down
+HOW to do it on this backend specifically:
+
+1. **Tool names on this backend:** `bash`, `read_file`, `write_file`,
+   `http_request`, `task_done`. There is no `Write` or `Edit` tool — use
+   `write_file` for any code change. There is no `Read` — use `read_file`.
+
+2. **Stick to the assigned feature list.** Do NOT query the PM API for more
+   work. If the list is empty, call `task_done(status="success", summary="no work")`
+   immediately.
+
+3. **Do NOT run `git add`, `git commit`, `git push`, or `gh pr create`.** The
+   orchestrator's deterministic Python pipeline does all git + PR ceremony
+   AFTER you exit. Your job is purely to write code and tests inside
+   `/workspace`. If you push, you'll create a conflicting branch.
+
+4. **Do NOT touch `/workspace/session_result.json`.** The post-coder Python
+   pipeline writes the Reviewing entries based on what code you changed.
+   (Reviewer persona is the exception — it does write session_result.json
+   per its own prompt.)
+
+5. **Call `task_done()` BEFORE your turn budget runs out.** Statuses:
+   - `success` — all assigned work done
+   - `blocked` — cannot proceed (one-line `summary`)
+   - `incomplete` — partial progress (note what's done in `summary`)
+   Exiting without `task_done` counts as a failure.
+
+6. **One tool call per turn is fine** — don't batch. Use `bash` for `pytest`,
+   `ls`, `mkdir`, `mv`, `rm`, `curl`, `head`, `grep`, `find`. NEVER use
+   `sed -i` or `awk -i` to edit code — they corrupt indentation. Use
+   `write_file` to overwrite the whole file instead.
+
+7. If a tool call fails, read the error and adjust ONE thing. Don't re-run
+   the same failing command twice.
+"""
+
+
+def build_prompt(product: dict, session_uid: str, persona: str | None = None, max_features: int | None = None, backend: str = "claude") -> str:
     """
     Returns the full Claude prompt string for this product session.
 
@@ -86,7 +179,14 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
             f"## Previous session context\n\n{prev}\n\n---\n" if prev else ""
         ),
         "{product_memory}": _memory_content,
+        "{reviewer_patterns}": _read_reviewer_patterns(_working_dir),
     }
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)
+
+    # Append Ollama-specific reinforcement when running on a local model.
+    # Harmless but slightly verbose for Claude; portable.
+    if backend == "ollama":
+        template = template + _OLLAMA_ADDENDUM
+
     return template
