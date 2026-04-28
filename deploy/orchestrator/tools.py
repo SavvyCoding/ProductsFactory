@@ -503,7 +503,55 @@ def determine_next_action(args: dict, **kwargs) -> str:
         non_terminal = [f for f in sprint_features if f.get("status") not in _TERMINAL]
 
         if not non_terminal:
-            return _ok({"action": "exit", "reason": "All sprint features terminal; retrospective handles this via priority 3"})
+            # All features in the active sprint are merged. Run the post-sprint
+            # regression chain — each persona launches as its own session so
+            # the History tab shows a real audit trail of what verified the
+            # sprint, and each can sign off its DoD gate independently:
+            #   1. qa_tester        → runs full test suite on main, signs qa_passed
+            #   2. security_auditor → audits merged code, signs security_clean
+            #   3. check-dod auto-completes the sprint once both above are signed
+            #   4. retrospective    → writes retro_sprint_<id>.md, signs retro_done
+            #
+            # Source of truth for gate state is /api/sprints/{id}/check-dod
+            # (POST returns the live evaluation including the auto-recompute
+            # rules from earlier today). The active_sprint payload from
+            # /products/{id}/sprints/active also carries dod_status + status.
+            try:
+                with _pm_client() as client:
+                    cd = client.post(f"/api/sprints/{sid}/check-dod").json()
+                dod = cd.get("dod") if isinstance(cd, dict) else {}
+            except Exception:
+                cd, dod = {}, {}
+
+            if not dod.get("qa_passed"):
+                return _ok({"action": "launch_session", "persona": "qa_tester",
+                            "product_id": product_id,
+                            "reason": f"sprint {sid}: all features Pushed — running QA regression to sign qa_passed"})
+            if not dod.get("security_clean"):
+                return _ok({"action": "launch_session", "persona": "security_auditor",
+                            "product_id": product_id,
+                            "reason": f"sprint {sid}: all features Pushed — running security audit to sign security_clean"})
+
+            # Both verification gates signed. check-dod above will have
+            # auto-completed the sprint already if the structural gates pass
+            # too (it returns action=auto_completed in that case).
+            #
+            # Retrospective writes retro_sprint_<id>.md, files action items,
+            # and signs retro_done. Triggered on completed sprints with no
+            # retro_doc_path yet. We use the active_sprint payload's status +
+            # retro_doc_path here (active_sprint is fetched at the top of
+            # determine_next_action and is the freshest snapshot).
+            sprint_status_now = active_sprint.get("status")
+            retro_done_path   = active_sprint.get("retro_doc_path")
+            if cd.get("action") == "auto_completed" or sprint_status_now == "completed":
+                if not retro_done_path:
+                    return _ok({"action": "launch_session", "persona": "retrospective",
+                                "product_id": product_id,
+                                "reason": f"sprint {sid} completed — retrospective writing retro_sprint_{sid}.md"})
+                return _ok({"action": "exit", "reason": f"sprint {sid} fully signed off + retro done"})
+
+            return _ok({"action": "exit",
+                        "reason": f"sprint {sid}: both gates signed but check-dod returned {cd.get('action','?')}"})
 
         reviewing = [f for f in non_terminal if f.get("status") == "Reviewing" and f.get("pr_number")]
         if reviewing:
@@ -516,9 +564,19 @@ def determine_next_action(args: dict, **kwargs) -> str:
             return _ok({"action": "launch_session", "persona": "product_planner",
                         "product_id": product_id, "reason": f"{len(approved_no_design)} Approved features need design docs"})
 
+        # Coder-eligible features:
+        #   - Designed (fresh from designer)
+        #   - Approved with design_doc_path (skip-design products)
+        #   - Implementing + review_outcome=changes_requested
+        #     (reviewer rejected, coder needs another pass — without this,
+        #     these sit "stuck in agent state" for 45 min until reset_stuck
+        #     drops them back to Designed, even though /next-for-persona?
+        #     persona=coder already returns them)
         codeable = [f for f in non_terminal
-                    if f.get("status") in ("Designed",)
-                    or (f.get("status") == "Approved" and f.get("design_doc_path"))]
+                    if f.get("status") == "Designed"
+                    or (f.get("status") == "Approved" and f.get("design_doc_path"))
+                    or (f.get("status") == "Implementing"
+                        and f.get("review_outcome") == "changes_requested")]
         if codeable:
             if open_pr_count >= max_prs:
                 return _ok({"action": "exit", "reason": f"PR gate: {open_pr_count} open PRs >= max {max_prs}"})

@@ -964,9 +964,17 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                 log.info(f"[assign] No active sprint for product {product_id} — skipping feature assignment")
                 features = []
             elif persona == "coder":
+                # Match the API's /next-for-persona?persona=coder rules so the
+                # orchestrator's persona dispatch and the agent's actually-
+                # assigned features stay in sync. Without the third clause,
+                # determine_next_action picks coder for `Implementing +
+                # changes_requested` features but _fetch_assigned_features
+                # returns 0 → agent task_done's in 3 seconds.
                 candidates = [f for f in all_features
                               if f.get("status") == "Designed"
-                              or (f.get("status") == "Approved" and f.get("design_doc_path"))]
+                              or (f.get("status") == "Approved" and f.get("design_doc_path"))
+                              or (f.get("status") == "Implementing"
+                                  and f.get("review_outcome") == "changes_requested")]
                 features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
             elif persona == "reviewer":
                 # Reviewer follows the PR — scope to active sprint but fall back to any sprint

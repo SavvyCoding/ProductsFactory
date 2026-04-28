@@ -404,7 +404,7 @@
             </div>
             <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
               <span style="font-size:11px;color:var(--text-muted)">{{ sp | length }}/{{ sf | length }}</span>
-              {% if sprint.status == 'active' %}
+              {% if sprint.status in ('active', 'completed') %}
               {% set dod = sprint.dod_status or {} %}
               {% set sf_count = features | selectattr('sprint_id', 'equalto', sprint.id) | list | length %}
               {% set sf_terminal = features | selectattr('sprint_id', 'equalto', sprint.id) | selectattr('status', 'in', ['Pushed','Deferred','Rejected']) | list | length %}
@@ -412,23 +412,29 @@
               {% set gate_qa       = dod.get('qa_passed', False) %}
               {% set gate_security = dod.get('security_clean', False) %}
               {% set gate_retro    = dod.get('retro_done', False) %}
-              {% set all_gates     = gate_features and gate_qa and gate_security and gate_retro %}
+              {% set all_gates     = gate_features and gate_qa and gate_security %}
               <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
-                <!-- DoD checklist -->
-                <div style="font-size:10px;display:flex;flex-direction:column;gap:2px;text-align:right">
+                <!-- DoD checklist (visible for both active and completed sprints) -->
+                <div style="font-size:10px;display:flex;flex-direction:column;gap:2px;text-align:right"
+                     title="{% if sprint.status == 'active' %}Sprint completes when Features done + QA + Security all sign off{% else %}DoD gate state at completion{% endif %}">
                   <span style="color:{% if gate_features %}var(--green){% else %}var(--text-muted){% endif %}">{% if gate_features %}✓{% else %}○{% endif %} Features done ({{ sf_terminal }}/{{ sf_count }})</span>
-                  <span style="color:{% if gate_qa %}var(--green){% else %}var(--text-muted){% endif %}">{% if gate_qa %}✓{% else %}○{% endif %} QA signed off</span>
-                  <span style="color:{% if gate_security %}var(--green){% else %}var(--text-muted){% endif %}">{% if gate_security %}✓{% else %}○{% endif %} Security signed off</span>
-                  <span style="color:{% if gate_retro %}var(--green){% else %}var(--text-muted){% endif %}">{% if gate_retro %}✓{% else %}○{% endif %} Retro written</span>
+                  <span style="color:{% if gate_qa %}var(--green){% else %}var(--text-muted){% endif %}"
+                        title="{{ dod.get('qa_passed_notes') or ('Sign-off pending' if not gate_qa else 'Signed') }}">{% if gate_qa %}✓{% else %}○{% endif %} QA signed off</span>
+                  <span style="color:{% if gate_security %}var(--green){% else %}var(--text-muted){% endif %}"
+                        title="{{ dod.get('security_clean_notes') or ('Sign-off pending' if not gate_security else 'Signed') }}">{% if gate_security %}✓{% else %}○{% endif %} Security signed off</span>
+                  <span style="color:{% if gate_retro %}var(--green){% else %}var(--text-muted){% endif %}"
+                        title="{% if gate_retro %}{{ sprint.retro_doc_path or 'Signed' }}{% else %}Retrospective runs after sprint completion{% endif %}">{% if gate_retro %}✓{% else %}○{% endif %} Retro written</span>
                 </div>
-                {% if all_gates %}
-                <form method="post" action="/product/{{ product.id }}/sprints/{{ sprint.id }}/complete" style="display:inline">
-                  <button class="btn btn-sm btn-green" style="font-size:11px;padding:3px 10px">✓✓ Complete Sprint</button>
-                </form>
-                {% else %}
-                <form method="post" action="/product/{{ product.id }}/sprints/{{ sprint.id }}/complete" style="display:inline">
-                  <button class="btn btn-sm btn-outline" onclick="return confirm('Not all DoD gates have passed. Complete sprint anyway?')" style="font-size:11px;padding:2px 8px;opacity:.7">Override → Done</button>
-                </form>
+                {% if sprint.status == 'active' %}
+                  {% if all_gates %}
+                  <form method="post" action="/product/{{ product.id }}/sprints/{{ sprint.id }}/complete" style="display:inline">
+                    <button class="btn btn-sm btn-green" style="font-size:11px;padding:3px 10px">✓✓ Complete Sprint</button>
+                  </form>
+                  {% else %}
+                  <form method="post" action="/product/{{ product.id }}/sprints/{{ sprint.id }}/complete" style="display:inline">
+                    <button class="btn btn-sm btn-outline" onclick="return confirm('Not all DoD gates have passed. Complete sprint anyway?')" style="font-size:11px;padding:2px 8px;opacity:.7">Override → Done</button>
+                  </form>
+                  {% endif %}
                 {% endif %}
               </div>
               {% endif %}
