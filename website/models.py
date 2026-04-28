@@ -42,6 +42,7 @@ class Product(Base):
     name:            Mapped[Optional[str]] = mapped_column(Text)
     github_repo:     Mapped[Optional[str]] = mapped_column(Text)
     tech_stack:      Mapped[Optional[List[str]]] = mapped_column(ARRAY(String))
+    ui_template:     Mapped[Optional[str]] = mapped_column(Text)  # picked at wizard time for web stacks
     type:            Mapped[str]           = mapped_column(Text, nullable=False, default="greenfield")
     status:          Mapped[str]           = mapped_column(Text, nullable=False, default="registered")
     analysis_status: Mapped[str]           = mapped_column(Text, nullable=False, default="pending")
