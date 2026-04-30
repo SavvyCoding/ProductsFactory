@@ -23,11 +23,44 @@ Networking:
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import httpx
+
+
+# ── Secret redaction for tool results ─────────────────────────────────────────
+# Tool output (bash stdout/stderr, file contents, HTTP responses) flows back
+# into the agent's conversation history and therefore reaches Ollama Cloud on
+# every subsequent turn. Strip credential-shaped substrings BEFORE the agent
+# sees them so they never leave this container.
+#
+# Mirrors orchestrator.docker_runner._SECRET_PATTERNS — keep in sync.
+_SECRET_PATTERNS = [
+    re.compile(r'gh[psoua]_[A-Za-z0-9]{20,}'),                                    # GitHub classic + variants
+    re.compile(r'github_pat_[A-Za-z0-9_]{20,}'),                                  # GitHub fine-grained
+    re.compile(r'sk-ant-(?:oat|ort|api|admin)[A-Za-z0-9_\-]{20,}'),               # Anthropic
+    re.compile(r'sk-[A-Za-z0-9]{20,}'),                                           # Generic OpenAI-shape
+    re.compile(r'AKIA[A-Z0-9]{16}'),                                              # AWS access key id
+    re.compile(r'xox[bpasr]-[A-Za-z0-9-]+'),                                      # Slack tokens
+    re.compile(r'(Bearer\s+)[A-Za-z0-9_.\-=]{12,}', re.IGNORECASE),                # HTTP Bearer
+    re.compile(r'(x-access-token:)[^@\s\'"]{8,}'),                                 # Embedded PAT in git remote URL
+]
+
+
+def _redact_secrets(s: str) -> str:
+    """Strip credential-shaped substrings before they reach the LLM context.
+
+    Returning the original on falsy input keeps None/'' working through the
+    tool-dispatch chain without special-casing each call site.
+    """
+    if not s:
+        return s
+    for pat in _SECRET_PATTERNS:
+        s = pat.sub('***REDACTED***', s)
+    return s
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -313,18 +346,25 @@ def tool_http_request(method: str, url: str, body: dict = None, headers: dict = 
 
 
 def dispatch_tool(name: str, args: dict) -> tuple[str, bool]:
-    """Returns (result_text, is_done)."""
+    """Returns (result_text, is_done).
+
+    All tool results that originate outside the agent (bash output, file
+    contents, HTTP responses) pass through `_redact_secrets` before returning
+    so credential-shaped substrings (PATs, Bearer tokens, x-access-token
+    URLs) never enter the LLM's conversation context. write_file's return is
+    just a status string we generated ourselves, so it doesn't need redaction.
+    """
     if name == "bash":
-        return tool_bash(args.get("command", ""), args.get("cwd", "/workspace")), False
+        return _redact_secrets(tool_bash(args.get("command", ""), args.get("cwd", "/workspace"))), False
     elif name == "read_file":
-        return tool_read_file(args.get("path", ""), args.get("max_lines", 500)), False
+        return _redact_secrets(tool_read_file(args.get("path", ""), args.get("max_lines", 500))), False
     elif name == "write_file":
         return tool_write_file(args.get("path", ""), args.get("content", "")), False
     elif name == "http_request":
-        return tool_http_request(
+        return _redact_secrets(tool_http_request(
             args.get("method", "GET"), args.get("url", ""),
             args.get("body"), args.get("headers"),
-        ), False
+        )), False
     elif name == "task_done":
         summary = args.get("summary", "")
         # Coder gate: if the post-coder pipeline would Block these features for

@@ -147,6 +147,13 @@ RUN python3 --version && \
     claude --version && \
     python3 /app/ollama_agent.py --help
 
+# ── Entrypoint — sets up git credential helper from GH_TOKEN, strips any
+#                 embedded PAT from existing remote URLs (legacy repos), then
+#                 execs the agent command. Runs as root just so it can chown
+#                 nothing — actually no privileged work, just shell ops.
+COPY deploy/docker/agent-entrypoint.sh /usr/local/bin/agent-entrypoint.sh
+RUN chmod +x /usr/local/bin/agent-entrypoint.sh
+
 # ── Switch to non-root agent user ────────────────────────────────────────────
 USER agent
 ENV HOME=/home/agent
@@ -160,3 +167,4 @@ ENV PATH=$PYENV_ROOT/bin:$PYENV_ROOT/shims:$GOROOT/bin:/home/agent/go/bin:/usr/l
 # /workspace               ← product working_dir          :rw
 
 WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/agent-entrypoint.sh"]
