@@ -1837,8 +1837,18 @@ async def api_update_feature(
     # Increment version on every write so callers can detect concurrent updates.
     feature.version = (feature.version or 0) + 1
 
+    # Capture pre-update review_outcome so we can detect a fresh transition
+    # to `changes_requested` below — needed to increment fix_attempts on
+    # rework cycles (the Blocked-sprint trigger). Without snapshotting here,
+    # the setattr loop below clobbers the old value.
+    prev_review_outcome = feature.review_outcome
+    prev_fix_attempts   = feature.fix_attempts or 0
+
     # Auto-record changelog for tracked fields before applying the update
-    _CHANGELOG_FIELDS = frozenset({"status", "priority", "pr_number", "blocked_reason", "sprint_id", "story_points", "due_date"})
+    _CHANGELOG_FIELDS = frozenset({
+        "status", "priority", "pr_number", "blocked_reason",
+        "sprint_id", "story_points", "due_date", "fix_attempts",
+    })
     changed_by = updates.pop("changed_by", "agent")
     for field in _CHANGELOG_FIELDS:
         if field in updates:
@@ -1857,7 +1867,16 @@ async def api_update_feature(
     feature_fields = {k: v for k, v in updates.items() if k not in ("session_uid",)}
     for field, value in feature_fields.items():
         setattr(feature, field, value)
-    # Auto-record review history whenever the reviewer sets an outcome
+
+    # Auto-record review history + bump fix_attempts on rework cycles.
+    # A "rework cycle" is a transition INTO review_outcome=changes_requested
+    # from something else (None, approved, etc.). Idempotent re-writes of the
+    # same value don't bump the counter. The github_client reconcile path
+    # already increments fix_attempts on closed-unmerged PRs; this covers the
+    # other half — features where the reviewer keeps sending it back without
+    # the PR ever closing. Once fix_attempts >= max_fix_attempts (default 5),
+    # the orchestrator's reconcile sweep routes the feature to the per-product
+    # Blocked sprint for human triage.
     if "review_outcome" in updates and updates["review_outcome"]:
         db.add(FeatureReview(
             feature_id=feature_id,
@@ -1865,6 +1884,22 @@ async def api_update_feature(
             review_notes=updates.get("review_notes"),
             session_uid=updates.get("session_uid"),
         ))
+        new_outcome = updates["review_outcome"]
+        # Only auto-bump if the caller didn't explicitly set fix_attempts
+        # (don't double-count when the orchestrator does its own
+        # closed-PR increment then PATCHes both fields together).
+        if (new_outcome == "changes_requested"
+                and prev_review_outcome != "changes_requested"
+                and "fix_attempts" not in updates):
+            new_attempts = prev_fix_attempts + 1
+            feature.fix_attempts = new_attempts
+            db.add(FeatureChangelog(
+                feature_id=feature_id,
+                field="fix_attempts",
+                old_value=str(prev_fix_attempts),
+                new_value=str(new_attempts),
+                changed_by=f"{changed_by} (rework cycle)",
+            ))
     return feature
 
 
