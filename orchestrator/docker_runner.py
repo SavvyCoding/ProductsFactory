@@ -728,12 +728,29 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             )
             return
         if already_handled & assigned_ids:
-            # Partial coverage — pipeline still runs for the unhandled ones,
-            # but log so the operator can see the split.
+            # Partial coverage. Narrow `assigned_features` to the unhandled
+            # subset so the downstream loops in this function (the no-diff
+            # Blocked-flip at lines ~755 and the session_result.json
+            # writeback near the end) don't touch features the agent already
+            # finished. Without this filter, two corruption paths fire:
+            #   (a) empty git diff → every assigned feature gets PATCHed to
+            #       Blocked, demoting already-Reviewing features.
+            #   (b) pipeline opens its own fresh PR → writeback overwrites
+            #       the agent's correct pr_number with the new one.
+            # Both bypass the rank guard in _apply_session_entry.
             log.info(
                 f"[post-coder] {pname}: agent handled {sorted(already_handled & assigned_ids)}; "
                 f"running fallback for {sorted(assigned_ids - already_handled)}"
             )
+            assigned_features = [f for f in assigned_features if f["id"] not in already_handled]
+            if not assigned_features:
+                # Filter consumed everything — handled features already
+                # taken care of by _apply_session_entry, no fallback work
+                # to do. (Defensive: the issubset check above should have
+                # caught this, but rely on it here too in case the set
+                # math races with a concurrent live-poll application.)
+                log.info(f"[post-coder] {pname}: all features handled by agent — skipping fallback pipeline")
+                return
     except Exception:
         log.exception(f"[post-coder] {pname}: agent-handled detection failed — running pipeline")
 
@@ -1260,6 +1277,65 @@ def _reset_workspace(working_dir: str, product_name: str) -> None:
     log.info(f"[{product_name}] Workspace synced to origin/{main_branch} (hard reset)")
 
 
+def _checkout_sprint_branch(working_dir: str, sprint_branch: str, product_name: str) -> bool:
+    """
+    Pre-checkout the sprint branch before launching the agent so the agent's
+    very first tool call lands on the right branch regardless of whether it
+    follows the prompt's MANDATORY-FIRST-ACTION instruction.
+
+    Runs after `_reset_workspace` (which leaves us on main) and assumes the
+    sprint branch already exists on origin (provisioned by website's
+    `_maybe_provision_sprint_pr` at sprint activation time).
+
+    Returns True on success. On failure logs a warning and returns False —
+    caller should leave the agent on `main` and rely on the post-coder
+    pipeline's own checkout to recover, but flag this loudly so the operator
+    knows the sprint branch wasn't pre-set.
+    """
+    if not sprint_branch:
+        return False
+    wd = Path(working_dir)
+    if not (wd / ".git").exists():
+        log.warning(f"[{product_name}] sprint pre-checkout: not a git repo, skipping")
+        return False
+
+    def _run(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(
+                cmd, cwd=str(wd), capture_output=True, text=True, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as te:
+            return subprocess.CompletedProcess(
+                cmd, returncode=124,
+                stdout=(te.stdout.decode() if isinstance(te.stdout, bytes) else (te.stdout or "")),
+                stderr=f"timed out after {timeout}s",
+            )
+
+    # Fetch first so the remote ref is current. _reset_workspace already
+    # fetched, but it was for origin/main with --prune; the sprint ref may
+    # not have existed at fetch time if just provisioned.
+    r = _run(["git", "fetch", "origin", sprint_branch], timeout=60)
+    if r.returncode != 0:
+        log.warning(
+            f"[{product_name}] sprint pre-checkout: fetch origin {sprint_branch} failed: "
+            f"{r.stderr.strip()[:200]}"
+        )
+        return False
+
+    # Check it out as a tracking branch. -B forces creation/reset so we always
+    # end up on a clean local branch tracking origin/<sprint_branch>.
+    r = _run(["git", "checkout", "-B", sprint_branch, f"origin/{sprint_branch}"])
+    if r.returncode != 0:
+        log.warning(
+            f"[{product_name}] sprint pre-checkout: checkout {sprint_branch} failed: "
+            f"{r.stderr.strip()[:200]}"
+        )
+        return False
+
+    log.info(f"[{product_name}] sprint pre-checkout: now on {sprint_branch}")
+    return True
+
+
 def _cleanup_workspace_post_session(working_dir: str, product_name: str) -> None:
     """
     Post-exit cleanup: return to main branch and remove uncommitted session artifacts.
@@ -1404,6 +1480,21 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     product["_sprint_branch"] = (active_sprint or {}).get("branch_name") or ""
     product["_sprint_pr_number"] = (active_sprint or {}).get("pr_number") or ""
     product["_sprint_pr_url"] = (active_sprint or {}).get("pr_url") or ""
+
+    # Pre-checkout the sprint branch so the agent's very first tool call —
+    # regardless of whether it follows the prompt's MANDATORY-FIRST-ACTION
+    # block — runs against `sprint/<id>` rather than `main`. Without this,
+    # tiny models reliably skip the checkout and fall through to grepping
+    # files on main; the post-coder pipeline can transfer dirty changes
+    # but it's wasted turns and confusing transcripts.
+    # Only fires when sprint_pr_mode is on AND the sprint already has a
+    # provisioned branch (i.e. _sprint_pr_mode==True is the same gate).
+    if product.get("_sprint_pr_mode"):
+        _checkout_sprint_branch(
+            working_dir,
+            product["_sprint_branch"],
+            product.get("name", str(working_dir)),
+        )
 
     # Write sprint-scoped features.md to working dir (replaces any stale full-backlog copy)
     _write_sprint_features_md(working_dir, assigned_features, active_sprint_name)
