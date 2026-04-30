@@ -261,18 +261,18 @@
           <p class="field-hint">Ollama API base URL (inside Docker containers).</p>
         </div>
         <div class="form-group">
-          <label for="p-designer">Designer model</label>
+          <label for="p-designer">Designer model chain</label>
           <input type="text" id="p-designer" name="designer_model"
                  value="{{ config.designer_model or '' }}"
-                 placeholder="gemma3:27b" autocomplete="off">
-          <p class="field-hint">Ollama model for Designer / Reviewer / Planner.</p>
+                 placeholder="gemma3:27b, qwen3-coder:480b" autocomplete="off">
+          <p class="field-hint">Ollama model(s) for Designer / Reviewer / Planner. Comma-separated for fallback chain — primary first. The agent tries each model up to 5× before falling through to the next on transient errors (5xx, timeouts, network).</p>
         </div>
         <div class="form-group">
-          <label for="p-coder">Coder model</label>
+          <label for="p-coder">Coder model chain</label>
           <input type="text" id="p-coder" name="coder_model"
                  value="{{ config.coder_model or '' }}"
-                 placeholder="qwen3-coder:30b" autocomplete="off">
-          <p class="field-hint">Ollama model for Coder persona.</p>
+                 placeholder="gpt-oss:120b, qwen3-coder:480b, deepseek-v4-flash" autocomplete="off">
+          <p class="field-hint">Ollama model(s) for Coder persona. Comma-separated for fallback chain.</p>
         </div>
         <div class="form-group">
           <label for="p-ollama-to">Ollama timeout <span class="field-unit">seconds</span></label>

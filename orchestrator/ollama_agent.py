@@ -64,14 +64,23 @@ def _find_bash() -> list[str]:
 
 BASH_CMD = _find_bash()
 
-# Model selection. The orchestrator pre-resolves the per-persona model and
-# passes it via OLLAMA_MODEL. Fall back to the legacy designer/coder split
-# only if OLLAMA_MODEL is unset (e.g. when test_run.py runs locally).
+# Model selection. The orchestrator pre-resolves the per-persona model chain
+# and passes it via OLLAMA_MODEL — a comma-separated list, primary first
+# (e.g. "gpt-oss:120b,qwen3-coder:480b,deepseek-v4-flash"). Fall back to the
+# legacy designer/coder split only if OLLAMA_MODEL is unset (test_run.py).
+def _parse_model_list(raw: str, fallback_single: str) -> list[str]:
+    items = [m.strip() for m in (raw or "").split(",")]
+    items = [m for m in items if m]
+    return items or [fallback_single]
+
 _EXPLICIT_MODEL = os.environ.get("OLLAMA_MODEL", "").strip()
 if _EXPLICIT_MODEL:
-    MODEL = _EXPLICIT_MODEL
+    MODELS = _parse_model_list(_EXPLICIT_MODEL, DESIGNER_MODEL)
 else:
-    MODEL = DESIGNER_MODEL if AGENT_PERSONA in ("designer", "reviewer") else CODER_MODEL
+    _legacy = DESIGNER_MODEL if AGENT_PERSONA in ("designer", "reviewer") else CODER_MODEL
+    MODELS = [_legacy]
+# Keep a string alias for log lines and the reachability probe.
+MODEL = MODELS[0]
 
 CHAT_URL = f"{OLLAMA_HOST}/v1/chat/completions"
 
@@ -317,9 +326,66 @@ def dispatch_tool(name: str, args: dict) -> tuple[str, bool]:
             args.get("body"), args.get("headers"),
         ), False
     elif name == "task_done":
-        _log(f"Task done: {args.get('summary', '')}")
+        summary = args.get("summary", "")
+        # Coder gate: if the post-coder pipeline would Block these features for
+        # an empty diff (`git status --porcelain` empty), refuse `task_done` here
+        # and force the agent to either actually edit something or self-report
+        # the failure with a clear status keyword. Catches the hallucinated-
+        # completion failure mode seen with quantised local models.
+        if AGENT_PERSONA == "coder" and not _agent_made_edits():
+            sl = summary.lower()
+            self_reports_failure = any(
+                kw in sl for kw in ("blocked:", "incomplete:", "cannot ", "unable to", "cannot proceed")
+            )
+            if not self_reports_failure:
+                _log("REFUSING task_done — no file edits detected and summary doesn't acknowledge incompleteness")
+                return (
+                    "REJECTED: You called task_done(success) but `git status --porcelain` is empty — "
+                    "no files have been modified. The post-coder pipeline will Block these features "
+                    "if the session ends with no diff. You MUST do one of the following:\n"
+                    "  (a) Actually edit at least one file using `write_file` (preferred) or via "
+                    "`bash` (heredoc, sed, etc.). Then call task_done again.\n"
+                    "  (b) If you genuinely cannot make progress, call task_done with summary "
+                    "starting with 'blocked: <one-line reason>' or 'incomplete: <what is partially done>'. "
+                    "This will be allowed.\n"
+                    "Continue working — do NOT call task_done(success) again until files are changed."
+                ), False
+        _log(f"Task done: {summary}")
         return "Session complete.", True
     return f"ERROR: Unknown tool '{name}'", False
+
+
+def _agent_made_edits() -> bool:
+    """Return True if `git status --porcelain` shows any changes inside WORKSPACE_DIR.
+
+    Mirrors the same check the post-coder pipeline runs in
+    `orchestrator/docker_runner.py` after the agent exits. Returning False here
+    is what triggers the task_done-gate: the agent claims success but git sees
+    no diff.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=WORKSPACE_DIR,
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            # Not a git repo, or git missing — fall open (don't gate on infra failure)
+            return True
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # Ignore the same artefacts the post-coder pipeline ignores
+            if line.endswith("session_result.json") or line.endswith("session_summary.md"):
+                continue
+            if "/Temp/" in line or "/Results/" in line:
+                continue
+            return True
+        return False
+    except Exception:
+        # Any unexpected failure — fall open so we don't trap legitimate sessions
+        return True
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -337,11 +403,22 @@ class _OllamaBackend:
     Handles Ollama-specific concerns: retrying on HTTP 500 (common with
     quantized models), timeout distinction, and falling back to embedded-JSON
     tool-call parsing for models that don't use the structured tool_calls field.
+
+    Multi-model fallback: `models` is a primary-first list. For each turn we
+    try models in order — when one exhausts its 5-retry budget on transient
+    errors we move to the next. Auth/lookup errors (401/403/404) are treated
+    as fatal (don't try sibling models with the same broken state).
+
+    Sticky preference: once a model succeeds on a given turn, future turns
+    start with that model first. Callers don't need to know which model
+    answered.
     """
 
-    def __init__(self, model: str, chat_url: str, timeout: int, retry_sleep: int,
+    def __init__(self, models: list[str], chat_url: str, timeout: int, retry_sleep: int,
                  api_key: str = "") -> None:
-        self.model = model
+        if not models:
+            raise ValueError("_OllamaBackend requires at least one model")
+        self.models = list(models)
         self.chat_url = chat_url
         self.timeout = timeout
         self.retry_sleep = retry_sleep
@@ -353,55 +430,94 @@ class _OllamaBackend:
         self.total_input_tokens  = 0
         self.total_output_tokens = 0
         self.call_count          = 0
+        # Ordered set of model fallbacks fired this session, for diagnostics.
+        self.fallback_log: list[str] = []
+
+    @property
+    def model(self) -> str:
+        """Currently-preferred model — used in log lines + reachability probe."""
+        return self.models[0]
 
     def __call__(self, messages: list[dict], tools: list[dict]) -> dict:
-        payload = {
-            "model":       self.model,
-            "messages":    messages,
-            "tools":       tools,
-            "tool_choice": "auto",
-            "stream":      False,
-            "options": {
-                "temperature": 0.2,    # low temp for deterministic code generation
-                "num_ctx":     32768,
-            },
-        }
-
-        # Retry up to 5× with exponential backoff on transient errors.
-        # Cloud/local Ollama can hit 5xx, 429 (rate limit), or socket errors —
-        # treat them all as retryable. Only 4xx other than 429 is non-retryable.
         import time as _time
+        # Retry up to 5× per model with exponential backoff on transient errors.
+        # When one model exhausts its budget, fall through to the next in the
+        # list. Auth (401/403) and missing-model (404) are fatal across the
+        # whole chain — same key/account on Ollama Cloud, no point retrying.
         _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+        _CHAIN_FATAL_STATUS = {401, 403}  # 404 handled per-model (treat as not-installed → fall through)
+
+        data = None
+        used_model: str | None = None
         last_err: str | None = None
-        for attempt in range(5):
-            try:
-                resp = httpx.post(self.chat_url, json=payload,
-                                  headers=self.headers, timeout=self.timeout)
-                resp.raise_for_status()
-                data = resp.json()
+        for model_idx, model in enumerate(self.models):
+            payload = {
+                "model":       model,
+                "messages":    messages,
+                "tools":       tools,
+                "tool_choice": "auto",
+                "stream":      False,
+                "options": {
+                    "temperature": 0.2,    # low temp for deterministic code generation
+                    "num_ctx":     32768,
+                },
+            }
+            tail = "" if model_idx == 0 else f" (fallback {model_idx}/{len(self.models)-1})"
+            for attempt in range(5):
+                try:
+                    resp = httpx.post(self.chat_url, json=payload,
+                                      headers=self.headers, timeout=self.timeout)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    used_model = model
+                    if model_idx > 0:
+                        # Sticky: promote the survivor so the next turn doesn't
+                        # waste budget on the failing primary.
+                        self.models = self.models[model_idx:] + self.models[:model_idx]
+                        msg = f"recovered on fallback model {model!r}"
+                        _log(f"INFO: {msg}")
+                        self.fallback_log.append(f"{model_idx}→{model}: {msg}")
+                    break
+                except httpx.TimeoutException:
+                    last_err = f"{model}: timeout after {self.timeout}s"
+                    _log(f"WARNING: Ollama timeout on {model!r} (attempt {attempt+1}/5){tail}")
+                except httpx.HTTPStatusError as e:
+                    code = e.response.status_code
+                    body = e.response.text[:300]
+                    last_err = f"{model}: HTTP {code}: {body}"
+                    if code in _CHAIN_FATAL_STATUS:
+                        # Auth-class failure — same chain key, won't help to swap models.
+                        raise RuntimeError(f"Ollama non-retryable {code}: {body}")
+                    if code == 404:
+                        # Model not found / not pulled — break out of retry loop
+                        # and fall through to the next model in the chain.
+                        _log(f"WARNING: model {model!r} returned 404 — falling through to next")
+                        break
+                    if code in _RETRYABLE_STATUS:
+                        _log(f"WARNING: Ollama {code} on {model!r} (attempt {attempt+1}/5){tail}: {body[:120]}")
+                    else:
+                        raise RuntimeError(f"Ollama non-retryable {code}: {body}")
+                except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as e:
+                    last_err = f"{model}: network: {type(e).__name__}: {e}"
+                    _log(f"WARNING: Ollama network error on {model!r} (attempt {attempt+1}/5){tail}: {last_err}")
+                except Exception as e:
+                    last_err = f"{model}: {type(e).__name__}: {e}"
+                    _log(f"WARNING: Ollama unexpected error on {model!r} (attempt {attempt+1}/5){tail}: {last_err}")
+                # Exponential backoff: 2s, 4s, 8s, 16s, then give up on this model
+                if attempt < 4:
+                    _time.sleep(self.retry_sleep * (2 ** attempt))
+            if data is not None:
                 break
-            except httpx.TimeoutException:
-                last_err = f"timeout after {self.timeout}s"
-                _log(f"WARNING: Ollama timeout (attempt {attempt+1}/5)")
-            except httpx.HTTPStatusError as e:
-                code = e.response.status_code
-                body = e.response.text[:300]
-                last_err = f"HTTP {code}: {body}"
-                if code in _RETRYABLE_STATUS:
-                    _log(f"WARNING: Ollama {code} (attempt {attempt+1}/5): {body[:120]}")
-                else:
-                    raise RuntimeError(f"Ollama non-retryable {code}: {body}")
-            except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as e:
-                last_err = f"network: {type(e).__name__}: {e}"
-                _log(f"WARNING: Ollama network error (attempt {attempt+1}/5): {last_err}")
-            except Exception as e:
-                last_err = f"{type(e).__name__}: {e}"
-                _log(f"WARNING: Ollama unexpected error (attempt {attempt+1}/5): {last_err}")
-            # Exponential backoff: 2s, 4s, 8s, 16s, then give up
-            if attempt < 4:
-                _time.sleep(self.retry_sleep * (2 ** attempt))
-        else:
-            raise RuntimeError(f"Ollama failed after 5 retries: {last_err}")
+            # Exhausted this model — log clearly before trying the next.
+            if model_idx + 1 < len(self.models):
+                next_model = self.models[model_idx + 1]
+                _log(f"WARNING: {model!r} exhausted 5 retries — falling back to {next_model!r}")
+                self.fallback_log.append(f"{model_idx}→{model}: exhausted, switching to {next_model}")
+        if data is None:
+            raise RuntimeError(
+                f"Ollama failed across all {len(self.models)} models in chain: "
+                f"{', '.join(self.models)} — last error: {last_err}"
+            )
 
         # Track token usage for session-end metrics PATCH. Ollama's OpenAI-
         # compatible endpoint returns prompt_tokens / completion_tokens per
@@ -478,7 +594,8 @@ def run_agent(initial_prompt: str) -> int:
     """
     from orchestrator.agent_loop import AgentLoop
 
-    _log(f"Starting — model={MODEL} persona={AGENT_PERSONA} max_turns={MAX_TURNS}")
+    chain_str = ",".join(MODELS) if len(MODELS) > 1 else MODEL
+    _log(f"Starting — model={chain_str} persona={AGENT_PERSONA} max_turns={MAX_TURNS}")
     _start_self_heartbeat()
 
     # Best-effort reachability probe — don't abort on failure since Ollama may
@@ -518,7 +635,7 @@ def run_agent(initial_prompt: str) -> int:
     )
 
     backend = _OllamaBackend(
-        model=MODEL, chat_url=CHAT_URL,
+        models=MODELS, chat_url=CHAT_URL,
         timeout=OLLAMA_TIMEOUT, retry_sleep=RETRY_SLEEP,
         api_key=OLLAMA_API_KEY,
     )

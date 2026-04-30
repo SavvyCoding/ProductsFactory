@@ -148,6 +148,7 @@ class Session(Base):
     heartbeat_at:        Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     expected_deadline:   Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     kill_reason:         Mapped[Optional[str]]  = mapped_column(Text)
+    log:                 Mapped[Optional[str]]  = mapped_column(Text)
 
     product: Mapped["Product"] = relationship("Product", back_populates="sessions")
 
@@ -202,6 +203,7 @@ class SystemConfig(Base):
     pr_gate_sleep:              Mapped[Optional[int]] = mapped_column(Integer)  # default 300s
     stuck_feature_timeout_hours:Mapped[Optional[float]] = mapped_column(Float)  # default 0.75h (45 min)
     max_features_per_run:       Mapped[Optional[int]] = mapped_column(Integer)  # default 1
+    max_features_per_sprint:    Mapped[Optional[int]] = mapped_column(Integer)  # default 5
     brownfield_file_threshold:  Mapped[Optional[int]] = mapped_column(Integer)  # default 10
     recommender_pending_threshold: Mapped[Optional[int]] = mapped_column(Integer)  # default 15
     auto_merge_enabled:            Mapped[Optional[bool]] = mapped_column(Boolean)  # default False
@@ -359,6 +361,9 @@ class Sprint(Base):
     dod_status:     Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True, default=dict)
     retro_doc_path: Mapped[Optional[str]]  = mapped_column(Text, nullable=True)
     completed_at:   Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    branch_name:    Mapped[Optional[str]]  = mapped_column(String(255), nullable=True)
+    pr_number:      Mapped[Optional[int]]  = mapped_column(Integer, nullable=True)
+    pr_url:         Mapped[Optional[str]]  = mapped_column(String(500), nullable=True)
 
     phase: Mapped[Optional["Phase"]] = relationship("Phase", back_populates="sprints")
 

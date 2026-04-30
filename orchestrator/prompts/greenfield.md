@@ -14,10 +14,22 @@ If a `docs/story_<ID>.md` exists for the feature, read it first.
 
 ---
 
+## Sprint PR mode
+
+`sprint_pr_mode = {sprint_pr_mode}`
+`sprint_branch  = {sprint_branch}`
+`sprint_pr      = #{sprint_pr_number}` ({sprint_pr_url})
+
+**When `sprint_pr_mode` is `True`:** push every commit to the existing sprint branch — DO NOT create your own branch and DO NOT open a new PR. The sprint PR is already open. Steps 2 and 5 below have a "sprint mode" sub-step you must use instead of the per-feature default.
+
+**When `sprint_pr_mode` is `False`:** follow steps 2 and 5 as written — one branch + one PR per feature, the legacy flow.
+
+---
+
 {reviewer_patterns}
 ## Your job
 
-For each assigned feature you implement code, run tests, then commit, push, and open a PR yourself.
+For each assigned feature you implement code, run tests, then commit and push. PR creation only fires in per-feature mode (sprint mode reuses the open sprint PR).
 
 You have access to `git` and `gh` CLI in `/workspace`. The `GH_TOKEN` env var is already set; `gh pr create` will authenticate automatically. The remote is configured.
 
@@ -32,7 +44,18 @@ For each assigned feature (one at a time):
 - `/workspace/ARCHITECTURE.md` if present (patterns to follow)
 - The story doc at `/workspace/docs/story_<ID>.md` if it exists
 
-**2. Create a feature branch**
+**2. Check out the working branch**
+
+If `sprint_pr_mode` is `True`:
+```bash
+cd /workspace
+git fetch origin
+git checkout {sprint_branch}
+git pull origin {sprint_branch}
+```
+The sprint branch is shared across all coder runs in this sprint — your commits land on the existing PR. Do NOT create a new branch.
+
+If `sprint_pr_mode` is `False`:
 ```bash
 cd /workspace
 git checkout main && git pull --ff-only
@@ -47,7 +70,17 @@ git checkout -b feature/<id>-<short-slug>
 - Run tests scoped to the files you changed (e.g. `pytest path/to/test_foo.py -q`). Avoid running the full suite — it can be slow or flaky in this env.
 - If broken: fix or revert. If stuck after 2 attempts, write `BLOCKED: <reason>` to `/workspace/session_summary.md` and exit cleanly.
 
-**5. Commit, push, open PR**
+**5. Commit and push**
+
+If `sprint_pr_mode` is `True`:
+```bash
+git add -A
+git commit -m "[feature-<id>] <short description> [coder-{session_uid}]"
+git push origin {sprint_branch}
+```
+The `[feature-<id>]` tag lets the reviewer scope diffs per feature. Do NOT run `gh pr create` — the sprint PR `#{sprint_pr_number}` already exists.
+
+If `sprint_pr_mode` is `False`:
 ```bash
 git add -A
 git commit -m "feat: <short description> [coder-{session_uid}]"
@@ -55,27 +88,34 @@ git push -u origin HEAD
 gh pr create --base main --title "<title>" --body "Closes #<id>"
 ```
 
-**6. Record the PR in session_result.json**
+**6. Record progress in session_result.json**
 
-Append ONE JSON object per line — never an array, never a wrapping object:
+Append ONE JSON object per line — never an array, never a wrapping object.
+
+If `sprint_pr_mode` is `True`, every feature reuses the sprint PR:
+```bash
+echo '{"id": <feature_id>, "status": "Reviewing", "pr_number": {sprint_pr_number}, "pr_url": "{sprint_pr_url}"}' >> /workspace/session_result.json
+```
+
+If `sprint_pr_mode` is `False`:
 ```bash
 echo '{"id": <feature_id>, "status": "Reviewing", "pr_number": <N>, "pr_url": "<url>"}' >> /workspace/session_result.json
 ```
 
-Blocked variant:
+Blocked variant (either mode):
 ```bash
 echo '{"id": <feature_id>, "status": "Blocked", "blocked_reason": "<reason>"}' >> /workspace/session_result.json
 ```
 
 **7. When all features are done**
-- Append a final-summary line to `/workspace/session_summary.md` listing feature IDs and PR numbers.
+- Append a final-summary line to `/workspace/session_summary.md` listing feature IDs and (in per-feature mode) PR numbers.
 - Exit cleanly.
 
 ---
 
 ## Safety net
 
-If you exit cleanly without a `Reviewing` entry in `session_result.json` for an assigned feature, the orchestrator runs a deterministic Python fallback that commits + pushes + opens a PR for you. That fallback is the safety net — try it yourself first because you have full context (good commit messages, scoped diffs, useful PR descriptions).
+If you exit cleanly without a `Reviewing` entry in `session_result.json` for an assigned feature, the orchestrator runs a deterministic Python fallback that commits + pushes for you. In sprint mode the fallback pushes to `{sprint_branch}` (no new PR opens). In per-feature mode it cuts a fresh branch and opens a PR. Try it yourself first — you have full context (good commit messages, scoped diffs).
 
 ---
 
@@ -85,4 +125,5 @@ If you exit cleanly without a `Reviewing` entry in `session_result.json` for an 
 - ONE JSON object per line in `session_result.json`. No arrays. No `{"features": [...]}` wrapping.
 - `status` must be exactly `"Reviewing"` (with integer `pr_number`) or `"Blocked"`.
 - Use a file-write tool for code edits. Never `sed -i` / `awk -i`.
+- In sprint mode: never create a branch, never run `gh pr create`. The sprint branch and PR already exist.
 - If stuck, write your reason to `session_summary.md` and exit. Don't loop on the same failing command.

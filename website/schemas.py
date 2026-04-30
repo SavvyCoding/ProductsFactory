@@ -449,6 +449,9 @@ class SprintOut(BaseModel):
     dod_status:     Optional[dict] = None
     retro_doc_path: Optional[str] = None
     completed_at:   Optional[datetime] = None
+    branch_name:    Optional[str] = None
+    pr_number:      Optional[int] = None
+    pr_url:         Optional[str] = None
 
     model_config = {"from_attributes": True}
 
