@@ -75,7 +75,35 @@ Your working directory is /workspace. All files must be written inside /workspac
    - [ ] No path traversal (e.g. joining user input onto file paths without sanitization)
    - [ ] No arbitrary file writes outside designated directories
 
-4. **For each issue found**, file a bug feature and apply the `security` label:
+4. **For each issue found**, file a bug feature and apply the `security` label.
+
+   **🚨 DEDUP FIRST — do this for every issue before creating a feature.**
+   Without this, the same vulnerability gets filed every audit cycle and the
+   coder burns sessions implementing the same fix N times.
+
+   a0. Search existing open features for a matching bug:
+   ```bash
+   # Pull all non-terminal features and grep for keywords from your bug
+   # (e.g. function/decorator/CVE name, file path, error type).
+   curl -s {pm_api_url}/api/products/{product_id}/features \
+     | python3 -c "
+   import sys, json
+   feats = json.load(sys.stdin)
+   keyword = '<KEYWORD>'.lower()  # set to a distinctive token from your finding
+   open_states = ('Pending','Approved','Designed','Implementing','Reviewing','Reviewed','Blocked')
+   matches = [f for f in feats if f.get('status') in open_states
+              and keyword in (f.get('name','') + ' ' + f.get('description','')).lower()]
+   for f in matches: print(f\"#{f['id']} {f['status']:12} {f['name']}\")
+   "
+   ```
+   - If a match exists, **skip the create** below. Optionally add a comment to
+     the existing feature noting that this PR re-surfaces it:
+     ```bash
+     curl -s -X POST {pm_api_url}/api/features/<existing_id>/comments \
+       -H "Content-Type: application/json" \
+       -d '{"author":"security_auditor","body":"Re-found in PR #<pr_number>"}'
+     ```
+   - Only proceed to (a) when **no** open feature describes the same issue.
 
    a. Create the bug feature (auto-approved so it enters the coder pipeline immediately):
    ```
