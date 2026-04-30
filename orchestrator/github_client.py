@@ -277,6 +277,27 @@ def reconcile_in_flight_prs(product: dict):
                 if pr_n:
                     candidates.append((f, int(pr_n)))
 
+            # Migration sweep runs BEFORE the in-flight PR reconciliation
+            # because products with no in-flight PRs (everything Approved or
+            # Blocked, no Reviewing/Implementing) would otherwise short-
+            # circuit out via the candidates-empty early return below.
+            stranded = [
+                f["id"] for f in features_data
+                if f.get("status") == "Blocked" and f.get("sprint_id") is not None
+            ]
+            if stranded:
+                try:
+                    client.post(
+                        f"/api/products/{product['id']}/sprints/blocked/route",
+                        json={
+                            "feature_ids": stranded[:20],
+                            "reason": "Migrated from legacy Blocked state",
+                        },
+                    )
+                    log.info(f"[in-flight] migration sweep: routed {len(stranded[:20])} stranded Blocked feature(s)")
+                except Exception as re:
+                    log.warning(f"[in-flight] migration sweep failed: {re}")
+
             if not candidates:
                 return
 
@@ -367,29 +388,6 @@ def reconcile_in_flight_prs(product: dict):
                             f"[in-flight] Feature #{fid} → Reviewing "
                             f"(PR #{pr_n} open, status was {cur_status})"
                         )
-
-            # Migration sweep: catch legacy Blocked features (those that
-            # auto-Blocked before the Blocked-sprint route existed, OR were
-            # manually set Blocked by a PM) and route them to the per-product
-            # holdpen so the dashboard surfaces them. Idempotent — features
-            # already on the Blocked sprint are skipped server-side.
-            stranded = [
-                f["id"] for f in features
-                if f.get("status") == "Blocked" and f.get("sprint_id") is not None
-            ]
-            if stranded:
-                # Cap routing per cycle to avoid a thundering herd; rest get
-                # picked up next cycle.
-                try:
-                    client.post(
-                        f"/api/products/{product['id']}/sprints/blocked/route",
-                        json={
-                            "feature_ids": stranded[:20],
-                            "reason": "Migrated from legacy Blocked state",
-                        },
-                    )
-                except Exception as re:
-                    log.warning(f"[in-flight] migration sweep failed: {re}")
 
     except Exception as e:
         log.warning(f"reconcile_in_flight_prs failed: {e}")
