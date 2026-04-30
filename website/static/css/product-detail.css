@@ -1116,6 +1116,102 @@
 }
 .metric-card--small .metric-icon { width: 30px; height: 30px; font-size: 14px; }
 .metric-card--small .metric-value { font-size: 22px; }
+
+
+/* ── Blocked Sprint card — theme-aware ──────────────────── */
+/* Uses --color-danger-* tokens so it reads correctly on both light and dark
+   themes (tokens.css has dark-theme overrides that swap subtle to a 10%
+   alpha-red and fg/emphasis to brighter reds). The empty state keeps a
+   neutral border + canvas so it doesn't shout when nothing's stuck. */
+.blocked-sprint-card {
+  background: var(--color-canvas-default);
+  border: 1px solid var(--color-border-default);
+  border-left: 4px solid var(--color-border-default);
+  border-radius: var(--radius-md, 8px);
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.blocked-sprint-card.is-populated {
+  background: var(--color-danger-subtle);
+  border-color: var(--color-danger-emphasis);
+  border-left-color: var(--color-danger-emphasis);
+}
+.blocked-sprint-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0;
+}
+.blocked-sprint-card.is-populated .blocked-sprint-header { margin-bottom: 8px; }
+
+.blocked-sprint-eyebrow {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  margin-bottom: 2px;
+  color: var(--color-fg-muted);
+}
+.blocked-sprint-card.is-populated .blocked-sprint-eyebrow {
+  color: var(--color-danger-fg);
+}
+
+.blocked-sprint-headline {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-fg-default);
+}
+.blocked-sprint-card.is-populated .blocked-sprint-headline {
+  color: var(--color-danger-emphasis);
+}
+
+.blocked-sprint-sub {
+  font-size: 11px;
+  margin-top: 2px;
+  color: var(--color-fg-muted);
+}
+.blocked-sprint-card.is-populated .blocked-sprint-sub {
+  color: var(--color-danger-emphasis);
+  opacity: 0.85;
+}
+
+.blocked-sprint-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.blocked-sprint-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 8px 10px;
+  background: var(--color-canvas-default);
+  border: 1px solid var(--color-border-default);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color 0.1s ease, background 0.1s ease;
+}
+.blocked-sprint-row:hover {
+  border-color: var(--color-danger-emphasis);
+  background: var(--color-canvas-subtle);
+}
+.blocked-sprint-row-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-fg-default);
+}
+.blocked-sprint-row-reason {
+  font-size: 11px;
+  color: var(--color-fg-muted);
+  margin-top: 2px;
+}
+.blocked-sprint-row-attempts {
+  font-size: 11px;
+  color: var(--color-fg-muted);
+  flex-shrink: 0;
+  margin-left: 8px;
+  font-variant-numeric: tabular-nums;
+}
 .metric-card.metric--accent {
   border-color: rgba(37, 99, 235, 0.25);
   background: linear-gradient(180deg, rgba(37, 99, 235, 0.04) 0%, var(--color-canvas-default) 60%);

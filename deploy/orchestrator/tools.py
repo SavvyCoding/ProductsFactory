@@ -88,6 +88,22 @@ def _pm(method: str, path: str, body: dict | None = None) -> str:
     return pm_api({"method": method, "path": path, "body": body})
 
 
+def _bump_product_last_run(product_id: int) -> None:
+    """Mark this product as visited by the orchestrator (advances round-robin).
+
+    Best-effort PATCH — never raises so a transient PM API hiccup doesn't
+    crash the cycle. Round-robin is `last_run_at ASC NULLS FIRST`, so
+    bumping to NOW pushes this product to the back of the queue and the
+    next cycle picks the next-oldest product.
+    """
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        _pm("PATCH", f"/api/products/{product_id}",
+            {"last_run_at": _dt.now(_tz.utc).isoformat()})
+    except Exception:
+        log.debug(f"[round-robin] could not bump last_run_at for product {product_id}")
+
+
 _PRODUCT_KEEP = {"id", "name", "status", "working_dir", "github_repo", "tech_stack",
                  "run_now", "run_trainer_now", "quiet_hours_start", "quiet_hours_end",
                  "daily_session_cap", "last_run_at", "config", "type"}
@@ -426,7 +442,17 @@ def run_cycle(args: dict, **kwargs) -> str:
         action_raw = json.loads(determine_next_action({"product_id": product_id}, **kwargs))
         action_data = action_raw.get("data") if isinstance(action_raw, dict) else action_raw
         if not isinstance(action_data, dict):
+            # Even on error, mark this product visited so round-robin advances.
+            _bump_product_last_run(product_id)
             return _ok({"action": "exit", "reason": "determine_next_action returned nothing"})
+
+        # Bump last_run_at on every cycle visit, NOT just on successful Docker
+        # exits. Without this, products that resolve to action=exit (no
+        # actionable work, PR-gated, etc.) keep their stale last_run_at
+        # forever and dominate the round-robin — starving other products.
+        # The launch_session branch's post-success bump still happens; this
+        # is just defensive coverage for the no-launch paths.
+        _bump_product_last_run(product_id)
 
         action = action_data.get("action")
         if action == "plan_sprints":
