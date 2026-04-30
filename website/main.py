@@ -98,7 +98,7 @@ templates = Jinja2Templates(directory="website/templates")
 # We map product.working_dir → /workspace/{relative_part} to locate output/ videos.
 _HOST_PRODUCTS_BASE     = os.environ.get("PRODUCTS_BASE_DIR", "").rstrip("/\\").replace("\\", "/")
 STUCK_FEATURE_HOURS     = int(os.environ.get("STUCK_FEATURE_TIMEOUT_HOURS", "2"))
-SESSION_LOG_MAXLEN      = int(os.environ.get("SESSION_LOG_MAXLEN", "1000"))
+SESSION_LOG_MAXLEN      = int(os.environ.get("SESSION_LOG_MAXLEN", "4000"))
 SESSION_LOG_WARN_AT     = int(SESSION_LOG_MAXLEN * 0.9)  # warn when buffer is 90% full
 
 # Claude model used for PM-facing LLM features (feature recommendations, vision articulation)
@@ -204,9 +204,10 @@ _session_subscribers: dict[int, list] = defaultdict(list)
 # Cap on persisted per-session transcript size — last N lines from the
 # in-memory buffer at session close. Earlier turns drop off; this is a
 # best-effort snapshot so the History tab has *something* rather than
-# nothing. For full transcripts, structured per-turn capture is the
-# follow-up (see plan).
-_SESSION_LOG_PERSIST_LINES = 500
+# nothing. Sized for typical Ollama-with-retries sessions (high turn
+# count + spammy WARNING lines) — we want to keep ~1-2 hours of activity.
+# For full transcripts, structured per-turn capture is the follow-up.
+_SESSION_LOG_PERSIST_LINES = 2000
 
 
 def _snapshot_session_log(session: "DBSession") -> str | None:
@@ -267,22 +268,38 @@ async def _sprint_cap(db: AsyncSession) -> int:
     return val if (val and val > 0) else 5
 
 
+# Statuses that terminate a feature's lifecycle. Such features are committed
+# history; they no longer compete for in-flight sprint capacity. Used both by
+# the cap check and the bulk-approve auto-assign code below to keep the cap
+# semantics consistent with how the orchestrator measures "open work".
+_TERMINAL_FEATURE_STATUSES = ("Pushed", "Deferred", "Rejected", "Reverted")
+
+
 async def _check_sprint_capacity(sprint_id: int, additions: int, db: AsyncSession) -> None:
     """
     Raise 422 if assigning `additions` more features to `sprint_id` would push it
     over the system-wide cap. Does nothing for falsy sprint_id (unassign path).
+
+    Terminal features (Pushed/Deferred/Rejected/Reverted) don't count — they're
+    committed history and shouldn't permanently consume sprint slots. Without
+    this filter, security_auditor's bug-fix endpoint 422s as soon as a sprint
+    has any merged features (sprint deadlock: security_clean stays false
+    because no bug feature ever lands on the sprint).
     """
     if not sprint_id or additions <= 0:
         return
     cap = await _sprint_cap(db)
     cur = await db.execute(
-        select(func.count()).select_from(Feature).where(Feature.sprint_id == sprint_id)
+        select(func.count()).select_from(Feature).where(
+            Feature.sprint_id == sprint_id,
+            Feature.status.notin_(_TERMINAL_FEATURE_STATUSES),
+        )
     )
     current = cur.scalar() or 0
     if current + additions > cap:
         raise HTTPException(
             status_code=422,
-            detail=f"Sprint cap exceeded — would have {current + additions} features (cap is {cap}).",
+            detail=f"Sprint cap exceeded — would have {current + additions} open features (cap is {cap}).",
         )
 
 
@@ -1504,7 +1521,10 @@ async def bulk_approve(
     used = 0
     if next_sprint:
         cur = await db.execute(
-            select(func.count()).select_from(Feature).where(Feature.sprint_id == next_sprint.id)
+            select(func.count()).select_from(Feature).where(
+                Feature.sprint_id == next_sprint.id,
+                Feature.status.notin_(_TERMINAL_FEATURE_STATUSES),
+            )
         )
         used = cur.scalar() or 0
     for f in result.scalars().all():
@@ -1547,7 +1567,10 @@ async def bulk_approve_all(
     used = 0
     if next_sprint:
         cur = await db.execute(
-            select(func.count()).select_from(Feature).where(Feature.sprint_id == next_sprint.id)
+            select(func.count()).select_from(Feature).where(
+                Feature.sprint_id == next_sprint.id,
+                Feature.status.notin_(_TERMINAL_FEATURE_STATUSES),
+            )
         )
         used = cur.scalar() or 0
     for f in result.scalars().all():
@@ -1614,10 +1637,14 @@ async def api_next_product(db: AsyncSession = Depends(get_db)):
         .where(Product.status == "ready")
         .where(has_actionable | has_no_actionable)
         # 1. run_now=true wins outright (PM-forced priority).
-        # 2. Otherwise oldest-first round-robin. NULLS LAST so a brand-new
-        #    product with last_run_at=NULL doesn't block every other product
-        #    forever — it joins the rotation after at least one cycle.
-        .order_by(Product.run_now.desc(), Product.last_run_at.asc().nullslast())
+        # 2. Otherwise oldest-first round-robin. NULLS FIRST so brand-new
+        #    products and ones whose first run errored out (last_run_at stays
+        #    NULL because the poller only updates it on exit_code==0) get
+        #    picked. Earlier ASC NULLS LAST attempt was logically inverted —
+        #    NULL there means "abandoned forever" because every successful
+        #    product has a non-NULL timestamp older than NULL's sort
+        #    position. Matches the existing partial index on the column.
+        .order_by(Product.run_now.desc(), Product.last_run_at.asc().nullsfirst())
         .limit(1)
     )
     return result.scalar_one_or_none()
@@ -1806,7 +1833,10 @@ async def api_pm_status_update(
         if next_sprint:
             cap = await _sprint_cap(db)
             cur = await db.execute(
-                select(func.count()).select_from(Feature).where(Feature.sprint_id == next_sprint.id)
+                select(func.count()).select_from(Feature).where(
+                Feature.sprint_id == next_sprint.id,
+                Feature.status.notin_(_TERMINAL_FEATURE_STATUSES),
+            )
             )
             if (cur.scalar() or 0) < cap:
                 feature.sprint_id = next_sprint.id

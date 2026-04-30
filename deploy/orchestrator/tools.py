@@ -519,7 +519,14 @@ def determine_next_action(args: dict, **kwargs) -> str:
             try:
                 with _pm_client() as client:
                     cd = client.post(f"/api/sprints/{sid}/check-dod").json()
-                dod = cd.get("dod") if isinstance(cd, dict) else {}
+                # Skip-action paths ({"action":"skipped"}) return no `dod`
+                # key — `cd.get("dod")` returns None then, not {}. `or {}`
+                # collapses both Nones and missing keys into a safe empty
+                # dict so subsequent dod.get(...) calls don't AttributeError.
+                # Triggered when the post-sprint regression chain auto-
+                # completes the sprint between this cycle's active_sprint
+                # fetch and the check-dod POST.
+                dod = (cd.get("dod") if isinstance(cd, dict) else None) or {}
             except Exception:
                 cd, dod = {}, {}
 

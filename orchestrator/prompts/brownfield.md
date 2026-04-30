@@ -4,25 +4,36 @@ Working dir: `/workspace`. Stack: {tech_stack}. Session: `{session_uid}`.
 
 ---
 
+## ⚠️ MANDATORY FIRST ACTION — branch checkout
+
+`sprint_pr_mode = {sprint_pr_mode}`
+`sprint_branch  = {sprint_branch}`
+`sprint_pr      = #{sprint_pr_number}`
+
+**Before reading any other file or running any other command**, run the appropriate checkout:
+
+If `sprint_pr_mode` is `True` — **your first tool call MUST be:**
+```bash
+cd /workspace && git fetch origin && git checkout {sprint_branch} && git pull origin {sprint_branch}
+```
+You will work on the existing `{sprint_branch}` branch. Every commit pushes to the open sprint PR `#{sprint_pr_number}`. **DO NOT create your own branch and DO NOT open a new PR.**
+
+If `sprint_pr_mode` is `False` — pick the FIRST feature in the list below, then your first tool call is:
+```bash
+cd /workspace && git checkout main && git pull --ff-only && git checkout -b feature/<id>-<slug>
+```
+
+DO NOT skip this step. DO NOT begin reading files or running tests until the right branch is checked out — the post-coder pipeline relies on you being on the correct branch.
+
+---
+
 ## Assigned features ({assigned_feature_count})
 
 {assigned_features}
 
 If the list is empty, exit cleanly (final assistant message, no tool calls).
 
-If a `docs/story_<ID>.md` exists for the feature, read it first.
-
----
-
-## Sprint PR mode
-
-`sprint_pr_mode = {sprint_pr_mode}`
-`sprint_branch  = {sprint_branch}`
-`sprint_pr      = #{sprint_pr_number}` ({sprint_pr_url})
-
-**When `sprint_pr_mode` is `True`:** push every commit to the existing sprint branch — DO NOT create your own branch and DO NOT open a new PR. The sprint PR is already open. Steps 2 and 5 below have a "sprint mode" sub-step you must use instead of the per-feature default.
-
-**When `sprint_pr_mode` is `False`:** follow steps 2 and 5 as written — one branch + one PR per feature, the legacy flow.
+If a `docs/story_<ID>.md` exists for the feature, read it AFTER the branch checkout above.
 
 ---
 

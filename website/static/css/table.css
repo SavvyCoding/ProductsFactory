@@ -394,8 +394,14 @@
   border-radius: var(--radius-md);
   padding: 8px 12px;
   margin: 6px 0 0;
-  max-height: 400px;
-  overflow: auto;
+  /* Vertical scroll inside a fixed window so big transcripts don't push
+     the rest of the History detail row off-screen. `overflow-y: scroll`
+     (not `auto`) keeps the scrollbar always visible — without it, browsers
+     hide the bar when the box isn't hovered, which makes long transcripts
+     look truncated even though they're scrollable. */
+  max-height: 500px;
+  overflow-y: scroll;
+  overflow-x: auto;
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--color-fg-default);
