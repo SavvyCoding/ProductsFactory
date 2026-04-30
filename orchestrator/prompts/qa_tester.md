@@ -89,7 +89,34 @@ Your working directory is /workspace. All files must be written inside /workspac
    ```
    Commit and push the Temp/ directory so the next coder session can read it.
 
-   b. **File a bug feature** for each distinct test failure:
+   b. **File a bug feature** for each distinct test failure.
+
+   **🚨 DEDUP FIRST.** Before posting a new bug, search open features for
+   a matching issue (same test name, same error, same module). Without
+   this, you re-file the same bug every QA cycle and the coder burns
+   sessions on duplicates.
+
+   ```bash
+   # Replace KEYWORD with a distinctive token (test name, decorator, file path)
+   curl -s {pm_api_url}/api/products/{product_id}/features \
+     | python3 -c "
+   import sys, json
+   feats = json.load(sys.stdin)
+   keyword = 'KEYWORD'.lower()
+   open_states = ('Pending','Approved','Designed','Implementing','Reviewing','Reviewed','Blocked')
+   for f in feats:
+     if f.get('status') in open_states and keyword in (f.get('name','') + ' ' + f.get('description','')).lower():
+       print(f\"#{f['id']} {f['status']:12} {f['name']}\")
+   "
+   ```
+   If a match exists, **skip the create** and instead add a comment:
+   ```bash
+   curl -s -X POST {pm_api_url}/api/features/<existing_id>/comments \
+     -H "Content-Type: application/json" \
+     -d '{"author":"qa_tester","body":"Re-found via test failure in PR #<pr_number>"}'
+   ```
+   Only file a fresh bug when no open feature describes the same failure.
+
    ```bash
    BUG_RESP=$(curl -s -X POST {pm_api_url}/api/features \
      -H "Content-Type: application/json" \
