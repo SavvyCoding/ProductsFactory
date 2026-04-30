@@ -267,7 +267,7 @@ FastAPI evaluates routes in definition order. The parameterized `GET /api/featur
 - **Sync in orchestrator**: `orchestrator/` runs on the Windows host with standard `httpx` (sync) calls to the PM API
 - **No hardcoded config**: everything from env vars (`.env.example` is the canonical reference)
 - **Idempotent operations**: `setup_product.py` discovery is safe to run multiple times; templates only written if missing
-- **last_run_at only updated on success**: poller sets `last_run_at` only when Docker exits with code 0, ensuring failed runs don't advance the round-robin pointer
+- **last_run_at advances on every cycle visit**: orchestrator bumps `last_run_at` after `determine_next_action` runs for a product, regardless of whether it produced a launch — so products that resolve to `action=exit` (no actionable work, PR-gated, etc.) still cycle through the round-robin instead of starving every other product. The post-success bump from `launch_session` (on Docker exit code 0) still happens; the cycle-visit bump is defensive coverage for the no-launch paths.
 - **Model changes require a migration**: add the column to `website/models.py` AND create a new `db/migrations/versions/NNN_*.py` file — Alembic does not auto-generate these
 - **Route ordering matters**: in `website/main.py`, parameterized routes (`/api/features/{id}`) must come after all static routes at the same path prefix to avoid shadowing
 - **Thread safety in orchestrator**: `orchestrator/alerts.py` uses a `threading.Lock` for the webhook fail counter; the poller spawns daemon threads for log streaming and live-polling `session_result.json`

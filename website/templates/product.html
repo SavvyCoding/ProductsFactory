@@ -773,20 +773,20 @@
   {% set blocked_sprint = sprints | selectattr('kind', 'equalto', 'blocked') | first %}
   {% set blocked_features = (features | selectattr('sprint_id', 'equalto', blocked_sprint.id) | list) if blocked_sprint else [] %}
   {% set is_populated = blocked_features | length > 0 %}
-  <div class="card" style="margin-bottom:16px;border-left:4px solid {% if is_populated %}#dc2626{% else %}var(--border){% endif %};{% if is_populated %}background:#fef2f2{% endif %}">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:{% if is_populated %}8px{% else %}0{% endif %}">
+  <div class="blocked-sprint-card {% if is_populated %}is-populated{% endif %}">
+    <div class="blocked-sprint-header">
       <div>
-        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:2px;color:{% if is_populated %}#dc2626{% else %}var(--text-muted){% endif %}">
+        <div class="blocked-sprint-eyebrow">
           🚫 BLOCKED SPRINT{% if is_populated %} — needs human triage{% endif %}
         </div>
-        <div style="font-size:14px;font-weight:700;color:{% if is_populated %}#7f1d1d{% else %}var(--text){% endif %}">
+        <div class="blocked-sprint-headline">
           {% if is_populated %}
             {{ blocked_features | length }} feature{{ 's' if blocked_features | length != 1 else '' }} exceeded max_fix_attempts
           {% else %}
             No features awaiting triage
           {% endif %}
         </div>
-        <div style="font-size:11px;color:{% if is_populated %}#991b1b{% else %}var(--text-muted){% endif %};margin-top:2px">
+        <div class="blocked-sprint-sub">
           {% if is_populated %}
             Re-route a feature to a normal sprint after fixing the root cause, or mark Rejected.
           {% else %}
@@ -796,20 +796,18 @@
       </div>
     </div>
     {% if is_populated %}
-    <div style="display:flex;flex-direction:column;gap:5px">
+    <div class="blocked-sprint-list">
       {% for f in blocked_features %}
-      <div class="phase-card" data-feature-id="{{ f.id }}" style="display:flex;justify-content:space-between;align-items:flex-start;padding:8px 10px;background:#fff;border-radius:6px;border:1px solid #fecaca;cursor:pointer">
+      <div class="phase-card blocked-sprint-row" data-feature-id="{{ f.id }}">
         <div style="min-width:0;flex:1">
-          <div style="font-size:13px;font-weight:600;color:var(--text)">
+          <div class="blocked-sprint-row-name">
             {% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
           </div>
           {% if f.blocked_reason %}
-          <div style="font-size:11px;color:var(--text-muted);margin-top:2px">{{ f.blocked_reason }}</div>
+          <div class="blocked-sprint-row-reason">{{ f.blocked_reason }}</div>
           {% endif %}
         </div>
-        <span style="font-size:11px;color:var(--text-muted);flex-shrink:0;margin-left:8px">
-          fix_attempts: {{ f.fix_attempts or 0 }}
-        </span>
+        <span class="blocked-sprint-row-attempts">fix_attempts: {{ f.fix_attempts or 0 }}</span>
       </div>
       {% endfor %}
     </div>
