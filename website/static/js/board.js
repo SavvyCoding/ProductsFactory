@@ -6,11 +6,12 @@ function escHtmlGlobal(s) {
 }
 
 // ── TAB SWITCHING ─────────────────────────────────────────
-const TAB_IDS = ['board','sprints','prs','history','videos','live','settings'];
+const TAB_IDS = ['summary','board','sprints','prs','history','videos','live','settings'];
 
 function switchTab(name, btn) {
   TAB_IDS.forEach(id => {
-    document.getElementById('tab-' + id).style.display = id === name ? '' : 'none';
+    const el = document.getElementById('tab-' + id);
+    if (el) el.style.display = id === name ? '' : 'none';
   });
   document.querySelectorAll('.pf-sidebar-item').forEach(b => b.classList.remove('active'));
   if (btn) btn.classList.add('active');

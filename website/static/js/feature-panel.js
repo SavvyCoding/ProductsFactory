@@ -289,8 +289,10 @@ async function removeLink(featureId, linkId) {
 }
 
 // ── Wire up feature card clicks ──────────────────────────
+// Matches both the phase-card variant (cards on Sprints/Backlog) and the
+// fbt-row variant (Feature Backlog table rows). Both expose data-feature-id.
 document.addEventListener('click', function(e) {
-  const card = e.target.closest('.phase-card[data-feature-id]');
+  const card = e.target.closest('.phase-card[data-feature-id], .fbt-row[data-feature-id]');
   if (!card) return;
   // Don't open panel if clicking on a button, link, checkbox, or form element
   if (e.target.closest('button, a, input, select, form')) return;

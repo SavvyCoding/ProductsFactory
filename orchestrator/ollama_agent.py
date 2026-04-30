@@ -396,35 +396,57 @@ def dispatch_tool(name: str, args: dict) -> tuple[str, bool]:
 
 
 def _agent_made_edits() -> bool:
-    """Return True if `git status --porcelain` shows any changes inside WORKSPACE_DIR.
+    """Return True if the workspace shows any committed or uncommitted changes.
 
-    Mirrors the same check the post-coder pipeline runs in
-    `orchestrator/docker_runner.py` after the agent exits. Returning False here
-    is what triggers the task_done-gate: the agent claims success but git sees
-    no diff.
+    Three signals count as "made edits":
+      1. Uncommitted changes in the working tree (`git status --porcelain`)
+      2. Commits ahead of the upstream branch (committed but not pushed)
+      3. Commits ahead of `origin/main` when no upstream is set yet
+
+    Without (2) and (3), the gate misfires when the agent does the right
+    thing — edits files, then commits — because `git status` is clean
+    post-commit. The gate then refuses task_done and traps the agent
+    in a confused loop.
+
+    Returning True for any unexpected error so we don't gate-block on
+    infra issues (missing git, not a repo, etc.).
     """
     try:
-        result = subprocess.run(
+        # 1. Uncommitted changes in the tree
+        status = subprocess.run(
             ["git", "status", "--porcelain"],
-            cwd=WORKSPACE_DIR,
-            capture_output=True, text=True, timeout=15,
+            cwd=WORKSPACE_DIR, capture_output=True, text=True, timeout=15,
         )
-        if result.returncode != 0:
-            # Not a git repo, or git missing — fall open (don't gate on infra failure)
-            return True
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            # Ignore the same artefacts the post-coder pipeline ignores
-            if line.endswith("session_result.json") or line.endswith("session_summary.md"):
-                continue
-            if "/Temp/" in line or "/Results/" in line:
-                continue
-            return True
+        if status.returncode == 0:
+            for line in status.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if line.endswith("session_result.json") or line.endswith("session_summary.md"):
+                    continue
+                if "/Temp/" in line or "/Results/" in line:
+                    continue
+                return True
+        elif status.returncode != 0 and "not a git repository" in (status.stderr or "").lower():
+            return True  # not a git repo — fall open
+
+        # 2/3. Local commits ahead of remote tracking branch (or main).
+        # `git rev-list --count @{u}..HEAD` returns the count of commits on
+        # HEAD not on the upstream. Falls back to origin/main if no upstream.
+        for ref in ("@{u}", "origin/main", "origin/master"):
+            ahead = subprocess.run(
+                ["git", "rev-list", "--count", f"{ref}..HEAD"],
+                cwd=WORKSPACE_DIR, capture_output=True, text=True, timeout=10,
+            )
+            if ahead.returncode == 0:
+                try:
+                    if int((ahead.stdout or "0").strip()) > 0:
+                        return True
+                except ValueError:
+                    pass
+                break  # ref resolved (even if count was 0) — don't try fallbacks
         return False
     except Exception:
-        # Any unexpected failure — fall open so we don't trap legitimate sessions
         return True
 
 
