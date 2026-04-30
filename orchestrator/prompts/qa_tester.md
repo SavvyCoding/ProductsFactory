@@ -129,23 +129,28 @@ Your working directory is /workspace. All files must be written inside /workspac
    gh pr comment <pr_number> --body "QA Tester [{session_uid}]: Added automated tests. Coverage added for: <list what was tested>"
    ```
 
-9. **Sprint DoD sign-off** — if the feature being tested belongs to a sprint, sign off QA for that sprint:
+9. **Sprint DoD sign-off** — sign off QA for the **active sprint** (not the
+   tested feature's sprint). Features can belong to older completed/planned
+   sprints; the DoD gate that matters is the one on the currently-active
+   sprint.
 
-   First get the feature's sprint_id:
+   Look up the active sprint:
    ```bash
-   curl -s {pm_api_url}/api/features/<feature_id>
+   SPRINT_ID=$(curl -s {pm_api_url}/api/products/{product_id}/sprints/active | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id') if d else '')")
    ```
-   If `sprint_id` is not null, and tests passed:
+   If `$SPRINT_ID` is empty there is no active sprint — skip sign-off entirely.
+
+   Otherwise, if tests passed:
    ```bash
-   curl -s -X POST {pm_api_url}/api/sprints/<sprint_id>/sign-off \
+   curl -s -X POST {pm_api_url}/api/sprints/$SPRINT_ID/sign-off \
      -H "Content-Type: application/json" \
-     -d '{"gate": "qa_passed", "value": true, "notes": "All tests passing — PR #{pr_number}"}'
+     -d '{"gate": "qa_passed", "value": true, "notes": "All tests passing — PR #<pr_number>"}'
    ```
    If tests could not be fixed:
    ```bash
-   curl -s -X POST {pm_api_url}/api/sprints/<sprint_id>/sign-off \
+   curl -s -X POST {pm_api_url}/api/sprints/$SPRINT_ID/sign-off \
      -H "Content-Type: application/json" \
-     -d '{"gate": "qa_passed", "value": false, "notes": "Test failures unresolved — see Temp/qa_notes_{feature_id}.md"}'
+     -d '{"gate": "qa_passed", "value": false, "notes": "Test failures unresolved — see Temp/qa_notes_<feature_id>.md"}'
    ```
 
 10. **Exit 0** when done.
