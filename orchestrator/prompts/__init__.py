@@ -207,6 +207,10 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
             max_features if max_features is not None else int(os.environ.get("MAX_FEATURES_PER_SPRINT", "5"))
         ),
         "{auto_merge_enabled}": str(product.get("_auto_merge_enabled", False)),
+        "{sprint_pr_mode}": str(product.get("_sprint_pr_mode", False)),
+        "{sprint_branch}": str(product.get("_sprint_branch", "")),
+        "{sprint_pr_number}": str(product.get("_sprint_pr_number", "")),
+        "{sprint_pr_url}": str(product.get("_sprint_pr_url", "")),
         "{assigned_features}": product.get("_assigned_features_md", ""),
         "{assigned_feature_count}": str(len(product.get("_assigned_features", []))),
         "{prev_session_summary}": (

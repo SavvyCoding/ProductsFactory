@@ -8,17 +8,47 @@ Working dir: `/workspace`. PM API: `{pm_api_url}`. Session: `{session_uid}`.
 
 {assigned_features}
 
-If empty, call `task_done(status="success", summary="no work")` immediately.
+---
+
+## How this session works (read carefully)
+
+You produce **one story file per feature**, in order. The list above may have several features — process them **one at a time**. Do not batch, do not look ahead, do not try to handle two features in one tool call.
+
+For each feature, you go through these phases in order:
+
+1. **Read** — gather context (only the first feature; cached after that)
+2. **Write** — create `docs/story_<NNN>.md` with the template below
+3. **Record** — append one line to `session_result.json`
+4. **STOP** — do not start the next feature until the previous file exists on disk
+
+After the last feature, you commit + push everything and call `task_done`.
+
+**Rules for tiny models / quantised backends:**
+- One tool call per turn. After each tool result, decide ONE next step.
+- Never write two story files in the same turn.
+- Never call `task_done` before all files in the assigned list have a corresponding `Designed` line in `session_result.json`.
 
 ---
 
-## Do exactly this, in order
+## Phase 1 — Read context (do this exactly once)
 
-For EACH feature above:
+On your **first turn only**, run:
 
-**1.** Read `/workspace/CLAUDE.md` once (only the first feature — skip on subsequent).
+```
+read_file("/workspace/CLAUDE.md")
+```
 
-**2.** Write the story to `/workspace/docs/story_<ID>.md` (zero-pad to 3 digits, e.g. `story_027.md`). Use this exact template:
+After reading, do not re-read on later turns. Move to Phase 2.
+
+If the assigned feature list is empty, skip everything and call `task_done(status="success", summary="no work")` immediately.
+
+---
+
+## Phase 2 — Write the story for ONE feature
+
+Pick the **first feature in the list that does not yet have a `docs/story_<NNN>.md` file**. (To check: run `read_file("/workspace/docs/story_<NNN>.md")` — if it returns a missing-file error, you need to write it.)
+
+Use this template **exactly**. Substitute the `<placeholders>` only — keep section headers, formatting, and order:
 
 ```markdown
 # Story: <feature_name>
@@ -31,9 +61,23 @@ For EACH feature above:
 **So that** <benefit>
 
 ## Acceptance Criteria
-- [ ] Given <context>, when <action>, then <outcome>
-- [ ] Given <context>, when <action>, then <outcome>
-- [ ] Given <error context>, when <invalid action>, then <error handling>
+- [ ] AC1: Given <context>, when <action>, then <outcome>
+- [ ] AC2: Given <context>, when <action>, then <outcome>
+- [ ] AC3: Given <error context>, when <invalid action>, then <error handling>
+
+## Test Cases
+
+Concrete tests the coder MUST implement. One test per AC plus edge/error cases.
+Use the project's test framework (read `CLAUDE.md` for the command).
+
+### Happy path
+- [ ] `test_<short_name>_happy`: Given <fixture/input>, when <action>, then assert <observable result>. Maps to AC1.
+
+### Edge cases
+- [ ] `test_<short_name>_<edge_label>`: Given <boundary input>, when <action>, then assert <expected behaviour>. Maps to AC2.
+
+### Error / failure cases
+- [ ] `test_<short_name>_<error_label>`: Given <invalid input or error condition>, when <action>, then assert <error type / status / message>. Maps to AC3.
 
 ## Technical Notes
 - <approach>
@@ -43,21 +87,39 @@ For EACH feature above:
 - <exclusions>
 ```
 
-Keep it under 60 lines.
+Write this file with **one** `write_file` call. Do not split it across multiple writes.
 
-**3.** Append ONE line to `/workspace/session_result.json`:
-```bash
-echo '{"id": <id>, "status": "Designed", "design_doc_path": "docs/story_<NNN>.md"}' >> /workspace/session_result.json
-```
-
-If the spec is too vague to write a story, use:
-```bash
-echo '{"id": <id>, "status": "Blocked", "blocked_reason": "<one line>"}' >> /workspace/session_result.json
-```
+Keep the whole story under 90 lines. If you find yourself writing more, you're over-engineering — trim Technical Notes first.
 
 ---
 
-## When all features done
+## Phase 3 — Record the result for this feature
+
+On your **next turn after the file write**, run exactly:
+
+```
+bash("echo '{\"id\": <id>, \"status\": \"Designed\", \"design_doc_path\": \"docs/story_<NNN>.md\"}' >> /workspace/session_result.json")
+```
+
+If the spec was too vague to write a real story (you wrote a stub or no file at all), record this instead:
+
+```
+bash("echo '{\"id\": <id>, \"status\": \"Blocked\", \"blocked_reason\": \"<one line>\"}' >> /workspace/session_result.json")
+```
+
+After recording, **STOP**. Go back to Phase 2 with the next unprocessed feature.
+
+---
+
+## Phase 4 — Finish the session (only when every assigned feature is recorded)
+
+Verify completeness with:
+
+```
+read_file("/workspace/session_result.json")
+```
+
+Confirm the file has one line per assigned feature ID. If any are missing, return to Phase 2 for that feature. If all are present:
 
 ```bash
 cd /workspace
@@ -66,14 +128,21 @@ git commit -m "plan: user stories [product_planner-{session_uid}]"
 git push
 ```
 
-Then call `task_done(status="success", summary="Planned N features")`.
+Then:
+
+```
+task_done(status="success", summary="Planned <N> features")
+```
 
 ---
 
-## Hard rules
+## Hard rules (any violation aborts the session)
 
-- ONE JSON object per line in session_result.json. No arrays. No `{"features": [...]}`.
+- One feature per work cycle. Never write `story_X.md` and `story_Y.md` in the same turn.
+- ONE JSON object per line in `session_result.json`. No arrays. No `{"features": [...]}`.
 - Status must be exactly `"Designed"` or `"Blocked"`.
-- Work on main branch only.
-- Never call `PATCH /api/features/<id>` — the poller reads session_result.json.
-- If a `bash` call fails, read the error, fix ONE thing, retry. Do not loop on the same failure.
+- Work on the main branch only.
+- Never call `PATCH /api/features/<id>` — the poller reads `session_result.json`.
+- Story file name uses **3-digit zero-padded** feature ID: `story_007.md`, `story_042.md`, `story_103.md`.
+- Test Cases section is **mandatory**. A story without it is incomplete.
+- If a `bash` call fails, read the error, fix ONE thing, retry once. Do not loop on the same failure.

@@ -84,7 +84,7 @@ from website.models import (
 )
 from website.auth import require_auth
 from website import schemas
-from website.github import fetch_progress_md, fetch_architecture_md, count_open_prs, list_open_prs, merge_pr, close_pr
+from website.github import fetch_progress_md, fetch_architecture_md, count_open_prs, list_open_prs, merge_pr, close_pr, provision_sprint_pr
 from website.schemas import PM_ALLOWED_TRANSITIONS
 
 app = FastAPI(title="ProductFactory PM", docs_url=None, redoc_url=None)
@@ -177,6 +177,20 @@ def _output_dir_for_product(working_dir: str) -> Path:
     # Fallback: direct path (works when running outside Docker)
     return Path(working_dir) / "output"
 
+
+def _workspace_dir_for_product(working_dir: str) -> Path:
+    """Map a product's host working_dir to the matching path inside the container.
+
+    The compose file mounts PRODUCTS_BASE_DIR (host) to /workspace (container,
+    read-only). For container-resident reads (story docs, design docs, README,
+    etc.), translate the host path to its container equivalent.
+    """
+    norm = working_dir.replace("\\", "/").rstrip("/")
+    if _HOST_PRODUCTS_BASE and norm.lower().startswith(_HOST_PRODUCTS_BASE.lower()):
+        rel = norm[len(_HOST_PRODUCTS_BASE):].lstrip("/")
+        return _CONTAINER_WORKSPACE / rel if rel else _CONTAINER_WORKSPACE
+    return Path(working_dir)
+
 _md = mistune.create_markdown(plugins=["table"])
 def _hash_password(pw: str) -> str:
     return _bcrypt_lib.hashpw(pw.encode(), _bcrypt_lib.gensalt()).decode()
@@ -186,6 +200,35 @@ def _hash_password(pw: str) -> str:
 _session_logs: dict[int, deque] = defaultdict(lambda: deque(maxlen=SESSION_LOG_MAXLEN))
 # product_id → list of asyncio.Queue (one per SSE subscriber)
 _session_subscribers: dict[int, list] = defaultdict(list)
+
+# Cap on persisted per-session transcript size — last N lines from the
+# in-memory buffer at session close. Earlier turns drop off; this is a
+# best-effort snapshot so the History tab has *something* rather than
+# nothing. For full transcripts, structured per-turn capture is the
+# follow-up (see plan).
+_SESSION_LOG_PERSIST_LINES = 500
+
+
+def _snapshot_session_log(session: "DBSession") -> str | None:
+    """Pull the agent stdout for this session out of the per-product in-memory
+    buffer and return a single newline-joined string, capped at the last
+    `_SESSION_LOG_PERSIST_LINES` lines. Returns None if no matching lines.
+
+    Each log line carries the prefix `[ollama-agent/<persona>/<session_uid>]`
+    or `[<persona>/<session_uid>]` for Claude. We match on the session_uid
+    substring (cheap, distinctive, persona-agnostic).
+    """
+    buf = _session_logs.get(session.product_id)
+    if not buf or not session.session_uid:
+        return None
+    needle = f"/{session.session_uid}]"
+    matches = [ln for ln in buf if needle in ln]
+    if not matches:
+        return None
+    if len(matches) > _SESSION_LOG_PERSIST_LINES:
+        dropped = len(matches) - _SESSION_LOG_PERSIST_LINES
+        matches = [f"... [{dropped} earlier line(s) truncated]"] + matches[-_SESSION_LOG_PERSIST_LINES:]
+    return "\n".join(matches)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -217,6 +260,32 @@ async def _get_system_config(db: AsyncSession) -> SystemConfig | None:
     return await db.get(SystemConfig, 1)
 
 
+async def _sprint_cap(db: AsyncSession) -> int:
+    """Resolve the system-wide max_features_per_sprint with a default of 5."""
+    cfg = await _get_system_config(db)
+    val = getattr(cfg, "max_features_per_sprint", None) if cfg else None
+    return val if (val and val > 0) else 5
+
+
+async def _check_sprint_capacity(sprint_id: int, additions: int, db: AsyncSession) -> None:
+    """
+    Raise 422 if assigning `additions` more features to `sprint_id` would push it
+    over the system-wide cap. Does nothing for falsy sprint_id (unassign path).
+    """
+    if not sprint_id or additions <= 0:
+        return
+    cap = await _sprint_cap(db)
+    cur = await db.execute(
+        select(func.count()).select_from(Feature).where(Feature.sprint_id == sprint_id)
+    )
+    current = cur.scalar() or 0
+    if current + additions > cap:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Sprint cap exceeded — would have {current + additions} features (cap is {cap}).",
+        )
+
+
 async def _next_planned_sprint(product_id: int, db: AsyncSession) -> Sprint | None:
     """Return the lowest-id planned sprint for this product, or None."""
     result = await db.execute(
@@ -238,11 +307,13 @@ _CFG_DEFAULTS = {
     "pr_gate_sleep":               300,
     "stuck_feature_timeout_hours": 0.75,  # 45 minutes — matches stale session threshold
     "max_features_per_run":        5,
+    "max_features_per_sprint":     5,
     "brownfield_file_threshold":   10,
     "auto_merge_enabled":            False,
     # Agent / Ollama
     "agent_backend":    "claude",
     "ollama_host":      "http://host.docker.internal:11434",
+    "ollama_api_key":   "",   # required for Ollama Cloud, ignored for local
     "designer_model":   "gemma3:27b",
     "coder_model":      "qwen3-coder:30b",
     "ollama_timeout":   300,
@@ -733,6 +804,7 @@ _POLLER_INT_BOUNDS: dict[str, tuple[int, int]] = {
     "pr_gate_sleep":               (60,  3600),
     "stuck_feature_timeout_hours": (0.25,  48),
     "max_features_per_run":        (1,     10),
+    "max_features_per_sprint":     (1,     50),
     "brownfield_file_threshold":   (1,    100),
     "ollama_timeout":              (30,  1800),
     "bash_timeout":                (10,   600),
@@ -793,6 +865,7 @@ async def admin_save_poller_settings(
     config.pr_gate_sleep               = _int("pr_gate_sleep")
     config.stuck_feature_timeout_hours = _float("stuck_feature_timeout_hours")
     config.max_features_per_run        = _int("max_features_per_run")
+    config.max_features_per_sprint     = _int("max_features_per_sprint")
     config.brownfield_file_threshold       = _int("brownfield_file_threshold")
     config.auto_merge_enabled              = form.get("auto_merge_enabled") == "1"
     config.agent_backend               = _str("agent_backend")
@@ -930,6 +1003,7 @@ async def create_sprint_form(
     )
     db.add(sprint)
     await db.flush()
+    await _maybe_provision_sprint_pr(sprint, db)
     return RedirectResponse(f"/product/{product_id}?tab=sprints", status_code=303)
 
 
@@ -953,11 +1027,19 @@ async def api_create_bugfix_sprint(body: schemas.BugFixSprintCreate, db: AsyncSe
     )
     target = active_result.scalar_one_or_none() or parent
 
+    # Cap-check: count bugs not already in target so we don't double-count
+    new_assignments = 0
+    fetched: list[Feature] = []
     for fid in body.bug_feature_ids:
         feat = await db.get(Feature, fid)
         if feat:
-            feat.sprint_id = target.id
-            feat.status = "Approved"
+            fetched.append(feat)
+            if feat.sprint_id != target.id:
+                new_assignments += 1
+    await _check_sprint_capacity(target.id, new_assignments, db)
+    for feat in fetched:
+        feat.sprint_id = target.id
+        feat.status = "Approved"
 
     return target
 
@@ -1189,6 +1271,39 @@ async def _do_complete_sprint(sprint: Sprint, product_id: int, db: AsyncSession)
     await _activate_next_sprint(sprint, product_id, db)
 
 
+async def _maybe_provision_sprint_pr(sprint: Sprint, db: AsyncSession) -> None:
+    """
+    When the owning product has `config.sprint_pr_mode = true`, create the
+    `sprint/<id>` branch + draft PR on GitHub and persist branch/pr_number/pr_url
+    onto the sprint. No-op otherwise. Idempotent: if branch_name is already set,
+    skip.
+    """
+    if sprint.branch_name:
+        return
+    product = await db.get(Product, sprint.product_id)
+    if not product or not product.github_repo:
+        return
+    cfg = product.config or {}
+    if not cfg.get("sprint_pr_mode"):
+        return
+    sys_cfg = await _get_system_config(db)
+    token = sys_cfg.github_pat if sys_cfg else None
+    if not token:
+        return
+    feat_rows = await db.execute(
+        select(Feature.name).where(Feature.sprint_id == sprint.id).order_by(Feature.id)
+    )
+    titles = [n for (n,) in feat_rows.all()]
+    result = provision_sprint_pr(
+        product.github_repo, sprint.id, sprint.name, sprint.goal, titles, token,
+    )
+    if result:
+        sprint.branch_name = result["branch"]
+        sprint.pr_number = result["number"]
+        sprint.pr_url = result["url"]
+        await db.flush()
+
+
 async def _activate_next_sprint(completed: Sprint, product_id: int, db: AsyncSession) -> None:
     """Find and activate the next planned sprint after the completed one."""
     # Same phase first
@@ -1205,6 +1320,7 @@ async def _activate_next_sprint(completed: Sprint, product_id: int, db: AsyncSes
         if nxt:
             nxt.status = "active"
             await db.flush()
+            await _maybe_provision_sprint_pr(nxt, db)
             return
 
         # No more sprints in this phase — check if phase should be completed
@@ -1245,6 +1361,7 @@ async def _activate_next_sprint(completed: Sprint, product_id: int, db: AsyncSes
                 if first:
                     first.status = "active"
                     await db.flush()
+                    await _maybe_provision_sprint_pr(first, db)
 
 
 @app.post("/product/{product_id}/sprints/{sprint_id}/complete")
@@ -1306,7 +1423,10 @@ async def assign_sprint_form(
 ):
     """Assign or remove a feature from a sprint."""
     feature = await _get_feature_or_404(feature_id, db)
-    feature.sprint_id = int(sprint_id) if sprint_id.isdigit() else None
+    new_sprint_id = int(sprint_id) if sprint_id.isdigit() else None
+    if new_sprint_id and new_sprint_id != feature.sprint_id:
+        await _check_sprint_capacity(new_sprint_id, 1, db)
+    feature.sprint_id = new_sprint_id
     await db.flush()
     return RedirectResponse(f"/product/{product_id}?tab=sprints", status_code=303)
 
@@ -1380,10 +1500,18 @@ async def bulk_approve(
         select(Feature).where(Feature.product_id == product_id, Feature.id.in_(ids), Feature.status == "Pending")
     )
     next_sprint = await _next_planned_sprint(product_id, db)
+    cap = await _sprint_cap(db)
+    used = 0
+    if next_sprint:
+        cur = await db.execute(
+            select(func.count()).select_from(Feature).where(Feature.sprint_id == next_sprint.id)
+        )
+        used = cur.scalar() or 0
     for f in result.scalars().all():
         f.status = "Approved"
-        if f.sprint_id is None and next_sprint:
+        if f.sprint_id is None and next_sprint and used < cap:
             f.sprint_id = next_sprint.id
+            used += 1
     await db.flush()
     return RedirectResponse(f"/product/{product_id}?tab=board&phase=Approved", status_code=303)
 
@@ -1415,10 +1543,18 @@ async def bulk_approve_all(
         select(Feature).where(Feature.product_id == product_id, Feature.status == "Pending")
     )
     next_sprint = await _next_planned_sprint(product_id, db)
+    cap = await _sprint_cap(db)
+    used = 0
+    if next_sprint:
+        cur = await db.execute(
+            select(func.count()).select_from(Feature).where(Feature.sprint_id == next_sprint.id)
+        )
+        used = cur.scalar() or 0
     for f in result.scalars().all():
         f.status = "Approved"
-        if f.sprint_id is None and next_sprint:
+        if f.sprint_id is None and next_sprint and used < cap:
             f.sprint_id = next_sprint.id
+            used += 1
     await db.flush()
     return RedirectResponse(f"/product/{product_id}?tab=board&phase=Approved", status_code=303)
 
@@ -1477,7 +1613,11 @@ async def api_next_product(db: AsyncSession = Depends(get_db)):
         select(Product)
         .where(Product.status == "ready")
         .where(has_actionable | has_no_actionable)
-        .order_by(Product.last_run_at.asc().nullsfirst())
+        # 1. run_now=true wins outright (PM-forced priority).
+        # 2. Otherwise oldest-first round-robin. NULLS LAST so a brand-new
+        #    product with last_run_at=NULL doesn't block every other product
+        #    forever — it joins the rotation after at least one cycle.
+        .order_by(Product.run_now.desc(), Product.last_run_at.asc().nullslast())
         .limit(1)
     )
     return result.scalar_one_or_none()
@@ -1551,6 +1691,8 @@ async def api_approved_features(product_id: int, db: AsyncSession = Depends(get_
 async def api_create_feature(body: schemas.FeatureCreate, db: AsyncSession = Depends(get_db)):
     """PM or Claude (AI-recommended) creates a new feature."""
     await _get_product_or_404(body.product_id, db)
+    if body.sprint_id:
+        await _check_sprint_capacity(body.sprint_id, 1, db)
     feature = Feature(**body.model_dump())
     db.add(feature)
     await db.flush()
@@ -1579,6 +1721,12 @@ async def api_update_feature(
                 "message": f"Feature #{feature_id} was modified concurrently — re-fetch and retry.",
             },
         )
+
+    # Enforce per-sprint cap BEFORE any mutation. Running the count query while
+    # the session is clean keeps autoflush from firing an UPDATE (and expiring
+    # server-side `onupdate=func.now()` columns the response model needs).
+    if "sprint_id" in updates and updates["sprint_id"] and updates["sprint_id"] != feature.sprint_id:
+        await _check_sprint_capacity(int(updates["sprint_id"]), 1, db)
 
     # Increment version on every write so callers can detect concurrent updates.
     feature.version = (feature.version or 0) + 1
@@ -1656,14 +1804,19 @@ async def api_pm_status_update(
         )
         next_sprint = next_sprint_result.scalar_one_or_none()
         if next_sprint:
-            feature.sprint_id = next_sprint.id
-            db.add(FeatureChangelog(
-                feature_id=feature_id,
-                field="sprint_id",
-                old_value=None,
-                new_value=str(next_sprint.id),
-                changed_by="pm",
-            ))
+            cap = await _sprint_cap(db)
+            cur = await db.execute(
+                select(func.count()).select_from(Feature).where(Feature.sprint_id == next_sprint.id)
+            )
+            if (cur.scalar() or 0) < cap:
+                feature.sprint_id = next_sprint.id
+                db.add(FeatureChangelog(
+                    feature_id=feature_id,
+                    field="sprint_id",
+                    old_value=None,
+                    new_value=str(next_sprint.id),
+                    changed_by="pm",
+                ))
 
     if old_status != body.status:
         db.add(FeatureChangelog(
@@ -2047,6 +2200,56 @@ async def api_feature_changelog(feature_id: int, db: AsyncSession = Depends(get_
     return result.scalars().all()
 
 
+@app.get("/api/features/{feature_id}/story")
+async def api_feature_story(feature_id: int, db: AsyncSession = Depends(get_db)):
+    """Return the story doc for a feature, rendered as HTML.
+
+    Resolution order (first hit wins):
+      1. `<working_dir>/docs/story_{feature_id:03d}.md` — the file the
+         product_planner persona writes for sprint-driven products.
+      2. `<working_dir>/<feature.design_doc_path>` — older designer flow.
+      3. `feature.design_doc` — inline content stored on the row.
+    Returns {source, path, raw, html} where html is mistune-rendered markdown.
+    Returns 200 with source=None and empty content if no story exists.
+    """
+    feature = await _get_feature_or_404(feature_id, db)
+    product = await db.get(Product, feature.product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    workspace = _workspace_dir_for_product(product.working_dir)
+    candidates: list[tuple[str, Path]] = [
+        ("story_file", workspace / "docs" / f"story_{feature_id:03d}.md"),
+    ]
+    if feature.design_doc_path:
+        # design_doc_path may be absolute, container-rooted, or repo-relative
+        dpath = feature.design_doc_path.replace("\\", "/").lstrip("/")
+        candidates.append(("design_doc_path", workspace / dpath))
+
+    for source, path in candidates:
+        try:
+            if path.is_file():
+                raw = path.read_text(encoding="utf-8", errors="replace")
+                return {
+                    "source": source,
+                    "path": str(path),
+                    "raw": raw,
+                    "html": _md(raw),
+                }
+        except OSError:
+            continue
+
+    if feature.design_doc:
+        return {
+            "source": "design_doc",
+            "path": None,
+            "raw": feature.design_doc,
+            "html": _md(feature.design_doc),
+        }
+
+    return {"source": None, "path": None, "raw": "", "html": ""}
+
+
 @app.post("/api/labels", response_model=schemas.LabelOut, status_code=201)
 async def api_create_label(body: schemas.LabelCreate, db: AsyncSession = Depends(get_db)):
     """Create a label for a product. Name must be unique within the product."""
@@ -2302,8 +2505,7 @@ async def api_plan_sprints(
         )
 
     # Read max features per sprint from DB config
-    _sys_cfg = await _get_system_config(db)
-    max_per_sprint = _cfg(_sys_cfg, "max_features_per_run") or 5
+    max_per_sprint = await _sprint_cap(db)
 
     # Fetch all non-terminal features (everything except Pushed/Rejected/Reverted/Deferred)
     terminal_statuses = ("Pushed", "Rejected", "Reverted", "Deferred")
@@ -2406,7 +2608,9 @@ async def api_plan_sprints(
             sprints_created += 1
             first_sprint_overall = False
 
-            for fid in sp.get("feature_ids", []):
+            # Clamp the LLM's feature_ids to the per-sprint cap; extras drop
+            # back to the unsprinted pool and can be planned in a later round.
+            for fid in (sp.get("feature_ids") or [])[:max_per_sprint]:
                 feat_row = await db.execute(
                     select(Feature).where(Feature.id == fid, Feature.product_id == product_id)
                 )
@@ -2414,6 +2618,10 @@ async def api_plan_sprints(
                 if feat:
                     feat.sprint_id = sprint.id
                     features_assigned += 1
+
+            await db.flush()
+            if sprint.status == "active":
+                await _maybe_provision_sprint_pr(sprint, db)
 
     return {"phases_created": phases_created, "sprints_created": sprints_created, "features_assigned": features_assigned}
 
@@ -2548,10 +2756,14 @@ async def api_session_kill(
     session.kill_reason = body.get("reason", "watchdog")
     session.ended_at = datetime.now(timezone.utc)
     session.exit_code = -1
-    # Audit log
+    # Audit log + transcript snapshot
     await db.execute(text(
         "INSERT INTO session_events (session_id, event, detail) VALUES (:sid, 'killed', :detail)"
     ), {"sid": session_id, "detail": session.kill_reason})
+    if not session.log:
+        snapshot = _snapshot_session_log(session)
+        if snapshot:
+            session.log = snapshot
     return {"ok": True}
 
 
@@ -2641,13 +2853,17 @@ async def api_end_session(
     was_open = session.ended_at is None
     for field, value in body_fields.items():
         setattr(session, field, value)
-    # Emit lifecycle event on close transition.
+    # Emit lifecycle event + snapshot agent log on close transition.
     if was_open and session.ended_at is not None:
         ev = "killed" if session.status == "killed" else "ended"
         detail = f"exit={session.exit_code} pushed={session.features_pushed}"
         await db.execute(text(
             "INSERT INTO session_events (session_id, event, detail) VALUES (:sid, :ev, :d)"
         ), {"sid": session_id, "ev": ev, "d": detail})
+        if not session.log:
+            snapshot = _snapshot_session_log(session)
+            if snapshot:
+                session.log = snapshot
     return session
 
 
@@ -2692,6 +2908,55 @@ async def api_get_session(session_id: int, db: AsyncSession = Depends(get_db)):
         for row in reviews_result
     ]
 
+    # Changelog entries inside the session's time window for this product's
+    # features. Best-effort attribution by time + product (we don't thread
+    # session_uid through every changelog write site yet — this gives a
+    # precise audit anyway because the agent is the only writer in flight).
+    changelog_result = await db.execute(
+        select(FeatureChangelog, Feature.name)
+        .join(Feature, FeatureChangelog.feature_id == Feature.id)
+        .where(
+            Feature.product_id == session.product_id,
+            FeatureChangelog.changed_at >= session.started_at,
+            FeatureChangelog.changed_at <= end_bound,
+        )
+        .order_by(FeatureChangelog.changed_at)
+    )
+    changelog = [
+        {
+            "feature_id": row.FeatureChangelog.feature_id,
+            "feature_name": row.name,
+            "field": row.FeatureChangelog.field,
+            "old_value": row.FeatureChangelog.old_value,
+            "new_value": row.FeatureChangelog.new_value,
+            "changed_by": row.FeatureChangelog.changed_by,
+            "changed_at": row.FeatureChangelog.changed_at.isoformat(),
+        }
+        for row in changelog_result
+    ]
+
+    # Comments left during the session's window — scoped the same way.
+    comments_result = await db.execute(
+        select(FeatureComment, Feature.name)
+        .join(Feature, FeatureComment.feature_id == Feature.id)
+        .where(
+            Feature.product_id == session.product_id,
+            FeatureComment.created_at >= session.started_at,
+            FeatureComment.created_at <= end_bound,
+        )
+        .order_by(FeatureComment.created_at)
+    )
+    comments = [
+        {
+            "feature_id": row.FeatureComment.feature_id,
+            "feature_name": row.name,
+            "author": row.FeatureComment.author,
+            "body": row.FeatureComment.body,
+            "created_at": row.FeatureComment.created_at.isoformat(),
+        }
+        for row in comments_result
+    ]
+
     dur = None
     if session.ended_at:
         dur = int((session.ended_at - session.started_at).total_seconds())
@@ -2711,6 +2976,12 @@ async def api_get_session(session_id: int, db: AsyncSession = Depends(get_db)):
         "notes": session.notes,
         "activities": activities,
         "reviews": reviews,
+        "changelog": changelog,
+        "comments": comments,
+        # log: persisted snapshot when session has ended; otherwise return the
+        # live in-memory tail so the History detail row shows something useful
+        # for in-flight sessions too.
+        "log": session.log or _snapshot_session_log(session),
     }
 
 

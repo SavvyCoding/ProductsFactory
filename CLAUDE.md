@@ -189,6 +189,7 @@ Important behaviours:
 - `quiet_hours_start` / `quiet_hours_end` — Hour of day (0–23) to suppress sessions
 - `daily_session_cap` — Max sessions per day for this product
 - `max_features_per_run` — Per-product override for the global `MAX_FEATURES_PER_RUN`
+- `sprint_pr_mode` — When true, sprint activation provisions a `sprint/<id>` branch + draft PR on GitHub, populating `sprints.branch_name/pr_number/pr_url`. The coder/reviewer/auto-merge wiring to consume that PR is staged work — the flag is currently observed only by sprint activation. Default off.
 
 Additionally, a `product_config.json` file in the product working directory (read by `setup_product.py` on discovery) can seed:
 - `preferred_stack` — Selects which `templates/stacks/` variant to install
@@ -294,6 +295,7 @@ See `.env.example` for all variables. Critical ones:
 - `STALE_THRESHOLD_MINUTES` — Alert if progress.md not pushed in N minutes (default: 45)
 - `BROWNFIELD_FILE_THRESHOLD` — Source file count above which a product is treated as brownfield (default: 10)
 - `MAX_FEATURES_PER_RUN` — Max features an agent attempts per session (default: 1; per-product override in DB)
+- `system_config.max_features_per_sprint` — Hard cap on features assignable to one sprint (default: 5). Enforced by all feature-to-sprint assignment endpoints; the LLM sprint planner clamps each sprint's plan at this value.
 - `MAX_OPEN_PRS` — Coder skips the product if open PR count meets or exceeds this (default: 3)
 - `OLLAMA_HOST` — Ollama base URL (default: `http://host.docker.internal:11434` inside Docker, `http://localhost:11434` for local runs)
 - `DESIGNER_MODEL` / `CODER_MODEL` — Ollama model names (defaults: `gemma3:27b` / `qwen3-coder:30b`)
