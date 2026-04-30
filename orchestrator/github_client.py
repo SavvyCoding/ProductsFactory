@@ -287,14 +287,21 @@ def reconcile_in_flight_prs(product: dict):
             ]
             if stranded:
                 try:
-                    client.post(
+                    resp = client.post(
                         f"/api/products/{product['id']}/sprints/blocked/route",
                         json={
                             "feature_ids": stranded[:20],
                             "reason": "Migrated from legacy Blocked state",
                         },
                     )
-                    log.info(f"[in-flight] migration sweep: routed {len(stranded[:20])} stranded Blocked feature(s)")
+                    # Only log when a real transition happened. The route
+                    # endpoint short-circuits idempotent re-routes (already in
+                    # the Blocked sprint), so a stranded list of N can yield
+                    # 0 actual moves — no need to flood the orchestrator log
+                    # with "routed 3 stranded Blocked features" every cycle.
+                    moved = (resp.json() or {}).get("moved", 0) if resp.status_code == 200 else 0
+                    if moved:
+                        log.info(f"[in-flight] migration sweep: routed {moved} stranded Blocked feature(s)")
                 except Exception as re:
                     log.warning(f"[in-flight] migration sweep failed: {re}")
 

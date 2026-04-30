@@ -1834,6 +1834,30 @@ async def api_update_feature(
     if "sprint_id" in updates and updates["sprint_id"] and updates["sprint_id"] != feature.sprint_id:
         await _check_sprint_capacity(int(updates["sprint_id"]), 1, db)
 
+    # Quarantine Blocked-sprint features from agent writes. Once a feature
+    # has been routed to the per-product Blocked sprint (kind=blocked), only
+    # PMs can change it — reroute via sprint_id (the kind=normal switch
+    # implicitly accepts re-engagement) or Reject. Without this, reviewers
+    # PATCH features back into the agent pipeline as soon as they spot the
+    # `[feature-NN]` commit prefix on the sprint PR, defeating the holdpen.
+    _peek_changed_by = updates.get("changed_by", "agent")
+    if feature.sprint_id and _peek_changed_by != "pm":
+        _cur_sprint = await db.get(Sprint, feature.sprint_id)
+        if _cur_sprint and _cur_sprint.kind == "blocked":
+            # Allow patches that ROUTE THE FEATURE OUT of the Blocked sprint
+            # (changing sprint_id) — those are how PMs re-engage. Block any
+            # other write from non-PM callers.
+            _exits_blocked = "sprint_id" in updates and updates["sprint_id"] != feature.sprint_id
+            if not _exits_blocked:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Feature #{feature_id} is in a Blocked sprint — agents "
+                        f"can't modify it. Reroute via PATCH sprint_id (PM-driven) "
+                        f"to put it back in the agent pipeline."
+                    ),
+                )
+
     # Increment version on every write so callers can detect concurrent updates.
     feature.version = (feature.version or 0) + 1
 
