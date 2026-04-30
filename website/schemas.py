@@ -452,6 +452,7 @@ class SprintOut(BaseModel):
     branch_name:    Optional[str] = None
     pr_number:      Optional[int] = None
     pr_url:         Optional[str] = None
+    kind:           str           = "normal"
 
     model_config = {"from_attributes": True}
 
