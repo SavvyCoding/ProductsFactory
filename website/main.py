@@ -288,6 +288,11 @@ async def _check_sprint_capacity(sprint_id: int, additions: int, db: AsyncSessio
     """
     if not sprint_id or additions <= 0:
         return
+    # The Blocked sprint is a holding pen — no cap. Stuck features pile up
+    # there for human triage; refusing to admit them would defeat the point.
+    target_sprint = await db.get(Sprint, sprint_id)
+    if target_sprint and target_sprint.kind == "blocked":
+        return
     cap = await _sprint_cap(db)
     cur = await db.execute(
         select(func.count()).select_from(Feature).where(
@@ -303,11 +308,64 @@ async def _check_sprint_capacity(sprint_id: int, additions: int, db: AsyncSessio
         )
 
 
+async def _get_or_create_blocked_sprint(product_id: int, db: AsyncSession) -> Sprint:
+    """Return the per-product Blocked sprint (holding pen for stuck features),
+    creating it on first use.
+
+    The Blocked sprint is a delivery-pipeline-bypass: it has `kind="blocked"`,
+    no DoD gates, no sprint-PR provisioning, no cap enforcement, and is
+    excluded from active-sprint selection so the orchestrator never picks
+    it for coder/reviewer work. PMs review and either reroute features back
+    to a normal sprint after fixing the underlying issue, or Reject them.
+
+    Status is `planned` so it doesn't appear in /products/{id}/sprints/active
+    queries and doesn't conflict with the one-active-sprint convention.
+    """
+    result = await db.execute(
+        select(Sprint).where(
+            Sprint.product_id == product_id,
+            Sprint.kind == "blocked",
+        ).limit(1)
+    )
+    sprint = result.scalar_one_or_none()
+    if sprint:
+        return sprint
+    sprint = Sprint(
+        product_id=product_id,
+        name="Blocked",
+        goal="Features that exceeded max_fix_attempts and need PM triage. "
+             "Re-route a feature to a normal sprint after fixing the root "
+             "cause, or mark Rejected.",
+        kind="blocked",
+        status="planned",  # never auto-progressed; lives in parallel
+    )
+    db.add(sprint)
+    await db.flush()
+    return sprint
+
+
+async def _max_fix_attempts(db: AsyncSession) -> int:
+    """Resolve max_fix_attempts from system_config with a default of 5."""
+    cfg = await _get_system_config(db)
+    val = getattr(cfg, "max_fix_attempts", None) if cfg else None
+    return val if (val and val > 0) else 5
+
+
 async def _next_planned_sprint(product_id: int, db: AsyncSession) -> Sprint | None:
-    """Return the lowest-id planned sprint for this product, or None."""
+    """Return the lowest-id planned sprint for this product, or None.
+
+    Excludes kind=blocked — the holdpen sprint is `planned` to stay out of
+    /sprints/active queries, but it must NOT receive auto-assigned features
+    from bulk-approve / Approved-status flows. Approved features go to the
+    next normal planned sprint, never to the blocked sprint.
+    """
     result = await db.execute(
         select(Sprint)
-        .where(Sprint.product_id == product_id, Sprint.status == "planned")
+        .where(
+            Sprint.product_id == product_id,
+            Sprint.status == "planned",
+            Sprint.kind == "normal",
+        )
         .order_by(Sprint.id.asc())
         .limit(1)
     )
@@ -325,6 +383,7 @@ _CFG_DEFAULTS = {
     "stuck_feature_timeout_hours": 0.75,  # 45 minutes — matches stale session threshold
     "max_features_per_run":        5,
     "max_features_per_sprint":     5,
+    "max_fix_attempts":            5,
     "brownfield_file_threshold":   10,
     "auto_merge_enabled":            False,
     # Agent / Ollama
@@ -822,6 +881,7 @@ _POLLER_INT_BOUNDS: dict[str, tuple[int, int]] = {
     "stuck_feature_timeout_hours": (0.25,  48),
     "max_features_per_run":        (1,     10),
     "max_features_per_sprint":     (1,     50),
+    "max_fix_attempts":            (1,     20),
     "brownfield_file_threshold":   (1,    100),
     "ollama_timeout":              (30,  1800),
     "bash_timeout":                (10,   600),
@@ -883,6 +943,7 @@ async def admin_save_poller_settings(
     config.stuck_feature_timeout_hours = _float("stuck_feature_timeout_hours")
     config.max_features_per_run        = _int("max_features_per_run")
     config.max_features_per_sprint     = _int("max_features_per_sprint")
+    config.max_fix_attempts            = _int("max_fix_attempts")
     config.brownfield_file_threshold       = _int("brownfield_file_threshold")
     config.auto_merge_enabled              = form.get("auto_merge_enabled") == "1"
     config.agent_backend               = _str("agent_backend")
@@ -1296,6 +1357,10 @@ async def _maybe_provision_sprint_pr(sprint: Sprint, db: AsyncSession) -> None:
     skip.
     """
     if sprint.branch_name:
+        return
+    # The Blocked sprint never gets a PR — it's a holding pen, not a delivery
+    # vehicle. Provisioning a draft PR for it would clutter the repo.
+    if getattr(sprint, "kind", "normal") == "blocked":
         return
     product = await db.get(Product, sprint.product_id)
     if not product or not product.github_repo:
@@ -1826,6 +1891,7 @@ async def api_pm_status_update(
             select(Sprint)
             .where(Sprint.product_id == feature.product_id)
             .where(Sprint.status == "planned")
+            .where(Sprint.kind == "normal")
             .order_by(Sprint.id.asc())
             .limit(1)
         )
@@ -2406,14 +2472,56 @@ async def api_list_sprints(product_id: int, db: AsyncSession = Depends(get_db)):
 
 @app.get("/api/products/{product_id}/sprints/active", response_model=schemas.SprintOut | None)
 async def api_active_sprint(product_id: int, db: AsyncSession = Depends(get_db)):
-    """Return the single active sprint for a product (lowest id wins if multiple)."""
+    """Return the single active sprint for a product (lowest id wins if multiple).
+
+    Excludes kind=blocked even though that sprint's status is `planned` —
+    defensive belt-and-suspenders in case a future code path accidentally
+    flips it to active.
+    """
     result = await db.execute(
         select(Sprint)
-        .where(Sprint.product_id == product_id, Sprint.status == "active")
+        .where(
+            Sprint.product_id == product_id,
+            Sprint.status == "active",
+            Sprint.kind == "normal",
+        )
         .order_by(Sprint.id.asc())
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+@app.post("/api/products/{product_id}/sprints/blocked/route", status_code=200)
+async def api_route_to_blocked_sprint(
+    product_id: int, body: dict, db: AsyncSession = Depends(get_db),
+):
+    """Move stuck features into the per-product Blocked sprint.
+
+    Called by the orchestrator's reconcile sweep when a feature's
+    fix_attempts crosses max_fix_attempts. Also creates the Blocked sprint
+    on first use if it doesn't exist. Idempotent — re-routing a feature
+    that's already there is a no-op.
+
+    Body: {"feature_ids": [1,2,3], "reason": "auto-escalated after N attempts"}
+    """
+    feature_ids = body.get("feature_ids") or []
+    reason = body.get("reason") or "auto-escalated after exceeding max_fix_attempts"
+    if not feature_ids:
+        return {"moved": 0, "sprint_id": None}
+    blocked = await _get_or_create_blocked_sprint(product_id, db)
+    moved: list[int] = []
+    for fid in feature_ids:
+        feat = await db.get(Feature, fid)
+        if not feat or feat.product_id != product_id:
+            continue
+        if feat.sprint_id == blocked.id and feat.status == "Blocked":
+            continue  # already routed
+        feat.sprint_id = blocked.id
+        feat.status = "Blocked"
+        if not feat.blocked_reason:
+            feat.blocked_reason = reason
+        moved.append(fid)
+    return {"moved": len(moved), "sprint_id": blocked.id, "feature_ids": moved}
 
 
 @app.patch("/api/sprints/{sprint_id}", response_model=schemas.SprintOut)

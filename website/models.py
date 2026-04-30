@@ -204,6 +204,7 @@ class SystemConfig(Base):
     stuck_feature_timeout_hours:Mapped[Optional[float]] = mapped_column(Float)  # default 0.75h (45 min)
     max_features_per_run:       Mapped[Optional[int]] = mapped_column(Integer)  # default 1
     max_features_per_sprint:    Mapped[Optional[int]] = mapped_column(Integer)  # default 5
+    max_fix_attempts:           Mapped[Optional[int]] = mapped_column(Integer)  # default 5
     brownfield_file_threshold:  Mapped[Optional[int]] = mapped_column(Integer)  # default 10
     recommender_pending_threshold: Mapped[Optional[int]] = mapped_column(Integer)  # default 15
     auto_merge_enabled:            Mapped[Optional[bool]] = mapped_column(Boolean)  # default False
@@ -364,6 +365,11 @@ class Sprint(Base):
     branch_name:    Mapped[Optional[str]]  = mapped_column(String(255), nullable=True)
     pr_number:      Mapped[Optional[int]]  = mapped_column(Integer, nullable=True)
     pr_url:         Mapped[Optional[str]]  = mapped_column(String(500), nullable=True)
+    # "normal" = standard delivery sprint (counts toward DoD, capacity, etc.)
+    # "blocked" = per-product holding pen for features that exhausted
+    #             max_fix_attempts. Excluded from active-sprint selection,
+    #             DoD gates, sprint cap, sprint-PR provisioning. PM-only.
+    kind:           Mapped[str]            = mapped_column(String(16), nullable=False, default="normal")
 
     phase: Mapped[Optional["Phase"]] = relationship("Phase", back_populates="sprints")
 

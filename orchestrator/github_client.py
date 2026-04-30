@@ -19,7 +19,31 @@ log = logging.getLogger("poller.github")
 # After this many "PR closed without merge" or "Reviewing → Implementing" reset
 # events on the same feature, the reconciler stops retrying and marks the feature
 # Blocked so a human can intervene. Prevents infinite review/fix loops.
+#
+# Default sourced from env at import; `_resolve_max_fix_attempts` below reads
+# the live value from system_config on each cycle so PM-driven rotations
+# (without an orchestrator restart) take effect immediately.
 MAX_FIX_ATTEMPTS = int(os.environ.get("MAX_FIX_ATTEMPTS", "5"))
+
+
+def _resolve_max_fix_attempts() -> int:
+    """Read max_fix_attempts from system_config; fall back to env constant.
+
+    Cheap one-shot HTTP call against the PM API (already a per-cycle
+    dependency for everything in this module). Never fails the caller —
+    on any error we return the env-default constant so the reconcile
+    sweep keeps working.
+    """
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
+            resp = client.get("/api/system-config")
+            if resp.status_code == 200:
+                val = (resp.json() or {}).get("max_fix_attempts")
+                if isinstance(val, int) and val > 0:
+                    return val
+    except Exception:
+        pass
+    return MAX_FIX_ATTEMPTS
 
 
 def _gh_get(url: str, headers: dict, params: dict | None = None, timeout: int = 15) -> httpx.Response | None:
@@ -288,7 +312,7 @@ def reconcile_in_flight_prs(product: dict):
                 # Closed-without-merge: PR is gone, agent decisions are moot. Reset.
                 if state == "closed" and not merged_at:
                     new_attempts = (feature.get("fix_attempts") or 0) + 1
-                    if new_attempts >= MAX_FIX_ATTEMPTS:
+                    if new_attempts >= _resolve_max_fix_attempts():
                         client.patch(f"/api/features/{fid}", json={
                             "status": "Blocked",
                             "pr_number": None, "pr_url": None, "branch_name": None,
@@ -298,8 +322,26 @@ def reconcile_in_flight_prs(product: dict):
                                 f"{new_attempts} attempts. Needs human review."
                             ),
                         })
+                        # Route to the per-product Blocked sprint so the PM
+                        # dashboard surfaces it for triage instead of
+                        # leaving it stranded on its original delivery
+                        # sprint (where it would otherwise contribute to
+                        # all_features_done=false and stall DoD).
+                        try:
+                            client.post(
+                                f"/api/products/{product_id}/sprints/blocked/route",
+                                json={
+                                    "feature_ids": [fid],
+                                    "reason": (
+                                        f"Auto-escalated after {new_attempts} closed-PR attempts "
+                                        f"(last PR #{pr_n})"
+                                    ),
+                                },
+                            )
+                        except Exception as re:
+                            log.warning(f"[in-flight] route to Blocked sprint failed for #{fid}: {re}")
                         log.warning(
-                            f"[in-flight] Feature #{fid} → Blocked "
+                            f"[in-flight] Feature #{fid} → Blocked sprint "
                             f"(fix_attempts={new_attempts} ≥ {MAX_FIX_ATTEMPTS})"
                         )
                     else:
@@ -325,6 +367,29 @@ def reconcile_in_flight_prs(product: dict):
                             f"[in-flight] Feature #{fid} → Reviewing "
                             f"(PR #{pr_n} open, status was {cur_status})"
                         )
+
+            # Migration sweep: catch legacy Blocked features (those that
+            # auto-Blocked before the Blocked-sprint route existed, OR were
+            # manually set Blocked by a PM) and route them to the per-product
+            # holdpen so the dashboard surfaces them. Idempotent — features
+            # already on the Blocked sprint are skipped server-side.
+            stranded = [
+                f["id"] for f in features
+                if f.get("status") == "Blocked" and f.get("sprint_id") is not None
+            ]
+            if stranded:
+                # Cap routing per cycle to avoid a thundering herd; rest get
+                # picked up next cycle.
+                try:
+                    client.post(
+                        f"/api/products/{product['id']}/sprints/blocked/route",
+                        json={
+                            "feature_ids": stranded[:20],
+                            "reason": "Migrated from legacy Blocked state",
+                        },
+                    )
+                except Exception as re:
+                    log.warning(f"[in-flight] migration sweep failed: {re}")
 
     except Exception as e:
         log.warning(f"reconcile_in_flight_prs failed: {e}")

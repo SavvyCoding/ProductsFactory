@@ -356,6 +356,48 @@
   </div>
   {% endif %}
 
+  {# Blocked sprint — per-product holding pen for features that exhausted
+     max_fix_attempts. Surfaces them as an alert card distinct from the
+     phasewise roadmap so PMs can triage. #}
+  {% set blocked_sprint = sprints | selectattr('kind', 'equalto', 'blocked') | first %}
+  {% if blocked_sprint %}
+  {% set blocked_features = features | selectattr('sprint_id', 'equalto', blocked_sprint.id) | list %}
+  {% if blocked_features %}
+  <div class="card" style="margin-bottom:16px;border-left:4px solid #dc2626;background:#fef2f2">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <div>
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:2px;color:#dc2626">
+          🚫 BLOCKED — needs human triage
+        </div>
+        <div style="font-size:14px;font-weight:700;color:#7f1d1d">
+          {{ blocked_features | length }} feature{{ 's' if blocked_features | length != 1 else '' }} exceeded max_fix_attempts
+        </div>
+        <div style="font-size:11px;color:#991b1b;margin-top:2px">
+          Re-route a feature to a normal sprint after fixing the root cause, or mark Rejected.
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:5px">
+      {% for f in blocked_features %}
+      <div class="phase-card" data-feature-id="{{ f.id }}" style="display:flex;justify-content:space-between;align-items:flex-start;padding:8px 10px;background:#fff;border-radius:6px;border:1px solid #fecaca;cursor:pointer">
+        <div style="min-width:0;flex:1">
+          <div style="font-size:13px;font-weight:600;color:var(--text)">
+            {% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
+          </div>
+          {% if f.blocked_reason %}
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px">{{ f.blocked_reason }}</div>
+          {% endif %}
+        </div>
+        <span style="font-size:11px;color:var(--text-muted);flex-shrink:0;margin-left:8px">
+          fix_attempts: {{ f.fix_attempts or 0 }}
+        </span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+  {% endif %}
+
   <div>
 
     <!-- LEFT: Phases → Sprints roadmap (right column reserved for future labels/manual-create UI) -->
