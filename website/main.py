@@ -602,6 +602,7 @@ async def product_detail(
         "current_pm": current_pm,
         "active_tab": tab,
         "max_features_default": _cfg(await _get_system_config(db), "max_features_per_run"),
+        "max_fix_attempts": _cfg(await _get_system_config(db), "max_fix_attempts"),
         "phases": phases,
         "sprints": sprints,
         "active_sprint": active_sprint,
@@ -1296,7 +1297,13 @@ async def _evaluate_dod(sprint_id: int, product_id: int, db: AsyncSession) -> di
     sprint_features = feat_result.scalars().all()
 
     terminal = {"Pushed", "Deferred", "Rejected"}
-    all_features_done = all(f.status in terminal for f in sprint_features) if sprint_features else False
+    # Empty sprint = nothing to do = vacuously done. Without this, sprints
+    # whose features all moved to the Blocked-sprint holdpen (or were
+    # individually rejected/deleted) get stuck active forever — no work
+    # to advance, no completion path. The qa_passed + security_clean gates
+    # still apply, so a brand-new empty sprint with unsigned gates won't
+    # auto-complete spuriously.
+    all_features_done = all(f.status in terminal for f in sprint_features)
     no_open_prs = all(f.pr_number is None or f.status == "Pushed" for f in sprint_features)
 
     # security_clean: auto-clear stale `false` once all bugs in the sprint are
