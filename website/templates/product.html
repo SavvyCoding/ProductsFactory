@@ -15,9 +15,13 @@
 <div class="pf-layout-sidebar">
   <aside class="pf-sidebar collapsed" id="pf-sidebar">
     <nav style="padding-top:8px">
-      <a class="pf-sidebar-item {% if active_tab == 'board' %}active{% endif %}" onclick="switchTab('board', this)" href="javascript:void(0)" title="Board">
+      <a class="pf-sidebar-item {% if active_tab == 'summary' %}active{% endif %}" onclick="switchTab('summary', this)" href="javascript:void(0)" title="Summary">
+        <span class="pf-sidebar-icon">&#9776;</span>
+        <span class="pf-sidebar-label">Summary</span>
+      </a>
+      <a class="pf-sidebar-item {% if active_tab == 'board' %}active{% endif %}" onclick="switchTab('board', this)" href="javascript:void(0)" title="Feature Backlog">
         <span class="pf-sidebar-icon">&#9638;</span>
-        <span class="pf-sidebar-label">Board</span>
+        <span class="pf-sidebar-label">Feature Backlog</span>
         {% set feat_count = features | length %}
         {% if feat_count %}<span class="pf-sidebar-badge">{{ feat_count }}</span>{% endif %}
       </a>
@@ -148,6 +152,226 @@
 
 
 <!-- ══ TAB: BOARD ══════════════════════════════════════════ -->
+{# ══ TAB: SUMMARY ══════════════════════════════════════════ #}
+<div class="tab-content" id="tab-summary" {% if active_tab != 'summary' %}style="display:none"{% endif %}>
+  {# Aggregate counts in pure Jinja so this view needs no new endpoints. #}
+  {% set _STATUS_BUCKETS = ['Pending','Approved','Designed','Implementing','Reviewing','Reviewed','Pushed','Blocked','Deferred','Rejected','Reverted'] %}
+  {% set status_counts = {} %}
+  {% for s in _STATUS_BUCKETS %}{% set _ = status_counts.update({s: 0}) %}{% endfor %}
+  {% for f in features %}{% set _ = status_counts.update({f.status: status_counts.get(f.status, 0) + 1}) %}{% endfor %}
+  {% set type_counts = {'feature': 0, 'bug': 0, 'chore': 0} %}
+  {% for f in features %}{% set _ = type_counts.update({f.feature_type: type_counts.get(f.feature_type, 0) + 1}) %}{% endfor %}
+  {% set total_features = features | length %}
+  {% set pushed = status_counts.get('Pushed', 0) %}
+  {% set blocked = status_counts.get('Blocked', 0) %}
+  {% set in_flight = status_counts.get('Implementing', 0) + status_counts.get('Reviewing', 0) + status_counts.get('Reviewed', 0) %}
+  {% set unsigned_approved = (features | selectattr('status','equalto','Approved') | list) | length %}
+  {% set ship_pct = ((pushed / total_features) * 100) | int if total_features else 0 %}
+
+  {% set pending_count = status_counts.get('Pending', 0) %}
+
+  {% set total_sessions = sessions | length %}
+  {% set ok_sessions = sessions | selectattr('exit_code','equalto',0) | list | length %}
+  {% set killed_sessions = sessions | rejectattr('exit_code','equalto',0) | rejectattr('exit_code','none') | list | length %}
+  {% set running_sessions = sessions | selectattr('ended_at','none') | list | length %}
+  {% set ok_pct = ((ok_sessions / total_sessions) * 100) | int if total_sessions else 0 %}
+  {# Some sessions have NULL token columns (Claude backend, killed before metrics
+     were patched, etc.). `sum(attribute=...)` chokes on None — sum manually
+     with a default-zero list comprehension instead. #}
+  {% set _t_in  = sessions | map(attribute='tokens_input')  | reject('none') | sum %}
+  {% set _t_out = sessions | map(attribute='tokens_output') | reject('none') | sum %}
+  {% set _t_total = _t_in + _t_out %}
+
+  {% set sprint_active = sprints | selectattr('status','equalto','active') | rejectattr('kind','equalto','blocked') | list | first %}
+  {% set sprint_planned_count = sprints | selectattr('status','equalto','planned') | rejectattr('kind','equalto','blocked') | list | length %}
+  {% set sprint_completed_count = sprints | selectattr('status','equalto','completed') | list | length %}
+  {% set blocked_sprint = sprints | selectattr('kind','equalto','blocked') | list | first %}
+  {% set blocked_sprint_count = (features | selectattr('sprint_id','equalto', blocked_sprint.id) | list | length) if blocked_sprint else 0 %}
+
+  <!-- METRIC CARDS — primary KPIs grouped by section -->
+
+  <div class="metric-section">
+    <div class="metric-section-title">Delivery</div>
+    <div class="metric-grid">
+      <div class="metric-card metric--accent">
+        <div class="metric-icon">✓</div>
+        <div class="metric-body">
+          <div class="metric-value">{{ pushed }}</div>
+          <div class="metric-label">Features shipped</div>
+          <div class="metric-foot">
+            <div class="metric-bar"><div class="metric-bar-fill" style="width:{{ ship_pct }}%"></div></div>
+            <span class="metric-foot-text">{{ ship_pct }}% of {{ total_features }}</span>
+          </div>
+        </div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-icon">▶</div>
+        <div class="metric-body">
+          <div class="metric-value">{{ in_flight }}</div>
+          <div class="metric-label">In flight</div>
+          <div class="metric-foot-text">{{ status_counts.get('Implementing',0) }} coding · {{ status_counts.get('Reviewing',0) }} reviewing</div>
+        </div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-icon">⌛</div>
+        <div class="metric-body">
+          <div class="metric-value">{{ unsigned_approved }}</div>
+          <div class="metric-label">Approved backlog</div>
+          <div class="metric-foot-text">Waiting for designer / coder</div>
+        </div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-icon">📋</div>
+        <div class="metric-body">
+          <div class="metric-value">{{ pending_count }}</div>
+          <div class="metric-label">Pending review</div>
+          <div class="metric-foot-text">PM hasn't approved yet</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="metric-section">
+    <div class="metric-section-title">Pipeline health</div>
+    <div class="metric-grid">
+      <div class="metric-card {% if blocked > 0 %}metric--alert{% endif %}">
+        <div class="metric-icon">🚫</div>
+        <div class="metric-body">
+          <div class="metric-value">{{ blocked }}</div>
+          <div class="metric-label">Blocked</div>
+          <div class="metric-foot-text">{% if blocked_sprint_count %}{{ blocked_sprint_count }} on Blocked sprint{% else %}—{% endif %}</div>
+        </div>
+      </div>
+      <div class="metric-card {% if open_prs and open_prs >= 3 %}metric--warn{% endif %}">
+        <div class="metric-icon">⇄</div>
+        <div class="metric-body">
+          <div class="metric-value">{{ open_prs or 0 }}</div>
+          <div class="metric-label">Open PRs</div>
+          <div class="metric-foot-text">{% if open_prs and open_prs >= 3 %}⚠ at PR-gate{% else %}healthy{% endif %}</div>
+        </div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-icon">▦</div>
+        <div class="metric-body">
+          {% if sprint_active %}
+          {% set sf_count = features | selectattr('sprint_id', 'equalto', sprint_active.id) | list | length %}
+          {% set sf_terminal = features | selectattr('sprint_id', 'equalto', sprint_active.id) | selectattr('status','in',['Pushed','Deferred','Rejected']) | list | length %}
+          {% set sprint_pct = ((sf_terminal / sf_count) * 100) | int if sf_count else 0 %}
+          <div class="metric-value">{{ sf_terminal }}<span class="metric-suffix">/{{ sf_count }}</span></div>
+          <div class="metric-label">{{ sprint_active.name }} (active)</div>
+          <div class="metric-foot">
+            <div class="metric-bar"><div class="metric-bar-fill metric-bar-fill--green" style="width:{{ sprint_pct }}%"></div></div>
+            <span class="metric-foot-text">{{ sprint_pct }}% complete</span>
+          </div>
+          {% else %}
+          <div class="metric-value metric-value--muted">—</div>
+          <div class="metric-label">No active sprint</div>
+          <div class="metric-foot-text">{{ sprint_planned_count }} planned · {{ sprint_completed_count }} done</div>
+          {% endif %}
+        </div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-icon">⊞</div>
+        <div class="metric-body">
+          <div class="metric-value">{{ sprint_planned_count + sprint_completed_count + (1 if sprint_active else 0) }}</div>
+          <div class="metric-label">Sprints lifetime</div>
+          <div class="metric-foot-text">{{ sprint_completed_count }} done · {{ sprint_planned_count }} planned{% if blocked_sprint_count %} · <span class="metric-foot-alert">{{ blocked_sprint_count }} stuck</span>{% endif %}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="metric-section">
+    <div class="metric-section-title">Activity</div>
+    <div class="metric-grid">
+      <div class="metric-card">
+        <div class="metric-icon">⚡</div>
+        <div class="metric-body">
+          <div class="metric-value">{{ total_sessions }}</div>
+          <div class="metric-label">Sessions lifetime</div>
+          <div class="metric-foot-text">{{ ok_sessions }} OK · {{ killed_sessions }} killed{% if running_sessions %} · {{ running_sessions }} running{% endif %}</div>
+        </div>
+      </div>
+      <div class="metric-card {% if total_sessions and ok_pct < 60 %}metric--warn{% endif %}">
+        <div class="metric-icon">📊</div>
+        <div class="metric-body">
+          <div class="metric-value">{{ ok_pct }}<span class="metric-suffix">%</span></div>
+          <div class="metric-label">Session success rate</div>
+          <div class="metric-foot">
+            <div class="metric-bar"><div class="metric-bar-fill {% if ok_pct < 60 %}metric-bar-fill--warn{% else %}metric-bar-fill--green{% endif %}" style="width:{{ ok_pct }}%"></div></div>
+            <span class="metric-foot-text">across {{ total_sessions }} runs</span>
+          </div>
+        </div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-icon">≡</div>
+        <div class="metric-body">
+          <div class="metric-value">{% if _t_total >= 1000000 %}{{ (_t_total / 1000000) | round(1) }}M{% elif _t_total >= 1000 %}{{ (_t_total / 1000) | round(0) | int }}K{% else %}{{ _t_total }}{% endif %}</div>
+          <div class="metric-label">Tokens lifetime</div>
+          <div class="metric-foot-text">{{ '{:,}'.format(_t_in) }} in · {{ '{:,}'.format(_t_out) }} out</div>
+        </div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-icon">✦</div>
+        <div class="metric-body">
+          <div class="metric-value">{{ type_counts.get('feature', 0) }}<span class="metric-suffix">/{{ type_counts.get('bug', 0) }}/{{ type_counts.get('chore', 0) }}</span></div>
+          <div class="metric-label">Features / Bugs / Chores</div>
+          <div class="metric-foot-text">Mix across all states</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="metric-section">
+    <div class="metric-section-title">Status mix</div>
+    <div class="metric-grid">
+      {% for st in _STATUS_BUCKETS %}{% if status_counts.get(st, 0) %}
+      <div class="metric-card metric-card--small">
+        <div class="metric-icon">
+          {% if st == 'Pushed' %}✓{% elif st == 'Blocked' %}🚫{% elif st in ['Implementing','Designing'] %}⚙{% elif st == 'Reviewing' %}🔍{% elif st == 'Reviewed' %}✓{% elif st in ['Approved','Pending'] %}📋{% elif st == 'Designed' %}✏{% else %}·{% endif %}
+        </div>
+        <div class="metric-body">
+          <div class="metric-value">{{ status_counts.get(st, 0) }}</div>
+          <div class="metric-label">
+            <span class="badge badge-status-{{ st | lower }}" style="font-size:10px">{{ st }}</span>
+          </div>
+        </div>
+      </div>
+      {% endif %}{% endfor %}
+    </div>
+  </div>
+
+  {% if sessions %}
+  <div class="metric-section">
+    <div class="metric-section-title">Latest sessions</div>
+    <div class="metric-grid">
+      {% for s in sessions[:6] %}
+      {% set dur = ((s.ended_at - s.started_at).total_seconds() | int) if s.ended_at and s.started_at else None %}
+      <div class="metric-card metric-card--small {% if s.exit_code is not none and s.exit_code != 0 %}metric--alert{% elif s.exit_code is none %}metric--accent{% endif %}">
+        <div class="metric-icon">
+          {% if s.exit_code == 0 %}✓
+          {% elif s.exit_code is none %}▶
+          {% else %}✗{% endif %}
+        </div>
+        <div class="metric-body">
+          <div class="metric-value" style="font-size:18px">
+            {% if dur %}{{ (dur // 60) }}m{% else %}—{% endif %}
+          </div>
+          <div class="metric-label">{{ s.persona or 'agent' }}</div>
+          <div class="metric-foot-text">
+            {% if s.exit_code == 0 %}OK
+            {% elif s.exit_code is none %}running
+            {% else %}{{ s.status or 'killed' }}{% endif %}
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+</div><!-- /tab-summary -->
+
+
 <div class="tab-content" id="tab-board" {% if active_tab != 'board' %}style="display:none"{% endif %}>
 
   {% if product.run_now %}
@@ -276,35 +500,221 @@
   </div>
   {% endif %}
 
-  <!-- All features flat list -->
+  <!-- All features — tabular view -->
   {% set all_features = features | rejectattr('status', 'in', ['Pending', 'Rejected', 'Reverted']) | list %}
   {% if all_features %}
+  {% set sprint_lookup = {} %}
+  {% for s in sprints %}{% set _ = sprint_lookup.update({s.id: s}) %}{% endfor %}
+  {% set distinct_statuses = all_features | map(attribute='status') | unique | list %}
+  {% set distinct_types = all_features | map(attribute='feature_type') | unique | list %}
   <div class="card">
     <div style="font-size:13px;font-weight:600;color:var(--dark);margin-bottom:12px">All Features ({{ all_features | length }})</div>
-    <div class="phase-list">
-      {% for f in all_features %}
-      <div class="phase-card {% if f.source == 'ai' %}fc-ai{% endif %}" data-feature-id="{{ f.id }}">
-        <div class="phase-card-left">
-          <div>
-            <div class="phase-card-name">{{ f.name }}</div>
-            <div class="phase-card-meta">
-              <span class="badge badge-status-{{ f.status | lower }}" style="font-size:10px">{{ f.status }}</span>
-              {% if f.feature_type == 'bug' %}<span class="type-badge type-bug">🐛 Bug</span>{% endif %}
-              {% if f.feature_type == 'chore' %}<span class="type-badge type-chore">🔧 Chore</span>{% endif %}
-              {% if f.source == 'ai' %}<span class="ai-badge">🤖 AI</span>{% endif %}
-              {% if f.blocked_reason %}<span class="blocked-reason">⚠ {{ f.blocked_reason }}</span>{% endif %}
-              {% if f.review_outcome == 'approved' %}<span class="review-outcome review-ok">✓ Approved</span>{% endif %}
-              {% if f.review_outcome == 'changes_requested' %}<span class="review-outcome review-changes">↩ Changes requested</span>{% endif %}
-            </div>
-          </div>
-        </div>
-        <div class="phase-card-right">
-          {% if f.pr_url %}<a href="{{ f.pr_url }}" target="_blank" class="btn btn-sm btn-outline">PR #{{ f.pr_number }} ↗</a>{% endif %}
-        </div>
-      </div>
-      {% endfor %}
+
+    <!-- Filter bar — pure client-side; no server round-trip. -->
+    <div class="feature-backlog-filters" id="fbf-bar">
+      <input type="search" id="fbf-q" placeholder="Search name, ID, blocked reason…" autocomplete="off">
+      <select id="fbf-status">
+        <option value="">All statuses</option>
+        {% for s in distinct_statuses %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+      </select>
+      <select id="fbf-type">
+        <option value="">All types</option>
+        {% for t in distinct_types %}<option value="{{ t }}">{% if t == 'bug' %}🐛 Bug{% elif t == 'chore' %}🔧 Chore{% else %}✦ Feature{% endif %}</option>{% endfor %}
+      </select>
+      <select id="fbf-sprint">
+        <option value="">All sprints</option>
+        <option value="__none__">— No sprint —</option>
+        {% for s in sprints %}<option value="{{ s.id }}">{% if s.kind == 'blocked' %}🚫 {% endif %}{{ s.name }}{% if s.status == 'completed' %} (done){% endif %}</option>{% endfor %}
+      </select>
+      <select id="fbf-review">
+        <option value="">Any review</option>
+        <option value="approved">✓ Approved</option>
+        <option value="changes_requested">↩ Changes</option>
+        <option value="__none__">— No review —</option>
+      </select>
+      <button type="button" class="fbf-clear" onclick="fbfClearFilters()">Clear</button>
+      <span class="fbf-count" id="fbf-count">{{ all_features | length }} of {{ all_features | length }}</span>
+    </div>
+
+    <div style="overflow-x:auto">
+      <table class="feature-backlog-table" id="feature-backlog-table">
+        <thead>
+          <tr>
+            <th style="width:42px"  class="fbt-sort" data-sort="id"        data-sort-type="num">ID<span class="fbt-sort-icon"></span></th>
+            <th                     class="fbt-sort" data-sort="name"      data-sort-type="text">Name<span class="fbt-sort-icon"></span></th>
+            <th style="width:80px"  class="fbt-sort" data-sort="type"      data-sort-type="text">Type<span class="fbt-sort-icon"></span></th>
+            <th style="width:110px" class="fbt-sort" data-sort="status"    data-sort-type="text">Status<span class="fbt-sort-icon"></span></th>
+            <th style="width:64px"  class="fbt-sort" data-sort="priority"  data-sort-type="num">Priority<span class="fbt-sort-icon"></span></th>
+            <th style="width:140px" class="fbt-sort" data-sort="sprint"    data-sort-type="text">Sprint<span class="fbt-sort-icon"></span></th>
+            <th style="width:120px" class="fbt-sort" data-sort="review"    data-sort-type="text">Review<span class="fbt-sort-icon"></span></th>
+            <th style="width:90px"  class="fbt-sort" data-sort="pr"        data-sort-type="num">PR<span class="fbt-sort-icon"></span></th>
+            <th style="width:130px" class="fbt-sort" data-sort="updated"   data-sort-type="text">Updated<span class="fbt-sort-icon"></span></th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for f in all_features %}
+          {% set f_sprint = sprint_lookup.get(f.sprint_id) if f.sprint_id else None %}
+          <tr class="fbt-row {% if f.source == 'ai' %}fbt-row--ai{% endif %}"
+              data-feature-id="{{ f.id }}"
+              data-status="{{ f.status }}"
+              data-type="{{ f.feature_type }}"
+              data-sprint="{{ f.sprint_id or '__none__' }}"
+              data-review="{{ f.review_outcome or '__none__' }}"
+              data-search="{{ ((f.id|string) ~ ' ' ~ (f.name or '') ~ ' ' ~ (f.blocked_reason or '')) | lower }}"
+              data-sort-id="{{ f.id }}"
+              data-sort-name="{{ (f.name or '') | lower }}"
+              data-sort-type="{{ f.feature_type or '' }}"
+              data-sort-status="{{ f.status }}"
+              data-sort-priority="{{ f.priority or 0 }}"
+              data-sort-sprint="{{ (sprint_lookup.get(f.sprint_id).name | lower) if f.sprint_id and sprint_lookup.get(f.sprint_id) else '~' }}"
+              data-sort-review="{{ f.review_outcome or '~' }}"
+              data-sort-pr="{{ f.pr_number or 0 }}"
+              data-sort-updated="{{ f.updated_at.isoformat() if f.updated_at else '' }}"
+              style="cursor:pointer">
+            <td class="fbt-id">#{{ f.id }}</td>
+            <td>
+              <div class="fbt-name">
+                {{ f.name }}
+                {% if f.source == 'ai' %}<span class="ai-badge" title="AI-suggested">🤖</span>{% endif %}
+              </div>
+              {% if f.blocked_reason %}<div class="fbt-blocked">⚠ {{ f.blocked_reason[:140] }}{% if f.blocked_reason|length > 140 %}…{% endif %}</div>{% endif %}
+            </td>
+            <td>
+              {% if f.feature_type == 'bug' %}<span class="type-badge type-bug">🐛 Bug</span>
+              {% elif f.feature_type == 'chore' %}<span class="type-badge type-chore">🔧 Chore</span>
+              {% else %}<span class="fbt-type-feat">✦ Feature</span>{% endif %}
+            </td>
+            <td><span class="badge badge-status-{{ f.status | lower }}" style="font-size:10px">{{ f.status }}</span></td>
+            <td class="fbt-num">{{ f.priority or '—' }}</td>
+            <td class="fbt-sprint">
+              {% if f_sprint %}
+                {% if f_sprint.kind == 'blocked' %}<span title="Holding pen">🚫 {{ f_sprint.name }}</span>
+                {% else %}{{ f_sprint.name }}{% endif %}
+              {% else %}<span class="fbt-muted">—</span>{% endif %}
+            </td>
+            <td>
+              {% if f.review_outcome == 'approved' %}<span class="review-outcome review-ok">✓ Approved</span>
+              {% elif f.review_outcome == 'changes_requested' %}<span class="review-outcome review-changes">↩ Changes</span>
+              {% else %}<span class="fbt-muted">—</span>{% endif %}
+            </td>
+            <td>
+              {% if f.pr_url %}<a href="{{ f.pr_url }}" target="_blank" onclick="event.stopPropagation()">#{{ f.pr_number }} ↗</a>
+              {% else %}<span class="fbt-muted">—</span>{% endif %}
+            </td>
+            <td class="fbt-date">{% if f.updated_at %}{{ f.updated_at.strftime('%Y-%m-%d %H:%M') }}{% else %}—{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
     </div>
   </div>
+
+  {# Client-side filters + sort for the Feature Backlog table. Data is in
+     the DOM via data-* attributes so this is pure show/hide + reorder. #}
+  <script>
+  (function() {
+    function init() {
+      const table = document.getElementById('feature-backlog-table');
+      if (!table) return;
+      const tbody = table.querySelector('tbody');
+      const rows = Array.from(tbody.querySelectorAll('tr.fbt-row'));
+      const total = rows.length;
+      const q       = document.getElementById('fbf-q');
+      const status  = document.getElementById('fbf-status');
+      const type    = document.getElementById('fbf-type');
+      const sprint  = document.getElementById('fbf-sprint');
+      const review  = document.getElementById('fbf-review');
+      const counter = document.getElementById('fbf-count');
+      if (!q || !status || !type || !sprint || !review || !counter) return;
+
+      function applyFilters() {
+        const qVal = (q.value || '').trim().toLowerCase();
+        const sVal = status.value;
+        const tVal = type.value;
+        const spVal = sprint.value;
+        const rVal = review.value;
+        let visible = 0;
+        for (const row of rows) {
+          const ok =
+            (!sVal  || row.dataset.status === sVal) &&
+            (!tVal  || row.dataset.type   === tVal) &&
+            (!spVal || row.dataset.sprint === spVal) &&
+            (!rVal  || row.dataset.review === rVal) &&
+            (!qVal  || (row.dataset.search || '').includes(qVal));
+          row.classList.toggle('fbt-hidden', !ok);
+          if (ok) visible++;
+        }
+        counter.textContent = visible + ' of ' + total;
+      }
+
+      q.addEventListener('input', applyFilters);
+      [status, type, sprint, review].forEach(el => el.addEventListener('change', applyFilters));
+      window.fbfClearFilters = function() {
+        q.value = ''; status.value = ''; type.value = '';
+        sprint.value = ''; review.value = '';
+        applyFilters();
+      };
+
+      // ── Column sorting ─────────────────────────────────────
+      // Click a TH to cycle: asc → desc → unsorted (DOM original order).
+      let sortKey = null, sortDir = null;
+      const ths = Array.from(table.querySelectorAll('th.fbt-sort'));
+      function paintIcons() {
+        ths.forEach(th => {
+          const ic = th.querySelector('.fbt-sort-icon');
+          if (!ic) return;
+          if (th.dataset.sort === sortKey) {
+            ic.textContent = sortDir === 'asc' ? ' ↑' : sortDir === 'desc' ? ' ↓' : '';
+            th.classList.toggle('fbt-sorted', !!sortDir);
+          } else {
+            ic.textContent = '';
+            th.classList.remove('fbt-sorted');
+          }
+        });
+      }
+      function sortRows() {
+        if (!sortKey || !sortDir) {
+          // Unsorted — restore original DOM order.
+          for (const r of rows) tbody.appendChild(r);
+          return;
+        }
+        const isNum = ths.find(th => th.dataset.sort === sortKey)?.dataset.sortType === 'num';
+        const dataKey = 'sort' + sortKey.charAt(0).toUpperCase() + sortKey.slice(1);
+        const sorted = rows.slice().sort((a, b) => {
+          let av = a.dataset[dataKey] || '';
+          let bv = b.dataset[dataKey] || '';
+          if (isNum) {
+            av = parseFloat(av) || 0;
+            bv = parseFloat(bv) || 0;
+            return sortDir === 'asc' ? av - bv : bv - av;
+          }
+          return sortDir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+        });
+        for (const r of sorted) tbody.appendChild(r);
+      }
+      ths.forEach(th => {
+        th.addEventListener('click', () => {
+          const key = th.dataset.sort;
+          if (sortKey === key) {
+            sortDir = sortDir === 'asc' ? 'desc' : sortDir === 'desc' ? null : 'asc';
+            if (!sortDir) sortKey = null;
+          } else {
+            sortKey = key;
+            sortDir = 'asc';
+          }
+          paintIcons();
+          sortRows();
+        });
+      });
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', init);
+    } else {
+      init();
+    }
+  })();
+  </script>
+
   {% elif not pending_features %}
   <div class="empty-state" style="margin-top:20px">
     <div class="empty-icon">📦</div>
@@ -357,26 +767,35 @@
   {% endif %}
 
   {# Blocked sprint — per-product holding pen for features that exhausted
-     max_fix_attempts. Surfaces them as an alert card distinct from the
-     phasewise roadmap so PMs can triage. #}
+     max_fix_attempts. Always shown on the Sprints tab so PMs know the
+     feature exists; renders as a calm empty state when nothing's stuck.
+     Populated state uses a red alert tone to draw attention. #}
   {% set blocked_sprint = sprints | selectattr('kind', 'equalto', 'blocked') | first %}
-  {% if blocked_sprint %}
-  {% set blocked_features = features | selectattr('sprint_id', 'equalto', blocked_sprint.id) | list %}
-  {% if blocked_features %}
-  <div class="card" style="margin-bottom:16px;border-left:4px solid #dc2626;background:#fef2f2">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+  {% set blocked_features = (features | selectattr('sprint_id', 'equalto', blocked_sprint.id) | list) if blocked_sprint else [] %}
+  {% set is_populated = blocked_features | length > 0 %}
+  <div class="card" style="margin-bottom:16px;border-left:4px solid {% if is_populated %}#dc2626{% else %}var(--border){% endif %};{% if is_populated %}background:#fef2f2{% endif %}">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:{% if is_populated %}8px{% else %}0{% endif %}">
       <div>
-        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:2px;color:#dc2626">
-          🚫 BLOCKED — needs human triage
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:2px;color:{% if is_populated %}#dc2626{% else %}var(--text-muted){% endif %}">
+          🚫 BLOCKED SPRINT{% if is_populated %} — needs human triage{% endif %}
         </div>
-        <div style="font-size:14px;font-weight:700;color:#7f1d1d">
-          {{ blocked_features | length }} feature{{ 's' if blocked_features | length != 1 else '' }} exceeded max_fix_attempts
+        <div style="font-size:14px;font-weight:700;color:{% if is_populated %}#7f1d1d{% else %}var(--text){% endif %}">
+          {% if is_populated %}
+            {{ blocked_features | length }} feature{{ 's' if blocked_features | length != 1 else '' }} exceeded max_fix_attempts
+          {% else %}
+            No features awaiting triage
+          {% endif %}
         </div>
-        <div style="font-size:11px;color:#991b1b;margin-top:2px">
-          Re-route a feature to a normal sprint after fixing the root cause, or mark Rejected.
+        <div style="font-size:11px;color:{% if is_populated %}#991b1b{% else %}var(--text-muted){% endif %};margin-top:2px">
+          {% if is_populated %}
+            Re-route a feature to a normal sprint after fixing the root cause, or mark Rejected.
+          {% else %}
+            Features that fail their PR cycle <strong>{{ max_fix_attempts or 5 }}</strong> times are auto-routed here for human triage.
+          {% endif %}
         </div>
       </div>
     </div>
+    {% if is_populated %}
     <div style="display:flex;flex-direction:column;gap:5px">
       {% for f in blocked_features %}
       <div class="phase-card" data-feature-id="{{ f.id }}" style="display:flex;justify-content:space-between;align-items:flex-start;padding:8px 10px;background:#fff;border-radius:6px;border:1px solid #fecaca;cursor:pointer">
@@ -394,9 +813,8 @@
       </div>
       {% endfor %}
     </div>
+    {% endif %}
   </div>
-  {% endif %}
-  {% endif %}
 
   <div>
 
@@ -829,10 +1247,10 @@
 </div>
 
 {% block scripts %}
-<script src="/static/js/board.js"></script>
+<script src="/static/js/board.js?v=2026-04-30-fbt"></script>
 <script src="/static/js/session.js"></script>
 <script src="/static/js/history.js"></script>
-<script src="/static/js/feature-panel.js"></script>
+<script src="/static/js/feature-panel.js?v=2026-04-30-fbt"></script>
 <script>
 function openSprintReport(sprintId, sprintName) {
   const backdrop = document.getElementById('sprint-report-backdrop');

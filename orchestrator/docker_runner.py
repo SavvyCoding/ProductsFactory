@@ -762,14 +762,24 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         timeout = kw.pop("timeout", 120)
         return _sp.run(cmd, cwd=working_dir, capture_output=True, text=True, timeout=timeout, **kw)
 
-    # 1. Detect changes (any modified, added, deleted, or untracked files in tracked paths)
+    # 1. Detect changes — anything uncommitted in the tree, OR committed-but-
+    # not-pushed (the agent may have committed itself; we still need to push).
     status = _run(["git", "status", "--porcelain"])
     changed = [ln for ln in status.stdout.splitlines() if ln.strip()
                and not ln.endswith("session_result.json")
                and not ln.endswith("session_summary.md")
                and "/Temp/" not in ln and "/Results/" not in ln]
-    if not changed:
-        log.warning(f"[post-coder] {pname}: agent exited 0 but no code changes — skipping PR")
+    has_unpushed_commits = False
+    for ref in ("@{u}", "origin/main", "origin/master"):
+        ahead = _run(["git", "rev-list", "--count", f"{ref}..HEAD"])
+        if ahead.returncode == 0:
+            try:
+                has_unpushed_commits = int((ahead.stdout or "0").strip()) > 0
+            except ValueError:
+                pass
+            break
+    if not changed and not has_unpushed_commits:
+        log.warning(f"[post-coder] {pname}: agent exited 0 but no code changes or unpushed commits — skipping PR")
         # Mark features Blocked so they don't loop in Implementing forever
         try:
             with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
@@ -831,29 +841,40 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             log.warning(f"[post-coder] {pname}: git checkout -b {branch} failed — {_fmt_err(co)}")
             return
 
-    # 3. Add + commit + push
-    add_r = _run(["git", "add", "-A"])
-    if add_r.returncode != 0:
-        log.warning(f"[post-coder] {pname}: git add -A failed — {_fmt_err(add_r)}")
-        return
-    # Sanity: was anything actually staged? `diff --cached --quiet` exits 1 if
-    # there are staged changes, 0 if none. Catches the "porcelain showed lines
-    # but add staged nothing" scenario (e.g. all changes inside a submodule or
-    # excluded path) so we surface a clear error instead of an empty stderr.
-    cached = _run(["git", "diff", "--cached", "--quiet"])
-    if cached.returncode == 0:
-        ls = _run(["git", "status", "--porcelain"])
-        log.warning(
-            f"[post-coder] {pname}: nothing staged after `git add -A` "
-            f"despite {len(changed)} porcelain entries. status={ls.stdout.strip()[:400]!r}"
-        )
-        return
+    # 3. Add + commit + push.
+    # Three states the working tree can be in at this point:
+    #   (a) Uncommitted changes present  → add, sanity-check stage, commit
+    #   (b) Clean tree, unpushed commits → agent already committed; skip to push
+    #   (c) Clean tree, no unpushed cmts → caught by the early-return above
     feat_summary = ", ".join(f"#{i}" for i in feat_ids)
-    commit_msg = f"feat: implement features {feat_summary} [coder-{session_uid}]"
-    commit_result = _run(["git", "commit", "-m", commit_msg])
-    if commit_result.returncode != 0:
-        log.warning(f"[post-coder] {pname}: git commit failed — {_fmt_err(commit_result)}")
-        return
+    if changed:
+        add_r = _run(["git", "add", "-A"])
+        if add_r.returncode != 0:
+            log.warning(f"[post-coder] {pname}: git add -A failed — {_fmt_err(add_r)}")
+            return
+        # Sanity: was anything actually staged? `diff --cached --quiet` exits 1
+        # if there are staged changes, 0 if none. Catches the "porcelain showed
+        # lines but add staged nothing" scenario (e.g. all changes inside a
+        # submodule or excluded path) so we surface a clear error instead of
+        # an empty stderr.
+        cached = _run(["git", "diff", "--cached", "--quiet"])
+        if cached.returncode == 0:
+            ls = _run(["git", "status", "--porcelain"])
+            log.warning(
+                f"[post-coder] {pname}: nothing staged after `git add -A` "
+                f"despite {len(changed)} porcelain entries. status={ls.stdout.strip()[:400]!r}"
+            )
+            return
+        commit_msg = f"feat: implement features {feat_summary} [coder-{session_uid}]"
+        commit_result = _run(["git", "commit", "-m", commit_msg])
+        if commit_result.returncode != 0:
+            log.warning(f"[post-coder] {pname}: git commit failed — {_fmt_err(commit_result)}")
+            return
+    else:
+        log.info(
+            f"[post-coder] {pname}: tree clean but {has_unpushed_commits and 'unpushed commits exist'} "
+            f"— skipping add/commit, going straight to push"
+        )
 
     if sprint_pr_mode:
         push_args = ["git", "push", "origin", branch]

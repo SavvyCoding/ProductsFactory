@@ -590,7 +590,7 @@ async def product_detail(
     labels = label_result.scalars().all()
 
     tab = request.query_params.get("tab", "board")
-    return templates.TemplateResponse("product.html", {
+    response = templates.TemplateResponse("product.html", {
         "request": request,
         "product": product,
         "features": features,
@@ -608,6 +608,13 @@ async def product_detail(
         "active_sprint": active_sprint,
         "labels": labels,
     })
+    # Force browsers to re-fetch the HTML on every navigation. Without this,
+    # the cached HTML keeps pointing at older CSS/JS hashes and the user
+    # never sees recent UI updates even after a hard refresh of static files.
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @app.get("/product/{product_id}/architecture", response_class=HTMLResponse)
