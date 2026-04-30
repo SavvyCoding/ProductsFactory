@@ -24,5 +24,25 @@ elif [ "$LOCK_STATUS" != "200" ] && [ "$LOCK_STATUS" != "201" ]; then
     echo "[bootstrap] Unexpected lock response: $LOCK_STATUS — continuing (PM API may still be starting)."
 fi
 
+# Configure git credential helper using the GitHub PAT so the orchestrator's
+# git operations (post-coder push, scaffold push, pat-rotate sweeps) succeed
+# without the PAT being baked into remote URLs. Pulls fresh from PM API in
+# case the operator rotated it after .env was loaded.
+PAT=$(curl -s "$PM_API_URL/api/system-config" 2>/dev/null \
+        | python3 -c "import sys,json; print((json.load(sys.stdin) or {}).get('github_pat') or '')" 2>/dev/null \
+        || echo "")
+if [ -n "$PAT" ]; then
+    git config --global credential.helper store
+    cat > ~/.git-credentials <<EOF
+https://x-access-token:${PAT}@github.com
+EOF
+    chmod 600 ~/.git-credentials
+    git config --global user.email "orchestrator@productfactory.local" 2>/dev/null || true
+    git config --global user.name  "ProductFactory Orchestrator" 2>/dev/null || true
+    echo "[bootstrap] Git credential helper configured."
+else
+    echo "[bootstrap] No GitHub PAT available — git push operations may fail until set."
+fi
+
 echo "[bootstrap] Starting orchestration loop..."
 exec python3 /app/orchestrate.py
