@@ -167,22 +167,33 @@ def _decide_product_planner(ctx: Context) -> DecisionResult:
 
 
 def _decide_route_unsprinted_security_bugs(ctx: Context) -> DecisionResult:
-    """Phase 3 (INVARIANTS.md VIII.2): when the active sprint's `security_clean`
-    gate is False AND there are unsprinted security bug features, route those
-    bugs into the active sprint so the coder picks them up next.
+    """Opportunistic backlog management for security bugs (INVARIANTS.md VIII.2).
 
-    This breaks the webcalculator-class deadlock where:
-      - active sprint has only Reviewed features (no codable work)
-      - DoD `security_clean` is failing because of unsprinted bugs filed by
-        the security_auditor
-      - coder is sprint-aware so unsprinted bugs are invisible
-      - sprint can't complete until security_clean clears
-      - security_clean can't clear until the bugs ship
-      - bugs can't ship because they aren't in any sprint
+    When the active sprint's `security_clean` gate is currently False AND there
+    are unsprinted bug features in `Approved`/`Designed` state, PATCH them into
+    the active sprint so the coder predicate picks them up.
 
-    Returns None — bugs get routed via PATCH side-effects, then the next
-    decision in the list (`_decide_coder`) picks them up because they're
-    now in the active sprint.
+    HONEST FRAMING: this does NOT directly unblock `security_clean`. Read the
+    website-side gate logic at `_evaluate_dod` (website/main.py): when the
+    auditor's persisted sign-off is False, the gate recomputes from
+    *sprint-bugs only* — `bool(_sprint_bugs) and all(f.status in terminal for
+    f in _sprint_bugs)`. Unsprinted bugs are not part of that calculation. So
+    the deadlock isn't:
+        unsprinted bugs block gate → can't ship → gate stays blocked
+    It's:
+        sprint-bugs in non-terminal states block gate (the real deadlock)
+        + unsprinted bugs sit invisible to the coder (the secondary blind spot)
+
+    What this decision DOES achieve: pulls unsprinted security bugs out of
+    invisibility so the next coder cycle ships them. Once they're shipped
+    (terminal in the sprint), they count toward the gate via the website's
+    recompute. The actual deadlock unblock is two steps: this routing, then
+    the coder, then `security_clean` clears via the recompute on next /dod
+    read.
+
+    Always returns None: this is a side-effect, not a persona pick. Position
+    in the decision list is intentional — running before `_decide_coder` lets
+    routed bugs become eligible the same cycle.
     """
     if not ctx.active_sprint or not ctx.active_sprint_dod:
         return None
@@ -212,8 +223,13 @@ def _decide_route_unsprinted_security_bugs(ctx: Context) -> DecisionResult:
             cap = int((sc_resp.json() or {}).get("max_features_per_sprint") or 5)
     except Exception:
         pass
-    in_sprint_count = sum(1 for f in ctx.features if f.get("sprint_id") == sid)
-    slots = max(0, cap - in_sprint_count)
+    # Match website's _check_sprint_capacity (website/main.py): terminal
+    # features are committed history and don't consume sprint slots.
+    in_sprint_active = sum(
+        1 for f in ctx.features
+        if f.get("sprint_id") == sid and f.get("status") not in TERMINAL
+    )
+    slots = max(0, cap - in_sprint_active)
     if slots == 0:
         log.info(
             f"Active sprint {sid}: security_clean=False with {len(routable)} "

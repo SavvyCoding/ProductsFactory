@@ -64,7 +64,7 @@ import httpx
 
 from orchestrator.setup_product import discover_and_populate
 from orchestrator.docker_runner import run_claude_in_docker
-from orchestrator.github_client import count_open_prs, reconcile_merged_prs, reconcile_in_flight_prs
+from orchestrator.github_client import count_open_prs
 from orchestrator.reconcile import reconcile_product
 from orchestrator.heartbeat import check_stale_sessions
 from orchestrator.alerts import send_alert

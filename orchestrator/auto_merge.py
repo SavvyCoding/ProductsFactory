@@ -99,10 +99,14 @@ def sweep_product(product: dict, sys_cfg: dict) -> dict:
                 fid = f["id"]
                 pr_num = f["pr_number"]
 
+                # `changed_by` tags the changelog row so the audit trail
+                # attributes Pushed transitions to the sweep, not "agent".
+                _patch_pushed = {"status": "Pushed", "changed_by": "auto-merge"}
+
                 # Same PR shared across multiple features (sprint PRs cover N features):
                 # once we successfully merge it, flip every other feature pointing at it.
                 if pr_num in merged_pr_nums:
-                    client.patch(f"/api/features/{fid}", json={"status": "Pushed"})
+                    client.patch(f"/api/features/{fid}", json=_patch_pushed)
                     counters["merged"] += 1
                     merged_features.append(f)
                     continue
@@ -114,7 +118,7 @@ def sweep_product(product: dict, sys_cfg: dict) -> dict:
                         f"PR=#{pr_num} merged"
                     )
                     merged_pr_nums.add(pr_num)
-                    client.patch(f"/api/features/{fid}", json={"status": "Pushed"})
+                    client.patch(f"/api/features/{fid}", json=_patch_pushed)
                     counters["merged"] += 1
                     merged_features.append(f)
                 elif code == 422:
@@ -124,7 +128,7 @@ def sweep_product(product: dict, sys_cfg: dict) -> dict:
                         f"already merged (422), flipping feature #{fid} to Pushed"
                     )
                     merged_pr_nums.add(pr_num)
-                    client.patch(f"/api/features/{fid}", json={"status": "Pushed"})
+                    client.patch(f"/api/features/{fid}", json=_patch_pushed)
                     counters["merged"] += 1
                     merged_features.append(f)
                 elif code == 405:
