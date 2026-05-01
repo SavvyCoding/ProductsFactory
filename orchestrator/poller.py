@@ -52,6 +52,7 @@ import httpx
 from orchestrator.setup_product import discover_and_populate
 from orchestrator.docker_runner import run_claude_in_docker
 from orchestrator.github_client import count_open_prs, reconcile_merged_prs, reconcile_in_flight_prs
+from orchestrator.reconcile import reconcile_product
 from orchestrator.heartbeat import check_stale_sessions
 from orchestrator.alerts import send_alert
 from orchestrator.greenfield_scaffold import scaffold_greenfield
@@ -1037,10 +1038,10 @@ def main():
 
             # ⑥b PR reconciliation for all products — runs every cycle so Implementing+open-PR
             # features are advanced to Reviewing before the reviewer-first check below.
+            # Phase 4 of PollerRevamp: single per-product entry point in
+            # orchestrator/reconcile.py — see INVARIANTS.md V.3-V.4 for contract.
             for _p in products:
-                if _p.get("status") == "ready":
-                    reconcile_merged_prs(_p)
-                    reconcile_in_flight_prs(_p)
+                reconcile_product(_p)
 
             # ⑥c Auto-merge sweep — Phase 1 of PollerRevamp.
             # Merges every Reviewed+approved+pr_number feature across ALL ready
