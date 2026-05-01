@@ -1,10 +1,16 @@
 """Per-cycle auto-merge sweep — Phase 1 of PollerRevamp.
 
 Walks every `ready` product once per cycle and squash-merges any feature
-that is Reviewed + has a pr_number + review_outcome=approved, regardless
-of sprint membership. Replaces the historical pattern where auto-merge
-was only triggered inside reviewer sessions or inside `determine_persona`
-for active-sprint Reviewed features (see invariant VII.1 in INVARIANTS.md).
+that is Reviewed + has a pr_number + review_outcome=approved. See
+INVARIANTS.md VII.1.
+
+Sprint-PR mode awareness (INVARIANTS.md VII.5): when a feature's
+pr_number matches its sprint's pr_number, the PR is shared across every
+feature in that sprint (sprint-PR mode). The sweep MUST NOT merge such
+a PR until every feature in the sprint is merge-eligible — otherwise it
+ships an incomplete sprint as soon as the first feature reaches
+Reviewed+approved. Per-feature mode (the default) is unaffected because
+each feature's pr_number is its own.
 
 Idempotent. If a feature was already merged in a prior cycle (status
 already Pushed, or PR already merged on GitHub), the sweep is a no-op
@@ -25,6 +31,31 @@ import httpx
 log = logging.getLogger("auto_merge")
 
 PM_API_URL = os.environ.get("PM_API_URL", "http://pm-api:8080")
+
+# Mirrors dispatch.TERMINAL but kept local to avoid an import cycle.
+TERMINAL = frozenset({"Pushed", "Deferred", "Rejected", "Reverted"})
+
+
+def _is_merge_eligible(feature: dict, target_pr_num: int) -> bool:
+    """A sprint feature is merge-eligible when EITHER:
+      - it's already terminal (Pushed/Deferred/Rejected/Reverted) — the
+        sprint has explicitly accounted for it, OR
+      - it's `Reviewed` + `approved` AND its pr_number matches the target
+        sprint PR — meaning it's queued to ship as part of THIS merge.
+
+    Anything else (Pending, Approved, Designed, Implementing, Reviewing,
+    Reviewed-changes-requested, Reviewed-pointing-at-different-PR, Blocked)
+    means the sprint isn't ready and the merge must wait.
+    """
+    if feature.get("status") in TERMINAL:
+        return True
+    if (
+        feature.get("status") == "Reviewed"
+        and feature.get("review_outcome") == "approved"
+        and feature.get("pr_number") == target_pr_num
+    ):
+        return True
+    return False
 
 
 def _parse_repo_slug(github_repo: str) -> str | None:
@@ -77,6 +108,7 @@ def sweep_product(product: dict, sys_cfg: dict) -> dict:
     product_id = product["id"]
     merged_features: list[dict] = []
     merged_pr_nums: set[int] = set()
+    held_sprint_prs: set[int] = set()  # PRs deferred this cycle by the sprint-PR gate
 
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=15) as client:
@@ -86,6 +118,24 @@ def sweep_product(product: dict, sys_cfg: dict) -> dict:
             feats = feats_resp.json() or []
             if not isinstance(feats, list):
                 return counters
+
+            # Build sprint_id → sprint(with pr_number) map so the sprint-PR
+            # mode gate can answer "is this feature's pr_number actually the
+            # sprint's PR?". Sprints without a pr_number can't be sprint-PR
+            # mode and are excluded.
+            sprint_by_id: dict[int, dict] = {}
+            try:
+                sprints_resp = client.get(f"/api/products/{product_id}/sprints")
+                if sprints_resp.status_code == 200:
+                    sprints_payload = sprints_resp.json() or []
+                    if isinstance(sprints_payload, list):
+                        sprint_by_id = {
+                            s["id"]: s
+                            for s in sprints_payload
+                            if s.get("id") and s.get("pr_number")
+                        }
+            except Exception:
+                pass  # Per-feature mode behaves fine with an empty map.
 
             candidates = [
                 f for f in feats
@@ -110,6 +160,40 @@ def sweep_product(product: dict, sys_cfg: dict) -> dict:
                     counters["merged"] += 1
                     merged_features.append(f)
                     continue
+
+                # If this PR was already determined non-mergeable this cycle by
+                # the sprint-PR gate, don't re-check or re-call GitHub.
+                if pr_num in held_sprint_prs:
+                    counters["skipped"] += 1
+                    continue
+
+                # Sprint-PR mode gate (INVARIANTS.md VII.5). When this feature's
+                # pr_number matches its sprint's pr_number, the PR is the
+                # whole-sprint PR. Merging it now would ship every feature in
+                # the sprint, so we hold the merge until every sprint feature
+                # is merge-eligible (terminal, or Reviewed+approved on the same
+                # PR). Per-feature mode never enters this branch because the
+                # feature's pr_number won't match its sprint's pr_number.
+                sid = f.get("sprint_id")
+                sprint = sprint_by_id.get(sid) if sid else None
+                if sprint and sprint.get("pr_number") == pr_num:
+                    sprint_features = [x for x in feats if x.get("sprint_id") == sid]
+                    blockers = [
+                        x for x in sprint_features
+                        if not _is_merge_eligible(x, pr_num)
+                    ]
+                    if blockers:
+                        # Log once per held PR per cycle, not once per feature
+                        # pointing at it.
+                        log.info(
+                            f"[auto-merge sweep] product={product_id} sprint={sid} "
+                            f"PR=#{pr_num} held: {len(blockers)} sprint feature(s) "
+                            f"not yet merge-eligible "
+                            f"(e.g. #{blockers[0]['id']} status={blockers[0].get('status')})"
+                        )
+                        held_sprint_prs.add(pr_num)
+                        counters["skipped"] += 1
+                        continue
 
                 code, body = _try_merge_pr(repo_slug, pr_num, pat)
                 if code == 200:
