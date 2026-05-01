@@ -52,7 +52,13 @@ COPY deploy/orchestrator/orchestrate.py  /app/orchestrate.py
 COPY deploy/orchestrator/tools.py        /app/orchestrator_runtime.py
 COPY deploy/orchestrator/bootstrap.sh    /usr/local/bin/bootstrap.sh
 
-RUN chmod +x /usr/local/bin/bootstrap.sh \
+# Strip Windows-style \r line endings from the bootstrap script — defense
+# against host filesystems with `core.autocrlf=true` (the default on Git
+# for Windows). The .gitattributes file already declares *.sh as eol=lf,
+# but this is belt-and-braces for fresh clones that haven't checked the
+# attribute, or for files added before .gitattributes shipped.
+RUN sed -i 's/\r$//' /usr/local/bin/bootstrap.sh \
+ && chmod +x /usr/local/bin/bootstrap.sh \
  && chown -R orchestrator:orchestrator /app
 
 USER orchestrator

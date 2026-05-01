@@ -1,0 +1,20 @@
+# Force LF line endings for shell scripts and Dockerfiles regardless of
+# host autocrlf setting. Scripts COPY'd into Linux images break with CRLF
+# in the shebang (`/bin/bash\r` doesn't exist).
+*.sh        text eol=lf
+*.bash      text eol=lf
+Dockerfile* text eol=lf
+*.dockerfile text eol=lf
+
+# Python: stay LF — Windows is fine with LF, Linux requires it.
+*.py        text eol=lf
+
+# Markdown / YAML: LF too, for consistency with editors.
+*.md        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+
+# Binary files: don't touch.
+*.png       binary
+*.jpg       binary
+*.mp4       binary
