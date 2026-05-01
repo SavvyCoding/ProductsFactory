@@ -673,32 +673,31 @@ def _format_agent_event(line: str) -> str | None:
 def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                               assigned_features: list[dict]) -> None:
     """
-    Deterministic git+gh pipeline run after the coder LLM exits cleanly.
-    The coder ONLY writes code; this function does the ceremony:
+    Deterministic git fallback after the coder LLM exits cleanly.
+    The coder ONLY writes code; this function pushes to the sprint branch:
       1. Detect if there are any changes in the workspace
-      2. Create branch coder/{session_uid}
+      2. Check out the sprint branch (provisioned at sprint activation)
       3. git add + commit + push
-      4. gh pr create
-      5. Append one Reviewing entry per assigned feature to session_result.json
-         (the existing reconcile loop will then PATCH each feature → Reviewing
-         with the same pr_number, and the auto-merge logic later picks it up)
+      4. Append one Reviewing entry per assigned feature to session_result.json
+         pointing at the existing sprint PR
 
-    Single PR for all assigned features in this session — simpler than per-feature
-    branches and matches how human devs typically batch related changes.
+    Sprint-PR mode is the only supported flow: PR creation happens once at
+    sprint activation (`orchestrator.sprint_pr.provision_sprint_pr`); coder
+    sessions just stack commits onto the same branch. If the active sprint
+    has no provisioned branch + PR, the pipeline marks the assigned features
+    Blocked with a clear reason — never opens a fresh PR.
     """
     import subprocess as _sp
     import json as _json
-    import re as _re
 
     pname = product.get("name", "?")
     if not assigned_features:
         log.info(f"[post-coder] {pname}: no assigned features — skipping commit/PR")
         return
 
-    # Symphony-style: this pipeline is a *fallback* now. Strong models open
-    # their own PRs and write Reviewing entries to session_result.json. If
-    # every assigned feature already has a Reviewing entry with pr_number,
-    # the agent did the work — skip the deterministic ceremony.
+    # The agent may have already pushed + written Reviewing entries to
+    # session_result.json itself. If every assigned feature has a Reviewing
+    # entry with pr_number, this fallback is a no-op.
     try:
         sr_path = Path(working_dir) / "session_result.json"
         already_handled: set[int] = set()
@@ -718,21 +717,16 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         assigned_ids = {f["id"] for f in assigned_features}
         if assigned_ids and assigned_ids.issubset(already_handled):
             log.info(
-                f"[post-coder] {pname}: agent opened PRs for all "
+                f"[post-coder] {pname}: agent pushed for all "
                 f"{len(assigned_ids)} assigned features — skipping fallback pipeline"
             )
             return
         if already_handled & assigned_ids:
             # Partial coverage. Narrow `assigned_features` to the unhandled
-            # subset so the downstream loops in this function (the no-diff
-            # Blocked-flip at lines ~755 and the session_result.json
-            # writeback near the end) don't touch features the agent already
-            # finished. Without this filter, two corruption paths fire:
-            #   (a) empty git diff → every assigned feature gets PATCHed to
-            #       Blocked, demoting already-Reviewing features.
-            #   (b) pipeline opens its own fresh PR → writeback overwrites
-            #       the agent's correct pr_number with the new one.
-            # Both bypass the rank guard in _apply_session_entry.
+            # subset so the no-diff Blocked-flip and the session_result.json
+            # writeback don't demote features the agent already finished
+            # (PATCHing them back to Blocked bypasses the rank guard in
+            # _apply_session_entry).
             log.info(
                 f"[post-coder] {pname}: agent handled {sorted(already_handled & assigned_ids)}; "
                 f"running fallback for {sorted(assigned_ids - already_handled)}"
@@ -795,46 +789,50 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         err = (r.stderr or "").strip()
         return f"rc={r.returncode} stdout={out[:300]!r} stderr={err[:300]!r}"
 
-    # 2. Resolve target branch.
-    # Sprint-PR mode: every coder run pushes to the same sprint/<id> branch so
-    # there's exactly one PR per sprint (no fan-out, no orphan PRs). The branch
-    # and PR were provisioned by orchestrator.sprint_pr.provision_sprint_pr at
-    # sprint activation; we just check it out and push commits.
-    # Per-feature mode (default): cut a fresh `coder/<session_uid>` branch and
-    # later open a new PR for it.
+    # 2. Resolve target branch — must be the active sprint's branch.
+    # Sprint-PR mode is the only supported flow: every coder run pushes to the
+    # same sprint/<id> branch so there's exactly one PR per sprint (no fan-out,
+    # no orphan PRs). Branch + PR were provisioned by
+    # orchestrator.sprint_pr.provision_sprint_pr at sprint activation.
     feat_ids = [f["id"] for f in assigned_features]
-    sprint_pr_mode = bool(product.get("_sprint_pr_mode"))
-    sprint_branch  = product.get("_sprint_branch") or ""
-    sprint_pr_num  = product.get("_sprint_pr_number") or None
-    sprint_pr_url  = product.get("_sprint_pr_url") or ""
-    if sprint_pr_mode:
-        if not sprint_branch or not sprint_pr_num:
-            log.warning(
-                f"[post-coder] {pname}: sprint_pr_mode set but sprint metadata missing "
-                f"(branch={sprint_branch!r} pr={sprint_pr_num!r}) — falling back to per-feature mode"
-            )
-            sprint_pr_mode = False
-    if sprint_pr_mode:
-        branch = sprint_branch
-        # Fetch first so we have the remote state, then check out (branch exists
-        # remotely from sprint provisioning). Pull --ff-only catches the case
-        # where another coder run already pushed and we'd otherwise diverge.
-        _run(["git", "fetch", "origin"])
-        co = _run(["git", "checkout", branch])
-        if co.returncode != 0:
-            log.warning(f"[post-coder] {pname}: git checkout {branch} failed — {_fmt_err(co)}")
-            return
-        pull_r = _run(["git", "pull", "--ff-only", "origin", branch])
-        if pull_r.returncode != 0:
-            log.warning(f"[post-coder] {pname}: git pull --ff-only on {branch} failed — {_fmt_err(pull_r)}")
-            # Don't return: a non-fast-forward state is rare and we still want
-            # to attempt the push so the operator sees the conflict.
-    else:
-        branch = f"coder/{session_uid}"
-        co = _run(["git", "checkout", "-b", branch])
-        if co.returncode != 0:
-            log.warning(f"[post-coder] {pname}: git checkout -b {branch} failed — {_fmt_err(co)}")
-            return
+    sprint_branch = product.get("_sprint_branch") or ""
+    sprint_pr_num = product.get("_sprint_pr_number") or None
+    sprint_pr_url = product.get("_sprint_pr_url") or ""
+    if not sprint_branch or not sprint_pr_num:
+        # No provisioned sprint PR. Don't open a fresh PR — that path is gone.
+        # Mark features Blocked with an actionable reason so the PM sees what
+        # to fix (enable sprint_pr_mode, or wait for sprint activation to
+        # finish provisioning).
+        reason = (
+            f"Sprint PR not provisioned for active sprint "
+            f"(branch={sprint_branch!r} pr={sprint_pr_num!r}). "
+            f"Enable product.config.sprint_pr_mode and re-activate the sprint."
+        )
+        log.warning(f"[post-coder] {pname}: {reason}")
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                for f in assigned_features:
+                    client.patch(f"/api/features/{f['id']}", json={
+                        "status": "Blocked",
+                        "blocked_reason": reason,
+                    })
+        except Exception:
+            pass
+        return
+    branch = sprint_branch
+    # Fetch first so we have the remote state, then check out (branch exists
+    # remotely from sprint provisioning). Pull --ff-only catches the case
+    # where another coder run already pushed and we'd otherwise diverge.
+    _run(["git", "fetch", "origin"])
+    co = _run(["git", "checkout", branch])
+    if co.returncode != 0:
+        log.warning(f"[post-coder] {pname}: git checkout {branch} failed — {_fmt_err(co)}")
+        return
+    pull_r = _run(["git", "pull", "--ff-only", "origin", branch])
+    if pull_r.returncode != 0:
+        log.warning(f"[post-coder] {pname}: git pull --ff-only on {branch} failed — {_fmt_err(pull_r)}")
+        # Don't return: a non-fast-forward state is rare and we still want
+        # to attempt the push so the operator sees the conflict.
 
     # 3. Add + commit + push.
     # Three states the working tree can be in at this point:
@@ -871,62 +869,16 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             f"— skipping add/commit, going straight to push"
         )
 
-    if sprint_pr_mode:
-        push_args = ["git", "push", "origin", branch]
-    else:
-        push_args = ["git", "push", "-u", "origin", branch]
-    push_result = _run(push_args, timeout=180)
+    push_result = _run(["git", "push", "origin", branch], timeout=180)
     if push_result.returncode != 0:
         log.warning(f"[post-coder] {pname}: git push failed: {push_result.stderr.strip()[:300]}")
         return
     log.info(f"[post-coder] {pname}: pushed branch {branch}")
 
-    # 4. PR resolution. In sprint mode the PR already exists — just reuse it.
-    # In per-feature mode, open a fresh PR via gh CLI.
-    if sprint_pr_mode:
-        pr_number = int(sprint_pr_num)
-        pr_url = sprint_pr_url
-        log.info(f"[post-coder] {pname}: reusing sprint PR #{pr_number} — {pr_url}")
-    else:
-        gh_token = _get_gh_token()
-        if not gh_token:
-            log.warning(f"[post-coder] {pname}: no GH_TOKEN — cannot open PR. Branch pushed; PM must open manually.")
-            return
-
-        # Build PR body — include feature names so PM can review at a glance
-        feat_lines = []
-        for f in assigned_features:
-            name = f.get("name", f"Feature {f['id']}")
-            feat_lines.append(f"- Closes #{f['id']}: {name}")
-        pr_body = (
-            f"Automated PR from coder session `{session_uid}`.\n\n"
-            f"## Features\n" + "\n".join(feat_lines) + "\n\n"
-            f"_This PR was generated by the ProductFactory coder agent. The agent "
-            f"writes code; the orchestrator handles git + PR ceremony deterministically._"
-        )
-        pr_title = (f"feat: {assigned_features[0].get('name', 'changes')}"
-                    if len(assigned_features) == 1
-                    else f"feat: implement {feat_summary} [{session_uid}]")
-
-        pr_env = dict(os.environ)
-        pr_env["GH_TOKEN"] = gh_token
-        pr_result = _sp.run(
-            ["gh", "pr", "create", "--base", "main", "--head", branch,
-             "--title", pr_title, "--body", pr_body],
-            cwd=working_dir, capture_output=True, text=True, env=pr_env, timeout=60,
-        )
-        if pr_result.returncode != 0:
-            log.warning(f"[post-coder] {pname}: gh pr create failed: {pr_result.stderr.strip()[:300]}")
-            return
-
-        # gh prints the PR URL on stdout
-        pr_url = pr_result.stdout.strip().splitlines()[-1]
-        m = _re.search(r"/pull/(\d+)", pr_url)
-        if not m:
-            log.warning(f"[post-coder] {pname}: could not parse PR number from gh output: {pr_url[:200]}")
-            return
-        pr_number = int(m.group(1))
-        log.info(f"[post-coder] {pname}: opened PR #{pr_number} — {pr_url}")
+    # 4. The sprint PR already exists — reuse it.
+    pr_number = int(sprint_pr_num)
+    pr_url = sprint_pr_url
+    log.info(f"[post-coder] {pname}: reusing sprint PR #{pr_number} — {pr_url}")
 
     # 5. Append session_result.json entries — one Reviewing per assigned feature.
     sr_path = Path(working_dir) / "session_result.json"

@@ -72,16 +72,17 @@ HOW to do it on this backend specifically:
    work. If the list is empty, call `task_done(status="success", summary="no work")`
    immediately.
 
-3. **Git + PR are optional on this backend.** The base prompt asks you to
-   commit, push, and `gh pr create` yourself. If you can do that reliably,
+3. **Git is optional on this backend.** The base prompt asks you to commit
+   to the sprint branch and push yourself. If you can do that reliably,
    great — write the Reviewing entry to `session_result.json` afterwards.
-   If you find git/`gh` operations too complex (you only have a small
-   turn budget), you can skip them: just write the code and exit. The
-   orchestrator's deterministic Python pipeline will commit, push, and
-   open the PR for you as a fallback. Don't half-do it — either complete
-   the full git+PR sequence yourself OR don't run any git commands at all.
+   If you find git operations too complex (you only have a small turn
+   budget), you can skip them: just write the code and exit. The
+   orchestrator's deterministic Python pipeline will commit + push to the
+   sprint branch as a fallback. **Never run `gh pr create`** — the sprint
+   PR already exists. Either complete the full git sequence yourself OR
+   don't run any git commands at all.
 
-4. **Touching `session_result.json` is required ONLY if you opened the PR
+4. **Touching `session_result.json` is required ONLY if you pushed
    yourself.** If you let the fallback do it, leave the file alone and
    the orchestrator will populate the Reviewing entry. The reviewer
    persona always writes its own session_result.json regardless.

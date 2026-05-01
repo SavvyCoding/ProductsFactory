@@ -100,7 +100,7 @@ When all gates pass (`POST /api/sprints/{id}/check-dod`): sprint marked `complet
 - `quiet_hours_start` / `quiet_hours_end` — Hour of day (0–23) to suppress sessions
 - `daily_session_cap` — Max sessions per day for this product
 - `max_features_per_run` — Per-product override for the global `MAX_FEATURES_PER_RUN`
-- `sprint_pr_mode` — When true, sprint activation provisions a `sprint/<id>` branch + draft PR on GitHub, populating `sprints.branch_name/pr_number/pr_url`. The coder/reviewer/auto-merge wiring to consume that PR is staged work — the flag is currently observed only by sprint activation. Default off.
+- `sprint_pr_mode` — When true, sprint activation calls `orchestrator.sprint_pr.provision_sprint_pr` to cut a `sprint/<id>` branch + draft PR on GitHub and populate `sprints.branch_name/pr_number/pr_url`. The coder/reviewer/qa_tester/security_auditor pipelines all assume this PR is the only PR for the product: coder commits stack onto the sprint branch, reviewer posts per-commit comments on the sprint PR, auto-merge merges the sprint PR once every sprint feature is merge-eligible. With `sprint_pr_mode=false` and an active sprint, the coder pipeline marks features Blocked rather than opening fresh per-feature PRs (the per-feature `gh pr create` path was removed in Phase 6.2). Default off; new products created after Phase 6.4 default to true.
 
 Additionally, a `product_config.json` file in the product working directory (read by `setup_product.py` on discovery) can seed:
 - `preferred_stack` — Selects which `templates/stacks/` variant to install
