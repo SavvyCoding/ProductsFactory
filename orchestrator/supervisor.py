@@ -88,16 +88,23 @@ def _get_supervisor_config() -> dict:
 
 
 _DEFAULTS = {
-    "supervisor_dry_run_only":             False,
-    "supervisor_false_success_enabled":    True,
-    "supervisor_dirty_pr_enabled":         True,
-    "supervisor_dirty_pr_min_age_min":     60,
-    "supervisor_dirty_pr_idle_min":        30,
-    "supervisor_auto_plan_enabled":        True,
-    "supervisor_auto_plan_min_unsprinted": 3,
-    "supervisor_merge_stall_enabled":      True,
-    "supervisor_merge_stall_min_min":      60,
-    "supervisor_overlap_pr_enabled":       True,
+    "supervisor_dry_run_only":                  False,
+    "supervisor_false_success_enabled":         True,
+    "supervisor_kill_recovery_enabled":         True,
+    "supervisor_dirty_pr_enabled":              True,
+    "supervisor_dirty_pr_min_age_min":          60,
+    "supervisor_dirty_pr_idle_min":             30,
+    "supervisor_auto_plan_enabled":             True,
+    "supervisor_auto_plan_min_unsprinted":      3,
+    "supervisor_merge_stall_enabled":           True,
+    "supervisor_merge_stall_min_min":           60,
+    "supervisor_overlap_pr_enabled":            True,
+    "supervisor_orphan_approved_enabled":       True,
+    "supervisor_orphan_approved_min_age_hours": 24,
+    "supervisor_orphan_approved_threshold":     1,
+    "supervisor_rapid_flap_enabled":            True,
+    "supervisor_rapid_flap_window_hours":       1,
+    "supervisor_rapid_flap_min_transitions":    5,
 }
 
 
@@ -186,6 +193,83 @@ def detect_false_success(
                 )
     except Exception:
         log.exception(f"detect_false_success crashed for session {session_uid}")
+    return touched
+
+
+# ── Detector F: kill recovery ────────────────────────────────────────────────
+# Session was killed (watchdog timeout, stall, container OOM, manual docker
+# kill, etc.) — exit_code != 0 and no clean session_result.json was written.
+# Without this, assigned features stay in their pre-session state until
+# reset_stuck rolls them back after 45 min, then the next agent picks the
+# same poisoned features and gets killed again. Each kill bumps fix_attempts
+# so the Blocked-sprint route triggers after `max_fix_attempts` kills, then
+# the loop terminates with a PM triage signal.
+
+def detect_kill_recovery(
+    *,
+    product_id: int,
+    session_uid: str,
+    persona: str,
+    exit_code: int | None,
+    assigned_features: Iterable[dict],
+) -> int:
+    """Run after a non-zero / killed session exits. Returns features touched.
+
+    Symmetric to detect_false_success but fires on the failure side. The
+    feature filter is broader (any agent state, not just Implementing) so
+    designer/reviewer kills also bump.
+    """
+    if exit_code == 0 or exit_code is None:
+        return 0  # successes go through detect_false_success
+
+    cfg = _get_supervisor_config()
+    if not cfg["supervisor_kill_recovery_enabled"]:
+        return 0
+    dry_run = cfg["supervisor_dry_run_only"]
+    touched = 0
+
+    _AGENT_STATES = {"Designing", "Implementing", "Reviewing"}
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            for f_in in assigned_features:
+                fid = f_in.get("id")
+                if not fid:
+                    continue
+                fresh = client.get(f"/api/features/{fid}")
+                if fresh.status_code != 200:
+                    continue
+                feat = fresh.json()
+                if feat.get("status") not in _AGENT_STATES:
+                    continue  # feature already moved on (Pushed/Reviewed/etc.)
+                cur_attempts = feat.get("fix_attempts") or 0
+                new_attempts = cur_attempts + 1
+                reason = (
+                    f"{persona} session {session_uid} killed (exit {exit_code}). "
+                    f"Feature #{fid} still in {feat.get('status')}. Bumping "
+                    f"fix_attempts {cur_attempts}→{new_attempts} so the kill "
+                    f"loop hits the Blocked-sprint route at max_fix_attempts."
+                )
+                _record_action(
+                    detector="kill_recovery",
+                    product_id=product_id,
+                    target_type="feature",
+                    target_id=fid,
+                    action="bump_attempts_after_kill",
+                    reason=reason,
+                    dry_run=dry_run,
+                )
+                touched += 1
+                if dry_run:
+                    continue
+                # Demote to Implementing+changes_requested so the coder
+                # filter picks it up next cycle (unless already Designing,
+                # in which case _rollback_stuck_features will reset it).
+                patch: dict = {"fix_attempts": new_attempts, "changed_by": "kill_recovery"}
+                if feat.get("status") in ("Implementing", "Reviewing"):
+                    patch["review_outcome"] = "changes_requested"
+                client.patch(f"/api/features/{fid}", json=patch)
+    except Exception:
+        log.exception(f"detect_kill_recovery crashed for session {session_uid}")
     return touched
 
 
@@ -521,3 +605,124 @@ def detect_overlapping_prs(
             except Exception:
                 log.exception(f"overlap_pr: failed to close PR #{pr_n}")
     return closed
+
+
+# ── Detector G: orphan-Approved features ─────────────────────────────────────
+# Approved features sitting unsprinted for >24h are dead weight — the
+# planner already ran and didn't pick them up. Auto_plan only triggers when
+# the active sprint has zero codeable; if a sprint is busy these orphans
+# never get adopted. This detector watches for them age-out and calls
+# /plan-sprints regardless of active-sprint state.
+
+def detect_orphan_approved(
+    *,
+    product_id: int,
+    features: list[dict],
+) -> bool:
+    """`features` is the product's full feature list (already fetched by
+    the caller for other purposes — passing it in avoids an extra round-trip).
+    """
+    cfg = _get_supervisor_config()
+    if not cfg["supervisor_orphan_approved_enabled"]:
+        return False
+    min_age = cfg["supervisor_orphan_approved_min_age_hours"] * 3600
+    threshold = cfg["supervisor_orphan_approved_threshold"]
+    now = datetime.now(timezone.utc).timestamp()
+
+    def _ts(s: str | None) -> float:
+        if not s:
+            return 0
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+        except (ValueError, AttributeError):
+            return 0
+
+    orphans = [
+        f for f in features
+        if f.get("status") == "Approved"
+        and not f.get("sprint_id")
+        and (now - _ts(f.get("updated_at"))) >= min_age
+    ]
+    if len(orphans) < threshold:
+        return False
+    if _recent_action(product_id=product_id, detector="orphan_approved",
+                      target_type="product", target_id=product_id, within_hours=4):
+        return False
+    dry_run = cfg["supervisor_dry_run_only"]
+    reason = (
+        f"{len(orphans)} Approved feature(s) unsprinted for "
+        f">={cfg['supervisor_orphan_approved_min_age_hours']}h "
+        f"(threshold {threshold}). Calling /plan-sprints — orphan IDs: "
+        f"{[f.get('id') for f in orphans[:10]]}."
+    )
+    _record_action(detector="orphan_approved", product_id=product_id,
+                   target_type="product", target_id=product_id,
+                   action="plan_sprints", reason=reason, dry_run=dry_run)
+    if dry_run:
+        return True
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=120) as client:
+            client.post(f"/api/products/{product_id}/plan-sprints")
+    except Exception:
+        log.exception(f"orphan_approved: plan-sprints call failed for product {product_id}")
+    return True
+
+
+# ── Detector H: rapid status flap ────────────────────────────────────────────
+# Feature status pinging Reviewing↔Implementing (or any state ↔ another)
+# more than `min_transitions` times in `window_hours` indicates the agent
+# pipeline is stuck in a tight loop with no progress. Route the feature to
+# the per-product Blocked sprint for PM triage. 24h cooldown per feature.
+
+def detect_rapid_flap(
+    *,
+    product_id: int,
+    flapping_features: list[dict],
+) -> int:
+    """`flapping_features` is the API response from
+    GET /api/products/{id}/flapping-features (one row per feature with
+    {feature_id, transitions, window_hours}). Caller pre-fetches.
+    Returns number of features routed (or that would route in dry-run).
+    """
+    cfg = _get_supervisor_config()
+    if not cfg["supervisor_rapid_flap_enabled"]:
+        return 0
+    if not flapping_features:
+        return 0
+    dry_run = cfg["supervisor_dry_run_only"]
+    routed = 0
+    feature_ids: list[int] = []
+    reasons: list[str] = []
+    for row in flapping_features:
+        fid = row.get("feature_id") or row.get("id")
+        if not fid:
+            continue
+        if _recent_action(product_id=product_id, detector="rapid_flap",
+                          target_type="feature", target_id=fid, within_hours=24):
+            continue
+        n = row.get("transitions", 0)
+        win = row.get("window_hours", cfg["supervisor_rapid_flap_window_hours"])
+        reason = (
+            f"Feature #{fid} cycled status {n} times in {win}h "
+            f"(threshold {cfg['supervisor_rapid_flap_min_transitions']}). "
+            f"Routing to Blocked sprint for PM triage — agent pipeline is "
+            f"stuck in a flap loop with no progress."
+        )
+        _record_action(detector="rapid_flap", product_id=product_id,
+                       target_type="feature", target_id=fid,
+                       action="route_to_blocked", reason=reason, dry_run=dry_run)
+        routed += 1
+        if not dry_run:
+            feature_ids.append(int(fid))
+            reasons.append(reason)
+    if feature_ids and not dry_run:
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=15) as client:
+                client.post(
+                    f"/api/products/{product_id}/sprints/blocked/route",
+                    json={"feature_ids": feature_ids,
+                          "reason": "Auto-routed: rapid status flap loop detected by supervisor"},
+                )
+        except Exception:
+            log.exception(f"rapid_flap: blocked-route call failed for product {product_id}")
+    return routed

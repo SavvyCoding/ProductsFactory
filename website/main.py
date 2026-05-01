@@ -1862,12 +1862,13 @@ async def api_update_feature(
     # Increment version on every write so callers can detect concurrent updates.
     feature.version = (feature.version or 0) + 1
 
-    # Capture pre-update review_outcome so we can detect a fresh transition
-    # to `changes_requested` below — needed to increment fix_attempts on
-    # rework cycles (the Blocked-sprint trigger). Without snapshotting here,
-    # the setattr loop below clobbers the old value.
+    # Capture pre-update review_outcome + status so we can detect a fresh
+    # transition into `changes_requested` OR a Reviewing→Implementing flap
+    # below — both increment fix_attempts (the Blocked-sprint trigger).
+    # Without snapshotting here, the setattr loop below clobbers old values.
     prev_review_outcome = feature.review_outcome
     prev_fix_attempts   = feature.fix_attempts or 0
+    prev_status         = feature.status
 
     # Auto-record changelog for tracked fields before applying the update
     _CHANGELOG_FIELDS = frozenset({
@@ -1909,22 +1910,42 @@ async def api_update_feature(
             review_notes=updates.get("review_notes"),
             session_uid=updates.get("session_uid"),
         ))
-        new_outcome = updates["review_outcome"]
-        # Only auto-bump if the caller didn't explicitly set fix_attempts
-        # (don't double-count when the orchestrator does its own
-        # closed-PR increment then PATCHes both fields together).
-        if (new_outcome == "changes_requested"
-                and prev_review_outcome != "changes_requested"
-                and "fix_attempts" not in updates):
-            new_attempts = prev_fix_attempts + 1
-            feature.fix_attempts = new_attempts
-            db.add(FeatureChangelog(
-                feature_id=feature_id,
-                field="fix_attempts",
-                old_value=str(prev_fix_attempts),
-                new_value=str(new_attempts),
-                changed_by=f"{changed_by} (rework cycle)",
-            ))
+
+    # Auto-bump fix_attempts on rework cycles. Two triggers, single increment:
+    #   (a) review_outcome transitions INTO changes_requested
+    #   (b) status transitions Reviewing → Implementing (catches agent flap
+    #       loops where the reviewer flips status without setting
+    #       review_outcome — observed 19 transitions on a single feature
+    #       with fix_attempts stuck at 0, so the Blocked-sprint route
+    #       never triggered)
+    # Skip if caller already set fix_attempts (don't double-count) or for
+    # PM / kill_recovery callers (PMs override; kill_recovery already
+    # bumped via supervisor.detect_kill_recovery).
+    new_outcome = updates.get("review_outcome")
+    new_status  = updates.get("status")
+    rework_via_outcome = (
+        new_outcome == "changes_requested"
+        and prev_review_outcome != "changes_requested"
+    )
+    rework_via_flap = (
+        new_status == "Implementing" and prev_status == "Reviewing"
+    )
+    should_bump = (
+        (rework_via_outcome or rework_via_flap)
+        and "fix_attempts" not in updates
+        and changed_by not in ("pm", "kill_recovery", "supervisor")
+    )
+    if should_bump:
+        new_attempts = prev_fix_attempts + 1
+        feature.fix_attempts = new_attempts
+        trigger = "rework cycle" if rework_via_outcome else "Reviewing→Implementing flap"
+        db.add(FeatureChangelog(
+            feature_id=feature_id,
+            field="fix_attempts",
+            old_value=str(prev_fix_attempts),
+            new_value=str(new_attempts),
+            changed_by=f"{changed_by} ({trigger})",
+        ))
     return feature
 
 
@@ -3505,6 +3526,45 @@ async def api_supervisor_list_actions(
             "created_at":  r.created_at.isoformat() if r.created_at else None,
         }
         for r in rows
+    ]
+
+
+@app.get("/api/products/{product_id}/flapping-features")
+async def api_flapping_features(
+    product_id: int,
+    window_hours: int = 1,
+    min_transitions: int = 5,
+    db: AsyncSession = Depends(get_db),
+):
+    """Features whose status transitioned >=min_transitions times in the last
+    window_hours. Used by supervisor.detect_rapid_flap to find features
+    stuck in agent flap loops with no progress.
+
+    Counts only status-field rows in feature_changelog scoped to this
+    product. Returns [{feature_id, transitions, window_hours}], newest
+    first by transition count.
+    """
+    await _get_product_or_404(product_id, db)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, int(window_hours)))
+    rows = await db.execute(
+        select(
+            FeatureChangelog.feature_id,
+            func.count(FeatureChangelog.id).label("transitions"),
+        )
+        .join(Feature, Feature.id == FeatureChangelog.feature_id)
+        .where(
+            Feature.product_id == product_id,
+            FeatureChangelog.field == "status",
+            FeatureChangelog.changed_at >= cutoff,
+        )
+        .group_by(FeatureChangelog.feature_id)
+        .having(func.count(FeatureChangelog.id) >= int(min_transitions))
+        .order_by(func.count(FeatureChangelog.id).desc())
+    )
+    return [
+        {"feature_id": r.feature_id, "transitions": r.transitions,
+         "window_hours": int(window_hours)}
+        for r in rows.all()
     ]
 
 
