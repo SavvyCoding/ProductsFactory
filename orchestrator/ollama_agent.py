@@ -398,18 +398,19 @@ def dispatch_tool(name: str, args: dict) -> tuple[str, bool]:
 def _agent_made_edits() -> bool:
     """Return True if the workspace shows any committed or uncommitted changes.
 
-    Three signals count as "made edits":
+    Three signals count as proof of edits:
       1. Uncommitted changes in the working tree (`git status --porcelain`)
       2. Commits ahead of the upstream branch (committed but not pushed)
       3. Commits ahead of `origin/main` when no upstream is set yet
 
-    Without (2) and (3), the gate misfires when the agent does the right
-    thing — edits files, then commits — because `git status` is clean
-    post-commit. The gate then refuses task_done and traps the agent
-    in a confused loop.
+    Fail-CLOSED on git errors that aren't "this isn't a git repo" — the
+    agent can't have written real code if git itself can't operate (lock
+    files, permission failures, OOM, etc.). Earlier this fell open on
+    any subprocess error and let the agent game the no-edit gate by
+    triggering write-permission failures and then claiming success.
 
-    Returning True for any unexpected error so we don't gate-block on
-    infra issues (missing git, not a repo, etc.).
+    The only fall-open case is when WORKSPACE_DIR isn't a git repo at
+    all (test_run.py edge cases) — there the gate is meaningless.
     """
     try:
         # 1. Uncommitted changes in the tree
@@ -427,12 +428,18 @@ def _agent_made_edits() -> bool:
                 if "/Temp/" in line or "/Results/" in line:
                     continue
                 return True
-        elif status.returncode != 0 and "not a git repository" in (status.stderr or "").lower():
-            return True  # not a git repo — fall open
+        else:
+            # Distinguish "not a git repo" (fall open — gate is irrelevant)
+            # from any other git failure (fail closed — agent likely can't
+            # actually edit, e.g. permission errors locking .git/index).
+            stderr_lc = (status.stderr or "").lower()
+            if "not a git repository" in stderr_lc:
+                _log(f"WARNING: workspace not a git repo — gate falling open (stderr: {stderr_lc[:120]})")
+                return True
+            _log(f"WARNING: git status failed (rc={status.returncode}); gate FAIL-CLOSED. stderr: {stderr_lc[:200]}")
+            return False
 
         # 2/3. Local commits ahead of remote tracking branch (or main).
-        # `git rev-list --count @{u}..HEAD` returns the count of commits on
-        # HEAD not on the upstream. Falls back to origin/main if no upstream.
         for ref in ("@{u}", "origin/main", "origin/master"):
             ahead = subprocess.run(
                 ["git", "rev-list", "--count", f"{ref}..HEAD"],
@@ -444,10 +451,13 @@ def _agent_made_edits() -> bool:
                         return True
                 except ValueError:
                     pass
-                break  # ref resolved (even if count was 0) — don't try fallbacks
+                break  # ref resolved (count was 0) — don't try fallbacks
         return False
-    except Exception:
-        return True
+    except Exception as e:
+        # Fail-CLOSED on unexpected errors — silently falling open is what
+        # let the permission-error attack succeed earlier.
+        _log(f"WARNING: _agent_made_edits raised {type(e).__name__}: {e!r}; gate FAIL-CLOSED")
+        return False
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
