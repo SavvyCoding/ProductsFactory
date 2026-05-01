@@ -140,6 +140,10 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 - *How*: `kind="blocked"` filter in `website.main` — `_check_sprint_capacity`, `api_active_sprint`, `_get_or_create_blocked_sprint`, etc.
 - *Why*: A holding pen must not affect delivery metrics — otherwise stuck features would eternally fail "all features done" and stall every sprint.
 
+**VI.5 ✅ Features that exhaust `max_fix_attempts` get routed to the Blocked sprint regardless of whether they ever opened a PR.**
+- *How*: `supervisor._route_to_blocked_if_at_cap` is called after every `fix_attempts` bump in `supervisor.detect_false_success` and `supervisor.detect_kill_recovery`. When the new value crosses `max_fix_attempts`, it POSTs to `/api/products/{id}/sprints/blocked/route` directly. Pairs with the existing route in `github_client.reconcile_in_flight_prs` which only fires for closed-unmerged PRs.
+- *Why*: Without this, a feature whose coder is repeatedly killed before ever pushing a PR (e.g. Ollama agent stalls, container OOMs, watchdog timeouts) accumulates `fix_attempts` indefinitely without an escape route. The github_client's PR-state-based route never sees it because there's no PR to inspect. Real example: webcalculator bug 126 reached `fix_attempts=5` (= cap) via four kill_recovery bumps and stayed stuck in `status=Implementing` in the active sprint until a manual DB UPDATE moved it. VI.5 closes that gap so kill loops terminate at the cap as VI.2's contract intends.
+
 ---
 
 ## VII. Auto-merge
