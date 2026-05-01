@@ -482,7 +482,6 @@ _TRANSIENT_GIT_PATTERNS = (
     "resource temporarily unavailable", "device or resource busy",
 )
 
-
 def _git_status_with_retry() -> subprocess.CompletedProcess:
     """Run `git status --porcelain` with one retry on transient errors.
 
@@ -545,11 +544,10 @@ def _agent_made_edits() -> bool:
       3. Commits ahead of `origin/main` when no upstream is set yet
 
     Fail-CLOSED on git errors that aren't "this isn't a git repo" — the
-    agent can't have written real code if git itself can't operate
-    (corrupted .git, ref errors, etc.). Transient lock/busy errors get
-    one retry via _git_status_with_retry before falling closed — those
-    are common on Windows NTFS bind-mounts and were a major contributor
-    to the 35-39% kill rate (#6).
+    agent can't have written real code if git itself can't operate (lock
+    files, permission failures, OOM, etc.). Earlier this fell open on
+    any subprocess error and let the agent game the no-edit gate by
+    triggering write-permission failures and then claiming success.
 
     The only fall-open case is when WORKSPACE_DIR isn't a git repo at
     all (test_run.py edge cases) — there the gate is meaningless.
