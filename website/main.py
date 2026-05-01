@@ -383,8 +383,6 @@ _CFG_DEFAULTS = {
     "session_timeout_minutes":     90,
     "stale_threshold_minutes":     45,
     "auth_check_timeout":          30,
-    "max_open_prs":                1,
-    "pr_gate_sleep":               300,
     "stuck_feature_timeout_hours": 0.75,  # 45 minutes — matches stale session threshold
     "max_features_per_run":        5,
     "max_features_per_sprint":     5,
@@ -922,8 +920,6 @@ _POLLER_INT_BOUNDS: dict[str, tuple[int, int]] = {
     "session_timeout_minutes":     (5,    480),
     "stale_threshold_minutes":     (5,    120),
     "auth_check_timeout":          (5,    120),
-    "max_open_prs":                (1,     20),
-    "pr_gate_sleep":               (60,  3600),
     "stuck_feature_timeout_hours": (0.25,  48),
     "max_features_per_run":        (1,     10),
     "max_features_per_sprint":     (1,     50),
@@ -984,8 +980,6 @@ async def admin_save_poller_settings(
     config.session_timeout_minutes     = _int("session_timeout_minutes")
     config.stale_threshold_minutes     = _int("stale_threshold_minutes")
     config.auth_check_timeout          = _int("auth_check_timeout")
-    config.max_open_prs                = _int("max_open_prs")
-    config.pr_gate_sleep               = _int("pr_gate_sleep")
     config.stuck_feature_timeout_hours = _float("stuck_feature_timeout_hours")
     config.max_features_per_run        = _int("max_features_per_run")
     config.max_features_per_sprint     = _int("max_features_per_sprint")

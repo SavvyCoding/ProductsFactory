@@ -199,8 +199,6 @@ class SystemConfig(Base):
     session_timeout_minutes:    Mapped[Optional[int]] = mapped_column(Integer)  # default 90
     stale_threshold_minutes:    Mapped[Optional[int]] = mapped_column(Integer)  # default 45
     auth_check_timeout:         Mapped[Optional[int]] = mapped_column(Integer)  # default 30s
-    max_open_prs:               Mapped[Optional[int]] = mapped_column(Integer)  # default 3
-    pr_gate_sleep:              Mapped[Optional[int]] = mapped_column(Integer)  # default 300s
     stuck_feature_timeout_hours:Mapped[Optional[float]] = mapped_column(Float)  # default 0.75h (45 min)
     max_features_per_run:       Mapped[Optional[int]] = mapped_column(Integer)  # default 1
     max_features_per_sprint:    Mapped[Optional[int]] = mapped_column(Integer)  # default 5

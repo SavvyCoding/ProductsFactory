@@ -187,7 +187,7 @@ def get_features(args: dict, **kwargs) -> str:
     return raw
 
 
-_SYSCFG_KEEP = {"auto_merge_enabled", "max_open_prs", "stuck_feature_timeout_hours",
+_SYSCFG_KEEP = {"auto_merge_enabled", "stuck_feature_timeout_hours",
                 "poll_interval", "session_timeout_minutes", "stale_threshold_minutes"}
 
 
@@ -529,16 +529,10 @@ def determine_next_action(args: dict, **kwargs) -> str:
             features_resp  = client.get(f"/api/products/{product_id}/features")
             sprint_resp    = client.get(f"/api/products/{product_id}/sprints/active")
             syscfg_resp    = client.get("/api/system-config")
-            # Use the dedicated /open_pr_count endpoint — /github/prs?state=open
-            # doesn't exist (returns 404), which silently broke the PR cap gate.
-            prs_resp       = client.get(f"/api/products/{product_id}/open_pr_count")
 
         features = features_resp.json() if features_resp.is_success else []
         active_sprint = sprint_resp.json() if sprint_resp.is_success else None
         sys_cfg = syscfg_resp.json() if syscfg_resp.is_success else {}
-        prs_data = prs_resp.json() if prs_resp.is_success else {}
-        open_pr_count = prs_data.get("count", 0) if isinstance(prs_data, dict) else 0
-        max_prs = sys_cfg.get("max_open_prs") or int(os.environ.get("MAX_OPEN_PRS", "3"))
 
         # No active sprint
         if active_sprint is None:
@@ -647,8 +641,6 @@ def determine_next_action(args: dict, **kwargs) -> str:
                     or (f.get("status") == "Implementing"
                         and f.get("review_outcome") == "changes_requested")]
         if codeable:
-            if open_pr_count >= max_prs:
-                return _ok({"action": "exit", "reason": f"PR gate: {open_pr_count} open PRs >= max {max_prs}"})
             return _ok({"action": "launch_session", "persona": "coder",
                         "product_id": product_id, "reason": f"{len(codeable)} features ready to code"})
 

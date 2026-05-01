@@ -129,3 +129,48 @@ class TestMergeSprintPr:
             code, body = sprint_pr.merge_sprint_pr("https://github.com/o/r.git", 42, "tok")
         assert code == 0
         assert "exception" in body
+
+
+class TestCheckOpenPrInvariant:
+    def setup_method(self):
+        from orchestrator.sprint_pr import _alerted_excess_prs
+        _alerted_excess_prs.clear()
+
+    def test_no_alert_when_count_one(self):
+        from orchestrator.sprint_pr import check_open_pr_invariant
+        calls = []
+        check_open_pr_invariant({"id": 1, "name": "P"}, 1, alerter=lambda lvl, msg: calls.append((lvl, msg)))
+        assert calls == []
+
+    def test_no_alert_when_count_zero(self):
+        from orchestrator.sprint_pr import check_open_pr_invariant
+        calls = []
+        check_open_pr_invariant({"id": 1, "name": "P"}, 0, alerter=lambda lvl, msg: calls.append((lvl, msg)))
+        assert calls == []
+
+    def test_alerts_on_count_above_one(self):
+        from orchestrator.sprint_pr import check_open_pr_invariant
+        calls = []
+        check_open_pr_invariant({"id": 1, "name": "MyProd"}, 3, alerter=lambda lvl, msg: calls.append((lvl, msg)))
+        assert len(calls) == 1
+        level, msg = calls[0]
+        assert level == "warning"
+        assert "MyProd" in msg
+        assert "3" in msg
+
+    def test_idempotent_per_run(self):
+        from orchestrator.sprint_pr import check_open_pr_invariant
+        calls = []
+        alerter = lambda lvl, msg: calls.append((lvl, msg))
+        for _ in range(5):
+            check_open_pr_invariant({"id": 1, "name": "P"}, 2, alerter=alerter)
+        assert len(calls) == 1
+
+    def test_rearms_after_recovery(self):
+        from orchestrator.sprint_pr import check_open_pr_invariant
+        calls = []
+        alerter = lambda lvl, msg: calls.append((lvl, msg))
+        check_open_pr_invariant({"id": 1, "name": "P"}, 2, alerter=alerter)
+        check_open_pr_invariant({"id": 1, "name": "P"}, 1, alerter=alerter)  # recovered
+        check_open_pr_invariant({"id": 1, "name": "P"}, 2, alerter=alerter)  # spike again
+        assert len(calls) == 2
