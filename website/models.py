@@ -238,6 +238,14 @@ class SystemConfig(Base):
     supervisor_merge_stall_enabled:    Mapped[Optional[bool]] = mapped_column(Boolean)  # default True
     supervisor_merge_stall_min_min:    Mapped[Optional[int]]  = mapped_column(Integer)  # default 60
     supervisor_overlap_pr_enabled:     Mapped[Optional[bool]] = mapped_column(Boolean)  # default True
+    # Phase-1 supervisor — additional detectors added in migration 038
+    supervisor_kill_recovery_enabled:        Mapped[Optional[bool]] = mapped_column(Boolean)  # default True
+    supervisor_orphan_approved_enabled:      Mapped[Optional[bool]] = mapped_column(Boolean)  # default True
+    supervisor_orphan_approved_min_age_hours: Mapped[Optional[int]] = mapped_column(Integer)  # default 24
+    supervisor_orphan_approved_threshold:    Mapped[Optional[int]]  = mapped_column(Integer)  # default 1
+    supervisor_rapid_flap_enabled:           Mapped[Optional[bool]] = mapped_column(Boolean)  # default True
+    supervisor_rapid_flap_window_hours:      Mapped[Optional[int]]  = mapped_column(Integer)  # default 1
+    supervisor_rapid_flap_min_transitions:   Mapped[Optional[int]]  = mapped_column(Integer)  # default 5
 
     updated_at:        Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
