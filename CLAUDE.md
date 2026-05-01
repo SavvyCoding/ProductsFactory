@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ProductFactory is a 24/7 autonomous development system. It orchestrates Claude Code agents inside isolated Docker containers to implement features across multiple product repos, monitored by a FastAPI PM dashboard.
 
 **Three independent subsystems:**
-- **Orchestrator** (`orchestrator/`) — Windows poller that runs on the host, picks products, launches Docker containers
+- **Orchestrator** (`orchestrator/`) — long-running host process. See its module docstrings (`orchestrator/poller.py`, `dispatch.py`, `auto_merge.py`, `reconcile.py`, `supervisor.py`) and `orchestrator/INVARIANTS.md` for the behavioral contract.
 - **PM Website** (`website/`) — FastAPI dashboard + REST API for managing products and features
 - **Agent Image** (`deploy/docker/Dockerfile`) — Docker image Claude runs inside per product session
 
@@ -56,17 +56,7 @@ python scripts/test_run.py \
 python scripts/build_pf_video.py
 ```
 
-### Windows Service Deployment
-
-The poller runs persistently on the Windows host via two options:
-- **Task Scheduler** (recommended): `deploy/windows/install_task.ps1` registers it as a system task that auto-starts on login
-- **Startup folder**: `deploy/install.sh` places a shortcut in the Windows startup folder
-
-The wrapper script `deploy/windows/start_poller.ps1` loads `.env`, then runs the poller in a crash-restart loop. The agent Docker image is built with `deploy/docker/build.sh`, which also creates the `productfactory-net` external bridge network.
-
 ## Architecture
-
-> **Poller / orchestrator behavior, persona dispatch, supervisor detectors, session FSM, stuck-feature reconciliation, and the agent contract live in `orchestrator/POLLER.md`.** This document covers the cross-cutting pieces (data model, deployment, REST API, conventions).
 
 ### Greenfield Scaffolding
 
@@ -122,9 +112,9 @@ Additionally, a `product_config.json` file in the product working directory (rea
 - **Website runtime** uses async SQLAlchemy + asyncpg
 - **Alembic migrations** use psycopg2 (sync) — driver is swapped in `db/migrations/env.py`
 - PostgreSQL runs in Docker (`docker-compose.yml`); PM website connects via `productfactory-net` bridge network
-- Key tables: `products`, `features`, `sessions`, `session_events`, `alerts`, `feature_reviews`, `sprints`, `phases`, `supervisor_actions`
-- JIRA-like tracking tables: `feature_comments` (per-feature discussion, author=pm/poller/persona), `feature_changelog` (auto-tracked field-level audit trail), `labels` + `feature_labels` (product-scoped color tags, many-to-many), `feature_links` (directed relationships: blocks/is_blocked_by/relates_to/duplicates)
-- Notable columns: `features.skip_design`, `features.design_doc`, `features.design_doc_path`, `features.review_outcome`, `features.review_notes`, `features.feature_type` (`feature | bug | chore`), `features.due_date`, `features.story_points`, `features.fix_attempts`, `features.blocked_reason`; `sessions.persona`, `sessions.container_id`, `sessions.status` (FSM), `sessions.heartbeat_at`, `sessions.expected_deadline`, `sessions.kill_reason`; `system_config.poller_pid/host/locked_at/heartbeat_at`; `system_config.stuck_feature_timeout_hours` (Float, default 0.75h), `system_config.max_fix_attempts` (default 5), `system_config.supervisor_*` (per-detector flags + thresholds); `sprints.dod_status` (JSONB — gate booleans + agent notes), `sprints.phase_id`, `sprints.release_notes`, `sprints.completed_at`, `sprints.retro_doc_path`, `sprints.kind` (`normal | blocked`)
+- Key tables: `products`, `features`, `sessions`, `alerts`, `feature_reviews`, `sprints`, `phases`
+- JIRA-like tracking tables: `feature_comments` (per-feature discussion), `feature_changelog` (auto-tracked field-level audit trail), `labels` + `feature_labels` (product-scoped color tags, many-to-many), `feature_links` (directed relationships: blocks/is_blocked_by/relates_to/duplicates)
+- Notable columns: `features.skip_design`, `features.design_doc`, `features.design_doc_path`, `features.review_outcome`, `features.review_notes`, `features.feature_type` (`feature | bug | chore`), `features.due_date`, `features.story_points`, `features.fix_attempts`, `features.blocked_reason`; `sprints.dod_status` (JSONB — gate booleans + agent notes), `sprints.phase_id`, `sprints.release_notes`, `sprints.completed_at`, `sprints.retro_doc_path`, `sprints.kind` (`normal | blocked`)
 - Tests use real PostgreSQL (not mocks) — each test runs inside a rolled-back transaction for isolation; requires `TEST_DATABASE_URL`
 
 **Feature tracking REST endpoints** (agents and PM can call these):
@@ -134,7 +124,7 @@ Additionally, a `product_config.json` file in the product working directory (rea
 - Links: `POST/GET /api/features/{id}/links`, `DELETE /api/features/{id}/links/{link_id}`
 - Search: `GET /api/features/search?q=...&product_id=...` (PostgreSQL tsvector full-text)
 - Overdue: `GET /api/features/overdue` (past due_date, not Pushed/Rejected/Deferred)
-- Sync: `POST /api/products/{id}/sync-features` — reads `features.md` and reconciles statuses into DB; called on poller startup and useful after a DB volume wipe
+- Sync: `POST /api/products/{id}/sync-features` — reads `features.md` and reconciles statuses into DB; useful after a DB volume wipe
 
 ### Docker Network Model
 
@@ -176,11 +166,11 @@ FastAPI evaluates routes in definition order. The parameterized `GET /api/featur
 ### Auth & Security
 
 - PM website uses HTTP Basic Auth (`secrets.compare_digest` — timing-safe); falls back to env-var credentials if no `pm_users` rows exist
-- REST API (`/api/...`) has no auth (internal use by the poller)
+- REST API (`/api/...`) has no auth (internal-only)
 - OAuth tokens (`~/.claude`) mounted read-only into agent containers
 - SSH deploy keys in `SSH_DIR`: per-product key `id_ed25519_{product_name}` with fallback to `id_ed25519_productfactory`; mounted read-only (not the full `~/.ssh` directory)
 - Agent containers run on an isolated bridge network, not `--network host`, no `--privileged`
-- GitHub PAT stored in `system_config.github_pat` (DB), not an env var — fetched fresh each API call so live updates take effect without restarting the poller
+- GitHub PAT stored in `system_config.github_pat` (DB), not an env var — fetched fresh each call so live updates take effect at runtime
 
 ## Key Conventions
 
@@ -191,7 +181,6 @@ FastAPI evaluates routes in definition order. The parameterized `GET /api/featur
 - **Route ordering matters**: in `website/main.py`, parameterized routes (`/api/features/{id}`) must come after all static routes at the same path prefix to avoid shadowing
 - **No linter/formatter configured**: there is no ruff, black, flake8, or eslint config — code style is enforced by convention only
 - **Shared requirements file**: `requirements.txt` covers both website and orchestrator (no separate dev/test requirements)
-- **Orchestrator-specific conventions** (sync httpx, `last_run_at` round-robin invariant, threading): see `orchestrator/POLLER.md`
 
 ## Utility Scripts
 
