@@ -85,7 +85,8 @@ from website.models import (
 )
 from website.auth import require_auth
 from website import schemas
-from website.github import fetch_progress_md, fetch_architecture_md, count_open_prs, list_open_prs, merge_pr, close_pr, provision_sprint_pr
+from website.github import fetch_progress_md, fetch_architecture_md, count_open_prs, list_open_prs, merge_pr, close_pr
+from orchestrator.sprint_pr import provision_sprint_pr
 from website.schemas import PM_ALLOWED_TRANSITIONS
 
 app = FastAPI(title="ProductFactory PM", docs_url=None, redoc_url=None)
@@ -1418,15 +1419,17 @@ async def _do_complete_sprint(sprint: Sprint, product_id: int, db: AsyncSession)
 
 async def _maybe_provision_sprint_pr(sprint: Sprint, db: AsyncSession) -> None:
     """
-    When the owning product has `config.sprint_pr_mode = true`, create the
-    `sprint/<id>` branch + draft PR on GitHub and persist branch/pr_number/pr_url
-    onto the sprint. No-op otherwise. Idempotent: if branch_name is already set,
-    skip.
+    Thin shim around `orchestrator.sprint_pr.provision_sprint_pr` — the
+    orchestrator owns the GitHub side; this function just gates on product
+    config + collects the inputs the orchestrator needs and persists the
+    returned branch/pr_number/pr_url onto the sprint.
+
+    Gated on `product.config.sprint_pr_mode = true`. No-op otherwise.
+    Idempotent: if branch_name is already set, skip. The Blocked sprint kind
+    is also skipped — it's a holding pen, not a delivery vehicle.
     """
     if sprint.branch_name:
         return
-    # The Blocked sprint never gets a PR — it's a holding pen, not a delivery
-    # vehicle. Provisioning a draft PR for it would clutter the repo.
     if getattr(sprint, "kind", "normal") == "blocked":
         return
     product = await db.get(Product, sprint.product_id)

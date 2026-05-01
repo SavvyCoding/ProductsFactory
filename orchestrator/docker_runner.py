@@ -798,7 +798,7 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     # 2. Resolve target branch.
     # Sprint-PR mode: every coder run pushes to the same sprint/<id> branch so
     # there's exactly one PR per sprint (no fan-out, no orphan PRs). The branch
-    # and PR were provisioned by the website's _maybe_provision_sprint_pr at
+    # and PR were provisioned by orchestrator.sprint_pr.provision_sprint_pr at
     # sprint activation; we just check it out and push commits.
     # Per-feature mode (default): cut a fresh `coder/<session_uid>` branch and
     # later open a new PR for it.
@@ -1300,8 +1300,8 @@ def _checkout_sprint_branch(working_dir: str, sprint_branch: str, product_name: 
     follows the prompt's MANDATORY-FIRST-ACTION instruction.
 
     Runs after `_reset_workspace` (which leaves us on main) and assumes the
-    sprint branch already exists on origin (provisioned by website's
-    `_maybe_provision_sprint_pr` at sprint activation time).
+    sprint branch already exists on origin (provisioned by
+    `orchestrator.sprint_pr.provision_sprint_pr` at sprint activation time).
 
     Returns True on success. On failure logs a warning and returns False —
     caller should leave the agent on `main` and rely on the post-coder
@@ -1484,9 +1484,9 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     # Sprint-PR-mode context: when the product opts in via config.sprint_pr_mode
     # AND the active sprint has been provisioned with a branch + PR (see
-    # website._maybe_provision_sprint_pr), agents push to that branch instead of
-    # cutting fresh `coder/<uid>` branches and opening parallel PRs. Off by
-    # default — the per-feature branch flow remains the fallback.
+    # orchestrator.sprint_pr.provision_sprint_pr), agents push to that branch
+    # instead of cutting fresh `coder/<uid>` branches and opening parallel PRs.
+    # Off by default — the per-feature branch flow remains the fallback.
     _cfg_flags = (product.get("config") or {})
     product["_sprint_pr_mode"] = bool(
         _cfg_flags.get("sprint_pr_mode")
