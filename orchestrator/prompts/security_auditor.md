@@ -16,7 +16,30 @@ Your working directory is /workspace. All files must be written inside /workspac
    ```
    gh pr list --state open --limit 1 --json number,headRefName,title
    ```
-   If no open PRs — nothing to audit. Exit 0 immediately.
+
+   **If no open PRs exist**, the prior coder's work was either already-
+   merged or didn't produce a PR. Don't exit — instead, sign off the
+   active sprint's security gate based on whether any open security bugs
+   exist for this product, then exit:
+   ```bash
+   SPRINT=$(curl -s {pm_api_url}/api/products/{product_id}/sprints/active | python3 -c "import sys,json; print(json.load(sys.stdin).get('id') or '')")
+   if [ -n "$SPRINT" ]; then
+     # Count open security bugs (any non-terminal feature with feature_type=bug)
+     OPEN_BUGS=$(curl -s "{pm_api_url}/api/products/{product_id}/features" | python3 -c "import sys,json; print(sum(1 for f in json.load(sys.stdin) if f.get('feature_type')=='bug' and f.get('status') not in ('Pushed','Deferred','Rejected','Reverted')))")
+     if [ "$OPEN_BUGS" -eq "0" ]; then
+       curl -s -X POST {pm_api_url}/api/sprints/$SPRINT/sign-off \
+         -H "Content-Type: application/json" \
+         -d '{"gate":"security_clean","value":true,"notes":"No open security bugs and no PR diff to audit this run [sec-{session_uid}]"}'
+     else
+       curl -s -X POST {pm_api_url}/api/sprints/$SPRINT/sign-off \
+         -H "Content-Type: application/json" \
+         -d "{\"gate\":\"security_clean\",\"value\":false,\"notes\":\"$OPEN_BUGS open security bug(s) — sprint blocked until resolved [sec-{session_uid}]\"}"
+     fi
+   fi
+   exit 0
+   ```
+
+   When there IS an open PR, continue with the steps below.
 
 2. **Get the diff:**
    ```
@@ -52,7 +75,35 @@ Your working directory is /workspace. All files must be written inside /workspac
    - [ ] No path traversal (e.g. joining user input onto file paths without sanitization)
    - [ ] No arbitrary file writes outside designated directories
 
-4. **For each issue found**, file a bug feature and apply the `security` label:
+4. **For each issue found**, file a bug feature and apply the `security` label.
+
+   **🚨 DEDUP FIRST — do this for every issue before creating a feature.**
+   Without this, the same vulnerability gets filed every audit cycle and the
+   coder burns sessions implementing the same fix N times.
+
+   a0. Search existing open features for a matching bug:
+   ```bash
+   # Pull all non-terminal features and grep for keywords from your bug
+   # (e.g. function/decorator/CVE name, file path, error type).
+   curl -s {pm_api_url}/api/products/{product_id}/features \
+     | python3 -c "
+   import sys, json
+   feats = json.load(sys.stdin)
+   keyword = '<KEYWORD>'.lower()  # set to a distinctive token from your finding
+   open_states = ('Pending','Approved','Designed','Implementing','Reviewing','Reviewed','Blocked')
+   matches = [f for f in feats if f.get('status') in open_states
+              and keyword in (f.get('name','') + ' ' + f.get('description','')).lower()]
+   for f in matches: print(f\"#{f['id']} {f['status']:12} {f['name']}\")
+   "
+   ```
+   - If a match exists, **skip the create** below. Optionally add a comment to
+     the existing feature noting that this PR re-surfaces it:
+     ```bash
+     curl -s -X POST {pm_api_url}/api/features/<existing_id>/comments \
+       -H "Content-Type: application/json" \
+       -d '{"author":"security_auditor","body":"Re-found in PR #<pr_number>"}'
+     ```
+   - Only proceed to (a) when **no** open feature describes the same issue.
 
    a. Create the bug feature (auto-approved so it enters the coder pipeline immediately):
    ```

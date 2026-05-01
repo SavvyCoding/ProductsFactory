@@ -88,6 +88,22 @@ def _pm(method: str, path: str, body: dict | None = None) -> str:
     return pm_api({"method": method, "path": path, "body": body})
 
 
+def _bump_product_last_run(product_id: int) -> None:
+    """Mark this product as visited by the orchestrator (advances round-robin).
+
+    Best-effort PATCH — never raises so a transient PM API hiccup doesn't
+    crash the cycle. Round-robin is `last_run_at ASC NULLS FIRST`, so
+    bumping to NOW pushes this product to the back of the queue and the
+    next cycle picks the next-oldest product.
+    """
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        _pm("PATCH", f"/api/products/{product_id}",
+            {"last_run_at": _dt.now(_tz.utc).isoformat()})
+    except Exception:
+        log.debug(f"[round-robin] could not bump last_run_at for product {product_id}")
+
+
 _PRODUCT_KEEP = {"id", "name", "status", "working_dir", "github_repo", "tech_stack",
                  "run_now", "run_trainer_now", "quiet_hours_start", "quiet_hours_end",
                  "daily_session_cap", "last_run_at", "config", "type"}
@@ -400,6 +416,16 @@ def run_cycle(args: dict, **kwargs) -> str:
             except Exception:
                 pass
 
+        # Phase-1 supervisor detectors that operate per-product on data the
+        # PM API already serves cheaply: orphan-Approved features and rapid
+        # status flaps. Both run every cycle (each has its own cooldown to
+        # prevent action spam). Best-effort — never raises.
+        for p in ready:
+            try:
+                _run_supervisor_per_product_detectors(p)
+            except Exception:
+                log.exception(f"supervisor per-product detectors failed for product {p.get('id')}")
+
         # 5. Find next work
         # Priority 1: reviewer work across all products
         reviewer_raw = json.loads(_pm("GET", "/api/features/next-for-persona?persona=reviewer"))
@@ -426,7 +452,17 @@ def run_cycle(args: dict, **kwargs) -> str:
         action_raw = json.loads(determine_next_action({"product_id": product_id}, **kwargs))
         action_data = action_raw.get("data") if isinstance(action_raw, dict) else action_raw
         if not isinstance(action_data, dict):
+            # Even on error, mark this product visited so round-robin advances.
+            _bump_product_last_run(product_id)
             return _ok({"action": "exit", "reason": "determine_next_action returned nothing"})
+
+        # Bump last_run_at on every cycle visit, NOT just on successful Docker
+        # exits. Without this, products that resolve to action=exit (no
+        # actionable work, PR-gated, etc.) keep their stale last_run_at
+        # forever and dominate the round-robin — starving other products.
+        # The launch_session branch's post-success bump still happens; this
+        # is just defensive coverage for the no-launch paths.
+        _bump_product_last_run(product_id)
 
         action = action_data.get("action")
         if action == "plan_sprints":
@@ -503,7 +539,62 @@ def determine_next_action(args: dict, **kwargs) -> str:
         non_terminal = [f for f in sprint_features if f.get("status") not in _TERMINAL]
 
         if not non_terminal:
-            return _ok({"action": "exit", "reason": "All sprint features terminal; retrospective handles this via priority 3"})
+            # All features in the active sprint are merged. Run the post-sprint
+            # regression chain — each persona launches as its own session so
+            # the History tab shows a real audit trail of what verified the
+            # sprint, and each can sign off its DoD gate independently:
+            #   1. qa_tester        → runs full test suite on main, signs qa_passed
+            #   2. security_auditor → audits merged code, signs security_clean
+            #   3. check-dod auto-completes the sprint once both above are signed
+            #   4. retrospective    → writes retro_sprint_<id>.md, signs retro_done
+            #
+            # Source of truth for gate state is /api/sprints/{id}/check-dod
+            # (POST returns the live evaluation including the auto-recompute
+            # rules from earlier today). The active_sprint payload from
+            # /products/{id}/sprints/active also carries dod_status + status.
+            try:
+                with _pm_client() as client:
+                    cd = client.post(f"/api/sprints/{sid}/check-dod").json()
+                # Skip-action paths ({"action":"skipped"}) return no `dod`
+                # key — `cd.get("dod")` returns None then, not {}. `or {}`
+                # collapses both Nones and missing keys into a safe empty
+                # dict so subsequent dod.get(...) calls don't AttributeError.
+                # Triggered when the post-sprint regression chain auto-
+                # completes the sprint between this cycle's active_sprint
+                # fetch and the check-dod POST.
+                dod = (cd.get("dod") if isinstance(cd, dict) else None) or {}
+            except Exception:
+                cd, dod = {}, {}
+
+            if not dod.get("qa_passed"):
+                return _ok({"action": "launch_session", "persona": "qa_tester",
+                            "product_id": product_id,
+                            "reason": f"sprint {sid}: all features Pushed — running QA regression to sign qa_passed"})
+            if not dod.get("security_clean"):
+                return _ok({"action": "launch_session", "persona": "security_auditor",
+                            "product_id": product_id,
+                            "reason": f"sprint {sid}: all features Pushed — running security audit to sign security_clean"})
+
+            # Both verification gates signed. check-dod above will have
+            # auto-completed the sprint already if the structural gates pass
+            # too (it returns action=auto_completed in that case).
+            #
+            # Retrospective writes retro_sprint_<id>.md, files action items,
+            # and signs retro_done. Triggered on completed sprints with no
+            # retro_doc_path yet. We use the active_sprint payload's status +
+            # retro_doc_path here (active_sprint is fetched at the top of
+            # determine_next_action and is the freshest snapshot).
+            sprint_status_now = active_sprint.get("status")
+            retro_done_path   = active_sprint.get("retro_doc_path")
+            if cd.get("action") == "auto_completed" or sprint_status_now == "completed":
+                if not retro_done_path:
+                    return _ok({"action": "launch_session", "persona": "retrospective",
+                                "product_id": product_id,
+                                "reason": f"sprint {sid} completed — retrospective writing retro_sprint_{sid}.md"})
+                return _ok({"action": "exit", "reason": f"sprint {sid} fully signed off + retro done"})
+
+            return _ok({"action": "exit",
+                        "reason": f"sprint {sid}: both gates signed but check-dod returned {cd.get('action','?')}"})
 
         reviewing = [f for f in non_terminal if f.get("status") == "Reviewing" and f.get("pr_number")]
         if reviewing:
@@ -516,9 +607,19 @@ def determine_next_action(args: dict, **kwargs) -> str:
             return _ok({"action": "launch_session", "persona": "product_planner",
                         "product_id": product_id, "reason": f"{len(approved_no_design)} Approved features need design docs"})
 
+        # Coder-eligible features:
+        #   - Designed (fresh from designer)
+        #   - Approved with design_doc_path (skip-design products)
+        #   - Implementing + review_outcome=changes_requested
+        #     (reviewer rejected, coder needs another pass — without this,
+        #     these sit "stuck in agent state" for 45 min until reset_stuck
+        #     drops them back to Designed, even though /next-for-persona?
+        #     persona=coder already returns them)
         codeable = [f for f in non_terminal
-                    if f.get("status") in ("Designed",)
-                    or (f.get("status") == "Approved" and f.get("design_doc_path"))]
+                    if f.get("status") == "Designed"
+                    or (f.get("status") == "Approved" and f.get("design_doc_path"))
+                    or (f.get("status") == "Implementing"
+                        and f.get("review_outcome") == "changes_requested")]
         if codeable:
             if open_pr_count >= max_prs:
                 return _ok({"action": "exit", "reason": f"PR gate: {open_pr_count} open PRs >= max {max_prs}"})
@@ -528,6 +629,51 @@ def determine_next_action(args: dict, **kwargs) -> str:
         in_agent_stuck = [f for f in non_terminal if f.get("status") in _IN_AGENT]
         if in_agent_stuck:
             return _ok({"action": "exit", "reason": f"{len(in_agent_stuck)} features stuck in agent state; reset_stuck will handle"})
+
+        # Phase-1 supervisor: detector D — sprint all-Reviewed but no merge.
+        # Compute last-activity ts from non_terminal updated_at; skip the
+        # detector entirely if we can't (avoids a perpetual false-fire when
+        # updated_at isn't serialized).
+        try:
+            from datetime import datetime as _dt
+            from orchestrator.supervisor import detect_merge_stall  # type: ignore
+            ts_strs = [f.get("updated_at") for f in non_terminal if f.get("updated_at")]
+            last_activity_ts = None
+            if ts_strs:
+                parsed_ts = []
+                for s in ts_strs:
+                    try:
+                        parsed_ts.append(_dt.fromisoformat(s.replace("Z", "+00:00")).timestamp())
+                    except (ValueError, AttributeError):
+                        pass
+                if parsed_ts:
+                    last_activity_ts = max(parsed_ts)
+            if last_activity_ts is not None:
+                detect_merge_stall(
+                    product_id=product_id, sprint_id=sid,
+                    sprint_features=sprint_features, last_merge_ts=last_activity_ts,
+                )
+        except Exception:
+            log.exception("supervisor merge_stall detector failed")
+
+        # Phase-1 supervisor: detector C — auto-plan when active sprint has
+        # nothing actionable but unsprinted Approved features are piling up.
+        # Detector POSTs /plan-sprints itself; we just exit this cycle.
+        try:
+            from orchestrator.supervisor import detect_auto_plan  # type: ignore
+            unsprinted_approved = sum(
+                1 for f in features
+                if f.get("status") == "Approved" and f.get("sprint_id") is None
+            )
+            if detect_auto_plan(
+                product_id=product_id,
+                active_sprint_has_codeable=False,
+                unsprinted_approved_count=unsprinted_approved,
+            ):
+                return _ok({"action": "exit",
+                            "reason": f"supervisor auto_plan triggered for product {product_id}"})
+        except Exception:
+            log.exception("supervisor auto_plan detector failed")
 
         return _ok({"action": "exit", "reason": "No actionable work found"})
 
@@ -727,10 +873,147 @@ def reconcile_prs(args: dict, **kwargs) -> str:
         product = product_resp.json()
         reconcile_merged_prs(product)
         reconcile_in_flight_prs(product)
+        # Phase-1 supervisor detectors that operate on open PRs.
+        # Cheap to run after the reconcile pass since we re-hit GitHub once
+        # for the full open-PR list. Best-effort — never raises.
+        try:
+            _run_supervisor_pr_detectors(product)
+        except Exception:
+            log.exception("supervisor PR detectors failed")
         return _ok({"reconciled": product_id})
     except Exception as e:
         log.exception("reconcile_prs failed")
         return _err(f"reconcile_prs failed: {e}")
+
+
+def _run_supervisor_per_product_detectors(product: dict) -> None:
+    """Per-cycle supervisor detectors that operate on product-level state
+    fetched from the PM API: orphan-Approved + rapid status flap.
+    """
+    import httpx as _httpx
+    from orchestrator.supervisor import detect_orphan_approved, detect_rapid_flap  # type: ignore
+
+    pid = product.get("id")
+    if not pid:
+        return
+
+    # Pull features once (full payload — orphan detector needs updated_at)
+    try:
+        with _pm_client() as client:
+            feat_resp = client.get(f"/api/products/{pid}/features")
+            features = feat_resp.json() if feat_resp.is_success else []
+    except Exception:
+        features = []
+    if isinstance(features, list):
+        try:
+            detect_orphan_approved(product_id=pid, features=features)
+        except Exception:
+            log.exception(f"orphan_approved detector failed for product {pid}")
+
+    # Pull flapping features (uses default thresholds from system_config
+    # — endpoint accepts overrides via query string but we fall back to
+    # the supervisor defaults to keep wiring simple).
+    try:
+        with _pm_client() as client:
+            sc_resp = client.get("/api/system-config")
+            sc = sc_resp.json() if sc_resp.is_success else {}
+        win = sc.get("supervisor_rapid_flap_window_hours") or 1
+        thr = sc.get("supervisor_rapid_flap_min_transitions") or 5
+        with _pm_client() as client:
+            flap_resp = client.get(
+                f"/api/products/{pid}/flapping-features",
+                params={"window_hours": win, "min_transitions": thr},
+            )
+            flapping = flap_resp.json() if flap_resp.is_success else []
+        if isinstance(flapping, list) and flapping:
+            detect_rapid_flap(product_id=pid, flapping_features=flapping)
+    except Exception:
+        log.exception(f"rapid_flap detector failed for product {pid}")
+
+
+def _run_supervisor_pr_detectors(product: dict) -> None:
+    """Pull open PRs + features once, run dirty-PR + overlap-PR detectors."""
+    import re as _re
+    import httpx as _httpx
+    from orchestrator.supervisor import detect_dirty_prs, detect_overlapping_prs  # type: ignore
+
+    repo_url = product.get("github_repo") or ""
+    if not repo_url:
+        return
+    m = _re.search(r"[:/]([^/]+/[^/]+?)(?:\.git)?$", repo_url)
+    if not m:
+        return
+    slug = m.group(1)
+
+    # Pull GH PAT once
+    pat = ""
+    try:
+        with _pm_client() as client:
+            sc = client.get("/api/system-config").json() or {}
+            pat = sc.get("github_pat") or ""
+    except Exception:
+        pass
+    headers = {"Accept": "application/vnd.github+json"}
+    if pat:
+        headers["Authorization"] = f"Bearer {pat}"
+
+    # Fetch open PRs (one call covers both detectors)
+    try:
+        prs_resp = _httpx.get(
+            f"https://api.github.com/repos/{slug}/pulls",
+            headers=headers, params={"state": "open", "per_page": 30}, timeout=10,
+        )
+        prs = prs_resp.json() if prs_resp.status_code == 200 else []
+    except Exception:
+        prs = []
+    if not isinstance(prs, list) or not prs:
+        return
+
+    # Augment each PR with last_commit_at (fetched per-PR; cap at 30 to bound
+    # GitHub API calls per cycle).
+    enriched = []
+    for pr in prs[:30]:
+        if not isinstance(pr, dict):
+            continue
+        pr_n = pr.get("number")
+        try:
+            commits_resp = _httpx.get(
+                f"https://api.github.com/repos/{slug}/pulls/{pr_n}/commits",
+                headers=headers, params={"per_page": 1, "direction": "desc"}, timeout=10,
+            )
+            cs = commits_resp.json() if commits_resp.status_code == 200 else []
+            last_commit_at = (
+                cs[-1]["commit"]["committer"]["date"]
+                if cs and isinstance(cs, list) and cs[-1].get("commit") else None
+            )
+        except Exception:
+            last_commit_at = None
+        enriched.append({
+            "number":          pr_n,
+            "title":           pr.get("title", ""),
+            "created_at":      pr.get("created_at"),
+            "mergeable_state": pr.get("mergeable_state"),
+            "last_commit_at":  last_commit_at,
+        })
+
+    # Pull features once for the dirty-PR feature reset
+    try:
+        with _pm_client() as client:
+            feat_resp = client.get(f"/api/products/{product['id']}/features")
+            features = feat_resp.json() if feat_resp.is_success else []
+    except Exception:
+        features = []
+    if not isinstance(features, list):
+        features = []
+
+    detect_dirty_prs(
+        product_id=product["id"], github_repo=repo_url,
+        open_prs_with_state=enriched, features=features, github_token=pat,
+    )
+    detect_overlapping_prs(
+        product_id=product["id"], github_repo=repo_url,
+        open_prs=enriched, github_token=pat,
+    )
 
 
 # ---------------------------------------------------------------------------

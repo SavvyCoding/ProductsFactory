@@ -148,6 +148,7 @@ class Session(Base):
     heartbeat_at:        Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     expected_deadline:   Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     kill_reason:         Mapped[Optional[str]]  = mapped_column(Text)
+    log:                 Mapped[Optional[str]]  = mapped_column(Text)
 
     product: Mapped["Product"] = relationship("Product", back_populates="sessions")
 
@@ -202,6 +203,8 @@ class SystemConfig(Base):
     pr_gate_sleep:              Mapped[Optional[int]] = mapped_column(Integer)  # default 300s
     stuck_feature_timeout_hours:Mapped[Optional[float]] = mapped_column(Float)  # default 0.75h (45 min)
     max_features_per_run:       Mapped[Optional[int]] = mapped_column(Integer)  # default 1
+    max_features_per_sprint:    Mapped[Optional[int]] = mapped_column(Integer)  # default 5
+    max_fix_attempts:           Mapped[Optional[int]] = mapped_column(Integer)  # default 5
     brownfield_file_threshold:  Mapped[Optional[int]] = mapped_column(Integer)  # default 10
     recommender_pending_threshold: Mapped[Optional[int]] = mapped_column(Integer)  # default 15
     auto_merge_enabled:            Mapped[Optional[bool]] = mapped_column(Boolean)  # default False
@@ -222,6 +225,27 @@ class SystemConfig(Base):
     claude_model_map:        Mapped[Optional[dict]] = mapped_column(JSONB) # explicit per-persona override
     claude_credentials_dir:  Mapped[Optional[str]] = mapped_column(Text)   # default C:/Users/digvi/.claude
     ssh_keys_dir:            Mapped[Optional[str]] = mapped_column(Text)   # default: SSH_DIR env var
+
+    # ── Supervisor (Phase 1 — rule-based detectors) ──────────────────────────
+    # Global kill switch + per-detector toggles. NULL means "use default".
+    supervisor_dry_run_only:           Mapped[Optional[bool]] = mapped_column(Boolean)  # default False
+    supervisor_false_success_enabled:  Mapped[Optional[bool]] = mapped_column(Boolean)  # default True
+    supervisor_dirty_pr_enabled:       Mapped[Optional[bool]] = mapped_column(Boolean)  # default True
+    supervisor_dirty_pr_min_age_min:   Mapped[Optional[int]]  = mapped_column(Integer)  # default 60
+    supervisor_dirty_pr_idle_min:      Mapped[Optional[int]]  = mapped_column(Integer)  # default 30
+    supervisor_auto_plan_enabled:      Mapped[Optional[bool]] = mapped_column(Boolean)  # default True
+    supervisor_auto_plan_min_unsprinted: Mapped[Optional[int]] = mapped_column(Integer) # default 3
+    supervisor_merge_stall_enabled:    Mapped[Optional[bool]] = mapped_column(Boolean)  # default True
+    supervisor_merge_stall_min_min:    Mapped[Optional[int]]  = mapped_column(Integer)  # default 60
+    supervisor_overlap_pr_enabled:     Mapped[Optional[bool]] = mapped_column(Boolean)  # default True
+    # Phase-1 supervisor — additional detectors added in migration 038
+    supervisor_kill_recovery_enabled:        Mapped[Optional[bool]] = mapped_column(Boolean)  # default True
+    supervisor_orphan_approved_enabled:      Mapped[Optional[bool]] = mapped_column(Boolean)  # default True
+    supervisor_orphan_approved_min_age_hours: Mapped[Optional[int]] = mapped_column(Integer)  # default 24
+    supervisor_orphan_approved_threshold:    Mapped[Optional[int]]  = mapped_column(Integer)  # default 1
+    supervisor_rapid_flap_enabled:           Mapped[Optional[bool]] = mapped_column(Boolean)  # default True
+    supervisor_rapid_flap_window_hours:      Mapped[Optional[int]]  = mapped_column(Integer)  # default 1
+    supervisor_rapid_flap_min_transitions:   Mapped[Optional[int]]  = mapped_column(Integer)  # default 5
 
     updated_at:        Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -359,6 +383,14 @@ class Sprint(Base):
     dod_status:     Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True, default=dict)
     retro_doc_path: Mapped[Optional[str]]  = mapped_column(Text, nullable=True)
     completed_at:   Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    branch_name:    Mapped[Optional[str]]  = mapped_column(String(255), nullable=True)
+    pr_number:      Mapped[Optional[int]]  = mapped_column(Integer, nullable=True)
+    pr_url:         Mapped[Optional[str]]  = mapped_column(String(500), nullable=True)
+    # "normal" = standard delivery sprint (counts toward DoD, capacity, etc.)
+    # "blocked" = per-product holding pen for features that exhausted
+    #             max_fix_attempts. Excluded from active-sprint selection,
+    #             DoD gates, sprint cap, sprint-PR provisioning. PM-only.
+    kind:           Mapped[str]            = mapped_column(String(16), nullable=False, default="normal")
 
     phase: Mapped[Optional["Phase"]] = relationship("Phase", back_populates="sprints")
 
@@ -382,3 +414,30 @@ class FeatureLink(Base):
 
     source: Mapped["Feature"] = relationship("Feature", foreign_keys=[source_id], back_populates="links_out")
     target: Mapped["Feature"] = relationship("Feature", foreign_keys=[target_id], back_populates="links_in")
+
+
+class SupervisorAction(Base):
+    """One row per supervisor-detector firing.
+
+    The Phase-1 supervisor (orchestrator/supervisor.py) is a set of rule-based
+    detectors that catch stuck-state patterns the deterministic orchestrator
+    misses. Every firing — whether it actually mutated state or just ran in
+    dry-run — writes one row here so PMs can audit what the system has been
+    doing automatically. Surfaced in the UI under each product's Corrections
+    tab and the global /admin/supervisor page.
+    """
+    __tablename__ = "supervisor_actions"
+
+    id:          Mapped[int]      = mapped_column(Integer, primary_key=True)
+    detector:    Mapped[str]      = mapped_column(String(40), nullable=False)
+    product_id:  Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("products.id", ondelete="SET NULL"), nullable=True
+    )
+    target_type: Mapped[str]      = mapped_column(String(20), nullable=False)
+    target_id:   Mapped[str]      = mapped_column(String(100), nullable=False)
+    action:      Mapped[str]      = mapped_column(String(40), nullable=False)
+    reason:      Mapped[str]      = mapped_column(Text, nullable=False)
+    dry_run:     Mapped[bool]     = mapped_column(Boolean, nullable=False, default=False)
+    created_at:  Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

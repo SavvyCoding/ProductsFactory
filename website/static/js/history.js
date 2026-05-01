@@ -120,7 +120,56 @@ async function toggleHistoryRow(row) {
       }
     } catch(e) { /* non-fatal */ }
 
-    body.innerHTML = metaHtml + evHtml + actHtml + rvHtml;
+    // Changelog entries inside the session window — per-field state transitions
+    // attributable to this run (status flips, sprint moves, priority bumps).
+    let clHtml = '';
+    if (d.changelog && d.changelog.length) {
+      clHtml = `<div class="hist-section-title">Field changes (${d.changelog.length})</div>
+        <div class="hist-events">` +
+        d.changelog.map(c => {
+          const t = fmtTime(c.changed_at) || '';
+          const oldV = c.old_value == null ? '—' : c.old_value;
+          const newV = c.new_value == null ? '—' : c.new_value;
+          return `<div class="hist-event-row">
+            <span class="hist-event-icon">🔧</span>
+            <span class="hist-event-name">#${c.feature_id} ${escHtmlGlobal(c.field)}</span>
+            <span class="hist-event-detail">${escHtmlGlobal(oldV)} → ${escHtmlGlobal(newV)} (by ${escHtmlGlobal(c.changed_by||'agent')})</span>
+            <span class="hist-event-time">${t.slice(11)}</span>
+          </div>`;
+        }).join('') + `</div>`;
+    }
+
+    // Comments left during the session window — usually agent-authored notes.
+    let cmHtml = '';
+    if (d.comments && d.comments.length) {
+      cmHtml = `<div class="hist-section-title">Comments (${d.comments.length})</div>
+        <div class="hist-events">` +
+        d.comments.map(c => {
+          const t = fmtTime(c.created_at) || '';
+          const body = c.body.length > 200 ? c.body.slice(0,200) + '…' : c.body;
+          return `<div class="hist-event-row">
+            <span class="hist-event-icon">💬</span>
+            <span class="hist-event-name">#${c.feature_id} ${escHtmlGlobal(c.author||'?')}</span>
+            <span class="hist-event-detail">${escHtmlGlobal(body)}</span>
+            <span class="hist-event-time">${t.slice(11)}</span>
+          </div>`;
+        }).join('') + `</div>`;
+    }
+
+    // Agent transcript — best-effort snapshot of stdout filtered by session_uid.
+    // For finished sessions this comes from sessions.log (snapshotted at close);
+    // for running sessions it tails the in-memory PM API buffer.
+    let logHtml = '';
+    if (d.log) {
+      const lineCount = d.log.split('\n').length;
+      logHtml = `<div class="hist-section-title">Agent log (${lineCount} line${lineCount === 1 ? '' : 's'})</div>
+        <details class="hist-log-details">
+          <summary>Show transcript</summary>
+          <pre class="hist-log-pre">${escHtmlGlobal(d.log)}</pre>
+        </details>`;
+    }
+
+    body.innerHTML = metaHtml + evHtml + actHtml + clHtml + cmHtml + rvHtml + logHtml;
   } catch(e) {
     document.getElementById('hist-detail-body-' + sid).innerHTML =
       `<span style="color:var(--red)">Failed to load details: ${escHtmlGlobal(String(e))}</span>`;
