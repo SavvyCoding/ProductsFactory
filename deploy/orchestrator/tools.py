@@ -416,6 +416,32 @@ def run_cycle(args: dict, **kwargs) -> str:
             except Exception:
                 pass
 
+        # Phase 1 of PollerRevamp (INVARIANTS.md VII.1): per-cycle auto-merge
+        # sweep. Walks every ready product and squash-merges any feature that
+        # is Reviewed+approved+pr_number, regardless of sprint membership.
+        # In sprint-PR mode (VII.5) it holds the sprint PR until every feature
+        # in the sprint is merge-eligible, preventing premature ship of
+        # incomplete work. Best-effort — never raises into run_cycle.
+        try:
+            from orchestrator.auto_merge import sweep_all  # type: ignore
+            with _pm_client() as client:
+                _sc_for_merge = client.get("/api/system-config").json()
+            if isinstance(_sc_for_merge, dict):
+                sweep_all(ready, _sc_for_merge)
+        except Exception:
+            log.exception("auto-merge sweep failed (non-fatal)")
+
+        # Phase 3 of PollerRevamp (INVARIANTS.md VIII.2): when an active
+        # sprint's security_clean gate is False and there are unsprinted bug
+        # features, route them into the active sprint so the coder can ship
+        # them. Side-effect only; determine_next_action's existing decision
+        # tree picks them up after they're sprinted.
+        for p in ready:
+            try:
+                _route_unsprinted_security_bugs(p)
+            except Exception:
+                log.exception(f"bug-routing failed for product {p.get('id')}")
+
         # Phase-1 supervisor detectors that operate per-product on data the
         # PM API already serves cheaply: orphan-Approved features and rapid
         # status flaps. Both run every cycle (each has its own cooldown to
@@ -865,14 +891,16 @@ def reconcile_prs(args: dict, **kwargs) -> str:
     try:
         if product_id is None:
             return reset_stuck_features({})
-        from orchestrator.github_client import reconcile_merged_prs, reconcile_in_flight_prs  # type: ignore
+        # Phase 4 of PollerRevamp: route through orchestrator.reconcile, the
+        # single per-product entry point that sequences reconcile_merged_prs
+        # then reconcile_in_flight_prs with isolated try/except per pass.
+        from orchestrator.reconcile import reconcile_product  # type: ignore
         with _pm_client() as client:
             product_resp = client.get(f"/api/products/{product_id}")
         if not product_resp.is_success:
             return _err(f"product {product_id} not found")
         product = product_resp.json()
-        reconcile_merged_prs(product)
-        reconcile_in_flight_prs(product)
+        reconcile_product(product)
         # Phase-1 supervisor detectors that operate on open PRs.
         # Cheap to run after the reconcile pass since we re-hit GitHub once
         # for the full open-PR list. Best-effort — never raises.
@@ -929,6 +957,84 @@ def _run_supervisor_per_product_detectors(product: dict) -> None:
             detect_rapid_flap(product_id=pid, flapping_features=flapping)
     except Exception:
         log.exception(f"rapid_flap detector failed for product {pid}")
+
+
+def _route_unsprinted_security_bugs(product: dict) -> int:
+    """Phase 3 of PollerRevamp (INVARIANTS.md VIII.2). When the active sprint's
+    `security_clean` gate is False AND there are unsprinted bug features in
+    Approved/Designed state, PATCH them into the active sprint so the coder
+    predicate picks them up.
+
+    Returns the number of bugs routed (0 if none, or if the gate is already
+    clean). Standalone analog of dispatch._decide_route_unsprinted_security_bugs
+    — duplicated here because the deployed orchestrator (tools.py) doesn't run
+    the dispatch.py priority list. Same data-driven logic, same caveat: this
+    does NOT directly clear the gate (the website's _evaluate_dod recomputes
+    security_clean from sprint-bugs only); routing the bugs makes them visible
+    to the coder so they can ship and clear the gate via the recompute.
+    """
+    pid = product.get("id")
+    sid = product.get("active_sprint_id")
+    if not pid or not sid:
+        return 0
+    try:
+        with _pm_client() as client:
+            dod_resp = client.get(f"/api/sprints/{sid}/dod")
+            if not dod_resp.is_success:
+                return 0
+            dod_payload = dod_resp.json() or {}
+            dod = dod_payload.get("dod") or {}
+            if dod.get("security_clean") is True:
+                return 0  # gate already clean
+
+            blockers = (dod_payload.get("blockers") or {}).get("security_clean") or []
+            unsprinted = [b for b in blockers if not b.get("sprint_id")]
+            routable = [
+                b for b in unsprinted
+                if b.get("status") in ("Approved", "Designed")
+            ]
+            if not routable:
+                return 0
+
+            # Match website's _check_sprint_capacity: terminal features don't
+            # consume sprint slots.
+            sc_resp = client.get("/api/system-config")
+            sys_cfg = sc_resp.json() if sc_resp.is_success else {}
+            cap = int(sys_cfg.get("max_features_per_sprint") or 5)
+
+            feats_resp = client.get(f"/api/products/{pid}/features")
+            feats = feats_resp.json() if feats_resp.is_success else []
+            terminal = {"Pushed", "Deferred", "Rejected", "Reverted"}
+            in_sprint_active = sum(
+                1 for f in (feats if isinstance(feats, list) else [])
+                if f.get("sprint_id") == sid and f.get("status") not in terminal
+            )
+            slots = max(0, cap - in_sprint_active)
+            if slots == 0:
+                log.info(
+                    f"[bug-routing] product={pid} sprint={sid}: security_clean=False with "
+                    f"{len(routable)} unsprinted bug(s), but sprint at capacity ({cap}) — leaving in backlog"
+                )
+                return 0
+
+            moved = 0
+            for bug in routable[:slots]:
+                try:
+                    client.patch(
+                        f"/api/features/{bug['id']}",
+                        json={"sprint_id": sid, "changed_by": "orchestrator"},
+                    )
+                    log.info(
+                        f"[bug-routing] product={pid} sprint={sid}: routed bug "
+                        f"#{bug['id']} ({(bug.get('name') or '')[:40]}) into sprint"
+                    )
+                    moved += 1
+                except Exception as e:
+                    log.warning(f"[bug-routing] failed to route bug #{bug['id']}: {e}")
+            return moved
+    except Exception:
+        log.exception(f"[bug-routing] crashed for product {pid}")
+        return 0
 
 
 def _run_supervisor_pr_detectors(product: dict) -> None:
