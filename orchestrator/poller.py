@@ -1251,6 +1251,18 @@ def main():
                     reconcile_merged_prs(_p)
                     reconcile_in_flight_prs(_p)
 
+            # ⑥c Auto-merge sweep — Phase 1 of PollerRevamp.
+            # Merges every Reviewed+approved+pr_number feature across ALL ready
+            # products, regardless of sprint membership. Independent of persona
+            # selection, so Reviewed features in non-active sprints (the
+            # webcalculator class of deadlock) get merged on schedule.
+            # See orchestrator/INVARIANTS.md VII.1 for the contract.
+            try:
+                from orchestrator.auto_merge import sweep_all as _auto_merge_sweep
+                _auto_merge_sweep(products, get_system_config())
+            except Exception:
+                log.exception("auto-merge sweep failed (non-fatal)")
+
             # ⑦a Reviewer-first: any product with a Reviewing feature + PR takes priority
             reviewer_product, reviewer_persona = get_next_reviewer_product(products)
             retro_product = get_next_retro_product(products)
