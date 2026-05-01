@@ -100,7 +100,7 @@ When all gates pass (`POST /api/sprints/{id}/check-dod`): sprint marked `complet
 - `quiet_hours_start` / `quiet_hours_end` — Hour of day (0–23) to suppress sessions
 - `daily_session_cap` — Max sessions per day for this product
 - `max_features_per_run` — Per-product override for the global `MAX_FEATURES_PER_RUN`
-- `sprint_pr_mode` — When true, sprint activation provisions a `sprint/<id>` branch + draft PR on GitHub, populating `sprints.branch_name/pr_number/pr_url`. The coder/reviewer/auto-merge wiring to consume that PR is staged work — the flag is currently observed only by sprint activation. Default off.
+- `sprint_pr_mode` — When true, sprint activation calls `orchestrator.sprint_pr.provision_sprint_pr` to cut a `sprint/<id>` branch + draft PR on GitHub and populate `sprints.branch_name/pr_number/pr_url`. The coder/reviewer/qa_tester/security_auditor pipelines all assume this PR is the only PR for the product: coder commits stack onto the sprint branch, reviewer posts per-commit comments on the sprint PR, auto-merge merges the sprint PR once every sprint feature is merge-eligible, and sprint completion squash-merges the PR before activating the next sprint (halting on conflict — see Phase 6.3). With `sprint_pr_mode=false` and an active sprint, the coder pipeline marks features Blocked rather than opening fresh per-feature PRs (the per-feature `gh pr create` path was removed in Phase 6.2). **Default true for new products** as of Phase 6.4 (set via `_seed_product_config` in `website/main.py`); existing products keep their setting and must be migrated explicitly via PATCH on `product.config`.
 
 Additionally, a `product_config.json` file in the product working directory (read by `setup_product.py` on discovery) can seed:
 - `preferred_stack` — Selects which `templates/stacks/` variant to install
@@ -204,12 +204,10 @@ See `.env.example` for all variables. Critical ones:
 - `BROWNFIELD_FILE_THRESHOLD` — Source file count above which a product is treated as brownfield (default: 10)
 - `MAX_FEATURES_PER_RUN` — Max features an agent attempts per session (default: 1; per-product override in DB)
 - `system_config.max_features_per_sprint` — Hard cap on features assignable to one sprint (default: 5). Enforced by all feature-to-sprint assignment endpoints; the LLM sprint planner clamps each sprint's plan at this value.
-- `MAX_OPEN_PRS` — Coder skips the product if open PR count meets or exceeds this (default: 3)
 - `OLLAMA_HOST` — Ollama base URL (default: `http://host.docker.internal:11434` inside Docker, `http://localhost:11434` for local runs)
 - `DESIGNER_MODEL` / `CODER_MODEL` — Ollama model names (defaults: `gemma3:27b` / `qwen3-coder:30b`)
 - `MAX_TURNS` — Hard cap on Ollama agent turns per session (default: 80)
 - `AUTH_CHECK_TIMEOUT` — Seconds for Claude CLI auth probe (default: 30)
-- `PR_GATE_SLEEP` — Seconds to wait when PR gate is triggered (default: 300)
 - `ANTHROPIC_API_KEY` — Optional; used for AI feature recommendations on the greenfield product form
 - `SESSION_LOG_MAXLEN` — Max in-memory log lines buffered per session in the PM website (default: 1000)
 - `PRODUCTS_BASE_DIR` — Root directory where product repos live; also used for video serving in docker-compose

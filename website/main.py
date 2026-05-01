@@ -61,6 +61,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
@@ -85,8 +86,11 @@ from website.models import (
 )
 from website.auth import require_auth
 from website import schemas
-from website.github import fetch_progress_md, fetch_architecture_md, count_open_prs, list_open_prs, merge_pr, close_pr, provision_sprint_pr
+from website.github import fetch_progress_md, fetch_architecture_md, count_open_prs, list_open_prs, merge_pr, close_pr
+from orchestrator.sprint_pr import provision_sprint_pr, merge_sprint_pr
 from website.schemas import PM_ALLOWED_TRANSITIONS
+
+log = logging.getLogger("website.main")
 
 app = FastAPI(title="ProductFactory PM", docs_url=None, redoc_url=None)
 
@@ -379,8 +383,6 @@ _CFG_DEFAULTS = {
     "session_timeout_minutes":     90,
     "stale_threshold_minutes":     45,
     "auth_check_timeout":          30,
-    "max_open_prs":                1,
-    "pr_gate_sleep":               300,
     "stuck_feature_timeout_hours": 0.75,  # 45 minutes — matches stale session threshold
     "max_features_per_run":        5,
     "max_features_per_sprint":     5,
@@ -686,6 +688,21 @@ async def progress_view(
 # HTML FORM ENDPOINTS — PM actions
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _seed_product_config(user_config: dict | None) -> dict:
+    """Merge new-product defaults with user-supplied config. User wins on conflict.
+
+    Sprint-PR mode is the default for every new product as of Phase 6.4 — the
+    coder/reviewer/qa/security pipeline only supports the sprint-PR flow now,
+    and the per-feature gh pr create path was removed in Phase 6.2. Existing
+    products keep whatever setting they had; this helper only affects products
+    created after the flip.
+    """
+    cfg = {"sprint_pr_mode": True}
+    if user_config:
+        cfg.update(user_config)
+    return cfg
+
+
 @app.post("/product/register")
 async def register_product_form(
     working_dir: str = Form(...),
@@ -697,7 +714,7 @@ async def register_product_form(
     )
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Product already registered")
-    product = Product(working_dir=working_dir)
+    product = Product(working_dir=working_dir, config=_seed_product_config(None))
     db.add(product)
     await db.flush()
     return RedirectResponse(f"/product/{product.id}", status_code=303)
@@ -768,7 +785,7 @@ async def register_greenfield_form(
         type="greenfield",
         status="greenfield_pending",
         ui_template=ui_template if chosen_ui else None,
-        config=product_config,
+        config=_seed_product_config(product_config),
     )
     db.add(product)
     await db.flush()
@@ -903,8 +920,6 @@ _POLLER_INT_BOUNDS: dict[str, tuple[int, int]] = {
     "session_timeout_minutes":     (5,    480),
     "stale_threshold_minutes":     (5,    120),
     "auth_check_timeout":          (5,    120),
-    "max_open_prs":                (1,     20),
-    "pr_gate_sleep":               (60,  3600),
     "stuck_feature_timeout_hours": (0.25,  48),
     "max_features_per_run":        (1,     10),
     "max_features_per_sprint":     (1,     50),
@@ -965,8 +980,6 @@ async def admin_save_poller_settings(
     config.session_timeout_minutes     = _int("session_timeout_minutes")
     config.stale_threshold_minutes     = _int("stale_threshold_minutes")
     config.auth_check_timeout          = _int("auth_check_timeout")
-    config.max_open_prs                = _int("max_open_prs")
-    config.pr_gate_sleep               = _int("pr_gate_sleep")
     config.stuck_feature_timeout_hours = _float("stuck_feature_timeout_hours")
     config.max_features_per_run        = _int("max_features_per_run")
     config.max_features_per_sprint     = _int("max_features_per_sprint")
@@ -1397,7 +1410,13 @@ async def _evaluate_dod(sprint_id: int, product_id: int, db: AsyncSession) -> di
 
 
 async def _do_complete_sprint(sprint: Sprint, product_id: int, db: AsyncSession) -> None:
-    """Mark sprint completed, generate release notes, activate next sprint."""
+    """Mark sprint completed, generate release notes, merge sprint PR, activate next sprint.
+
+    The sprint PR merge is a hard gate on activation: if it fails (conflicts,
+    failing CI, branch protection — anything that returns 405), the next
+    sprint is NOT activated and a critical Alert is filed for the PM. Never
+    ships broken code to keep the orchestrator moving.
+    """
     from datetime import datetime as _dt, timezone as _tz
     sprint.status = "completed"
     sprint.completed_at = _dt.now(_tz.utc)
@@ -1412,21 +1431,77 @@ async def _do_complete_sprint(sprint: Sprint, product_id: int, db: AsyncSession)
     except Exception:
         pass
 
+    # Merge the sprint PR before handing off to the next sprint. Halt
+    # activation on any non-success — the PM resolves the conflict and
+    # re-triggers activation manually.
+    if not await _attempt_merge_completed_sprint_pr(sprint, db):
+        return
+
     # Activate the next sprint in the same phase, or next phase's first sprint
     await _activate_next_sprint(sprint, product_id, db)
 
 
+async def _attempt_merge_completed_sprint_pr(sprint: Sprint, db: AsyncSession) -> bool:
+    """Attempt to merge the just-completed sprint's PR.
+
+    Returns True if it's safe for the caller to proceed with next-sprint
+    activation:
+      - sprint has no PR (per-feature mode product, or never provisioned) → True
+      - product has no GitHub repo / no PAT → True (nothing we can do)
+      - Blocked sprints never had a PR → True
+      - merge returned 200/201/422 → True (merged or already merged)
+    Returns False (and files a critical Alert) when:
+      - merge returned 405 (conflicts, failing CI, branch protection)
+      - merge returned any other non-success or transport error
+
+    The caller MUST skip `_activate_next_sprint` when this returns False so
+    the next sprint never branches off code that didn't actually ship.
+    """
+    if not sprint.pr_number:
+        return True
+    if getattr(sprint, "kind", "normal") == "blocked":
+        return True
+    product = await db.get(Product, sprint.product_id)
+    if not product or not product.github_repo:
+        return True
+    sys_cfg = await _get_system_config(db)
+    token = sys_cfg.github_pat if sys_cfg else None
+    if not token:
+        return True
+
+    code, body = merge_sprint_pr(product.github_repo, sprint.pr_number, token)
+    if code in (200, 201, 422):
+        log.info(
+            f"sprint #{sprint.id} PR #{sprint.pr_number} merged (HTTP {code}) — "
+            f"activation can proceed"
+        )
+        return True
+
+    msg = (
+        f"Sprint #{sprint.id} ({sprint.name}) PR #{sprint.pr_number} merge "
+        f"FAILED (HTTP {code}): {body[:200]}. Next sprint activation halted — "
+        f"resolve the PR conflict / failing CI manually and re-trigger "
+        f"activation."
+    )
+    log.error(msg)
+    db.add(Alert(product_id=sprint.product_id, level="critical", message=msg))
+    await db.flush()
+    return False
+
+
 async def _maybe_provision_sprint_pr(sprint: Sprint, db: AsyncSession) -> None:
     """
-    When the owning product has `config.sprint_pr_mode = true`, create the
-    `sprint/<id>` branch + draft PR on GitHub and persist branch/pr_number/pr_url
-    onto the sprint. No-op otherwise. Idempotent: if branch_name is already set,
-    skip.
+    Thin shim around `orchestrator.sprint_pr.provision_sprint_pr` — the
+    orchestrator owns the GitHub side; this function just gates on product
+    config + collects the inputs the orchestrator needs and persists the
+    returned branch/pr_number/pr_url onto the sprint.
+
+    Gated on `product.config.sprint_pr_mode = true`. No-op otherwise.
+    Idempotent: if branch_name is already set, skip. The Blocked sprint kind
+    is also skipped — it's a holding pen, not a delivery vehicle.
     """
     if sprint.branch_name:
         return
-    # The Blocked sprint never gets a PR — it's a holding pen, not a delivery
-    # vehicle. Provisioning a draft PR for it would clutter the repo.
     if getattr(sprint, "kind", "normal") == "blocked":
         return
     product = await db.get(Product, sprint.product_id)
@@ -1731,13 +1806,12 @@ async def api_create_product(
     db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
 ):
     """JSON endpoint for PM or tooling to register a product."""
-    product = Product(working_dir=body.working_dir)
+    product = Product(working_dir=body.working_dir, config=_seed_product_config(body.config))
     if body.name:         product.name        = body.name
     if body.type:         product.type        = body.type
     if body.tech_stack:   product.tech_stack  = body.tech_stack
     if body.status:       product.status      = body.status
     if body.github_repo:  product.github_repo = body.github_repo
-    if body.config:       product.config      = body.config
     db.add(product)
     await db.flush()
     return product

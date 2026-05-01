@@ -100,7 +100,6 @@ services:
       PM_PASSWORD:        ${PM_PASSWORD:?PM_PASSWORD must be set in .env}
       SESSION_TIMEOUT_MINUTES: ${SESSION_TIMEOUT_MINUTES:-90}
       STALE_THRESHOLD_MINUTES: ${STALE_THRESHOLD_MINUTES:-45}
-      MAX_OPEN_PRS:       ${MAX_OPEN_PRS:-3}
       MAX_FEATURES_PER_RUN: ${MAX_FEATURES_PER_RUN:-1}
       ORCHESTRATION_CYCLE_SECONDS: ${ORCHESTRATION_CYCLE_SECONDS:-60}
       # Agent backend — `ollama` for local/offline/TOS-compliant, `claude` for API

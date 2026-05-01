@@ -50,7 +50,7 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 
 **II.5 ✅ Reviewer work preempts everything except trainer.**
 - *How*: `poller.main` calls `get_next_reviewer_product` *before* round-robin; if any product has `Reviewing` features with PRs, it runs reviewer first.
-- *Why*: Reviewing is the bottleneck of the delivery pipeline. If reviewer falls behind, PRs pile up against `MAX_OPEN_PRS` and coder gets gated everywhere.
+- *Why*: Reviewing is the bottleneck of the delivery pipeline. If reviewer falls behind, the sprint PR keeps growing and merge-time conflicts compound.
 
 ---
 
@@ -64,9 +64,9 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 - *How*: `poller.main` retries the per-cycle products fetch 3× with `2**attempt` backoff; on final failure, alert + `continue`.
 - *Why*: PM API restarts should not crash the poller. The poller is designed to outlive the website.
 
-**III.3 ✅ Coder skips a product when ≥ `MAX_OPEN_PRS` open PRs exist.**
-- *How*: `poller.main` PR-count gate before launching coder, using `count_open_prs` from `github_client`.
-- *Why*: Unbounded open PRs against a single repo overwhelm reviewers and create merge-conflict storms.
+**III.3 ✅ More than 1 open PR per product is anomalous and surfaces an alert.**
+- *How*: `poller.main` runs `orchestrator.sprint_pr.check_open_pr_invariant` for every product after the per-cycle reconcile sweep. When `count_open_prs > 1` it calls `send_alert("warning", …)` once per product per process run (re-arms when the count drops back to ≤1).
+- *Why*: In sprint-PR mode there should be exactly one open PR per product (the sprint PR). >1 means a stale orphan, a manually-opened PR, or an unmerged previous sprint PR — all worth a human look. Replaces the legacy `MAX_OPEN_PRS=3` coder gate (Phase 6.5): we no longer pause work, just alert. Pausing on the sprint PR's own existence would block every coder run forever.
 
 ---
 
