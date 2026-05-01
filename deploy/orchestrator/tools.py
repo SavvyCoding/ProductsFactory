@@ -416,6 +416,16 @@ def run_cycle(args: dict, **kwargs) -> str:
             except Exception:
                 pass
 
+        # Phase-1 supervisor detectors that operate per-product on data the
+        # PM API already serves cheaply: orphan-Approved features and rapid
+        # status flaps. Both run every cycle (each has its own cooldown to
+        # prevent action spam). Best-effort — never raises.
+        for p in ready:
+            try:
+                _run_supervisor_per_product_detectors(p)
+            except Exception:
+                log.exception(f"supervisor per-product detectors failed for product {p.get('id')}")
+
         # 5. Find next work
         # Priority 1: reviewer work across all products
         reviewer_raw = json.loads(_pm("GET", "/api/features/next-for-persona?persona=reviewer"))
@@ -874,6 +884,51 @@ def reconcile_prs(args: dict, **kwargs) -> str:
     except Exception as e:
         log.exception("reconcile_prs failed")
         return _err(f"reconcile_prs failed: {e}")
+
+
+def _run_supervisor_per_product_detectors(product: dict) -> None:
+    """Per-cycle supervisor detectors that operate on product-level state
+    fetched from the PM API: orphan-Approved + rapid status flap.
+    """
+    import httpx as _httpx
+    from orchestrator.supervisor import detect_orphan_approved, detect_rapid_flap  # type: ignore
+
+    pid = product.get("id")
+    if not pid:
+        return
+
+    # Pull features once (full payload — orphan detector needs updated_at)
+    try:
+        with _pm_client() as client:
+            feat_resp = client.get(f"/api/products/{pid}/features")
+            features = feat_resp.json() if feat_resp.is_success else []
+    except Exception:
+        features = []
+    if isinstance(features, list):
+        try:
+            detect_orphan_approved(product_id=pid, features=features)
+        except Exception:
+            log.exception(f"orphan_approved detector failed for product {pid}")
+
+    # Pull flapping features (uses default thresholds from system_config
+    # — endpoint accepts overrides via query string but we fall back to
+    # the supervisor defaults to keep wiring simple).
+    try:
+        with _pm_client() as client:
+            sc_resp = client.get("/api/system-config")
+            sc = sc_resp.json() if sc_resp.is_success else {}
+        win = sc.get("supervisor_rapid_flap_window_hours") or 1
+        thr = sc.get("supervisor_rapid_flap_min_transitions") or 5
+        with _pm_client() as client:
+            flap_resp = client.get(
+                f"/api/products/{pid}/flapping-features",
+                params={"window_hours": win, "min_transitions": thr},
+            )
+            flapping = flap_resp.json() if flap_resp.is_success else []
+        if isinstance(flapping, list) and flapping:
+            detect_rapid_flap(product_id=pid, flapping_features=flapping)
+    except Exception:
+        log.exception(f"rapid_flap detector failed for product {pid}")
 
 
 def _run_supervisor_pr_detectors(product: dict) -> None:
