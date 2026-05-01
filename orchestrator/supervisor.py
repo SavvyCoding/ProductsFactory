@@ -108,6 +108,86 @@ _DEFAULTS = {
 }
 
 
+def _resolve_max_fix_attempts() -> int:
+    """Read system_config.max_fix_attempts; fall back to env (5)."""
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
+            resp = client.get("/api/system-config")
+            if resp.status_code == 200:
+                val = (resp.json() or {}).get("max_fix_attempts")
+                if val and int(val) > 0:
+                    return int(val)
+    except Exception:
+        pass
+    return int(os.environ.get("MAX_FIX_ATTEMPTS", "5"))
+
+
+def _route_to_blocked_if_at_cap(
+    *,
+    client: httpx.Client,
+    detector: str,
+    product_id: int,
+    feature_id: int,
+    new_attempts: int,
+    max_attempts: int,
+    extra_reason: str,
+    dry_run: bool,
+) -> bool:
+    """When fix_attempts has just crossed `max_attempts`, route the feature
+    to the per-product Blocked sprint regardless of whether it has a PR.
+
+    Bridges the gap that the existing Blocked-sprint route in
+    `github_client.reconcile_in_flight_prs` only fires for features with
+    a closed-unmerged PR on GitHub. Never-pushed features that exhaust
+    their budget via repeated kills/false-success would otherwise sit in
+    the active sprint forever — bug 126 in webcalculator was the canonical
+    example: fix_attempts=5, status=Implementing, no pr_number, no escape.
+
+    Idempotent: the website endpoint short-circuits if the feature is
+    already in the Blocked sprint. Best-effort — never raises.
+
+    Returns True if the route was attempted (regardless of HTTP outcome).
+    """
+    if new_attempts < max_attempts:
+        return False
+
+    full_reason = (
+        f"Auto-blocked by supervisor.{detector}: fix_attempts={new_attempts} "
+        f">= max_fix_attempts={max_attempts}. {extra_reason}"
+    )
+    _record_action(
+        detector=detector,
+        product_id=product_id,
+        target_type="feature",
+        target_id=feature_id,
+        action="route_to_blocked_sprint",
+        reason=full_reason,
+        dry_run=dry_run,
+    )
+    if dry_run:
+        return True
+    try:
+        resp = client.post(
+            f"/api/products/{product_id}/sprints/blocked/route",
+            json={"feature_ids": [feature_id], "reason": full_reason},
+        )
+        if resp.is_success:
+            log.warning(
+                f"[{detector}] Feature #{feature_id} -> Blocked sprint "
+                f"(fix_attempts={new_attempts} >= {max_attempts})"
+            )
+        else:
+            log.warning(
+                f"[{detector}] route to Blocked sprint failed for "
+                f"#{feature_id}: HTTP {resp.status_code} {resp.text[:120]}"
+            )
+    except Exception as e:
+        log.warning(
+            f"[{detector}] route to Blocked sprint failed for #{feature_id}: {e}"
+        )
+    return True
+
+
 # ── Detector B: coder false-success ──────────────────────────────────────────
 # Coder session ended exit_code=0 but features_pushed=0 AND no fix_attempts
 # bump happened on its assigned features. The agent gamed the no-edit gate
@@ -139,7 +219,8 @@ def detect_false_success(
     if not cfg["supervisor_false_success_enabled"]:
         return 0
 
-    dry_run = cfg["supervisor_dry_run_only"]
+    dry_run      = cfg["supervisor_dry_run_only"]
+    max_attempts = _resolve_max_fix_attempts()
     touched = 0
 
     # Re-fetch each assigned feature's CURRENT state from the PM API.
@@ -191,6 +272,24 @@ def detect_false_success(
                         "changed_by":     "supervisor",
                     },
                 )
+                # If this bump just crossed max_fix_attempts, route to the
+                # per-product Blocked sprint. Without this, never-pushed
+                # features (no PR ever opened) bypass the existing route in
+                # github_client.reconcile_in_flight_prs and sit in the active
+                # sprint forever. See INVARIANTS.md VI.5.
+                _route_to_blocked_if_at_cap(
+                    client=client,
+                    detector="false_success",
+                    product_id=product_id,
+                    feature_id=fid,
+                    new_attempts=new_attempts,
+                    max_attempts=max_attempts,
+                    extra_reason=(
+                        f"Coder session {session_uid} declared success but "
+                        f"feature #{fid} never reached Reviewing."
+                    ),
+                    dry_run=dry_run,
+                )
     except Exception:
         log.exception(f"detect_false_success crashed for session {session_uid}")
     return touched
@@ -225,7 +324,8 @@ def detect_kill_recovery(
     cfg = _get_supervisor_config()
     if not cfg["supervisor_kill_recovery_enabled"]:
         return 0
-    dry_run = cfg["supervisor_dry_run_only"]
+    dry_run      = cfg["supervisor_dry_run_only"]
+    max_attempts = _resolve_max_fix_attempts()
     touched = 0
 
     _AGENT_STATES = {"Designing", "Implementing", "Reviewing"}
@@ -268,6 +368,23 @@ def detect_kill_recovery(
                 if feat.get("status") in ("Implementing", "Reviewing"):
                     patch["review_outcome"] = "changes_requested"
                 client.patch(f"/api/features/{fid}", json=patch)
+                # If this bump just crossed max_fix_attempts, route to the
+                # per-product Blocked sprint. Bridges the gap that
+                # github_client.reconcile_in_flight_prs only routes features
+                # with a closed-unmerged PR. See INVARIANTS.md VI.5.
+                _route_to_blocked_if_at_cap(
+                    client=client,
+                    detector="kill_recovery",
+                    product_id=product_id,
+                    feature_id=fid,
+                    new_attempts=new_attempts,
+                    max_attempts=max_attempts,
+                    extra_reason=(
+                        f"{persona} session {session_uid} killed without "
+                        f"pushing a PR; feature #{fid} exhausted retries."
+                    ),
+                    dry_run=dry_run,
+                )
     except Exception:
         log.exception(f"detect_kill_recovery crashed for session {session_uid}")
     return touched

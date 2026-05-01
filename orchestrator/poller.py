@@ -1,30 +1,43 @@
-"""
-ProductFactory Poller - main loop (Windows localhost).
+"""ProductFactory orchestrator main loop.
 
-Runs as a Windows Service via NSSM.
-Poll interval: 60s when idle, 5s between products.
+Runs on the host (typically Windows via NSSM / Task Scheduler), holds the
+distributed lock, and drives every product cycle: auth check → discovery
+→ stale-container kill → stuck-feature reset → PR reconciliation →
+auto-merge sweep → persona dispatch → docker session.
 
-Multi-agent persona routing:
-  - Designer: writes design docs for Approved features (before coding)
-  - Coder:    implements Designed (or skip_design Approved) features, opens PRs, sets Reviewing
-  - Reviewer: reviews open PRs, approves or requests changes, sets Reviewed
+This module is the cycle controller. The actual decisions live in
+sibling modules — read those for the *what* and *why*:
 
-Flow per cycle:
-  1. Auth health check (real API call, not --version)
-  2. Scaffold any greenfield_pending products
-  3. Discover any newly-registered folders
-  4. Heartbeat - kill stale containers (progress.md not pushed in >45m)
-  5. Reset stuck features (Implementing/Designing/Reviewing > 2h)
-  6. Deliver pending PM messages to workspace files
-  7a. Reviewer-first: check globally for Reviewing features with PRs
-  7b. If none: pick next product via round-robin (has Approved/Designed features)
-  7c. Determine persona: designer (Approved+no skip_design) or coder
-  8. Quiet hours gate (reviewers skip this gate - reviews are time-sensitive)
-  9. Daily session cap gate (reviewers exempt)
-  10. PR count gate (coder only - designer/reviewer don't open new PRs)
-  11. GitHub PR reconciliation (sync merged PRs -> DB -> Pushed)
-  12. Run Claude in Docker with persona (blocks until session ends)
-  13. Update last_run_at ONLY on clean exit (exit code 0)
+    dispatch.py    persona priority list (ACTIVE_SPRINT_DECISIONS,
+                   NO_SPRINT_DECISIONS) — replaces the legacy 220-line
+                   determine_persona cascade
+    auto_merge.py  per-cycle sweep that merges every Reviewed+approved+pr
+                   feature regardless of sprint membership
+    reconcile.py   single per-product entry point sequencing
+                   reconcile_merged_prs + reconcile_in_flight_prs
+    supervisor.py  rule-based detectors (false-success, kill-recovery,
+                   dirty-PR, merge-stall, orphan-Approved, rapid-flap)
+    docker_runner.py  session lifecycle, agent-contract validation,
+                      _apply_session_entry, post-coder pipeline
+    INVARIANTS.md  the behavioral contract every change must preserve
+
+Conventions specific to this subsystem:
+
+  - Sync HTTP only. The orchestrator uses synchronous httpx; async is
+    reserved for the website. A cycle is a single thread of control with
+    blocking calls — adding asyncio here breaks the lock-and-FSM model.
+
+  - last_run_at advances on *every cycle visit*, not only on session
+    launch (INVARIANTS.md II.2). A product that resolves to "no actionable
+    work" still rotates in the round-robin so it cannot starve others.
+    The post-success bump from launch_session on Docker exit code 0 is
+    an additional independent write.
+
+  - Threads: the heartbeat refresher (15s lock TTL keep-alive), the
+    log-streaming tail, and the live-poll on session_result.json are all
+    daemon threads owned by this loop. They communicate back via
+    threading.Event flags; the main loop checks _hb_lock_stolen at the
+    top of each cycle and exits cleanly if another poller has taken over.
 """
 
 import os
@@ -51,7 +64,8 @@ import httpx
 
 from orchestrator.setup_product import discover_and_populate
 from orchestrator.docker_runner import run_claude_in_docker
-from orchestrator.github_client import count_open_prs, reconcile_merged_prs, reconcile_in_flight_prs
+from orchestrator.github_client import count_open_prs
+from orchestrator.reconcile import reconcile_product
 from orchestrator.heartbeat import check_stale_sessions
 from orchestrator.alerts import send_alert
 from orchestrator.greenfield_scaffold import scaffold_greenfield
@@ -550,227 +564,18 @@ def _auto_create_sprint_for_unsprinted(product: dict, client: httpx.Client) -> b
     return True
 
 
-def determine_persona(product: dict) -> str:
+def determine_persona(product: dict) -> str | None:
+    """Decide which persona should run for this product, or None if nothing.
+
+    Phase 2 of PollerRevamp: thin wrapper delegating to orchestrator.dispatch —
+    the real logic is a priority list of small decision functions, each
+    testable in isolation. Behavior is preserved against the legacy 220-line
+    cascade except that the inline auto-merge path was removed because Phase 1's
+    per-cycle sweep already covers Reviewed+pr_number features (INVARIANTS.md
+    VII.1).
     """
-    Decide which persona should run for this product.
-    Sprint-gated: if an active sprint exists, only work on features in THAT sprint.
-    Never jump to a different sprint until the current one is marked done.
-
-    Priority order:
-    1. retrospective   - a sprint was just completed with no retro yet
-    2. product_planner - Approved features in the active sprint (writes detailed stories)
-    3. designer        - Approved features with no design doc in the active sprint
-    4. coder           - Designed features (or Approved with existing design doc)
-    5. (if no active sprint) post-sprint maintenance personas (documenter/analytics/etc.)
-    6. documenter / analytics / refactorer / devops / recommender  - once per completed sprint
-    7. planner         - no actionable features; generate new ones
-    """
-    TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted"}
-    try:
-        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-            # Retrospective disabled - DoD gates are auto-signed on sprint completion.
-            # The retrospective agent was causing infinite loops. If needed, re-enable
-            # by un-commenting and ensuring the agent calls the sign-off endpoint.
-
-            # Check for active sprint
-            active_sprint_resp = client.get(f"/api/products/{product['id']}/sprints/active")
-            active_sprint = None
-            if active_sprint_resp.status_code == 200 and active_sprint_resp.json():
-                active_sprint = active_sprint_resp.json()
-
-            # Fetch last completed sprint (for post-sprint persona gating)
-            last_completed_sprint = None
-            completed_no_retro = []
-            sprints_resp = client.get(f"/api/products/{product['id']}/sprints")
-            if sprints_resp.status_code == 200:
-                all_sprints = sprints_resp.json()
-                completed = [s for s in all_sprints if s.get("status") == "completed"]
-                if completed:
-                    last_completed_sprint = max(completed, key=lambda s: s["id"])
-                # Collect completed sprints missing retro — checked after active sprint work
-                completed_no_retro = [s for s in completed if not s.get("retro_doc_path")]
-
-            # Fetch all product features
-            feat_resp = client.get(f"/api/products/{product['id']}/features")
-            all_features = feat_resp.json() if feat_resp.status_code == 200 else []
-            if not isinstance(all_features, list):
-                all_features = []
-
-            if active_sprint:
-                sid = active_sprint.get("id")
-                sprint_features = [f for f in all_features if f.get("sprint_id") == sid]
-
-                # If all sprint features are terminal, run retrospective then complete the sprint
-                non_terminal = [f for f in sprint_features if f.get("status") not in TERMINAL]
-                if not non_terminal and sprint_features:
-                    retro_done = active_sprint.get("retro_doc_path")
-                    if not retro_done:
-                        log.info(f"Active sprint {sid}: all features terminal — running retrospective first")
-                        return "retrospective"
-
-                    # Retro is done — now complete the sprint
-                    log.info(f"Active sprint {sid}: retro complete, completing sprint")
-                    complete_resp = client.post(f"/api/sprints/{sid}/force-complete")
-                    if complete_resp.status_code == 200:
-                        result = complete_resp.json()
-                        log.info(f"Sprint {sid} completed via API: {result.get('action')}")
-                        if result.get("release_notes"):
-                            log.info(f"Release notes generated ({len(result['release_notes'])} chars)")
-
-                    working_dir = product.get("working_dir")
-                    if working_dir:
-                        _clear_sprint_context(working_dir)
-                    return None
-
-                # Approved features with no design doc -> product_planner writes the story
-                needs_design = [f for f in sprint_features
-                                if f.get("status") == "Approved"
-                                and not f.get("design_doc_path")]
-                if needs_design:
-                    return "product_planner"
-
-                # Designed features or Approved with existing design doc -> coder
-                codable = [f for f in sprint_features
-                           if f.get("status") == "Designed"
-                           or (f.get("status") == "Approved" and f.get("design_doc_path"))]
-                if codable:
-                    return "coder"
-
-                # Reviewing features -> reviewer
-                reviewable = [f for f in sprint_features
-                              if f.get("status") == "Reviewing" and f.get("pr_number")]
-                if reviewable:
-                    return "reviewer"
-
-                # Reviewed with no PR -> auto-push (PR was already merged/closed)
-                reviewed_no_pr = [f for f in sprint_features
-                                  if f.get("status") == "Reviewed" and not f.get("pr_number")]
-                for f in reviewed_no_pr:
-                    try:
-                        client.patch(f"/api/features/{f['id']}", json={"status": "Pushed"})
-                        log.info(f"Feature #{f['id']}: Reviewed with no PR -> Pushed")
-                    except Exception:
-                        pass
-
-                # Reviewed features with PRs -> auto-merge if enabled
-                reviewed = [f for f in sprint_features
-                            if f.get("status") == "Reviewed" and f.get("pr_number")]
-                if reviewed:
-                    sys_cfg_resp = client.get("/api/system-config")
-                    sys_cfg = sys_cfg_resp.json() if sys_cfg_resp.status_code == 200 else {}
-                    if sys_cfg.get("auto_merge_enabled"):
-                        github_pat = sys_cfg.get("github_pat", "")
-                        github_repo = product.get("github_repo", "")
-                        if github_pat and github_repo:
-                            # Extract owner/repo from URL
-                            repo_slug = github_repo.rstrip("/").split("github.com/")[-1].replace(".git", "")
-                            log.info(f"Active sprint {sid}: auto-merging {len(reviewed)} Reviewed PRs on {repo_slug}")
-                            merged_ids = set()
-                            merged_features = []
-                            for f in reviewed:
-                                pr_num = f["pr_number"]
-                                if pr_num in merged_ids:
-                                    # PR already merged, just update this feature
-                                    client.patch(f"/api/features/{f['id']}", json={"status": "Pushed"})
-                                    merged_features.append(f)
-                                    continue
-                                try:
-                                    merge_resp = httpx.put(
-                                        f"https://api.github.com/repos/{repo_slug}/pulls/{pr_num}/merge",
-                                        headers={"Authorization": f"token {github_pat}", "Accept": "application/vnd.github+json"},
-                                        json={"merge_method": "squash"},
-                                        timeout=30,
-                                    )
-                                    if merge_resp.status_code == 200:
-                                        log.info(f"Auto-merged PR #{pr_num} for feature #{f['id']}")
-                                        merged_ids.add(pr_num)
-                                        client.patch(f"/api/features/{f['id']}", json={"status": "Pushed"})
-                                        merged_features.append(f)
-                                    elif merge_resp.status_code == 405:
-                                        log.warning(f"PR #{pr_num} not mergeable (conflicts?) - skipping")
-                                    elif merge_resp.status_code == 422:
-                                        log.info(f"PR #{pr_num} already merged")
-                                        client.patch(f"/api/features/{f['id']}", json={"status": "Pushed"})
-                                        merged_features.append(f)
-                                    else:
-                                        log.warning(f"Merge PR #{pr_num} returned {merge_resp.status_code}: {merge_resp.text[:100]}")
-                                except Exception as e:
-                                    log.warning(f"Failed to merge PR #{pr_num}: {e}")
-                            # Record auto-merge as a session in history
-                            if merged_features:
-                                import uuid
-                                session_uid = str(uuid.uuid4())[:8]
-                                notes = "Auto-merged PRs: " + ", ".join(
-                                    f"#{f['pr_number']} ({f['name'][:30]})" for f in merged_features
-                                )
-                                try:
-                                    client.post("/api/sessions", json={
-                                        "product_id": product["id"],
-                                        "session_uid": session_uid,
-                                        "persona": "auto-merge",
-                                        "backend": "poller",
-                                        "container_id": "poller",
-                                        "exit_code": 0,
-                                        "features_attempted": len(merged_features),
-                                        "features_pushed": len(merged_features),
-                                        "notes": notes,
-                                    })
-                                except Exception:
-                                    pass  # non-critical
-                        else:
-                            log.warning(f"Auto-merge enabled but missing github_pat or github_repo")
-                        return None  # re-check on next cycle after merges
-                    else:
-                        log.info(f"Active sprint {sid}: {len(reviewed)} Reviewed features awaiting manual merge")
-                        return None
-
-                # Check what's blocking progress
-                pending = [f for f in sprint_features if f.get("status") == "Pending"]
-                in_agent = [f for f in sprint_features
-                            if f.get("status") in ("Designing", "Implementing", "Reviewing")]
-                if in_agent:
-                    # Check if there's actually a running container - if not, reset the features
-                    active_session = client.get(f"/api/sessions/active", params={"product_id": product["id"]})
-                    has_active = active_session.status_code == 200 and active_session.json()
-                    if not has_active:
-                        log.info(f"Active sprint {sid}: {len(in_agent)} features in agent states but no active session - resetting")
-                        for f in in_agent:
-                            # Reset to Designed if design doc exists, otherwise Approved
-                            reset_to = "Designed" if f.get("design_doc_path") else "Approved"
-                            client.patch(f"/api/features/{f['id']}", json={"status": reset_to})
-                            log.info(f"  Feature #{f['id']} {f['status']} -> {reset_to} (no active session)")
-                        return None  # next cycle will pick them up
-                    log.info(f"Active sprint {sid}: {len(in_agent)} features being processed by agents - waiting")
-                    return None
-                if pending and not in_agent:
-                    log.info(f"Active sprint {sid}: {len(pending)} Pending features awaiting PM approval - nothing for agents to do")
-                    return None
-
-                log.info(f"Active sprint {sid}: {len(non_terminal)} features in other states - waiting")
-                return None
-
-            # No active sprint — auto-create one for any Approved unsprinted features.
-            if _auto_create_sprint_for_unsprinted(product, client):
-                return None  # next cycle picks up the new active sprint
-            log.info(f"No active sprint and no approved unsprinted features for product {product['id']}")
-    except httpx.HTTPError as e:
-        log.error(f"determine_persona failed: {e}")
-        return None
-
-    # No design/code work — run retro for any recently completed sprint with no retro doc yet
-    if completed_no_retro:
-        most_recent = max(completed_no_retro, key=lambda s: s["id"])
-        log.info(f"Sprint {most_recent['id']} completed without retrospective — running retro")
-        return "retrospective"
-
-    # No design/code work — check post-sprint personas (documenter/analytics/refactorer/devops/recommender)
-    post_sprint = _post_sprint_persona_due(product, last_completed_sprint)
-    if post_sprint:
-        log.info(f"Post-sprint persona due: {post_sprint} (last sprint: {last_completed_sprint.get('id') if last_completed_sprint else None})")
-        return post_sprint
-
-    # Nothing else - run planner to generate new feature ideas
-    return "planner"
+    from orchestrator.dispatch import determine_persona as _dispatch
+    return _dispatch(product)
 
 
 def deliver_pm_messages(product: dict):
@@ -1246,10 +1051,22 @@ def main():
 
             # ⑥b PR reconciliation for all products — runs every cycle so Implementing+open-PR
             # features are advanced to Reviewing before the reviewer-first check below.
+            # Phase 4 of PollerRevamp: single per-product entry point in
+            # orchestrator/reconcile.py — see INVARIANTS.md V.3-V.4 for contract.
             for _p in products:
-                if _p.get("status") == "ready":
-                    reconcile_merged_prs(_p)
-                    reconcile_in_flight_prs(_p)
+                reconcile_product(_p)
+
+            # ⑥c Auto-merge sweep — Phase 1 of PollerRevamp.
+            # Merges every Reviewed+approved+pr_number feature across ALL ready
+            # products, regardless of sprint membership. Independent of persona
+            # selection, so Reviewed features in non-active sprints (the
+            # webcalculator class of deadlock) get merged on schedule.
+            # See orchestrator/INVARIANTS.md VII.1 for the contract.
+            try:
+                from orchestrator.auto_merge import sweep_all as _auto_merge_sweep
+                _auto_merge_sweep(products, get_system_config())
+            except Exception:
+                log.exception("auto-merge sweep failed (non-fatal)")
 
             # ⑦a Reviewer-first: any product with a Reviewing feature + PR takes priority
             reviewer_product, reviewer_persona = get_next_reviewer_product(products)
