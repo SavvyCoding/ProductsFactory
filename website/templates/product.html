@@ -39,6 +39,10 @@
         <span class="pf-sidebar-icon">&#8986;</span>
         <span class="pf-sidebar-label">History</span>
       </a>
+      <a class="pf-sidebar-item {% if active_tab == 'corrections' %}active{% endif %}" onclick="switchTab('corrections', this); loadCorrections()" href="javascript:void(0)" title="Corrections">
+        <span class="pf-sidebar-icon">&#9881;</span>
+        <span class="pf-sidebar-label">Corrections</span>
+      </a>
       <a class="pf-sidebar-item {% if active_tab == 'videos' %}active{% endif %}" onclick="switchTab('videos', this); loadVideos()" href="javascript:void(0)" title="Videos">
         <span class="pf-sidebar-icon">&#9654;&#9646;</span>
         <span class="pf-sidebar-label">Videos</span>
@@ -1098,6 +1102,82 @@
     <p>Sessions appear here once the poller runs Claude on this product.</p>
   </div>
   {% endif %}
+</div>
+
+
+<!-- ══ TAB: CORRECTIONS — supervisor audit log ════════════════ -->
+<div class="tab-content" id="tab-corrections" style="display:none">
+  <div style="margin-bottom:14px">
+    <div style="font-size:13px;font-weight:600;color:var(--text)">Auto-corrections</div>
+    <div style="font-size:11px;color:var(--text-muted);margin-top:2px">
+      Rule-based detectors that catch stuck-state patterns the orchestrator misses.
+      Every firing — whether it actually mutated state or just ran in dry-run — is logged here.
+    </div>
+  </div>
+  <div id="corrections-loading" class="muted" style="font-size:13px;color:var(--text-muted)">Loading…</div>
+  <div id="corrections-empty" class="hidden empty-state" style="margin-top:20px">
+    <div class="empty-icon">⚙</div>
+    <h2>No corrections yet</h2>
+    <p>The supervisor hasn't needed to intervene on this product.</p>
+  </div>
+  <div style="overflow-x:auto" id="corrections-table-wrap" class="hidden">
+    <table class="feature-backlog-table">
+      <thead>
+        <tr>
+          <th style="width:140px">When</th>
+          <th style="width:160px">Detector</th>
+          <th style="width:130px">Target</th>
+          <th style="width:120px">Action</th>
+          <th>Reason</th>
+          <th style="width:60px">Dry-run</th>
+        </tr>
+      </thead>
+      <tbody id="corrections-tbody"></tbody>
+    </table>
+  </div>
+  <script>
+  function loadCorrections() {
+    const wrap    = document.getElementById('corrections-table-wrap');
+    const empty   = document.getElementById('corrections-empty');
+    const loading = document.getElementById('corrections-loading');
+    const tbody   = document.getElementById('corrections-tbody');
+    if (!wrap || !empty || !loading || !tbody) return;
+    loading.classList.remove('hidden');
+    wrap.classList.add('hidden');
+    empty.classList.add('hidden');
+    fetch(`/api/products/{{ product.id }}/supervisor-actions`)
+      .then(r => r.json())
+      .then(rows => {
+        loading.classList.add('hidden');
+        if (!Array.isArray(rows) || rows.length === 0) {
+          empty.classList.remove('hidden');
+          return;
+        }
+        tbody.innerHTML = rows.map(r => {
+          const t = r.created_at ? r.created_at.replace('T',' ').slice(0,16) : '';
+          const dryBadge = r.dry_run
+            ? '<span class="badge" style="background:#fef3c7;color:#92400e">dry-run</span>'
+            : '<span class="badge" style="background:#dcfce7;color:#166534">applied</span>';
+          return `<tr>
+            <td class="fbt-date">${escHtmlGlobal(t)}</td>
+            <td><code style="font-size:11px">${escHtmlGlobal(r.detector)}</code></td>
+            <td class="fbt-num"><code style="font-size:11px">${escHtmlGlobal(r.target_type)}/${escHtmlGlobal(r.target_id)}</code></td>
+            <td><code style="font-size:11px">${escHtmlGlobal(r.action)}</code></td>
+            <td style="font-size:12px;line-height:1.5">${escHtmlGlobal(r.reason)}</td>
+            <td>${dryBadge}</td>
+          </tr>`;
+        }).join('');
+        wrap.classList.remove('hidden');
+      })
+      .catch(e => {
+        loading.textContent = 'Failed to load: ' + (e && e.message || e);
+      });
+  }
+  // Auto-load on page open if landing directly on the tab via ?tab=corrections
+  if (document.getElementById('tab-corrections')?.style.display !== 'none') {
+    loadCorrections();
+  }
+  </script>
 </div>
 
 

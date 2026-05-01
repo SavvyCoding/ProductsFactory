@@ -2027,6 +2027,21 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             except Exception:
                 log.exception(f"Post-coder pipeline failed for {product.get('name')}")
 
+            # Phase-1 supervisor: detect false-success (exit 0, no PR pushed,
+            # no features advanced). Bumps fix_attempts + demotes to
+            # changes_requested so the feature doesn't sit Implementing
+            # forever waiting on reset_stuck. Best-effort — never raises.
+            try:
+                from orchestrator.supervisor import detect_false_success
+                detect_false_success(
+                    product_id=product["id"],
+                    session_uid=session_uid,
+                    exit_code=exit_code,
+                    assigned_features=product.get("_assigned_features", []),
+                )
+            except Exception:
+                log.exception(f"Supervisor detect_false_success failed for {product.get('name')}")
+
         # 1. Read session_result.json ONCE — shared between auto_merge and reconcile so
         #    the file isn't deleted before auto_merge can act on it.
         _session_features = _read_session_result(working_dir)

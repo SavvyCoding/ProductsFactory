@@ -226,6 +226,19 @@ class SystemConfig(Base):
     claude_credentials_dir:  Mapped[Optional[str]] = mapped_column(Text)   # default C:/Users/digvi/.claude
     ssh_keys_dir:            Mapped[Optional[str]] = mapped_column(Text)   # default: SSH_DIR env var
 
+    # ── Supervisor (Phase 1 — rule-based detectors) ──────────────────────────
+    # Global kill switch + per-detector toggles. NULL means "use default".
+    supervisor_dry_run_only:           Mapped[Optional[bool]] = mapped_column(Boolean)  # default False
+    supervisor_false_success_enabled:  Mapped[Optional[bool]] = mapped_column(Boolean)  # default True
+    supervisor_dirty_pr_enabled:       Mapped[Optional[bool]] = mapped_column(Boolean)  # default True
+    supervisor_dirty_pr_min_age_min:   Mapped[Optional[int]]  = mapped_column(Integer)  # default 60
+    supervisor_dirty_pr_idle_min:      Mapped[Optional[int]]  = mapped_column(Integer)  # default 30
+    supervisor_auto_plan_enabled:      Mapped[Optional[bool]] = mapped_column(Boolean)  # default True
+    supervisor_auto_plan_min_unsprinted: Mapped[Optional[int]] = mapped_column(Integer) # default 3
+    supervisor_merge_stall_enabled:    Mapped[Optional[bool]] = mapped_column(Boolean)  # default True
+    supervisor_merge_stall_min_min:    Mapped[Optional[int]]  = mapped_column(Integer)  # default 60
+    supervisor_overlap_pr_enabled:     Mapped[Optional[bool]] = mapped_column(Boolean)  # default True
+
     updated_at:        Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     # ── Poller distributed lock ───────────────────────────────────────────────
@@ -393,3 +406,30 @@ class FeatureLink(Base):
 
     source: Mapped["Feature"] = relationship("Feature", foreign_keys=[source_id], back_populates="links_out")
     target: Mapped["Feature"] = relationship("Feature", foreign_keys=[target_id], back_populates="links_in")
+
+
+class SupervisorAction(Base):
+    """One row per supervisor-detector firing.
+
+    The Phase-1 supervisor (orchestrator/supervisor.py) is a set of rule-based
+    detectors that catch stuck-state patterns the deterministic orchestrator
+    misses. Every firing — whether it actually mutated state or just ran in
+    dry-run — writes one row here so PMs can audit what the system has been
+    doing automatically. Surfaced in the UI under each product's Corrections
+    tab and the global /admin/supervisor page.
+    """
+    __tablename__ = "supervisor_actions"
+
+    id:          Mapped[int]      = mapped_column(Integer, primary_key=True)
+    detector:    Mapped[str]      = mapped_column(String(40), nullable=False)
+    product_id:  Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("products.id", ondelete="SET NULL"), nullable=True
+    )
+    target_type: Mapped[str]      = mapped_column(String(20), nullable=False)
+    target_id:   Mapped[str]      = mapped_column(String(100), nullable=False)
+    action:      Mapped[str]      = mapped_column(String(40), nullable=False)
+    reason:      Mapped[str]      = mapped_column(Text, nullable=False)
+    dry_run:     Mapped[bool]     = mapped_column(Boolean, nullable=False, default=False)
+    created_at:  Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

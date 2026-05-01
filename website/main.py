@@ -81,6 +81,7 @@ from website.database import get_db
 from website.models import (
     Product, Feature, FeatureReview, Session as DBSession, Alert, SystemConfig, PMUser,
     FeatureComment, FeatureChangelog, Label, FeatureLabel, Phase, Sprint, FeatureLink,
+    SupervisorAction,
 )
 from website.auth import require_auth
 from website import schemas
@@ -3436,6 +3437,78 @@ async def api_force_unlock_poller(db: AsyncSession = Depends(get_db)):
     return {"ok": True, "message": "Poller lock forcefully cleared"}
 
 
+# REST API — Supervisor (Phase 1: rule-based corrections audit)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/supervisor/actions", status_code=201)
+async def api_supervisor_record_action(
+    body: dict, db: AsyncSession = Depends(get_db),
+):
+    """Append one row to the supervisor audit log.
+
+    Called by orchestrator-side detectors after they fire (whether they
+    actually mutated state or just ran in dry-run). No auth — internal
+    poller path. Body validation is permissive: required fields are
+    detector/target_type/target_id/action/reason; everything else is
+    optional with sensible defaults.
+    """
+    detector    = (body.get("detector")    or "").strip()
+    target_type = (body.get("target_type") or "").strip()
+    target_id   = (body.get("target_id")   or "").strip()
+    action      = (body.get("action")      or "").strip()
+    reason      = (body.get("reason")      or "").strip()
+    if not (detector and target_type and target_id and action and reason):
+        raise HTTPException(
+            status_code=422,
+            detail="detector, target_type, target_id, action, reason are required",
+        )
+    row = SupervisorAction(
+        detector=detector[:40],
+        product_id=body.get("product_id"),
+        target_type=target_type[:20],
+        target_id=target_id[:100],
+        action=action[:40],
+        reason=reason,
+        dry_run=bool(body.get("dry_run", False)),
+    )
+    db.add(row)
+    await db.flush()
+    return {"id": row.id}
+
+
+@app.get("/api/products/{product_id}/supervisor-actions")
+async def api_supervisor_list_actions(
+    product_id: int,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the latest supervisor-action audit rows for a product, newest
+    first. Used by the product page's Corrections tab.
+    """
+    await _get_product_or_404(product_id, db)
+    result = await db.execute(
+        select(SupervisorAction)
+        .where(SupervisorAction.product_id == product_id)
+        .order_by(SupervisorAction.created_at.desc())
+        .limit(min(limit, 500))
+    )
+    rows = result.scalars().all()
+    return [
+        {
+            "id":          r.id,
+            "detector":    r.detector,
+            "target_type": r.target_type,
+            "target_id":   r.target_id,
+            "action":      r.action,
+            "reason":      r.reason,
+            "dry_run":     r.dry_run,
+            "created_at":  r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # REST API — Misc
 # ══════════════════════════════════════════════════════════════════════════════
 

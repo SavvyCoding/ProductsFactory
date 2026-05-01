@@ -6,7 +6,7 @@ function escHtmlGlobal(s) {
 }
 
 // ── TAB SWITCHING ─────────────────────────────────────────
-const TAB_IDS = ['summary','board','sprints','prs','history','videos','live','settings'];
+const TAB_IDS = ['summary','board','sprints','prs','history','corrections','videos','live','settings'];
 
 function switchTab(name, btn) {
   TAB_IDS.forEach(id => {
