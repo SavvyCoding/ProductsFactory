@@ -159,6 +159,11 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 - *How*: `auto_merge.sweep_product` includes `changed_by` in every Pushed PATCH so `feature_changelog` rows record the sweep as the author rather than the default "agent".
 - *Why*: Auditability. Without explicit attribution, the audit trail can't distinguish merges done by the sweep from merges done by a reviewer session or by a human via the UI.
 
+**VII.5 ✅ In sprint-PR mode, a sprint PR is merged ONLY when every feature in the sprint is merge-eligible.**
+- *How*: `auto_merge.sweep_product` detects sprint-PR mode at sweep time by checking whether the feature's `pr_number` equals its sprint's `pr_number`. If yes, it iterates every feature in that sprint and verifies each is either terminal (Pushed/Deferred/Rejected/Reverted) or `Reviewed+approved` pointing at the same PR (`_is_merge_eligible` helper). If any feature is in a pre-shipping state (Pending/Approved/Designed/Implementing/Reviewing/Reviewed-changes-requested), the merge is held this cycle and the PR is added to `held_sprint_prs` so subsequent features pointing at the same PR don't re-check or re-call GitHub. Per-feature mode (default) never enters this branch — feature pr_number won't match sprint pr_number.
+- *Why*: In sprint-PR mode the PR contains every feature in the sprint. Merging on the first `Reviewed+approved` feature would ship the whole sprint while later features are still being implemented or reviewed — a premature ship of incomplete work. The sprint PR's natural unit is the whole sprint, not the individual feature, so the merge gate must reflect that.
+- *Detection is data-driven, not flag-driven*: nothing reads `config.sprint_pr_mode` at sweep time. The signal is the actual data shape (feature/sprint pr_number alignment), so the same code is correct for hybrid states (e.g. a product mid-migration with some sprint-PR-mode sprints and some per-feature-mode sprints).
+
 ---
 
 ## VIII. Sprint-aware persona selection
