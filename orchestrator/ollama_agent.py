@@ -401,50 +401,16 @@ _TRANSIENT_GIT_PATTERNS = (
     "resource temporarily unavailable", "device or resource busy",
 )
 
-
-def _git_status_with_retry() -> subprocess.CompletedProcess:
-    """Run `git status --porcelain` with one retry on transient errors.
-
-    On Windows NTFS bind-mounts the index/config locks can fleetingly fail
-    when a parallel git process (heartbeat thread, prior-session shutdown,
-    docker_runner cleanup) hasn't released them yet. A single short retry
-    eliminates the spurious fail-closed that otherwise burns the agent's
-    whole turn budget and ends in a 90-min watchdog SIGKILL.
-
-    Real failures (bad object, corrupted .git, write-protected workspace)
-    don't match the transient patterns and fail through to the caller's
-    fail-closed path unchanged.
-    """
-    for attempt in (0, 1):
-        r = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=WORKSPACE_DIR, capture_output=True, text=True, timeout=15,
-        )
-        if r.returncode == 0:
-            return r
-        stderr_lc = (r.stderr or "").lower()
-        if attempt == 0 and any(p in stderr_lc for p in _TRANSIENT_GIT_PATTERNS):
-            _log(f"_agent_made_edits: transient git error (rc={r.returncode}), retrying once")
-            time.sleep(2)
-            continue
-        return r
-    return r  # unreachable, satisfies type checker
-
-
-def _agent_made_edits() -> bool:
-    """Return True if `git status --porcelain` shows any changes inside WORKSPACE_DIR.
-
     Three signals count as proof of edits:
       1. Uncommitted changes in the working tree (`git status --porcelain`)
       2. Commits ahead of the upstream branch (committed but not pushed)
       3. Commits ahead of `origin/main` when no upstream is set yet
 
     Fail-CLOSED on git errors that aren't "this isn't a git repo" — the
-    agent can't have written real code if git itself can't operate
-    (corrupted .git, ref errors, etc.). Transient lock/busy errors get
-    one retry via _git_status_with_retry before falling closed — those
-    are common on Windows NTFS bind-mounts and were a major contributor
-    to the 35-39% kill rate (#6).
+    agent can't have written real code if git itself can't operate (lock
+    files, permission failures, OOM, etc.). Earlier this fell open on
+    any subprocess error and let the agent game the no-edit gate by
+    triggering write-permission failures and then claiming success.
 
     The only fall-open case is when WORKSPACE_DIR isn't a git repo at
     all (test_run.py edge cases) — there the gate is meaningless.
@@ -492,9 +458,6 @@ def _agent_made_edits() -> bool:
         # let the permission-error attack succeed earlier.
         _log(f"WARNING: _agent_made_edits raised {type(e).__name__}: {e!r}; gate FAIL-CLOSED")
         return False
-    except Exception:
-        # Any unexpected failure — fall open so we don't trap legitimate sessions
-        return True
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
