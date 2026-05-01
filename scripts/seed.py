@@ -84,8 +84,6 @@ def seed(db: Session) -> None:
         poll_interval=60,
         session_timeout_minutes=90,
         stale_threshold_minutes=45,
-        max_open_prs=3,
-        pr_gate_sleep=300,
         stuck_feature_timeout_hours=2,
         max_features_per_run=1,
         brownfield_file_threshold=10,

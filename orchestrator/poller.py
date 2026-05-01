@@ -77,8 +77,6 @@ SSH_DIR       = Path(os.environ.get("SSH_DIR", "C:/Users/digvi/.ssh"))
 _ENV_DEFAULTS = {
     "poll_interval":               int(os.environ.get("POLL_INTERVAL",            "60")),
     "auth_check_timeout":          int(os.environ.get("AUTH_CHECK_TIMEOUT",       "30")),
-    "max_open_prs":                int(os.environ.get("MAX_OPEN_PRS",             "3")),
-    "pr_gate_sleep":               int(os.environ.get("PR_GATE_SLEEP",            "300")),
     "session_timeout_minutes":     int(os.environ.get("SESSION_TIMEOUT_MINUTES",  "90")),
     "stale_threshold_minutes":     int(os.environ.get("STALE_THRESHOLD_MINUTES",  "45")),
     "max_features_per_run":        int(os.environ.get("MAX_FEATURES_PER_SPRINT",  "5")),
@@ -1053,8 +1051,19 @@ def main():
             # features are advanced to Reviewing before the reviewer-first check below.
             # Phase 4 of PollerRevamp: single per-product entry point in
             # orchestrator/reconcile.py — see INVARIANTS.md V.3-V.4 for contract.
+            #
+            # Also runs the open-PR-count invariant (Phase 6.5): in sprint-PR
+            # mode there should be exactly one open PR per product. >1 alerts
+            # the operator once per product per run, but no longer gates work
+            # (the old MAX_OPEN_PRS gate was removed).
+            from orchestrator.sprint_pr import check_open_pr_invariant
             for _p in products:
                 reconcile_product(_p)
+                if _p.get("github_repo"):
+                    try:
+                        check_open_pr_invariant(_p, count_open_prs(_p), alerter=send_alert)
+                    except Exception:
+                        log.exception(f"open-PR invariant check failed for {_p.get('name', '?')}")
 
             # ⑥c Auto-merge sweep — Phase 1 of PollerRevamp.
             # Merges every Reviewed+approved+pr_number feature across ALL ready
@@ -1143,25 +1152,11 @@ def main():
             # redundant and created races with the live-poll thread of any session
             # that was about to start.
 
-            # ⑪ PR count gate (only applies to coder - designer/reviewer don't open new PRs)
-            # Exclude PRs already being fixed (feature is Implementing + review_outcome set)
-            # — those are in-flight fix cycles and should not block new coder work.
-            if persona == "coder":
-                try:
-                    _feats_resp = httpx.get(f"{PM_API_URL}/api/products/{product['id']}/features", timeout=10)
-                    _fixing_prs = {
-                        f["pr_number"]
-                        for f in (_feats_resp.json() if _feats_resp.status_code == 200 else [])
-                        if f.get("status") == "Implementing" and f.get("review_outcome") and f.get("pr_number")
-                    }
-                except Exception:
-                    _fixing_prs = set()
-                open_pr_count = max(0, count_open_prs(product) - len(_fixing_prs))
-                if open_pr_count >= _cfg["max_open_prs"]:
-                    log.info(f"PR gate: {open_pr_count} open PRs - skipping")
-                    send_alert("warning", f"{product['name']}: ≥{_cfg['max_open_prs']} open PRs unmerged - pausing")
-                    time.sleep(_cfg["pr_gate_sleep"])
-                    continue
+            # ⑪ The MAX_OPEN_PRS coder gate is gone (Phase 6.5). With sprint-PR
+            # mode there's exactly one open PR per product (the sprint PR);
+            # gating on its existence would block every coder run forever.
+            # Anomaly detection (>1 open PR) lives in the per-cycle invariant
+            # check in step ⑥b instead, which alerts but does not pause.
 
             # ⑫ Run Claude session - wrap in a log scope so every record emitted
             # by the docker_runner, the live-poll thread, and the log-stream thread
