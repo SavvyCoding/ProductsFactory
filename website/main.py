@@ -1224,19 +1224,6 @@ async def api_sprint_report(sprint_id: int, db: AsyncSession = Depends(get_db)):
     }
 
 
-@app.get("/api/sprints/{sprint_id}/dod")
-async def api_sprint_dod(sprint_id: int, db: AsyncSession = Depends(get_db)):
-    """
-    Evaluate the Definition of Done for a sprint.
-    Returns the current gate states — used by poller and UI.
-    """
-    sprint = await db.get(Sprint, sprint_id)
-    if not sprint:
-        raise HTTPException(status_code=404, detail="Sprint not found")
-    dod = await _evaluate_dod(sprint_id, sprint.product_id, db)
-    return dod
-
-
 @app.post("/api/sprints/{sprint_id}/force-complete")
 async def api_force_complete_sprint(sprint_id: int, db: AsyncSession = Depends(get_db)):
     """
@@ -1265,6 +1252,53 @@ async def api_force_complete_sprint(sprint_id: int, db: AsyncSession = Depends(g
         "action": "completed",
         "sprint_id": sprint_id,
         "release_notes": sprint.release_notes,
+    }
+
+
+@app.get("/api/sprints/{sprint_id}/dod")
+async def api_get_dod(sprint_id: int, db: AsyncSession = Depends(get_db)):
+    """Read-only DoD evaluation. Returns the same gate breakdown as
+    POST /check-dod but without any side-effect (no auto-completion).
+
+    Phase 3 of PollerRevamp: the orchestrator dispatcher consumes this to
+    reason about WHY a sprint is stuck (which gate is failing, which
+    blocking bug features exist) and route corrective work — see
+    INVARIANTS.md VIII.2.
+    """
+    sprint = await db.get(Sprint, sprint_id)
+    if not sprint:
+        raise HTTPException(status_code=404, detail="Sprint not found")
+    dod = await _evaluate_dod(sprint_id, sprint.product_id, db)
+
+    # Surface the *blocking* features so callers don't need to re-derive them.
+    # security_clean blockers = non-terminal bugs anywhere in the product
+    #   (sprint-scoped or unsprinted), since unsprinted bugs filed by the
+    #   security_auditor are exactly what blocks the gate from clearing.
+    # all_features_done blockers = non-terminal features in this sprint.
+    terminal = {"Pushed", "Deferred", "Rejected"}
+    feat_result = await db.execute(
+        select(Feature).where(Feature.product_id == sprint.product_id)
+    )
+    all_product_features = feat_result.scalars().all()
+
+    sprint_non_terminal = [
+        {"id": f.id, "name": f.name, "status": f.status, "feature_type": f.feature_type}
+        for f in all_product_features
+        if f.sprint_id == sprint_id and f.status not in terminal
+    ]
+    open_security_bugs = [
+        {"id": f.id, "name": f.name, "status": f.status, "sprint_id": f.sprint_id}
+        for f in all_product_features
+        if f.feature_type == "bug" and f.status not in terminal
+    ]
+
+    return {
+        "sprint_id": sprint_id,
+        "dod": dod,
+        "blockers": {
+            "all_features_done": sprint_non_terminal,
+            "security_clean":    open_security_bugs,
+        },
     }
 
 
