@@ -1998,6 +1998,44 @@ async def api_update_feature(
             new_value=str(new_attempts),
             changed_by=f"{changed_by} ({trigger})",
         ))
+
+        # INVARIANTS.md VI.5 (website-side): when this bump just crossed
+        # max_fix_attempts, route to the per-product Blocked sprint inline.
+        # Without this the feature sits at-or-above the cap, status=
+        # Implementing, and the next coder cycle picks it up again — the
+        # orchestrator's PR-based route only fires for closed-unmerged
+        # PRs (VI.2), and the supervisor's bump-and-route only handles
+        # the kill_recovery / false_success paths. Three places bump
+        # fix_attempts; all three must route at the cap or the cap is
+        # not actually a cap.
+        max_fix = await _max_fix_attempts(db)
+        if new_attempts >= max_fix:
+            blocked_sprint = await _get_or_create_blocked_sprint(
+                feature.product_id, db
+            )
+            prev_sprint_id = feature.sprint_id
+            feature.sprint_id = blocked_sprint.id
+            feature.status = "Blocked"
+            if not feature.blocked_reason:
+                feature.blocked_reason = (
+                    f"Auto-blocked: fix_attempts={new_attempts} >= "
+                    f"max_fix_attempts={max_fix} via {trigger}. "
+                    f"Needs human triage."
+                )
+            db.add(FeatureChangelog(
+                feature_id=feature_id,
+                field="sprint_id",
+                old_value=str(prev_sprint_id) if prev_sprint_id else None,
+                new_value=str(blocked_sprint.id),
+                changed_by=f"{changed_by} (auto-blocked at cap)",
+            ))
+            db.add(FeatureChangelog(
+                feature_id=feature_id,
+                field="status",
+                old_value=str(new_status) if new_status else str(prev_status),
+                new_value="Blocked",
+                changed_by=f"{changed_by} (auto-blocked at cap)",
+            ))
     return feature
 
 
