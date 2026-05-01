@@ -690,6 +690,21 @@ async def progress_view(
 # HTML FORM ENDPOINTS — PM actions
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _seed_product_config(user_config: dict | None) -> dict:
+    """Merge new-product defaults with user-supplied config. User wins on conflict.
+
+    Sprint-PR mode is the default for every new product as of Phase 6.4 — the
+    coder/reviewer/qa/security pipeline only supports the sprint-PR flow now,
+    and the per-feature gh pr create path was removed in Phase 6.2. Existing
+    products keep whatever setting they had; this helper only affects products
+    created after the flip.
+    """
+    cfg = {"sprint_pr_mode": True}
+    if user_config:
+        cfg.update(user_config)
+    return cfg
+
+
 @app.post("/product/register")
 async def register_product_form(
     working_dir: str = Form(...),
@@ -701,7 +716,7 @@ async def register_product_form(
     )
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Product already registered")
-    product = Product(working_dir=working_dir)
+    product = Product(working_dir=working_dir, config=_seed_product_config(None))
     db.add(product)
     await db.flush()
     return RedirectResponse(f"/product/{product.id}", status_code=303)
@@ -772,7 +787,7 @@ async def register_greenfield_form(
         type="greenfield",
         status="greenfield_pending",
         ui_template=ui_template if chosen_ui else None,
-        config=product_config,
+        config=_seed_product_config(product_config),
     )
     db.add(product)
     await db.flush()
@@ -1797,13 +1812,12 @@ async def api_create_product(
     db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
 ):
     """JSON endpoint for PM or tooling to register a product."""
-    product = Product(working_dir=body.working_dir)
+    product = Product(working_dir=body.working_dir, config=_seed_product_config(body.config))
     if body.name:         product.name        = body.name
     if body.type:         product.type        = body.type
     if body.tech_stack:   product.tech_stack  = body.tech_stack
     if body.status:       product.status      = body.status
     if body.github_repo:  product.github_repo = body.github_repo
-    if body.config:       product.config      = body.config
     db.add(product)
     await db.flush()
     return product
