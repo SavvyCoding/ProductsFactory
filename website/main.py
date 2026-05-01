@@ -400,6 +400,24 @@ _CFG_DEFAULTS = {
     "claude_model":           "claude-sonnet-4-6",
     "claude_credentials_dir": "C:/Users/digvi/.claude",
     "ssh_keys_dir":           "",
+    # Supervisor (Phase-1 detectors)
+    "supervisor_dry_run_only":                   False,
+    "supervisor_false_success_enabled":          True,
+    "supervisor_kill_recovery_enabled":          True,
+    "supervisor_dirty_pr_enabled":               True,
+    "supervisor_dirty_pr_min_age_min":           60,
+    "supervisor_dirty_pr_idle_min":              30,
+    "supervisor_auto_plan_enabled":              True,
+    "supervisor_auto_plan_min_unsprinted":       3,
+    "supervisor_merge_stall_enabled":            True,
+    "supervisor_merge_stall_min_min":            60,
+    "supervisor_overlap_pr_enabled":             True,
+    "supervisor_orphan_approved_enabled":        True,
+    "supervisor_orphan_approved_min_age_hours":  24,
+    "supervisor_orphan_approved_threshold":      1,
+    "supervisor_rapid_flap_enabled":             True,
+    "supervisor_rapid_flap_window_hours":        1,
+    "supervisor_rapid_flap_min_transitions":     5,
 }
 
 

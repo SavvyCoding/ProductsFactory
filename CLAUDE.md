@@ -95,6 +95,27 @@ Four layers prevent features from getting stuck:
 3. **`reconcile_merged_prs` (every cycle)**: Batch-reconciles the 20 most recently closed PRs. Handles both merged and closed-unmerged PRs. Parses `pr_number` from `pr_url` as fallback.
 4. **`reset_stuck` (time-gated)**: Features stuck in agent states (Implementing/Designing/Reviewing) for longer than `stuck_feature_timeout_hours` (default 0.75h / 45 min, configurable as float) are reset to their prior ready state.
 
+### Blocked Sprint Quarantine Route
+
+Each `features.fix_attempts` is bumped on every changes-requested rework cycle, false-success detection, and killed-session recovery. When it crosses `system_config.max_fix_attempts` (default 5), `orchestrator/github_client.py` routes the feature to a per-product **Blocked sprint** (`sprints.kind = "blocked"`) for PM triage instead of letting it cycle indefinitely.
+
+Blocked sprints are excluded from active-sprint selection, DoD gates, sprint capacity caps, and sprint-PR provisioning — they are purely a holding pen surfaced on the PM dashboard. The feature columns `fix_attempts`, `blocked_reason` and the sprint column `kind` are the persistence layer; migration `036_blocked_sprint.py` introduced them.
+
+### Phase-1 Supervisor
+
+`orchestrator/supervisor.py` is a rule-based safety net (no LLM) that catches stuck-state patterns the deterministic orchestrator misses. It is wired into three hook points:
+- **Post-coder pipeline** (`docker_runner.py` after every coder session) — runs `detect_false_success` (exit 0 but no PR) and `detect_kill_recovery` (non-zero exit) to bump `fix_attempts` so the Blocked-sprint route triggers faster instead of waiting for `reset_stuck`.
+- **Per-product reconcile sweep** (`deploy/orchestrator/tools.py::reconcile_prs`) — runs `detect_dirty_prs`, `detect_overlapping_prs`, `detect_orphan_approved`, `detect_rapid_flap`.
+- **No-work cycle hook** — runs `detect_auto_plan` (active sprint dead + ≥N unsprinted Approved → call plan-sprints) and `detect_merge_stall` (sprint all-Reviewed but PR not merging for ≥1h → alert).
+
+Every detector firing — even in dry-run — writes one row to the `supervisor_actions` audit table (`detector`, `target_type`, `target_id`, `action`, `reason`, `dry_run`, `created_at`) so the PM dashboard can show what the system has been doing automatically. Detector toggles + thresholds live in `system_config` (`supervisor_*_enabled`, `supervisor_*_min_*`, etc.) — flip them without restarting; the orchestrator picks them up next cycle. `supervisor_dry_run_only=True` is a global kill switch that lets all detectors log but skip mutations. Migrations `037_supervisor_actions.py` (audit table + 10 flags) and `038_supervisor_orphan_flap.py` (orphan_approved + rapid_flap flags) own the schema.
+
+### Session FSM
+
+`sessions.status` is the canonical session lifecycle state — never parse docker output or file mtimes when a session's state is in question, consult this column. Statuses: `pending` (DB row created, docker not yet started) → `starting` (docker run launched) → `running` (container live) → `wrapping` (agent exited, harvester applying results) → `ended` (clean exit_code=0) | `killed` (watchdog/timeout/SIGKILL) | `orphaned` (DB says running but no container — reconciler recovers).
+
+Three actors drive transitions: the **watchdog** (kills stale sessions past `expected_deadline`, sets `killed` + `kill_reason`), the **reconciler** (recovers `orphaned` sessions when no container exists), and the **harvester** (applies session_result.json results in the `wrapping` phase). Every transition is appended to `session_events` (table) for audit. Related columns: `heartbeat_at`, `expected_deadline`, `kill_reason`, `log` (last N lines, capped by `SESSION_LOG_MAXLEN`).
+
 ### Greenfield Scaffolding
 
 When `setup_product.py` discovers a new product directory with fewer than `BROWNFIELD_FILE_THRESHOLD` (default: 10) source files, it is classified as **greenfield**. `greenfield_scaffold.py` then:
@@ -201,9 +222,9 @@ Additionally, a `product_config.json` file in the product working directory (rea
 - **Website runtime** uses async SQLAlchemy + asyncpg
 - **Alembic migrations** use psycopg2 (sync) — driver is swapped in `db/migrations/env.py`
 - PostgreSQL runs in Docker (`docker-compose.yml`); PM website connects via `productfactory-net` bridge network
-- Key tables: `products`, `features`, `sessions`, `alerts`, `feature_reviews`, `sprints`, `phases`
+- Key tables: `products`, `features`, `sessions`, `session_events`, `alerts`, `feature_reviews`, `sprints`, `phases`, `supervisor_actions`
 - JIRA-like tracking tables: `feature_comments` (per-feature discussion, author=pm/poller/persona), `feature_changelog` (auto-tracked field-level audit trail), `labels` + `feature_labels` (product-scoped color tags, many-to-many), `feature_links` (directed relationships: blocks/is_blocked_by/relates_to/duplicates)
-- Notable columns: `features.skip_design`, `features.design_doc`, `features.design_doc_path`, `features.review_outcome`, `features.review_notes`, `features.feature_type` (`feature | bug | chore`), `features.due_date`, `features.story_points`; `sessions.persona`, `sessions.container_id`; `system_config.poller_pid/host/locked_at/heartbeat_at`; `system_config.stuck_feature_timeout_hours` (Float, default 0.75h); `sprints.dod_status` (JSONB — gate booleans + agent notes), `sprints.phase_id`, `sprints.release_notes`, `sprints.completed_at`, `sprints.retro_doc_path`
+- Notable columns: `features.skip_design`, `features.design_doc`, `features.design_doc_path`, `features.review_outcome`, `features.review_notes`, `features.feature_type` (`feature | bug | chore`), `features.due_date`, `features.story_points`, `features.fix_attempts`, `features.blocked_reason`; `sessions.persona`, `sessions.container_id`, `sessions.status` (FSM), `sessions.heartbeat_at`, `sessions.expected_deadline`, `sessions.kill_reason`; `system_config.poller_pid/host/locked_at/heartbeat_at`; `system_config.stuck_feature_timeout_hours` (Float, default 0.75h), `system_config.max_fix_attempts` (default 5), `system_config.supervisor_*` (per-detector flags + thresholds); `sprints.dod_status` (JSONB — gate booleans + agent notes), `sprints.phase_id`, `sprints.release_notes`, `sprints.completed_at`, `sprints.retro_doc_path`, `sprints.kind` (`normal | blocked`)
 - Tests use real PostgreSQL (not mocks) — each test runs inside a rolled-back transaction for isolation; requires `TEST_DATABASE_URL`
 
 **Feature tracking REST endpoints** (agents and PM can call these):
