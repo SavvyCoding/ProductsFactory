@@ -2062,6 +2062,25 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     except Exception:
         log.exception(f"Post-exit reconciliation failed for {product.get('name')}")
     finally:
+        # Phase-1 supervisor: kill-recovery. Bumps fix_attempts on every
+        # assigned feature still in agent state when the session died non-
+        # zero (watchdog kill, container OOM, manual kill). Without this the
+        # same feature gets re-assigned next cycle and gets killed again,
+        # because reset_stuck only resets status (not fix_attempts) — the
+        # auto-Block route never triggers.
+        if exit_code is not None and exit_code != 0:
+            try:
+                from orchestrator.supervisor import detect_kill_recovery
+                detect_kill_recovery(
+                    product_id=product["id"],
+                    session_uid=session_uid,
+                    persona=persona,
+                    exit_code=exit_code,
+                    assigned_features=product.get("_assigned_features", []),
+                )
+            except Exception:
+                log.exception(f"Supervisor detect_kill_recovery failed for {product.get('name')}")
+
         # 4. Always record session end — guaranteed even if reconciliation raises.
         if session_id is not None:
             try:
