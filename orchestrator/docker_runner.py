@@ -413,10 +413,9 @@ def _reconcile_session_result(working_dir: str, product_id: int, exit_code: int,
 
 def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
     """
-    For reviewer sessions with auto_merge_enabled: process approved features.
-    - High confidence: attempt GitHub merge → update entry to Pushed
+    For reviewer sessions with auto_merge_enabled: merge every approved feature.
+    - approved: attempt GitHub merge → update entry to Pushed
     - PR closed/conflicted: close PR, update entry to Implementing (clears pr_number)
-    - Low confidence: leave entry unchanged (stays Reviewed for human sign-off)
 
     Takes the session features list, modifies entries in-place, and returns it
     so reconcile applies the final authoritative state.
@@ -498,11 +497,7 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
             })
             continue
 
-        # Low confidence — merge anyway (sprint-gating handles the flow)
-        if entry.get("confidence", "low") != "high":
-            log.info(f"[auto-merge] Feature #{fid} approved (low-confidence) — merging via sprint flow")
-
-        # PR is open + high confidence — attempt merge.
+        # PR is open — attempt merge regardless of reviewer-reported confidence.
         # First, try to update the PR branch with main (GitHub's "Update branch"
         # button, REST endpoint /update-branch). If the PR branch is behind main
         # or has conflicts, this rebases/merges main into the branch so the
@@ -523,7 +518,7 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
         except Exception as _ue:
             log.warning(f"[auto-merge] update-branch failed for PR #{pr_number}: {_ue} — proceeding to merge anyway")
 
-        log.info(f"[auto-merge] Merging PR #{pr_number} for feature #{fid} (high-confidence)")
+        log.info(f"[auto-merge] Merging PR #{pr_number} for feature #{fid}")
         try:
             resp = httpx.put(
                 f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}/merge",
