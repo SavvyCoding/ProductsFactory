@@ -1,6 +1,8 @@
 # Poller Invariants
 
-This document is the behavioral spec for the orchestrator. Every invariant listed here is something the current code enforces — sourced from reading `poller.py`, `docker_runner.py`, `supervisor.py`, and `github_client.py`. If a future refactor (or rewrite) breaks any of these without an explicit decision to change the behavior, that's a regression.
+This document is the behavioral spec for the orchestrator. Every invariant listed here is something the current code enforces — sourced from reading `poller.py`, `docker_runner.py`, `supervisor.py`, `github_client.py`, and `deploy/orchestrator/tools.py`. If a future refactor (or rewrite) breaks any of these without an explicit decision to change the behavior, that's a regression.
+
+> **Two orchestrator implementations co-exist today**: `orchestrator/poller.py` (the legacy host-mode entry point invoked by `deploy/windows/start_poller.ps1`) and `deploy/orchestrator/{orchestrate,tools}.py` (the containerized entry point used by `pf-orchestrator`, currently the deployed path). The Phase 1-4 modules in `orchestrator/` (`auto_merge`, `dispatch`, `reconcile`) are wired into BOTH paths where applicable. The `dispatch.py` priority-list cascade is only used by the legacy path; `tools.py.determine_next_action` keeps its own decision tree. Consolidating the two entry points is on the future-work list.
 
 Each invariant is tagged with **why** (the failure mode it guards against) and **how** (the function or module that enforces it). Citations are by name, not line number — line numbers drift on every refactor, and a stale citation is worse than no citation. If a citation's function gets renamed or moved, that's exactly the kind of regression this document is supposed to catch.
 

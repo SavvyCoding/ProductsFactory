@@ -152,7 +152,9 @@ RUN python3 --version && \
 #                 execs the agent command. Runs as root just so it can chown
 #                 nothing — actually no privileged work, just shell ops.
 COPY deploy/docker/agent-entrypoint.sh /usr/local/bin/agent-entrypoint.sh
-RUN chmod +x /usr/local/bin/agent-entrypoint.sh
+# Strip Windows \r from the entrypoint — see Dockerfile.orchestrator for rationale.
+RUN sed -i 's/\r$//' /usr/local/bin/agent-entrypoint.sh \
+ && chmod +x /usr/local/bin/agent-entrypoint.sh
 
 # ── Switch to non-root agent user ────────────────────────────────────────────
 USER agent
