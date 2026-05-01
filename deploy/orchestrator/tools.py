@@ -620,6 +620,51 @@ def determine_next_action(args: dict, **kwargs) -> str:
         if in_agent_stuck:
             return _ok({"action": "exit", "reason": f"{len(in_agent_stuck)} features stuck in agent state; reset_stuck will handle"})
 
+        # Phase-1 supervisor: detector D — sprint all-Reviewed but no merge.
+        # Compute last-activity ts from non_terminal updated_at; skip the
+        # detector entirely if we can't (avoids a perpetual false-fire when
+        # updated_at isn't serialized).
+        try:
+            from datetime import datetime as _dt
+            from orchestrator.supervisor import detect_merge_stall  # type: ignore
+            ts_strs = [f.get("updated_at") for f in non_terminal if f.get("updated_at")]
+            last_activity_ts = None
+            if ts_strs:
+                parsed_ts = []
+                for s in ts_strs:
+                    try:
+                        parsed_ts.append(_dt.fromisoformat(s.replace("Z", "+00:00")).timestamp())
+                    except (ValueError, AttributeError):
+                        pass
+                if parsed_ts:
+                    last_activity_ts = max(parsed_ts)
+            if last_activity_ts is not None:
+                detect_merge_stall(
+                    product_id=product_id, sprint_id=sid,
+                    sprint_features=sprint_features, last_merge_ts=last_activity_ts,
+                )
+        except Exception:
+            log.exception("supervisor merge_stall detector failed")
+
+        # Phase-1 supervisor: detector C — auto-plan when active sprint has
+        # nothing actionable but unsprinted Approved features are piling up.
+        # Detector POSTs /plan-sprints itself; we just exit this cycle.
+        try:
+            from orchestrator.supervisor import detect_auto_plan  # type: ignore
+            unsprinted_approved = sum(
+                1 for f in features
+                if f.get("status") == "Approved" and f.get("sprint_id") is None
+            )
+            if detect_auto_plan(
+                product_id=product_id,
+                active_sprint_has_codeable=False,
+                unsprinted_approved_count=unsprinted_approved,
+            ):
+                return _ok({"action": "exit",
+                            "reason": f"supervisor auto_plan triggered for product {product_id}"})
+        except Exception:
+            log.exception("supervisor auto_plan detector failed")
+
         return _ok({"action": "exit", "reason": "No actionable work found"})
 
     except Exception as e:
@@ -818,10 +863,102 @@ def reconcile_prs(args: dict, **kwargs) -> str:
         product = product_resp.json()
         reconcile_merged_prs(product)
         reconcile_in_flight_prs(product)
+        # Phase-1 supervisor detectors that operate on open PRs.
+        # Cheap to run after the reconcile pass since we re-hit GitHub once
+        # for the full open-PR list. Best-effort — never raises.
+        try:
+            _run_supervisor_pr_detectors(product)
+        except Exception:
+            log.exception("supervisor PR detectors failed")
         return _ok({"reconciled": product_id})
     except Exception as e:
         log.exception("reconcile_prs failed")
         return _err(f"reconcile_prs failed: {e}")
+
+
+def _run_supervisor_pr_detectors(product: dict) -> None:
+    """Pull open PRs + features once, run dirty-PR + overlap-PR detectors."""
+    import re as _re
+    import httpx as _httpx
+    from orchestrator.supervisor import detect_dirty_prs, detect_overlapping_prs  # type: ignore
+
+    repo_url = product.get("github_repo") or ""
+    if not repo_url:
+        return
+    m = _re.search(r"[:/]([^/]+/[^/]+?)(?:\.git)?$", repo_url)
+    if not m:
+        return
+    slug = m.group(1)
+
+    # Pull GH PAT once
+    pat = ""
+    try:
+        with _pm_client() as client:
+            sc = client.get("/api/system-config").json() or {}
+            pat = sc.get("github_pat") or ""
+    except Exception:
+        pass
+    headers = {"Accept": "application/vnd.github+json"}
+    if pat:
+        headers["Authorization"] = f"Bearer {pat}"
+
+    # Fetch open PRs (one call covers both detectors)
+    try:
+        prs_resp = _httpx.get(
+            f"https://api.github.com/repos/{slug}/pulls",
+            headers=headers, params={"state": "open", "per_page": 30}, timeout=10,
+        )
+        prs = prs_resp.json() if prs_resp.status_code == 200 else []
+    except Exception:
+        prs = []
+    if not isinstance(prs, list) or not prs:
+        return
+
+    # Augment each PR with last_commit_at (fetched per-PR; cap at 30 to bound
+    # GitHub API calls per cycle).
+    enriched = []
+    for pr in prs[:30]:
+        if not isinstance(pr, dict):
+            continue
+        pr_n = pr.get("number")
+        try:
+            commits_resp = _httpx.get(
+                f"https://api.github.com/repos/{slug}/pulls/{pr_n}/commits",
+                headers=headers, params={"per_page": 1, "direction": "desc"}, timeout=10,
+            )
+            cs = commits_resp.json() if commits_resp.status_code == 200 else []
+            last_commit_at = (
+                cs[-1]["commit"]["committer"]["date"]
+                if cs and isinstance(cs, list) and cs[-1].get("commit") else None
+            )
+        except Exception:
+            last_commit_at = None
+        enriched.append({
+            "number":          pr_n,
+            "title":           pr.get("title", ""),
+            "created_at":      pr.get("created_at"),
+            "mergeable_state": pr.get("mergeable_state"),
+            "last_commit_at":  last_commit_at,
+        })
+
+    # Pull features once for the dirty-PR feature reset
+    try:
+        with _pm_client() as client:
+            feat_resp = client.get(f"/api/products/{product['id']}/features")
+            features = feat_resp.json() if feat_resp.is_success else []
+    except Exception:
+        features = []
+    if not isinstance(features, list):
+        features = []
+
+    detect_dirty_prs(
+        product_id=product["id"], github_repo=repo_url,
+        open_prs_with_state=enriched, features=features, github_token=pat,
+    )
+    detect_overlapping_prs(
+        product_id=product["id"], github_repo=repo_url,
+        open_prs=enriched, github_token=pat,
+    )
 
 
 # ---------------------------------------------------------------------------
