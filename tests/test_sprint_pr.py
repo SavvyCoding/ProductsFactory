@@ -75,3 +75,57 @@ class TestProvisionSprintPr:
                 "https://github.com/o/r.git", 7, "Sprint 7", "G", ["a"], "tok",
             )
         assert result == {"branch": "sprint/7", "number": 13, "url": "https://github.com/o/r/pull/13"}
+
+
+class TestMergeSprintPr:
+    def test_returns_zero_when_inputs_missing(self):
+        from orchestrator.sprint_pr import merge_sprint_pr
+        code, _ = merge_sprint_pr("", 1, "tok")
+        assert code == 0
+        code, _ = merge_sprint_pr("https://github.com/o/r.git", 0, "tok")
+        assert code == 0
+        code, _ = merge_sprint_pr("https://github.com/o/r.git", 1, "")
+        assert code == 0
+
+    def test_marks_ready_then_merges_squash(self):
+        from orchestrator import sprint_pr
+
+        ready = MagicMock(status_code=200, text="")
+        merge = MagicMock(status_code=200, text="merged")
+        with patch.object(sprint_pr.httpx, "patch", return_value=ready) as mock_patch, \
+             patch.object(sprint_pr.httpx, "put", return_value=merge) as mock_put:
+            code, body = sprint_pr.merge_sprint_pr("https://github.com/o/r.git", 42, "tok")
+        assert code == 200
+        assert body == "merged"
+        # Mark ready first
+        assert "/pulls/42" in mock_patch.call_args.args[0]
+        assert mock_patch.call_args.kwargs["json"] == {"draft": False}
+        # Then squash-merge
+        assert "/pulls/42/merge" in mock_put.call_args.args[0]
+        assert mock_put.call_args.kwargs["json"] == {"merge_method": "squash"}
+
+    def test_returns_405_unchanged_on_conflict(self):
+        from orchestrator import sprint_pr
+        ready = MagicMock(status_code=200, text="")
+        merge = MagicMock(status_code=405, text='{"message": "PR is not mergeable"}')
+        with patch.object(sprint_pr.httpx, "patch", return_value=ready), \
+             patch.object(sprint_pr.httpx, "put", return_value=merge):
+            code, body = sprint_pr.merge_sprint_pr("https://github.com/o/r.git", 42, "tok")
+        assert code == 405
+        assert "not mergeable" in body
+
+    def test_returns_422_when_already_merged(self):
+        from orchestrator import sprint_pr
+        ready = MagicMock(status_code=422, text="already merged")
+        merge = MagicMock(status_code=422, text="already merged")
+        with patch.object(sprint_pr.httpx, "patch", return_value=ready), \
+             patch.object(sprint_pr.httpx, "put", return_value=merge):
+            code, _ = sprint_pr.merge_sprint_pr("https://github.com/o/r.git", 42, "tok")
+        assert code == 422
+
+    def test_transport_exception_returns_zero(self):
+        from orchestrator import sprint_pr
+        with patch.object(sprint_pr.httpx, "patch", side_effect=Exception("network down")):
+            code, body = sprint_pr.merge_sprint_pr("https://github.com/o/r.git", 42, "tok")
+        assert code == 0
+        assert "exception" in body

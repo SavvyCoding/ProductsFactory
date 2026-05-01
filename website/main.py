@@ -61,6 +61,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
@@ -86,8 +87,10 @@ from website.models import (
 from website.auth import require_auth
 from website import schemas
 from website.github import fetch_progress_md, fetch_architecture_md, count_open_prs, list_open_prs, merge_pr, close_pr
-from orchestrator.sprint_pr import provision_sprint_pr
+from orchestrator.sprint_pr import provision_sprint_pr, merge_sprint_pr
 from website.schemas import PM_ALLOWED_TRANSITIONS
+
+log = logging.getLogger("website.main")
 
 app = FastAPI(title="ProductFactory PM", docs_url=None, redoc_url=None)
 
@@ -1398,7 +1401,13 @@ async def _evaluate_dod(sprint_id: int, product_id: int, db: AsyncSession) -> di
 
 
 async def _do_complete_sprint(sprint: Sprint, product_id: int, db: AsyncSession) -> None:
-    """Mark sprint completed, generate release notes, activate next sprint."""
+    """Mark sprint completed, generate release notes, merge sprint PR, activate next sprint.
+
+    The sprint PR merge is a hard gate on activation: if it fails (conflicts,
+    failing CI, branch protection — anything that returns 405), the next
+    sprint is NOT activated and a critical Alert is filed for the PM. Never
+    ships broken code to keep the orchestrator moving.
+    """
     from datetime import datetime as _dt, timezone as _tz
     sprint.status = "completed"
     sprint.completed_at = _dt.now(_tz.utc)
@@ -1413,8 +1422,62 @@ async def _do_complete_sprint(sprint: Sprint, product_id: int, db: AsyncSession)
     except Exception:
         pass
 
+    # Merge the sprint PR before handing off to the next sprint. Halt
+    # activation on any non-success — the PM resolves the conflict and
+    # re-triggers activation manually.
+    if not await _attempt_merge_completed_sprint_pr(sprint, db):
+        return
+
     # Activate the next sprint in the same phase, or next phase's first sprint
     await _activate_next_sprint(sprint, product_id, db)
+
+
+async def _attempt_merge_completed_sprint_pr(sprint: Sprint, db: AsyncSession) -> bool:
+    """Attempt to merge the just-completed sprint's PR.
+
+    Returns True if it's safe for the caller to proceed with next-sprint
+    activation:
+      - sprint has no PR (per-feature mode product, or never provisioned) → True
+      - product has no GitHub repo / no PAT → True (nothing we can do)
+      - Blocked sprints never had a PR → True
+      - merge returned 200/201/422 → True (merged or already merged)
+    Returns False (and files a critical Alert) when:
+      - merge returned 405 (conflicts, failing CI, branch protection)
+      - merge returned any other non-success or transport error
+
+    The caller MUST skip `_activate_next_sprint` when this returns False so
+    the next sprint never branches off code that didn't actually ship.
+    """
+    if not sprint.pr_number:
+        return True
+    if getattr(sprint, "kind", "normal") == "blocked":
+        return True
+    product = await db.get(Product, sprint.product_id)
+    if not product or not product.github_repo:
+        return True
+    sys_cfg = await _get_system_config(db)
+    token = sys_cfg.github_pat if sys_cfg else None
+    if not token:
+        return True
+
+    code, body = merge_sprint_pr(product.github_repo, sprint.pr_number, token)
+    if code in (200, 201, 422):
+        log.info(
+            f"sprint #{sprint.id} PR #{sprint.pr_number} merged (HTTP {code}) — "
+            f"activation can proceed"
+        )
+        return True
+
+    msg = (
+        f"Sprint #{sprint.id} ({sprint.name}) PR #{sprint.pr_number} merge "
+        f"FAILED (HTTP {code}): {body[:200]}. Next sprint activation halted — "
+        f"resolve the PR conflict / failing CI manually and re-trigger "
+        f"activation."
+    )
+    log.error(msg)
+    db.add(Alert(product_id=sprint.product_id, level="critical", message=msg))
+    await db.flush()
+    return False
 
 
 async def _maybe_provision_sprint_pr(sprint: Sprint, db: AsyncSession) -> None:

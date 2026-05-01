@@ -45,6 +45,49 @@ def _headers(token: str) -> dict:
     }
 
 
+def merge_sprint_pr(github_repo: str, pr_number: int, token: str) -> tuple[int, str]:
+    """Squash-merge the sprint PR, marking it ready-for-review first if needed.
+
+    Sprint PRs are provisioned as drafts; GitHub's merge endpoint returns 405
+    on draft PRs, so we PATCH `draft=false` first (idempotent — already-ready
+    PRs accept the same call without error). Then we PUT /merge.
+
+    Returns (status_code, body_excerpt) of the merge call. Caller interprets:
+      - 200 / 201          → merged
+      - 422                → already merged (treat as success)
+      - 405                → not mergeable (conflicts / failing CI / branch
+                              protection) → halt and alert PM
+      - 0                  → transport error (network, timeout) → treat as halt
+      - anything else      → unexpected → halt and alert PM
+
+    No force-merge bypass — the orchestrator never ships broken code to keep
+    the next-sprint activation moving.
+    """
+    slug = _parse_repo_slug(github_repo)
+    if not slug or not token or not pr_number:
+        return 0, "missing repo / token / pr_number"
+    owner, repo = slug
+    h = _headers(token)
+    try:
+        ready = httpx.patch(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
+            headers=h, timeout=_TIMEOUT, json={"draft": False},
+        )
+        if ready.status_code not in (200, 201, 422):
+            log.warning(
+                f"merge_sprint_pr: mark-ready PATCH returned {ready.status_code} "
+                f"for {owner}/{repo} PR#{pr_number}: {ready.text[:200]}"
+            )
+        merge = httpx.put(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/merge",
+            headers=h, timeout=30, json={"merge_method": "squash"},
+        )
+        return merge.status_code, (merge.text or "")[:200]
+    except Exception as e:
+        log.warning(f"merge_sprint_pr error for {owner}/{repo} PR#{pr_number}: {e}")
+        return 0, f"exception: {e}"
+
+
 def provision_sprint_pr(
     github_repo: str,
     sprint_id: int,
