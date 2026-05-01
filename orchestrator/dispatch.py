@@ -58,6 +58,10 @@ class Context:
     last_completed_sprint: Optional[dict]
     completed_no_retro: list[dict]
     features: list[dict]
+    # Phase 3: live DoD breakdown for the active sprint, fetched from
+    # GET /api/sprints/{id}/dod. None when there's no active sprint or the
+    # call failed. Shape: {"sprint_id": int, "dod": {...gates...}, "blockers": {...}}
+    active_sprint_dod: Optional[dict] = None
 
     @property
     def sprint_features(self) -> list[dict]:
@@ -69,8 +73,10 @@ class Context:
 
 
 def _build_context(product: dict, client: httpx.Client) -> Optional[Context]:
-    """Fetch sprints + features + active sprint in three calls. Returns None on
-    PM API failure (caller should treat as 'no actionable work this cycle')."""
+    """Fetch sprints + features + active sprint + active-sprint DoD breakdown.
+    Returns None on PM API failure (caller treats as 'no work this cycle').
+
+    Total API cost: 3-4 GETs (DoD only fetched when an active sprint exists)."""
     pid = product["id"]
     try:
         active_resp = client.get(f"/api/products/{pid}/sprints/active")
@@ -85,6 +91,17 @@ def _build_context(product: dict, client: httpx.Client) -> Optional[Context]:
         features = feat_resp.json() if feat_resp.status_code == 200 else []
         if not isinstance(features, list):
             features = []
+
+        # Phase 3: fetch DoD breakdown so decisions can reason about gate failures.
+        # Read-only — no side-effects. Only meaningful when there's an active sprint.
+        active_sprint_dod = None
+        if active_sprint and active_sprint.get("id"):
+            try:
+                dod_resp = client.get(f"/api/sprints/{active_sprint['id']}/dod")
+                if dod_resp.status_code == 200:
+                    active_sprint_dod = dod_resp.json()
+            except Exception:
+                pass  # absence of DoD info is non-fatal; predicates fall back to None
     except httpx.HTTPError as e:
         log.error(f"_build_context HTTP error: {e}")
         return None
@@ -102,6 +119,7 @@ def _build_context(product: dict, client: httpx.Client) -> Optional[Context]:
         last_completed_sprint=last_completed,
         completed_no_retro=completed_no_retro,
         features=features,
+        active_sprint_dod=active_sprint_dod,
     )
 
 
@@ -146,6 +164,90 @@ def _decide_product_planner(ctx: Context) -> DecisionResult:
         if f.get("status") == "Approved" and not f.get("design_doc_path")
     ]
     return "product_planner" if needs_design else None
+
+
+def _decide_route_unsprinted_security_bugs(ctx: Context) -> DecisionResult:
+    """Phase 3 (INVARIANTS.md VIII.2): when the active sprint's `security_clean`
+    gate is False AND there are unsprinted security bug features, route those
+    bugs into the active sprint so the coder picks them up next.
+
+    This breaks the webcalculator-class deadlock where:
+      - active sprint has only Reviewed features (no codable work)
+      - DoD `security_clean` is failing because of unsprinted bugs filed by
+        the security_auditor
+      - coder is sprint-aware so unsprinted bugs are invisible
+      - sprint can't complete until security_clean clears
+      - security_clean can't clear until the bugs ship
+      - bugs can't ship because they aren't in any sprint
+
+    Returns None — bugs get routed via PATCH side-effects, then the next
+    decision in the list (`_decide_coder`) picks them up because they're
+    now in the active sprint.
+    """
+    if not ctx.active_sprint or not ctx.active_sprint_dod:
+        return None
+    dod = ctx.active_sprint_dod.get("dod", {})
+    if dod.get("security_clean") is True:
+        return None  # Gate already clean.
+
+    # Use the website-supplied blocker list — single source of truth on which
+    # bugs count toward security_clean.
+    blockers = (ctx.active_sprint_dod.get("blockers") or {}).get("security_clean") or []
+    unsprinted = [b for b in blockers if not b.get("sprint_id")]
+    # Only route bugs in pre-coder states; in-flight bugs are already moving.
+    routable = [
+        b for b in unsprinted
+        if b.get("status") in ("Approved", "Designed")
+    ]
+    if not routable:
+        return None
+
+    sid = ctx.active_sprint["id"]
+    # Honor max_features_per_sprint cap so we don't blow past the website's
+    # capacity invariant. Read fresh in case admin changed it mid-cycle.
+    cap = 5
+    try:
+        sc_resp = ctx.client.get("/api/system-config")
+        if sc_resp.status_code == 200:
+            cap = int((sc_resp.json() or {}).get("max_features_per_sprint") or 5)
+    except Exception:
+        pass
+    in_sprint_count = sum(1 for f in ctx.features if f.get("sprint_id") == sid)
+    slots = max(0, cap - in_sprint_count)
+    if slots == 0:
+        log.info(
+            f"Active sprint {sid}: security_clean=False with {len(routable)} "
+            f"unsprinted bug(s), but sprint is at capacity ({cap}) — leaving in backlog"
+        )
+        return None
+
+    moved = 0
+    for bug in routable[:slots]:
+        try:
+            ctx.client.patch(
+                f"/api/features/{bug['id']}",
+                json={"sprint_id": sid, "changed_by": "dispatcher"},
+            )
+            log.info(
+                f"Active sprint {sid}: routed bug #{bug['id']} ({bug.get('name', '')[:40]}) "
+                f"into sprint to unblock security_clean"
+            )
+            moved += 1
+        except Exception as e:
+            log.warning(f"Failed to route bug #{bug['id']} into sprint {sid}: {e}")
+
+    if moved:
+        # Refresh ctx.features so subsequent decisions see the new sprint
+        # membership and the coder predicate fires this same cycle.
+        try:
+            feat_resp = ctx.client.get(f"/api/products/{ctx.product['id']}/features")
+            if feat_resp.status_code == 200:
+                fresh = feat_resp.json()
+                if isinstance(fresh, list):
+                    ctx.features = fresh
+        except Exception:
+            pass  # next decision will work with stale snapshot — coder catches up next cycle
+    return None  # never returns a persona; downstream `_decide_coder` does that
 
 
 def _decide_coder(ctx: Context) -> DecisionResult:
@@ -275,6 +377,7 @@ def _decide_planner_fallback(ctx: Context) -> DecisionResult:
 
 ACTIVE_SPRINT_DECISIONS: list[Callable[[Context], DecisionResult]] = [
     _decide_complete_sprint,
+    _decide_route_unsprinted_security_bugs,  # Phase 3: VIII.2 — opportunistic, returns None
     _decide_product_planner,
     _decide_coder,
     _decide_reviewer,
