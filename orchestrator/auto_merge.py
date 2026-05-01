@@ -235,6 +235,12 @@ def sweep_product(product: dict, sys_cfg: dict) -> dict:
                     counters["errors"] += 1
 
             if merged_features:
+                # Observability row: gives the History tab an audit trail of
+                # what the sweep merged. status=ended so launch_session's
+                # "already has active session" guard doesn't see this as a
+                # phantom in-flight session and block real persona launches.
+                # ended_at left to website default if it has one; explicit
+                # exit_code=0 + features_pushed mark this as a completed run.
                 session_uid = str(uuid.uuid4())[:8]
                 notes = "Auto-merged PRs (sweep): " + ", ".join(
                     f"#{f['pr_number']} ({(f.get('name') or '')[:30]})"
@@ -247,6 +253,7 @@ def sweep_product(product: dict, sys_cfg: dict) -> dict:
                         "persona":            "auto-merge",
                         "backend":            "poller",
                         "container_id":       "poller",
+                        "status":             "ended",
                         "exit_code":          0,
                         "features_attempted": len(merged_features),
                         "features_pushed":    len(merged_features),
