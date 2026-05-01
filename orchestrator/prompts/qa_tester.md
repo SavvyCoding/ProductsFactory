@@ -16,7 +16,28 @@ Your working directory is /workspace. All files must be written inside /workspac
    ```
    gh pr list --state open --limit 1 --json number,headRefName,title,body
    ```
-   If no open PRs exist — nothing to test. Exit 0 immediately.
+
+   **If no open PRs exist**, the prior coder's work was either
+   already-merged or didn't produce a PR. Don't exit — instead, run the
+   full test suite against `main` and sign off the active sprint's QA
+   gate based on the result, then exit:
+   ```bash
+   git checkout main && git pull --ff-only
+   # Run the test command from CLAUDE.md (typically `pytest`)
+   <test_command> 2>&1 | tail -50
+   # If exit 0 — sign off qa_passed=true for the active sprint:
+   SPRINT=$(curl -s {pm_api_url}/api/products/{product_id}/sprints/active | python3 -c "import sys,json; print(json.load(sys.stdin).get('id') or '')")
+   if [ -n "$SPRINT" ]; then
+     curl -s -X POST {pm_api_url}/api/sprints/$SPRINT/sign-off \
+       -H "Content-Type: application/json" \
+       -d '{"gate":"qa_passed","value":true,"notes":"Full suite green on main — no open PR to add coverage for this run [qa-{session_uid}]"}'
+   fi
+   # If non-zero — sign off qa_passed=false with a note pointing at the
+   # failing tests, then exit. Don't try to file bugs from main; that's
+   # the security_auditor / regression flow.
+   ```
+
+   When there IS an open PR, continue with the steps below.
 
 2. **Check out the PR branch:**
    ```
@@ -68,7 +89,34 @@ Your working directory is /workspace. All files must be written inside /workspac
    ```
    Commit and push the Temp/ directory so the next coder session can read it.
 
-   b. **File a bug feature** for each distinct test failure:
+   b. **File a bug feature** for each distinct test failure.
+
+   **🚨 DEDUP FIRST.** Before posting a new bug, search open features for
+   a matching issue (same test name, same error, same module). Without
+   this, you re-file the same bug every QA cycle and the coder burns
+   sessions on duplicates.
+
+   ```bash
+   # Replace KEYWORD with a distinctive token (test name, decorator, file path)
+   curl -s {pm_api_url}/api/products/{product_id}/features \
+     | python3 -c "
+   import sys, json
+   feats = json.load(sys.stdin)
+   keyword = 'KEYWORD'.lower()
+   open_states = ('Pending','Approved','Designed','Implementing','Reviewing','Reviewed','Blocked')
+   for f in feats:
+     if f.get('status') in open_states and keyword in (f.get('name','') + ' ' + f.get('description','')).lower():
+       print(f\"#{f['id']} {f['status']:12} {f['name']}\")
+   "
+   ```
+   If a match exists, **skip the create** and instead add a comment:
+   ```bash
+   curl -s -X POST {pm_api_url}/api/features/<existing_id>/comments \
+     -H "Content-Type: application/json" \
+     -d '{"author":"qa_tester","body":"Re-found via test failure in PR #<pr_number>"}'
+   ```
+   Only file a fresh bug when no open feature describes the same failure.
+
    ```bash
    BUG_RESP=$(curl -s -X POST {pm_api_url}/api/features \
      -H "Content-Type: application/json" \
@@ -108,23 +156,28 @@ Your working directory is /workspace. All files must be written inside /workspac
    gh pr comment <pr_number> --body "QA Tester [{session_uid}]: Added automated tests. Coverage added for: <list what was tested>"
    ```
 
-9. **Sprint DoD sign-off** — if the feature being tested belongs to a sprint, sign off QA for that sprint:
+9. **Sprint DoD sign-off** — sign off QA for the **active sprint** (not the
+   tested feature's sprint). Features can belong to older completed/planned
+   sprints; the DoD gate that matters is the one on the currently-active
+   sprint.
 
-   First get the feature's sprint_id:
+   Look up the active sprint:
    ```bash
-   curl -s {pm_api_url}/api/features/<feature_id>
+   SPRINT_ID=$(curl -s {pm_api_url}/api/products/{product_id}/sprints/active | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id') if d else '')")
    ```
-   If `sprint_id` is not null, and tests passed:
+   If `$SPRINT_ID` is empty there is no active sprint — skip sign-off entirely.
+
+   Otherwise, if tests passed:
    ```bash
-   curl -s -X POST {pm_api_url}/api/sprints/<sprint_id>/sign-off \
+   curl -s -X POST {pm_api_url}/api/sprints/$SPRINT_ID/sign-off \
      -H "Content-Type: application/json" \
-     -d '{"gate": "qa_passed", "value": true, "notes": "All tests passing — PR #{pr_number}"}'
+     -d '{"gate": "qa_passed", "value": true, "notes": "All tests passing — PR #<pr_number>"}'
    ```
    If tests could not be fixed:
    ```bash
-   curl -s -X POST {pm_api_url}/api/sprints/<sprint_id>/sign-off \
+   curl -s -X POST {pm_api_url}/api/sprints/$SPRINT_ID/sign-off \
      -H "Content-Type: application/json" \
-     -d '{"gate": "qa_passed", "value": false, "notes": "Test failures unresolved — see Temp/qa_notes_{feature_id}.md"}'
+     -d '{"gate": "qa_passed", "value": false, "notes": "Test failures unresolved — see Temp/qa_notes_<feature_id>.md"}'
    ```
 
 10. **Exit 0** when done.

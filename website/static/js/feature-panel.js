@@ -26,8 +26,9 @@ function openFeaturePanel(featureId) {
     fetch(`/api/features/${featureId}/changelog`).then(r => r.json()).catch(() => []),
     fetch(`/api/features/${featureId}/labels`).then(r => r.json()).catch(() => []),
     fetch(`/api/features/${featureId}/links`).then(r => r.json()).catch(() => []),
-  ]).then(([feature, comments, changelog, labels, links]) => {
-    renderFeaturePanel(feature, comments, changelog, labels, links);
+    fetch(`/api/features/${featureId}/story`).then(r => r.json()).catch(() => ({source: null, html: ''})),
+  ]).then(([feature, comments, changelog, labels, links, story]) => {
+    renderFeaturePanel(feature, comments, changelog, labels, links, story);
   }).catch(err => {
     document.getElementById('fp-body').innerHTML =
       `<div style="color:var(--color-danger-fg);padding:20px">Failed to load feature: ${escHtmlGlobal(err.message)}</div>`;
@@ -49,7 +50,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && _panelOpen) closeFeaturePanel();
 });
 
-function renderFeaturePanel(f, comments, changelog, labels, links) {
+function renderFeaturePanel(f, comments, changelog, labels, links, story) {
   const body = document.getElementById('fp-body');
   if (!body) return;
 
@@ -130,6 +131,22 @@ function renderFeaturePanel(f, comments, changelog, labels, links) {
     html += `<div class="pf-panel__section">
       <div class="pf-panel__section-title">Description</div>
       <div style="font-size:13px;line-height:1.6;color:var(--color-fg-default);white-space:pre-wrap">${escHtmlGlobal(f.description)}</div>
+    </div>`;
+  }
+
+  // Story (rendered markdown from docs/story_<NNN>.md or design_doc fallback)
+  if (story && story.html) {
+    const sourceLabel = ({
+      'story_file': 'Story doc',
+      'design_doc_path': 'Design doc',
+      'design_doc': 'Design (inline)',
+    })[story.source] || 'Story';
+    const pathSuffix = story.path
+      ? ` <span style="font-weight:400;color:var(--color-fg-muted);font-size:11px">${escHtmlGlobal(story.path.split('/').slice(-2).join('/'))}</span>`
+      : '';
+    html += `<div class="pf-panel__section">
+      <div class="pf-panel__section-title">${sourceLabel}${pathSuffix}</div>
+      <div class="pf-story">${story.html}</div>
     </div>`;
   }
 
@@ -272,8 +289,10 @@ async function removeLink(featureId, linkId) {
 }
 
 // ── Wire up feature card clicks ──────────────────────────
+// Matches both the phase-card variant (cards on Sprints/Backlog) and the
+// fbt-row variant (Feature Backlog table rows). Both expose data-feature-id.
 document.addEventListener('click', function(e) {
-  const card = e.target.closest('.phase-card[data-feature-id]');
+  const card = e.target.closest('.phase-card[data-feature-id], .fbt-row[data-feature-id]');
   if (!card) return;
   // Don't open panel if clicking on a button, link, checkbox, or form element
   if (e.target.closest('button, a, input, select, form')) return;

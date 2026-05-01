@@ -15,6 +15,7 @@ import os
 import shlex
 import shutil
 import tempfile
+import time
 import uuid
 import subprocess
 import logging
@@ -412,10 +413,9 @@ def _reconcile_session_result(working_dir: str, product_id: int, exit_code: int,
 
 def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
     """
-    For reviewer sessions with auto_merge_enabled: process approved features.
-    - High confidence: attempt GitHub merge → update entry to Pushed
+    For reviewer sessions with auto_merge_enabled: merge every approved feature.
+    - approved: attempt GitHub merge → update entry to Pushed
     - PR closed/conflicted: close PR, update entry to Implementing (clears pr_number)
-    - Low confidence: leave entry unchanged (stays Reviewed for human sign-off)
 
     Takes the session features list, modifies entries in-place, and returns it
     so reconcile applies the final authoritative state.
@@ -497,11 +497,7 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
             })
             continue
 
-        # Low confidence — merge anyway (sprint-gating handles the flow)
-        if entry.get("confidence", "low") != "high":
-            log.info(f"[auto-merge] Feature #{fid} approved (low-confidence) — merging via sprint flow")
-
-        # PR is open + high confidence — attempt merge.
+        # PR is open — attempt merge regardless of reviewer-reported confidence.
         # First, try to update the PR branch with main (GitHub's "Update branch"
         # button, REST endpoint /update-branch). If the PR branch is behind main
         # or has conflicts, this rebases/merges main into the branch so the
@@ -522,7 +518,7 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
         except Exception as _ue:
             log.warning(f"[auto-merge] update-branch failed for PR #{pr_number}: {_ue} — proceeding to merge anyway")
 
-        log.info(f"[auto-merge] Merging PR #{pr_number} for feature #{fid} (high-confidence)")
+        log.info(f"[auto-merge] Merging PR #{pr_number} for feature #{fid}")
         try:
             resp = httpx.put(
                 f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}/merge",
@@ -699,6 +695,60 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         log.info(f"[post-coder] {pname}: no assigned features — skipping commit/PR")
         return
 
+    # Symphony-style: this pipeline is a *fallback* now. Strong models open
+    # their own PRs and write Reviewing entries to session_result.json. If
+    # every assigned feature already has a Reviewing entry with pr_number,
+    # the agent did the work — skip the deterministic ceremony.
+    try:
+        sr_path = Path(working_dir) / "session_result.json"
+        already_handled: set[int] = set()
+        if sr_path.exists():
+            for ln in sr_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    e = _json.loads(ln)
+                except Exception:
+                    continue
+                if (isinstance(e, dict) and e.get("status") == "Reviewing"
+                        and isinstance(e.get("pr_number"), int)
+                        and isinstance(e.get("id"), int)):
+                    already_handled.add(e["id"])
+        assigned_ids = {f["id"] for f in assigned_features}
+        if assigned_ids and assigned_ids.issubset(already_handled):
+            log.info(
+                f"[post-coder] {pname}: agent opened PRs for all "
+                f"{len(assigned_ids)} assigned features — skipping fallback pipeline"
+            )
+            return
+        if already_handled & assigned_ids:
+            # Partial coverage. Narrow `assigned_features` to the unhandled
+            # subset so the downstream loops in this function (the no-diff
+            # Blocked-flip at lines ~755 and the session_result.json
+            # writeback near the end) don't touch features the agent already
+            # finished. Without this filter, two corruption paths fire:
+            #   (a) empty git diff → every assigned feature gets PATCHed to
+            #       Blocked, demoting already-Reviewing features.
+            #   (b) pipeline opens its own fresh PR → writeback overwrites
+            #       the agent's correct pr_number with the new one.
+            # Both bypass the rank guard in _apply_session_entry.
+            log.info(
+                f"[post-coder] {pname}: agent handled {sorted(already_handled & assigned_ids)}; "
+                f"running fallback for {sorted(assigned_ids - already_handled)}"
+            )
+            assigned_features = [f for f in assigned_features if f["id"] not in already_handled]
+            if not assigned_features:
+                # Filter consumed everything — handled features already
+                # taken care of by _apply_session_entry, no fallback work
+                # to do. (Defensive: the issubset check above should have
+                # caught this, but rely on it here too in case the set
+                # math races with a concurrent live-poll application.)
+                log.info(f"[post-coder] {pname}: all features handled by agent — skipping fallback pipeline")
+                return
+    except Exception:
+        log.exception(f"[post-coder] {pname}: agent-handled detection failed — running pipeline")
+
     def _run(cmd: list[str], **kw) -> _sp.CompletedProcess:
         # Pop timeout from kw so the caller's override doesn't collide with the
         # default we pass into _sp.run. Without this, e.g. _run(..., timeout=180)
@@ -707,14 +757,24 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         timeout = kw.pop("timeout", 120)
         return _sp.run(cmd, cwd=working_dir, capture_output=True, text=True, timeout=timeout, **kw)
 
-    # 1. Detect changes (any modified, added, deleted, or untracked files in tracked paths)
+    # 1. Detect changes — anything uncommitted in the tree, OR committed-but-
+    # not-pushed (the agent may have committed itself; we still need to push).
     status = _run(["git", "status", "--porcelain"])
     changed = [ln for ln in status.stdout.splitlines() if ln.strip()
                and not ln.endswith("session_result.json")
                and not ln.endswith("session_summary.md")
                and "/Temp/" not in ln and "/Results/" not in ln]
-    if not changed:
-        log.warning(f"[post-coder] {pname}: agent exited 0 but no code changes — skipping PR")
+    has_unpushed_commits = False
+    for ref in ("@{u}", "origin/main", "origin/master"):
+        ahead = _run(["git", "rev-list", "--count", f"{ref}..HEAD"])
+        if ahead.returncode == 0:
+            try:
+                has_unpushed_commits = int((ahead.stdout or "0").strip()) > 0
+            except ValueError:
+                pass
+            break
+    if not changed and not has_unpushed_commits:
+        log.warning(f"[post-coder] {pname}: agent exited 0 but no code changes or unpushed commits — skipping PR")
         # Mark features Blocked so they don't loop in Implementing forever
         try:
             with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
@@ -735,84 +795,138 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         err = (r.stderr or "").strip()
         return f"rc={r.returncode} stdout={out[:300]!r} stderr={err[:300]!r}"
 
-    # 2. Create branch (fail fast if branch already exists or checkout fails)
+    # 2. Resolve target branch.
+    # Sprint-PR mode: every coder run pushes to the same sprint/<id> branch so
+    # there's exactly one PR per sprint (no fan-out, no orphan PRs). The branch
+    # and PR were provisioned by the website's _maybe_provision_sprint_pr at
+    # sprint activation; we just check it out and push commits.
+    # Per-feature mode (default): cut a fresh `coder/<session_uid>` branch and
+    # later open a new PR for it.
     feat_ids = [f["id"] for f in assigned_features]
-    branch = f"coder/{session_uid}"
-    co = _run(["git", "checkout", "-b", branch])
-    if co.returncode != 0:
-        log.warning(f"[post-coder] {pname}: git checkout -b {branch} failed — {_fmt_err(co)}")
-        return
+    sprint_pr_mode = bool(product.get("_sprint_pr_mode"))
+    sprint_branch  = product.get("_sprint_branch") or ""
+    sprint_pr_num  = product.get("_sprint_pr_number") or None
+    sprint_pr_url  = product.get("_sprint_pr_url") or ""
+    if sprint_pr_mode:
+        if not sprint_branch or not sprint_pr_num:
+            log.warning(
+                f"[post-coder] {pname}: sprint_pr_mode set but sprint metadata missing "
+                f"(branch={sprint_branch!r} pr={sprint_pr_num!r}) — falling back to per-feature mode"
+            )
+            sprint_pr_mode = False
+    if sprint_pr_mode:
+        branch = sprint_branch
+        # Fetch first so we have the remote state, then check out (branch exists
+        # remotely from sprint provisioning). Pull --ff-only catches the case
+        # where another coder run already pushed and we'd otherwise diverge.
+        _run(["git", "fetch", "origin"])
+        co = _run(["git", "checkout", branch])
+        if co.returncode != 0:
+            log.warning(f"[post-coder] {pname}: git checkout {branch} failed — {_fmt_err(co)}")
+            return
+        pull_r = _run(["git", "pull", "--ff-only", "origin", branch])
+        if pull_r.returncode != 0:
+            log.warning(f"[post-coder] {pname}: git pull --ff-only on {branch} failed — {_fmt_err(pull_r)}")
+            # Don't return: a non-fast-forward state is rare and we still want
+            # to attempt the push so the operator sees the conflict.
+    else:
+        branch = f"coder/{session_uid}"
+        co = _run(["git", "checkout", "-b", branch])
+        if co.returncode != 0:
+            log.warning(f"[post-coder] {pname}: git checkout -b {branch} failed — {_fmt_err(co)}")
+            return
 
-    # 3. Add + commit + push
-    add_r = _run(["git", "add", "-A"])
-    if add_r.returncode != 0:
-        log.warning(f"[post-coder] {pname}: git add -A failed — {_fmt_err(add_r)}")
-        return
-    # Sanity: was anything actually staged? `diff --cached --quiet` exits 1 if
-    # there are staged changes, 0 if none. Catches the "porcelain showed lines
-    # but add staged nothing" scenario (e.g. all changes inside a submodule or
-    # excluded path) so we surface a clear error instead of an empty stderr.
-    cached = _run(["git", "diff", "--cached", "--quiet"])
-    if cached.returncode == 0:
-        ls = _run(["git", "status", "--porcelain"])
-        log.warning(
-            f"[post-coder] {pname}: nothing staged after `git add -A` "
-            f"despite {len(changed)} porcelain entries. status={ls.stdout.strip()[:400]!r}"
-        )
-        return
+    # 3. Add + commit + push.
+    # Three states the working tree can be in at this point:
+    #   (a) Uncommitted changes present  → add, sanity-check stage, commit
+    #   (b) Clean tree, unpushed commits → agent already committed; skip to push
+    #   (c) Clean tree, no unpushed cmts → caught by the early-return above
     feat_summary = ", ".join(f"#{i}" for i in feat_ids)
-    commit_msg = f"feat: implement features {feat_summary} [coder-{session_uid}]"
-    commit_result = _run(["git", "commit", "-m", commit_msg])
-    if commit_result.returncode != 0:
-        log.warning(f"[post-coder] {pname}: git commit failed — {_fmt_err(commit_result)}")
-        return
+    if changed:
+        add_r = _run(["git", "add", "-A"])
+        if add_r.returncode != 0:
+            log.warning(f"[post-coder] {pname}: git add -A failed — {_fmt_err(add_r)}")
+            return
+        # Sanity: was anything actually staged? `diff --cached --quiet` exits 1
+        # if there are staged changes, 0 if none. Catches the "porcelain showed
+        # lines but add staged nothing" scenario (e.g. all changes inside a
+        # submodule or excluded path) so we surface a clear error instead of
+        # an empty stderr.
+        cached = _run(["git", "diff", "--cached", "--quiet"])
+        if cached.returncode == 0:
+            ls = _run(["git", "status", "--porcelain"])
+            log.warning(
+                f"[post-coder] {pname}: nothing staged after `git add -A` "
+                f"despite {len(changed)} porcelain entries. status={ls.stdout.strip()[:400]!r}"
+            )
+            return
+        commit_msg = f"feat: implement features {feat_summary} [coder-{session_uid}]"
+        commit_result = _run(["git", "commit", "-m", commit_msg])
+        if commit_result.returncode != 0:
+            log.warning(f"[post-coder] {pname}: git commit failed — {_fmt_err(commit_result)}")
+            return
+    else:
+        log.info(
+            f"[post-coder] {pname}: tree clean but {has_unpushed_commits and 'unpushed commits exist'} "
+            f"— skipping add/commit, going straight to push"
+        )
 
-    push_result = _run(["git", "push", "-u", "origin", branch], timeout=180)
+    if sprint_pr_mode:
+        push_args = ["git", "push", "origin", branch]
+    else:
+        push_args = ["git", "push", "-u", "origin", branch]
+    push_result = _run(push_args, timeout=180)
     if push_result.returncode != 0:
         log.warning(f"[post-coder] {pname}: git push failed: {push_result.stderr.strip()[:300]}")
         return
     log.info(f"[post-coder] {pname}: pushed branch {branch}")
 
-    # 4. Open PR via gh CLI. GH_TOKEN must be in env for `gh` to authenticate.
-    gh_token = _get_gh_token()
-    if not gh_token:
-        log.warning(f"[post-coder] {pname}: no GH_TOKEN — cannot open PR. Branch pushed; PM must open manually.")
-        return
+    # 4. PR resolution. In sprint mode the PR already exists — just reuse it.
+    # In per-feature mode, open a fresh PR via gh CLI.
+    if sprint_pr_mode:
+        pr_number = int(sprint_pr_num)
+        pr_url = sprint_pr_url
+        log.info(f"[post-coder] {pname}: reusing sprint PR #{pr_number} — {pr_url}")
+    else:
+        gh_token = _get_gh_token()
+        if not gh_token:
+            log.warning(f"[post-coder] {pname}: no GH_TOKEN — cannot open PR. Branch pushed; PM must open manually.")
+            return
 
-    # Build PR body — include feature names so PM can review at a glance
-    feat_lines = []
-    for f in assigned_features:
-        name = f.get("name", f"Feature {f['id']}")
-        feat_lines.append(f"- Closes #{f['id']}: {name}")
-    pr_body = (
-        f"Automated PR from coder session `{session_uid}`.\n\n"
-        f"## Features\n" + "\n".join(feat_lines) + "\n\n"
-        f"_This PR was generated by the ProductFactory coder agent. The agent "
-        f"writes code; the orchestrator handles git + PR ceremony deterministically._"
-    )
-    pr_title = (f"feat: {assigned_features[0].get('name', 'changes')}"
-                if len(assigned_features) == 1
-                else f"feat: implement {feat_summary} [{session_uid}]")
+        # Build PR body — include feature names so PM can review at a glance
+        feat_lines = []
+        for f in assigned_features:
+            name = f.get("name", f"Feature {f['id']}")
+            feat_lines.append(f"- Closes #{f['id']}: {name}")
+        pr_body = (
+            f"Automated PR from coder session `{session_uid}`.\n\n"
+            f"## Features\n" + "\n".join(feat_lines) + "\n\n"
+            f"_This PR was generated by the ProductFactory coder agent. The agent "
+            f"writes code; the orchestrator handles git + PR ceremony deterministically._"
+        )
+        pr_title = (f"feat: {assigned_features[0].get('name', 'changes')}"
+                    if len(assigned_features) == 1
+                    else f"feat: implement {feat_summary} [{session_uid}]")
 
-    pr_env = dict(os.environ)
-    pr_env["GH_TOKEN"] = gh_token
-    pr_result = _sp.run(
-        ["gh", "pr", "create", "--base", "main", "--head", branch,
-         "--title", pr_title, "--body", pr_body],
-        cwd=working_dir, capture_output=True, text=True, env=pr_env, timeout=60,
-    )
-    if pr_result.returncode != 0:
-        log.warning(f"[post-coder] {pname}: gh pr create failed: {pr_result.stderr.strip()[:300]}")
-        return
+        pr_env = dict(os.environ)
+        pr_env["GH_TOKEN"] = gh_token
+        pr_result = _sp.run(
+            ["gh", "pr", "create", "--base", "main", "--head", branch,
+             "--title", pr_title, "--body", pr_body],
+            cwd=working_dir, capture_output=True, text=True, env=pr_env, timeout=60,
+        )
+        if pr_result.returncode != 0:
+            log.warning(f"[post-coder] {pname}: gh pr create failed: {pr_result.stderr.strip()[:300]}")
+            return
 
-    # gh prints the PR URL on stdout
-    pr_url = pr_result.stdout.strip().splitlines()[-1]
-    m = _re.search(r"/pull/(\d+)", pr_url)
-    if not m:
-        log.warning(f"[post-coder] {pname}: could not parse PR number from gh output: {pr_url[:200]}")
-        return
-    pr_number = int(m.group(1))
-    log.info(f"[post-coder] {pname}: opened PR #{pr_number} — {pr_url}")
+        # gh prints the PR URL on stdout
+        pr_url = pr_result.stdout.strip().splitlines()[-1]
+        m = _re.search(r"/pull/(\d+)", pr_url)
+        if not m:
+            log.warning(f"[post-coder] {pname}: could not parse PR number from gh output: {pr_url[:200]}")
+            return
+        pr_number = int(m.group(1))
+        log.info(f"[post-coder] {pname}: opened PR #{pr_number} — {pr_url}")
 
     # 5. Append session_result.json entries — one Reviewing per assigned feature.
     sr_path = Path(working_dir) / "session_result.json"
@@ -896,26 +1010,32 @@ def _read_session_summary(working_dir: str) -> str:
     return ""
 
 
-def _fetch_assigned_features(product_id: int, persona: str | None, max_count: int = MAX_FEATURES_PER_SPRINT) -> tuple[list[dict], str | None]:
+def _fetch_assigned_features(product_id: int, persona: str | None, max_count: int = MAX_FEATURES_PER_SPRINT) -> tuple[list[dict], str | None, dict | None]:
     """
     Pre-fetch features the agent should work on this session.
     Sprint-aware: when an active sprint exists, picks ALL eligible features in
     that sprint (up to MAX_FEATURES_PER_SPRINT) so the entire sprint is planned
     and implemented together.
-    Returns ([], None) for personas that manage their own work (qa_tester, recommender, etc.).
-    Second element is the active sprint name (for features.md generation).
+    Returns ([], None, None) for personas that manage their own work (qa_tester, recommender, etc.).
+
+    Tuple shape: (features, active_sprint_name, active_sprint_dict).
+    `active_sprint_dict` is the full sprint payload (id, name, branch_name,
+    pr_number, pr_url, ...) so callers can wire sprint-PR-mode context into
+    prompts and the post-coder pipeline without an extra round trip.
     """
     if persona not in ("coder", "designer", "product_planner", "reviewer"):
-        return [], None
+        return [], None, None
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
             # Check for active sprint — if one exists, scope to its features
             active_sprint_id = None
             active_sprint_name = None
+            active_sprint: dict | None = None
             active_resp = client.get(f"/api/products/{product_id}/sprints/active")
             if active_resp.status_code == 200 and active_resp.json():
-                active_sprint_id = active_resp.json().get("id")
-                active_sprint_name = active_resp.json().get("name")
+                active_sprint = active_resp.json()
+                active_sprint_id = active_sprint.get("id")
+                active_sprint_name = active_sprint.get("name")
 
             resp = client.get(f"/api/products/{product_id}/features")
             resp.raise_for_status()
@@ -926,9 +1046,17 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                 log.info(f"[assign] No active sprint for product {product_id} — skipping feature assignment")
                 features = []
             elif persona == "coder":
+                # Match the API's /next-for-persona?persona=coder rules so the
+                # orchestrator's persona dispatch and the agent's actually-
+                # assigned features stay in sync. Without the third clause,
+                # determine_next_action picks coder for `Implementing +
+                # changes_requested` features but _fetch_assigned_features
+                # returns 0 → agent task_done's in 3 seconds.
                 candidates = [f for f in all_features
                               if f.get("status") == "Designed"
-                              or (f.get("status") == "Approved" and f.get("design_doc_path"))]
+                              or (f.get("status") == "Approved" and f.get("design_doc_path"))
+                              or (f.get("status") == "Implementing"
+                                  and f.get("review_outcome") == "changes_requested")]
                 features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
             elif persona == "reviewer":
                 # Reviewer follows the PR — scope to active sprint but fall back to any sprint
@@ -962,10 +1090,10 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                 "blocked_reason": f.get("blocked_reason"),
             }
             for f in selected
-        ], active_sprint_name
+        ], active_sprint_name, active_sprint
     except Exception as e:
         log.warning(f"[assign] Could not pre-fetch features for {persona}: {e} — agent will get empty list")
-        return [], None
+        return [], None, None
 
 
 def _write_sprint_features_md(working_dir: str, features: list[dict], sprint_name: str | None) -> None:
@@ -1165,6 +1293,65 @@ def _reset_workspace(working_dir: str, product_name: str) -> None:
     log.info(f"[{product_name}] Workspace synced to origin/{main_branch} (hard reset)")
 
 
+def _checkout_sprint_branch(working_dir: str, sprint_branch: str, product_name: str) -> bool:
+    """
+    Pre-checkout the sprint branch before launching the agent so the agent's
+    very first tool call lands on the right branch regardless of whether it
+    follows the prompt's MANDATORY-FIRST-ACTION instruction.
+
+    Runs after `_reset_workspace` (which leaves us on main) and assumes the
+    sprint branch already exists on origin (provisioned by website's
+    `_maybe_provision_sprint_pr` at sprint activation time).
+
+    Returns True on success. On failure logs a warning and returns False —
+    caller should leave the agent on `main` and rely on the post-coder
+    pipeline's own checkout to recover, but flag this loudly so the operator
+    knows the sprint branch wasn't pre-set.
+    """
+    if not sprint_branch:
+        return False
+    wd = Path(working_dir)
+    if not (wd / ".git").exists():
+        log.warning(f"[{product_name}] sprint pre-checkout: not a git repo, skipping")
+        return False
+
+    def _run(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(
+                cmd, cwd=str(wd), capture_output=True, text=True, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as te:
+            return subprocess.CompletedProcess(
+                cmd, returncode=124,
+                stdout=(te.stdout.decode() if isinstance(te.stdout, bytes) else (te.stdout or "")),
+                stderr=f"timed out after {timeout}s",
+            )
+
+    # Fetch first so the remote ref is current. _reset_workspace already
+    # fetched, but it was for origin/main with --prune; the sprint ref may
+    # not have existed at fetch time if just provisioned.
+    r = _run(["git", "fetch", "origin", sprint_branch], timeout=60)
+    if r.returncode != 0:
+        log.warning(
+            f"[{product_name}] sprint pre-checkout: fetch origin {sprint_branch} failed: "
+            f"{r.stderr.strip()[:200]}"
+        )
+        return False
+
+    # Check it out as a tracking branch. -B forces creation/reset so we always
+    # end up on a clean local branch tracking origin/<sprint_branch>.
+    r = _run(["git", "checkout", "-B", sprint_branch, f"origin/{sprint_branch}"])
+    if r.returncode != 0:
+        log.warning(
+            f"[{product_name}] sprint pre-checkout: checkout {sprint_branch} failed: "
+            f"{r.stderr.strip()[:200]}"
+        )
+        return False
+
+    log.info(f"[{product_name}] sprint pre-checkout: now on {sprint_branch}")
+    return True
+
+
 def _cleanup_workspace_post_session(working_dir: str, product_name: str) -> None:
     """
     Post-exit cleanup: return to main branch and remove uncommitted session artifacts.
@@ -1246,15 +1433,37 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # Per-persona Ollama model resolution (mirrors Claude routing). Order:
     #   1. sys_cfg.ollama_model_map[persona]  — explicit override
     #   2. legacy designer_model / coder_model split
+    # Each lookup may yield a string OR a list of strings (primary-first
+    # fallback chain, e.g. ["gpt-oss:120b", "qwen3-coder:480b"]). Always
+    # normalise to a comma-separated string so the agent's MODEL parser
+    # can split it back into a list.
+    def _normalize_model_chain(value, fallback: str) -> str:
+        if value is None or value == "":
+            return fallback
+        if isinstance(value, list):
+            items = [str(x).strip() for x in value if str(x).strip()]
+            return ",".join(items) if items else fallback
+        # String (legacy single value or already-comma-joined chain)
+        return str(value).strip() or fallback
+
     _ollama_map = sys_cfg.get("ollama_model_map") or {}
-    if isinstance(_ollama_map, dict) and persona and _ollama_map.get(persona):
-        effective_persona_model = _ollama_map[persona]
-    elif persona in ("designer", "reviewer"):
-        effective_persona_model = sys_cfg.get("designer_model") or DESIGNER_MODEL or "qwen3-coder:30b"
+    _persona_override = (
+        _ollama_map.get(persona)
+        if isinstance(_ollama_map, dict) and persona else None
+    )
+    if persona in ("designer", "reviewer"):
+        _legacy_default = sys_cfg.get("designer_model") or DESIGNER_MODEL or "qwen3-coder:30b"
     else:
-        effective_persona_model = sys_cfg.get("coder_model") or CODER_MODEL or "qwen3-coder:30b"
-    effective_designer_model = sys_cfg.get("designer_model") or DESIGNER_MODEL or "gemma3:27b"
-    effective_coder_model    = sys_cfg.get("coder_model")    or CODER_MODEL    or "qwen3-coder:30b"
+        _legacy_default = sys_cfg.get("coder_model") or CODER_MODEL or "qwen3-coder:30b"
+    effective_persona_model = _normalize_model_chain(_persona_override, _legacy_default)
+    effective_designer_model = _normalize_model_chain(
+        _ollama_map.get("designer") if isinstance(_ollama_map, dict) else None,
+        sys_cfg.get("designer_model") or DESIGNER_MODEL or "gemma3:27b",
+    )
+    effective_coder_model = _normalize_model_chain(
+        _ollama_map.get("coder") if isinstance(_ollama_map, dict) else None,
+        sys_cfg.get("coder_model") or CODER_MODEL or "qwen3-coder:30b",
+    )
     effective_ollama_timeout = int(sys_cfg.get("ollama_timeout") or os.environ.get("OLLAMA_TIMEOUT", "600"))
     effective_max_turns      = int(sys_cfg.get("max_turns")      or os.environ.get("MAX_TURNS",      "80"))
     effective_bash_timeout   = int(sys_cfg.get("bash_timeout")   or os.environ.get("BASH_TIMEOUT",   "180"))
@@ -1267,10 +1476,41 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     # Poller-driven feature assignment: pre-fetch and claim features before launch.
     # Agent receives an explicit task list — no self-discovery inside the container.
-    assigned_features, active_sprint_name = _fetch_assigned_features(product["id"], persona, effective_max_features)
+    assigned_features, active_sprint_name, active_sprint = _fetch_assigned_features(product["id"], persona, effective_max_features)
     _claim_features(assigned_features, persona)
     product["_assigned_features"] = assigned_features
     product["_assigned_features_md"] = _format_assigned_features(assigned_features, persona)
+    product["_active_sprint"] = active_sprint or {}
+
+    # Sprint-PR-mode context: when the product opts in via config.sprint_pr_mode
+    # AND the active sprint has been provisioned with a branch + PR (see
+    # website._maybe_provision_sprint_pr), agents push to that branch instead of
+    # cutting fresh `coder/<uid>` branches and opening parallel PRs. Off by
+    # default — the per-feature branch flow remains the fallback.
+    _cfg_flags = (product.get("config") or {})
+    product["_sprint_pr_mode"] = bool(
+        _cfg_flags.get("sprint_pr_mode")
+        and active_sprint
+        and active_sprint.get("branch_name")
+    )
+    product["_sprint_branch"] = (active_sprint or {}).get("branch_name") or ""
+    product["_sprint_pr_number"] = (active_sprint or {}).get("pr_number") or ""
+    product["_sprint_pr_url"] = (active_sprint or {}).get("pr_url") or ""
+
+    # Pre-checkout the sprint branch so the agent's very first tool call —
+    # regardless of whether it follows the prompt's MANDATORY-FIRST-ACTION
+    # block — runs against `sprint/<id>` rather than `main`. Without this,
+    # tiny models reliably skip the checkout and fall through to grepping
+    # files on main; the post-coder pipeline can transfer dirty changes
+    # but it's wasted turns and confusing transcripts.
+    # Only fires when sprint_pr_mode is on AND the sprint already has a
+    # provisioned branch (i.e. _sprint_pr_mode==True is the same gate).
+    if product.get("_sprint_pr_mode"):
+        _checkout_sprint_branch(
+            working_dir,
+            product["_sprint_branch"],
+            product.get("name", str(working_dir)),
+        )
 
     # Write sprint-scoped features.md to working dir (replaces any stale full-backlog copy)
     _write_sprint_features_md(working_dir, assigned_features, active_sprint_name)
@@ -1611,12 +1851,23 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         # Claude only — Ollama agent doesn't emit a result event in this shape.
         session_meta: dict = {}
 
+        # Stall detection (Symphony pattern): track timestamp of the last
+        # event seen on the agent's stdout. A separate watchdog thread kills
+        # the container if no event arrives within stall_timeout. Distinct
+        # from session_timeout: that's the upper bound on a productive run;
+        # stall detects stuck-but-alive containers (Ollama 500s, hung pytest,
+        # claude waiting on a hung child) much sooner.
+        stall_state = {"last_event_at": time.monotonic()}
+        _stall_kill = threading.Event()  # signal the wait loop that we killed for stall
+
         def _stream_logs():
             buffer: list[str] = []
             for raw_line in process.stdout:
                 line = raw_line.rstrip("\n")
                 if not line:
                     continue
+                # Bump the stall timer on every non-empty event line.
+                stall_state["last_event_at"] = time.monotonic()
                 # Fast-path: capture the single result event that closes a
                 # claude stream-json session (one per session). Cheap string
                 # check first so we don't JSON-parse every assistant turn twice.
@@ -1658,6 +1909,36 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         log_thread = threading.Thread(target=_stream_logs, daemon=True)
         log_thread.start()
 
+        # Stall watchdog (Symphony pattern). Runs alongside session_timeout:
+        #   - session_timeout (90 min default) — upper bound on a productive run
+        #   - stall_timeout (5 min default)    — no agent events for this long
+        # The stall window is much shorter, so a hung pytest / Ollama 500-loop /
+        # silent claude child gets caught at minute 5 instead of minute 90.
+        # Disabled when stall_timeout_minutes <= 0.
+        stall_timeout_seconds = int(sys_cfg.get("stall_timeout_minutes")
+                                    or os.environ.get("STALL_TIMEOUT_MINUTES", "5")) * 60
+        _stall_stop = threading.Event()
+        def _stall_watchdog():
+            if stall_timeout_seconds <= 0:
+                return
+            while not _stall_stop.wait(30):  # check every 30s
+                idle = time.monotonic() - stall_state["last_event_at"]
+                if idle > stall_timeout_seconds:
+                    log.warning(
+                        f"[stall] {product.get('name')}: no agent events for "
+                        f"{int(idle)}s (>{stall_timeout_seconds}s) — killing container"
+                    )
+                    _stall_kill.set()
+                    try:
+                        subprocess.run(
+                            ["docker", "kill", f"pf-{product['id']}-{session_uid}"],
+                            capture_output=True, timeout=30,
+                        )
+                    except Exception:
+                        log.exception("[stall] docker kill failed")
+                    return
+        threading.Thread(target=_stall_watchdog, daemon=True).start()
+
         # Live-poll session_result.json while container runs — applies DB updates in real-time
         # as the agent writes phase transitions (Implementing → Reviewing, Blocked, etc.).
         _poll_stop = threading.Event()
@@ -1683,9 +1964,17 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             exit_code = 1
         else:
             exit_code = process.returncode
+            # Distinguish a stall-kill (we killed the container due to no events)
+            # from a normal exit so the alert + exit_code reflect reality.
+            if _stall_kill.is_set():
+                send_alert("warning",
+                           f"{product['name']}: agent stalled (no events for "
+                           f"{stall_timeout_seconds//60}m) — killed by stall watchdog")
+                exit_code = 1
         finally:
             _hb_stop.set()         # stop heartbeat thread
             _poll_stop.set()       # signal live-poll thread to stop
+            _stall_stop.set()      # stop stall watchdog
             log_thread.join(timeout=10)
             if log_thread.is_alive():
                 log.warning(f"[{product.get('name')}] log_thread did not exit after 10s — orphaned (daemon)")
@@ -1733,6 +2022,21 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             except Exception:
                 log.exception(f"Post-coder pipeline failed for {product.get('name')}")
 
+            # Phase-1 supervisor: detect false-success (exit 0, no PR pushed,
+            # no features advanced). Bumps fix_attempts + demotes to
+            # changes_requested so the feature doesn't sit Implementing
+            # forever waiting on reset_stuck. Best-effort — never raises.
+            try:
+                from orchestrator.supervisor import detect_false_success
+                detect_false_success(
+                    product_id=product["id"],
+                    session_uid=session_uid,
+                    exit_code=exit_code,
+                    assigned_features=product.get("_assigned_features", []),
+                )
+            except Exception:
+                log.exception(f"Supervisor detect_false_success failed for {product.get('name')}")
+
         # 1. Read session_result.json ONCE — shared between auto_merge and reconcile so
         #    the file isn't deleted before auto_merge can act on it.
         _session_features = _read_session_result(working_dir)
@@ -1753,6 +2057,25 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     except Exception:
         log.exception(f"Post-exit reconciliation failed for {product.get('name')}")
     finally:
+        # Phase-1 supervisor: kill-recovery. Bumps fix_attempts on every
+        # assigned feature still in agent state when the session died non-
+        # zero (watchdog kill, container OOM, manual kill). Without this the
+        # same feature gets re-assigned next cycle and gets killed again,
+        # because reset_stuck only resets status (not fix_attempts) — the
+        # auto-Block route never triggers.
+        if exit_code is not None and exit_code != 0:
+            try:
+                from orchestrator.supervisor import detect_kill_recovery
+                detect_kill_recovery(
+                    product_id=product["id"],
+                    session_uid=session_uid,
+                    persona=persona,
+                    exit_code=exit_code,
+                    assigned_features=product.get("_assigned_features", []),
+                )
+            except Exception:
+                log.exception(f"Supervisor detect_kill_recovery failed for {product.get('name')}")
+
         # 4. Always record session end — guaranteed even if reconciliation raises.
         if session_id is not None:
             try:

@@ -45,20 +45,13 @@ For each assigned feature (in order):
    # Run the test command from product_config.json or CLAUDE.md
    ```
 
-4. **Assess confidence and make a decision:**
+4. **Make a decision:**
 
-   **APPROVE — High confidence** if ALL of the following:
-   - All acceptance criteria from the design doc are met
+   **APPROVE** if:
+   - Acceptance criteria from the design doc are met
    - Tests pass and no coverage regression
    - No bugs, security issues, or architectural violations
    - Code follows existing conventions (ARCHITECTURE.md)
-   - Diff is focused and easy to reason about
-
-   **APPROVE — Low confidence** if you approve but one or more of:
-   - Design doc is missing / vague
-   - Tests are minimal or coverage is borderline
-   - Change touches critical paths (auth, payments, data migrations)
-   - Diff is large or complex (>300 lines changed)
 
    **REQUEST CHANGES** if:
    - Tests fail
@@ -70,7 +63,7 @@ For each assigned feature (in order):
 
    Approve:
    ```
-   gh pr review <pr_number> --approve --body "LGTM — all acceptance criteria met. Confidence: high|low. Reviewed by Reviewer agent [{session_uid}]."
+   gh pr review <pr_number> --approve --body "LGTM — all acceptance criteria met. Reviewed by Reviewer agent [{session_uid}]."
    ```
 
    Request changes:
@@ -80,19 +73,14 @@ For each assigned feature (in order):
 
 6. **Append one JSON line to `/workspace/session_result.json`** immediately after each review decision.
    The poller polls this file every 30 s and updates the DB in real-time. Do NOT call PATCH /api/features/{id}.
-   Include `confidence` on approvals so the poller knows whether to auto-merge.
 
-   High-confidence approval:
+   Approval:
    ```
-   {"id": <feature_id>, "status": "Reviewed", "review_outcome": "approved", "confidence": "high"}
-   ```
-   Low-confidence approval:
-   ```
-   {"id": <feature_id>, "status": "Reviewed", "review_outcome": "approved", "confidence": "low"}
+   {"id": <feature_id>, "status": "Reviewed", "review_outcome": "approved"}
    ```
    Changes requested:
    ```
-   {"id": <feature_id>, "status": "Implementing", "review_outcome": "changes_requested", "confidence": "low"}
+   {"id": <feature_id>, "status": "Implementing", "review_outcome": "changes_requested"}
    ```
 
    Use `echo '{"id":...}' >> /workspace/session_result.json` or write the line from a tool call.
@@ -124,7 +112,7 @@ echo "Started: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /workspace/session_summary.md
 
 Append a line after each review decision:
 ```
-echo "Approved #<id> PR#<n> confidence=high — <one line reason>" >> /workspace/session_summary.md
+echo "Approved #<id> PR#<n> — <one line reason>" >> /workspace/session_summary.md
 echo "Changes requested #<id> PR#<n> — <issue summary>" >> /workspace/session_summary.md
 echo "Pattern: <recurring issue the coder should fix going forward>" >> /workspace/session_summary.md
 ```
@@ -152,7 +140,7 @@ Commit product_memory.md with your final push to main.
 ## Rules
 
 - You are a **strict but fair** reviewer. The bar for approval is: correct, tested, secure, and consistent with the architecture.
-- **Auto Merge is {auto_merge_enabled}.** When True, a high-confidence approval will trigger an automatic merge — be conservative assigning high confidence.
+- **Auto Merge is {auto_merge_enabled}.** When True, every approval triggers an automatic merge — only approve if you actually believe the PR should ship.
 - Do NOT merge the PR yourself — the poller handles auto-merge via the PM API.
 - Do NOT modify code — only review and comment.
 - Do NOT call PATCH /api/features/{id} — use session_result.json only.
@@ -161,12 +149,3 @@ Commit product_memory.md with your final push to main.
 - Cite specific lines or files when requesting changes.
 - Security checklist (must check each): SQL injection, XSS, hardcoded secrets, missing auth, unvalidated input at API boundaries.
 
-## Confidence guide
-
-| Signal | High confidence | Low confidence |
-|---|---|---|
-| Tests | Pass, good coverage | Pass but minimal |
-| Design doc | Exists, all criteria met | Missing or vague |
-| Diff size | Small, focused | Large or complex |
-| Code area | Low-risk feature | Auth, DB schema, payments |
-| Security | Clean pass | Any borderline finding |

@@ -54,16 +54,17 @@ def scaffold_greenfield(product: dict, system_config: dict, pm_api_url: str, ssh
         # ① Create GitHub repo
         log.info(f"Scaffold [{product_name}]: creating GitHub repo {org}/{github_repo_name}")
         ssh_url, actual_owner = _create_github_repo(org, github_repo_name, pat)
-        # Use HTTPS+PAT for the remote URL instead of SSH. Reasons:
-        #  - The orchestrator container has no default-named SSH key, so
-        #    git fetch from `git@github.com:…` fails with "Permission denied".
-        #  - The agent container's per-product key is mounted as ~/.ssh/id_ed25519
-        #    (default name) and works for SSH, BUT switching all internal paths
-        #    to HTTPS+PAT keeps orchestrator + agent on the same protocol and
-        #    matches the working brownfield convention.
-        # Trade-off: PAT lands in .git/config — same security posture as
-        # brownfield products today; secret-redaction in log streams scrubs it.
-        https_url = f"https://x-access-token:{pat}@github.com/{actual_owner}/{github_repo_name}.git"
+        # Use plain HTTPS for the remote URL — auth is handled at runtime by
+        # git's credential helper, which the agent container's entrypoint
+        # configures from $GH_TOKEN. Storing a PAT inside the URL leaks it
+        # the moment any tool runs `git remote -v` — and that output flows
+        # into the LLM's conversation context, then to Ollama Cloud.
+        https_url = f"https://github.com/{actual_owner}/{github_repo_name}.git"
+        # Helper URL with embedded PAT — only used by the orchestrator's
+        # initial scaffold push so it can authenticate without going through
+        # an entrypoint that doesn't run for direct subprocess calls.
+        # Never persisted in .git/config.
+        push_url = f"https://x-access-token:{pat}@github.com/{actual_owner}/{github_repo_name}.git"
 
         # ② Generate deploy key on host
         key_slug = github_repo_name.lower().replace("-", "_").replace(".", "_")
@@ -120,10 +121,20 @@ def scaffold_greenfield(product: dict, system_config: dict, pm_api_url: str, ssh
             )
             # If nothing to commit (re-running scaffold over an existing repo) skip push.
             if commit.returncode == 0:
+                # Push with the PAT-embedded URL inline so it isn't persisted
+                # to .git/config. Sets upstream tracking using the plain
+                # origin URL (`-u origin main` would re-write the URL).
                 push = subprocess.run(
-                    ["git", "push", "-u", "origin", "main"],
+                    ["git", "push", push_url, "main:main"],
                     cwd=working_dir, capture_output=True, text=True, timeout=60,
                 )
+                # Set upstream tracking explicitly so subsequent `git push`
+                # without args still works.
+                if push.returncode == 0:
+                    subprocess.run(
+                        ["git", "branch", "--set-upstream-to=origin/main", "main"],
+                        cwd=working_dir, capture_output=True,
+                    )
                 if push.returncode != 0:
                     log.warning(f"Scaffold [{product_name}]: initial push failed: {push.stderr.strip()[:300]}")
                 else:

@@ -72,15 +72,19 @@ HOW to do it on this backend specifically:
    work. If the list is empty, call `task_done(status="success", summary="no work")`
    immediately.
 
-3. **Do NOT run `git add`, `git commit`, `git push`, or `gh pr create`.** The
-   orchestrator's deterministic Python pipeline does all git + PR ceremony
-   AFTER you exit. Your job is purely to write code and tests inside
-   `/workspace`. If you push, you'll create a conflicting branch.
+3. **Git + PR are optional on this backend.** The base prompt asks you to
+   commit, push, and `gh pr create` yourself. If you can do that reliably,
+   great — write the Reviewing entry to `session_result.json` afterwards.
+   If you find git/`gh` operations too complex (you only have a small
+   turn budget), you can skip them: just write the code and exit. The
+   orchestrator's deterministic Python pipeline will commit, push, and
+   open the PR for you as a fallback. Don't half-do it — either complete
+   the full git+PR sequence yourself OR don't run any git commands at all.
 
-4. **Do NOT touch `/workspace/session_result.json`.** The post-coder Python
-   pipeline writes the Reviewing entries based on what code you changed.
-   (Reviewer persona is the exception — it does write session_result.json
-   per its own prompt.)
+4. **Touching `session_result.json` is required ONLY if you opened the PR
+   yourself.** If you let the fallback do it, leave the file alone and
+   the orchestrator will populate the Reviewing entry. The reviewer
+   persona always writes its own session_result.json regardless.
 
 5. **Call `task_done()` BEFORE your turn budget runs out.** Statuses:
    - `success` — all assigned work done
@@ -141,8 +145,38 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
     else:
         template_name = "greenfield"
 
-    template_path = Path(__file__).parent / f"{template_name}.md"
+    # Per-product prompt overrides (Symphony-style WORKFLOW.md pattern):
+    # if a product wants its own prompt for any persona, it can drop a file at
+    # `<working_dir>/.productfactory/prompts/<persona>.md`. This file is
+    # version-controlled with the product code, hot-reloaded on every call
+    # (no orchestrator restart required), and falls back to the baked-in
+    # default when absent. Lets product teams iterate on their own agent
+    # contracts without rebuilding the orchestrator image.
+    _baked_path = Path(__file__).parent / f"{template_name}.md"
+    template_path = _baked_path
+    _override_source = "baked-in"
+    _wd = product.get("working_dir", "")
+    if _wd:
+        try:
+            from orchestrator.paths import container_path as _container_path
+            _wd_resolved = _container_path(_wd)
+        except Exception:
+            _wd_resolved = _wd
+        _override_path = Path(_wd_resolved) / ".productfactory" / "prompts" / f"{template_name}.md"
+        if _override_path.is_file():
+            template_path = _override_path
+            _override_source = f"override:{_override_path}"
     template = template_path.read_text(encoding="utf-8")
+    # Note: log line is at INFO so the override is visible in `docker logs
+    # pf-orchestrator` — useful when debugging "why is my custom prompt not
+    # being picked up". Falls back silently when no override exists (the
+    # common case).
+    if _override_source != "baked-in":
+        import logging as _logging
+        _logging.getLogger("orchestrator.prompts").info(
+            "[prompt] persona=%s template=%s source=%s",
+            persona or "<default>", template_name, _override_source,
+        )
 
     # Use explicit replacement instead of str.format() so that JSON examples
     # like {"status": "..."} in the templates are not misinterpreted as placeholders.
@@ -173,6 +207,10 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
             max_features if max_features is not None else int(os.environ.get("MAX_FEATURES_PER_SPRINT", "5"))
         ),
         "{auto_merge_enabled}": str(product.get("_auto_merge_enabled", False)),
+        "{sprint_pr_mode}": str(product.get("_sprint_pr_mode", False)),
+        "{sprint_branch}": str(product.get("_sprint_branch", "")),
+        "{sprint_pr_number}": str(product.get("_sprint_pr_number", "")),
+        "{sprint_pr_url}": str(product.get("_sprint_pr_url", "")),
         "{assigned_features}": product.get("_assigned_features_md", ""),
         "{assigned_feature_count}": str(len(product.get("_assigned_features", []))),
         "{prev_session_summary}": (
