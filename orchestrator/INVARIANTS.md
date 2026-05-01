@@ -35,7 +35,7 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 - *Why*: Concurrent agent sessions per cycle would exhaust Claude API rate limits, Docker host resources, and the GitHub PR cap. The system is built around serial per-cycle work.
 
 **II.2 ✅ `last_run_at` advances on every cycle visit, not only on session launch.**
-- *How*: Documented in `POLLER.md` ("Conventions specific to the orchestrator"). Implementation: cycle-visit bump after `determine_next_action` regardless of action outcome.
+- *How*: Cycle-visit bump after `determine_next_action` runs for a product, regardless of whether it produced a launch (poller.py main loop). The post-success bump from `launch_session` on Docker exit code 0 is independent.
 - *Why*: Without this, products that resolve to `action=exit` (no actionable work, PR-gated, etc.) keep getting picked by the round-robin and starve every other product. Real incident: pre-fix, a single PR-gated product blocked the loop for hours.
 
 **II.3 ✅ `run_now=True` jumps the queue.**
@@ -115,7 +115,7 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 - *Why*: V.3 only catches features with `pr_number` set. Features whose `pr_number` was lost (DB volume wipe, agent crash before PATCH) need PR-side reconciliation to recover.
 
 **V.5 ✅ A session_result.json with no entry for an assigned feature → that feature rolls back to Approved.**
-- *How*: Documented in POLLER.md "Agent Contract"; enforced in `_reconcile_session_result` (docker_runner.py:368) + `_rollback_stuck_features`.
+- *How*: Enforced in `_reconcile_session_result` (docker_runner.py:368) + `_rollback_stuck_features` (docker_runner.py:126). Agent contract documented as docstrings on `_read_session_result` and `_apply_session_entry`.
 - *Why*: Crashed mid-session containers leave features claimed but uncommitted. Rollback is mandatory or they sit until V.1's timeout.
 
 ---

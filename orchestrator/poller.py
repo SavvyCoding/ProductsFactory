@@ -1,30 +1,43 @@
-"""
-ProductFactory Poller - main loop (Windows localhost).
+"""ProductFactory orchestrator main loop.
 
-Runs as a Windows Service via NSSM.
-Poll interval: 60s when idle, 5s between products.
+Runs on the host (typically Windows via NSSM / Task Scheduler), holds the
+distributed lock, and drives every product cycle: auth check → discovery
+→ stale-container kill → stuck-feature reset → PR reconciliation →
+auto-merge sweep → persona dispatch → docker session.
 
-Multi-agent persona routing:
-  - Designer: writes design docs for Approved features (before coding)
-  - Coder:    implements Designed (or skip_design Approved) features, opens PRs, sets Reviewing
-  - Reviewer: reviews open PRs, approves or requests changes, sets Reviewed
+This module is the cycle controller. The actual decisions live in
+sibling modules — read those for the *what* and *why*:
 
-Flow per cycle:
-  1. Auth health check (real API call, not --version)
-  2. Scaffold any greenfield_pending products
-  3. Discover any newly-registered folders
-  4. Heartbeat - kill stale containers (progress.md not pushed in >45m)
-  5. Reset stuck features (Implementing/Designing/Reviewing > 2h)
-  6. Deliver pending PM messages to workspace files
-  7a. Reviewer-first: check globally for Reviewing features with PRs
-  7b. If none: pick next product via round-robin (has Approved/Designed features)
-  7c. Determine persona: designer (Approved+no skip_design) or coder
-  8. Quiet hours gate (reviewers skip this gate - reviews are time-sensitive)
-  9. Daily session cap gate (reviewers exempt)
-  10. PR count gate (coder only - designer/reviewer don't open new PRs)
-  11. GitHub PR reconciliation (sync merged PRs -> DB -> Pushed)
-  12. Run Claude in Docker with persona (blocks until session ends)
-  13. Update last_run_at ONLY on clean exit (exit code 0)
+    dispatch.py    persona priority list (ACTIVE_SPRINT_DECISIONS,
+                   NO_SPRINT_DECISIONS) — replaces the legacy 220-line
+                   determine_persona cascade
+    auto_merge.py  per-cycle sweep that merges every Reviewed+approved+pr
+                   feature regardless of sprint membership
+    reconcile.py   single per-product entry point sequencing
+                   reconcile_merged_prs + reconcile_in_flight_prs
+    supervisor.py  rule-based detectors (false-success, kill-recovery,
+                   dirty-PR, merge-stall, orphan-Approved, rapid-flap)
+    docker_runner.py  session lifecycle, agent-contract validation,
+                      _apply_session_entry, post-coder pipeline
+    INVARIANTS.md  the behavioral contract every change must preserve
+
+Conventions specific to this subsystem:
+
+  - Sync HTTP only. The orchestrator uses synchronous httpx; async is
+    reserved for the website. A cycle is a single thread of control with
+    blocking calls — adding asyncio here breaks the lock-and-FSM model.
+
+  - last_run_at advances on *every cycle visit*, not only on session
+    launch (INVARIANTS.md II.2). A product that resolves to "no actionable
+    work" still rotates in the round-robin so it cannot starve others.
+    The post-success bump from launch_session on Docker exit code 0 is
+    an additional independent write.
+
+  - Threads: the heartbeat refresher (15s lock TTL keep-alive), the
+    log-streaming tail, and the live-poll on session_result.json are all
+    daemon threads owned by this loop. They communicate back via
+    threading.Event flags; the main loop checks _hb_lock_stolen at the
+    top of each cycle and exits cleanly if another poller has taken over.
 """
 
 import os
