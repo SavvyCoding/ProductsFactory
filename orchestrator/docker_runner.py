@@ -1879,12 +1879,15 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
         # Stall watchdog (Symphony pattern). Runs alongside session_timeout:
         #   - session_timeout (90 min default) — upper bound on a productive run
-        #   - stall_timeout (5 min default)    — no agent events for this long
+        #   - stall_timeout (10 min default)   — no agent events for this long
         # The stall window is much shorter, so a hung pytest / Ollama 500-loop /
-        # silent claude child gets caught at minute 5 instead of minute 90.
+        # silent claude child gets caught at minute 10 instead of minute 90.
+        # Bumped 5→10 in fix #6: at 5 min, the Ollama backoff (2/4/8/16s × 5
+        # retries × N models = 30+s/turn) would trip the stall during normal
+        # retry handling, contributing to the 35-39% kill rate.
         # Disabled when stall_timeout_minutes <= 0.
         stall_timeout_seconds = int(sys_cfg.get("stall_timeout_minutes")
-                                    or os.environ.get("STALL_TIMEOUT_MINUTES", "5")) * 60
+                                    or os.environ.get("STALL_TIMEOUT_MINUTES", "10")) * 60
         _stall_stop = threading.Event()
         def _stall_watchdog():
             if stall_timeout_seconds <= 0:
