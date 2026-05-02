@@ -900,6 +900,18 @@ def reconcile_prs(args: dict, **kwargs) -> str:
             _run_supervisor_pr_detectors(product)
         except Exception:
             log.exception("supervisor PR detectors failed")
+        # Phase 6.5 invariant: in sprint-PR mode there's exactly 1 open PR per
+        # product (the sprint PR). > 1 alerts the operator (once per product
+        # per process run) — the legacy MAX_OPEN_PRS gate that paused the
+        # coder is gone. Best-effort.
+        if product.get("github_repo"):
+            try:
+                from orchestrator.sprint_pr import check_open_pr_invariant
+                from orchestrator.github_client import count_open_prs
+                from orchestrator.alerts import send_alert
+                check_open_pr_invariant(product, count_open_prs(product), alerter=send_alert)
+            except Exception:
+                log.exception("open-PR invariant check failed")
         return _ok({"reconciled": product_id})
     except Exception as e:
         log.exception("reconcile_prs failed")

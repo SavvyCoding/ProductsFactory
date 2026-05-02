@@ -27,6 +27,13 @@ COPY templates/ templates/
 COPY db/        db/
 COPY alembic.ini .
 
+# Sprint-PR provisioning + merge live in orchestrator/sprint_pr.py and are
+# imported by website.main (Phase 6.1). The website only needs that one
+# leaf module — copy it explicitly with a stub package init rather than
+# bundling the full orchestrator/ tree (which carries heavy deps the
+# website doesn't have).
+COPY orchestrator/__init__.py orchestrator/sprint_pr.py orchestrator/
+
 # Run Alembic migrations then start the server.
 # startup.sh: self-heals stale alembic_version (tables gone but version row
 # exists after a volume wipe), then runs alembic upgrade head + uvicorn.
