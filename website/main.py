@@ -377,6 +377,23 @@ async def _next_planned_sprint(product_id: int, db: AsyncSession) -> Sprint | No
     return result.scalar_one_or_none()
 
 
+# Status rank guard for api_update_feature (INVARIANTS IV.1).
+# Lifted from orchestrator/docker_runner.py:_apply_session_entry so EVERY PATCH
+# path gets the protection — not just the agent harness. Per fix #4: bypassing
+# the harness (auto_merge sweep, supervisor, github_client direct writes,
+# features_sync) used to silently downgrade status. Now rejected at the website
+# boundary with 422.
+_FEATURE_PROGRESS_RANK = {
+    "Pending":      0, "Approved":     1, "Designing":    2, "Designed":     3,
+    "Implementing": 4, "Reviewing":    5, "Reviewed":     6, "Pushed":       7,
+    "Blocked":      2, "Deferred":     7, "Rejected":     7, "Reverted":     0,
+}
+_FEATURE_ALLOWED_BACKWARD = frozenset({
+    ("Reviewing",  "Implementing"),  # reviewer requests changes
+    ("Reviewed",   "Implementing"),  # reviewer requests changes after approval
+})
+
+
 _CFG_DEFAULTS = {
     # Poller
     "poll_interval":               60,
@@ -1984,6 +2001,39 @@ async def api_update_feature(
                         f"to put it back in the agent pipeline."
                     ),
                 )
+
+    # IV.1 rank guard (#4): status never silently downgrades. Previously
+    # enforced only in the agent harness (orchestrator/docker_runner.py:
+    # _apply_session_entry); now enforced at the website boundary so every
+    # caller gets the same protection — including auto_merge sweep,
+    # supervisor, github_client direct writes, and features_sync.
+    #
+    # PMs go through /api/features/{id}/pm-status which has its own
+    # PM_ALLOWED_TRANSITIONS validation; PMs that PATCH this endpoint with
+    # changed_by="pm" bypass the rank check explicitly (consistent with the
+    # Blocked-quarantine carve-out above).
+    new_status_for_rank = updates.get("status")
+    if new_status_for_rank and updates.get("changed_by") != "pm":
+        cur_rank = _FEATURE_PROGRESS_RANK.get(feature.status, 0)
+        new_rank = _FEATURE_PROGRESS_RANK.get(new_status_for_rank, 0)
+        if (
+            cur_rank > new_rank
+            and (feature.status, new_status_for_rank) not in _FEATURE_ALLOWED_BACKWARD
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error":   "rank_downgrade",
+                    "current": feature.status,
+                    "target":  new_status_for_rank,
+                    "message": (
+                        f"Cannot downgrade feature #{feature_id} from "
+                        f"{feature.status!r} to {new_status_for_rank!r}. Use "
+                        f"PATCH /api/features/{feature_id}/pm-status for PM moves "
+                        f"or pass changed_by='pm' to bypass."
+                    ),
+                },
+            )
 
     # Increment version on every write so callers can detect concurrent updates.
     feature.version = (feature.version or 0) + 1
