@@ -483,3 +483,49 @@ class FeatureLinkOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ── Internal /api/* request bodies (Phase #9) ────────────────────────────────
+# Pydantic shapes for endpoints that previously took body: dict — replaces
+# silent no-op-on-typo behavior with a 422 on malformed payloads.
+
+class BlockedRouteRequest(BaseModel):
+    feature_ids: List[int]
+    reason:      Optional[str] = None
+
+
+class SprintSignOffRequest(BaseModel):
+    gate:           str
+    value:          bool = True
+    notes:          Optional[str] = None
+    retro_doc_path: Optional[str] = None
+
+    @field_validator("gate")
+    @classmethod
+    def gate_valid(cls, v: str) -> str:
+        valid = {"qa_passed", "security_clean", "retro_done"}
+        if v not in valid:
+            raise ValueError(f"gate must be one of {sorted(valid)}")
+        return v
+
+
+class SessionKillRequest(BaseModel):
+    reason: str = "watchdog"
+
+
+class SupervisorActionRequest(BaseModel):
+    detector:    str
+    target_type: str
+    target_id:   str
+    action:      str
+    reason:      str
+    product_id:  Optional[int]  = None
+    dry_run:     bool           = False
+
+
+class SessionLogAppendRequest(BaseModel):
+    lines: List[str]
+
+
+class SessionPersonaSetRequest(BaseModel):
+    persona: str

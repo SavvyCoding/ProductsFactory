@@ -84,7 +84,7 @@ from website.models import (
     FeatureComment, FeatureChangelog, Label, FeatureLabel, Phase, Sprint, FeatureLink,
     SupervisorAction,
 )
-from website.auth import require_auth
+from website.auth import require_auth, verify_internal_signature
 from website import schemas
 from website.github import fetch_progress_md, fetch_architecture_md, count_open_prs, list_open_prs, merge_pr, close_pr
 from orchestrator.sprint_pr import provision_sprint_pr, merge_sprint_pr
@@ -2829,7 +2829,9 @@ async def api_active_sprint(product_id: int, db: AsyncSession = Depends(get_db))
 
 @app.post("/api/products/{product_id}/sprints/blocked/route", status_code=200)
 async def api_route_to_blocked_sprint(
-    product_id: int, body: dict, db: AsyncSession = Depends(get_db),
+    product_id: int, body: schemas.BlockedRouteRequest,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_internal_signature),
 ):
     """Move stuck features into the per-product Blocked sprint.
 
@@ -2837,11 +2839,9 @@ async def api_route_to_blocked_sprint(
     fix_attempts crosses max_fix_attempts. Also creates the Blocked sprint
     on first use if it doesn't exist. Idempotent — re-routing a feature
     that's already there is a no-op.
-
-    Body: {"feature_ids": [1,2,3], "reason": "auto-escalated after N attempts"}
     """
-    feature_ids = body.get("feature_ids") or []
-    reason = body.get("reason") or "auto-escalated after exceeding max_fix_attempts"
+    feature_ids = body.feature_ids
+    reason = body.reason or "auto-escalated after exceeding max_fix_attempts"
     if not feature_ids:
         return {"moved": 0, "sprint_id": None}
     blocked = await _get_or_create_blocked_sprint(product_id, db)
@@ -2875,13 +2875,12 @@ async def api_update_sprint(sprint_id: int, body: schemas.SprintUpdate, db: Asyn
 @app.post("/api/sprints/{sprint_id}/sign-off")
 async def api_sprint_sign_off(
     sprint_id: int,
-    body: dict,
+    body: schemas.SprintSignOffRequest,
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_internal_signature),
 ):
     """
     Agent sign-off endpoint — merges gate values into sprint.dod_status.
-    Body: {"gate": "qa_passed"|"security_clean"|"retro_done", "value": true/false,
-           "notes": "optional notes", "retro_doc_path": "optional path"}
     After each sign-off, check if all gates pass → auto-complete sprint.
     """
     sprint = await db.get(Sprint, sprint_id)
@@ -2890,18 +2889,15 @@ async def api_sprint_sign_off(
     if sprint.status == "completed":
         return {"status": "already_completed"}
 
-    gate  = body.get("gate")
-    value = body.get("value", True)
-    valid_gates = {"qa_passed", "security_clean", "retro_done"}
-    if gate not in valid_gates:
-        raise HTTPException(status_code=400, detail=f"gate must be one of {valid_gates}")
+    gate  = body.gate
+    value = body.value
 
     current = dict(sprint.dod_status or {})
     current[gate] = bool(value)
-    if body.get("notes"):
-        current[f"{gate}_notes"] = body["notes"]
-    if gate == "retro_done" and body.get("retro_doc_path"):
-        sprint.retro_doc_path = body["retro_doc_path"]
+    if body.notes:
+        current[f"{gate}_notes"] = body.notes
+    if gate == "retro_done" and body.retro_doc_path:
+        sprint.retro_doc_path = body.retro_doc_path
     sprint.dod_status = current
     await db.flush()
 
@@ -3219,15 +3215,23 @@ async def api_watchdog_targets(db: AsyncSession = Depends(get_db)):
 @app.post("/api/sessions/{session_id}/kill")
 async def api_session_kill(
     session_id: int,
-    body: dict,
+    body: schemas.SessionKillRequest,
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_internal_signature),
 ):
-    """Close a session as killed. Watchdog calls after running docker kill."""
+    """Close a session as killed. Watchdog calls after running docker kill.
+
+    Idempotent (#9): early-returns when the session is already terminal so
+    racing watchdog cycles don't double-emit `killed` audit events or
+    overwrite `ended_at`.
+    """
     session = await db.get(DBSession, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    if session.status in ("killed", "ended", "orphaned"):
+        return {"ok": True, "status": session.status, "noop": True}
     session.status = "killed"
-    session.kill_reason = body.get("reason", "watchdog")
+    session.kill_reason = body.reason
     session.ended_at = datetime.now(timezone.utc)
     session.exit_code = -1
     # Audit log + transcript snapshot
@@ -3460,10 +3464,12 @@ async def api_get_session(session_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @app.patch("/api/products/{product_id}/last-session/persona")
-async def api_set_last_session_persona(product_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+async def api_set_last_session_persona(
+    product_id: int, body: schemas.SessionPersonaSetRequest,
+    db: AsyncSession = Depends(get_db),
+):
     """Poller calls this after container exits to record the persona on the most recent session."""
-    body = await request.json()
-    persona = body.get("persona")
+    persona = body.persona
     if not persona:
         raise HTTPException(status_code=422, detail="persona required")
     result = await db.execute(
@@ -3483,10 +3489,9 @@ async def api_set_last_session_persona(product_id: int, request: Request, db: As
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.post("/api/products/{product_id}/session/log")
-async def api_append_session_log(product_id: int, request: Request):
+async def api_append_session_log(product_id: int, body: schemas.SessionLogAppendRequest):
     """Called by poller to push agent stdout lines. No auth — internal network only."""
-    body = await request.json()
-    lines: list[str] = body.get("lines", [])
+    lines: list[str] = body.lines
     buf = _session_logs[product_id]
     if lines and len(buf) >= SESSION_LOG_WARN_AT:
         log.warning(
@@ -3704,34 +3709,23 @@ async def api_force_unlock_poller(db: AsyncSession = Depends(get_db)):
 
 @app.post("/api/supervisor/actions", status_code=201)
 async def api_supervisor_record_action(
-    body: dict, db: AsyncSession = Depends(get_db),
+    body: schemas.SupervisorActionRequest, db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_internal_signature),
 ):
     """Append one row to the supervisor audit log.
 
     Called by orchestrator-side detectors after they fire (whether they
     actually mutated state or just ran in dry-run). No auth — internal
-    poller path. Body validation is permissive: required fields are
-    detector/target_type/target_id/action/reason; everything else is
-    optional with sensible defaults.
+    poller path.
     """
-    detector    = (body.get("detector")    or "").strip()
-    target_type = (body.get("target_type") or "").strip()
-    target_id   = (body.get("target_id")   or "").strip()
-    action      = (body.get("action")      or "").strip()
-    reason      = (body.get("reason")      or "").strip()
-    if not (detector and target_type and target_id and action and reason):
-        raise HTTPException(
-            status_code=422,
-            detail="detector, target_type, target_id, action, reason are required",
-        )
     row = SupervisorAction(
-        detector=detector[:40],
-        product_id=body.get("product_id"),
-        target_type=target_type[:20],
-        target_id=target_id[:100],
-        action=action[:40],
-        reason=reason,
-        dry_run=bool(body.get("dry_run", False)),
+        detector=body.detector.strip()[:40],
+        product_id=body.product_id,
+        target_type=body.target_type.strip()[:20],
+        target_id=body.target_id.strip()[:100],
+        action=body.action.strip()[:40],
+        reason=body.reason.strip(),
+        dry_run=body.dry_run,
     )
     db.add(row)
     await db.flush()

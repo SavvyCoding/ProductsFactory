@@ -132,3 +132,54 @@ async def require_auth(
         raise _unauthorized()
     _record_success(username)
     return username
+
+
+# ── Internal API HMAC verification (Phase #9, opt-in) ────────────────────────
+# When PF_INTERNAL_API_SECRET is set, write endpoints reachable from the
+# orchestrator/agent network require an X-PF-Signature header containing
+# `sha256=<hmac>` of the raw request body keyed by the secret. When the env
+# var is unset, the dependency is a no-op (preserves current behavior, no
+# operational risk on rollout).
+#
+# The orchestrator side computes the signature in deploy/orchestrator/tools.py
+# (helper sign_internal_body) and includes it on every internal POST.
+#
+# Why opt-in: agent containers attach to productfactory-net and historically
+# trust the network. Flipping enforcement on would require coordinated deploy
+# of orchestrator + website + agent prompt updates. Operators can roll this
+# out one product at a time, then enable globally.
+
+import hashlib
+import hmac as _hmac
+from fastapi import Request
+
+_INTERNAL_API_SECRET = os.environ.get("PF_INTERNAL_API_SECRET", "")
+
+
+def _compute_internal_signature(body: bytes, secret: str) -> str:
+    """Return `sha256=<hex>` HMAC of body using secret."""
+    digest = _hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return f"sha256={digest}"
+
+
+async def verify_internal_signature(request: Request) -> None:
+    """FastAPI dependency: verify X-PF-Signature on internal write endpoints.
+
+    No-op when PF_INTERNAL_API_SECRET is unset. When set, the request body is
+    re-read and HMAC-SHA256 verified against the X-PF-Signature header. Uses
+    timing-safe comparison so signature mismatches don't leak via timing.
+
+    Raises 401 on missing or mismatched signature.
+    """
+    if not _INTERNAL_API_SECRET:
+        return  # opt-in: no enforcement when env var unset
+    sig = request.headers.get("X-PF-Signature", "")
+    if not sig:
+        raise HTTPException(
+            status_code=401,
+            detail="missing X-PF-Signature header (PF_INTERNAL_API_SECRET enforced)",
+        )
+    body = await request.body()
+    expected = _compute_internal_signature(body, _INTERNAL_API_SECRET)
+    if not _hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=401, detail="invalid X-PF-Signature")
