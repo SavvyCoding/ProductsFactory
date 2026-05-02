@@ -290,13 +290,26 @@ async def _check_sprint_capacity(sprint_id: int, additions: int, db: AsyncSessio
     this filter, security_auditor's bug-fix endpoint 422s as soon as a sprint
     has any merged features (sprint deadlock: security_clean stays false
     because no bug feature ever lands on the sprint).
+
+    Race-safe (#8): locks the sprint row with SELECT...FOR UPDATE before
+    counting. Without the lock, two concurrent PATCHes that each saw
+    `current=4, cap=5` would both pass and commit, yielding `current=6`.
+    The lock serializes them: the second blocks until the first commits,
+    then sees `current=5` and 422s correctly.
     """
     if not sprint_id or additions <= 0:
         return
-    # The Blocked sprint is a holding pen — no cap. Stuck features pile up
-    # there for human triage; refusing to admit them would defeat the point.
-    target_sprint = await db.get(Sprint, sprint_id)
-    if target_sprint and target_sprint.kind == "blocked":
+    # Lock the sprint row for the duration of the request transaction. This
+    # is the critical-section gate. The Blocked sprint is exempt from caps
+    # (holding pen) so we exit early without locking — saves contention on
+    # the busiest sprint in the system.
+    target_sprint_q = await db.execute(
+        select(Sprint).where(Sprint.id == sprint_id).with_for_update()
+    )
+    target_sprint = target_sprint_q.scalar_one_or_none()
+    if not target_sprint:
+        return
+    if target_sprint.kind == "blocked":
         return
     cap = await _sprint_cap(db)
     cur = await db.execute(
