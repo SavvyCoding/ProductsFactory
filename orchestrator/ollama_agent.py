@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -395,33 +396,101 @@ def dispatch_tool(name: str, args: dict) -> tuple[str, bool]:
     return f"ERROR: Unknown tool '{name}'", False
 
 
+_TRANSIENT_GIT_PATTERNS = (
+    "index.lock", "lock file", "could not lock", "unable to create temporary",
+    "resource temporarily unavailable", "device or resource busy",
+)
+
+
+def _git_status_with_retry() -> subprocess.CompletedProcess:
+    """Run `git status --porcelain` with one retry on transient errors.
+
+    On Windows NTFS bind-mounts the index/config locks can fleetingly fail
+    when a parallel git process (heartbeat thread, prior-session shutdown,
+    docker_runner cleanup) hasn't released them yet. A single short retry
+    eliminates the spurious fail-closed that otherwise burns the agent's
+    whole turn budget and ends in a 90-min watchdog SIGKILL.
+
+    Real failures (bad object, corrupted .git, write-protected workspace)
+    don't match the transient patterns and fail through to the caller's
+    fail-closed path unchanged.
+    """
+    for attempt in (0, 1):
+        r = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=WORKSPACE_DIR, capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode == 0:
+            return r
+        stderr_lc = (r.stderr or "").lower()
+        if attempt == 0 and any(p in stderr_lc for p in _TRANSIENT_GIT_PATTERNS):
+            _log(f"_agent_made_edits: transient git error (rc={r.returncode}), retrying once")
+            time.sleep(2)
+            continue
+        return r
+    return r  # unreachable, satisfies type checker
+
+
 def _agent_made_edits() -> bool:
     """Return True if `git status --porcelain` shows any changes inside WORKSPACE_DIR.
 
-    Mirrors the same check the post-coder pipeline runs in
-    `orchestrator/docker_runner.py` after the agent exits. Returning False here
-    is what triggers the task_done-gate: the agent claims success but git sees
-    no diff.
+    Three signals count as proof of edits:
+      1. Uncommitted changes in the working tree (`git status --porcelain`)
+      2. Commits ahead of the upstream branch (committed but not pushed)
+      3. Commits ahead of `origin/main` when no upstream is set yet
+
+    Fail-CLOSED on git errors that aren't "this isn't a git repo" — the
+    agent can't have written real code if git itself can't operate
+    (corrupted .git, ref errors, etc.). Transient lock/busy errors get
+    one retry via _git_status_with_retry before falling closed — those
+    are common on Windows NTFS bind-mounts and were a major contributor
+    to the 35-39% kill rate (#6).
+
+    The only fall-open case is when WORKSPACE_DIR isn't a git repo at
+    all (test_run.py edge cases) — there the gate is meaningless.
     """
     try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=WORKSPACE_DIR,
-            capture_output=True, text=True, timeout=15,
-        )
-        if result.returncode != 0:
-            # Not a git repo, or git missing — fall open (don't gate on infra failure)
-            return True
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            # Ignore the same artefacts the post-coder pipeline ignores
-            if line.endswith("session_result.json") or line.endswith("session_summary.md"):
-                continue
-            if "/Temp/" in line or "/Results/" in line:
-                continue
-            return True
+        # 1. Uncommitted changes in the tree
+        status = _git_status_with_retry()
+        if status.returncode == 0:
+            for line in status.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if line.endswith("session_result.json") or line.endswith("session_summary.md"):
+                    continue
+                if "/Temp/" in line or "/Results/" in line:
+                    continue
+                return True
+        else:
+            # Distinguish "not a git repo" (fall open — gate is irrelevant)
+            # from any other git failure (fail closed — agent likely can't
+            # actually edit, e.g. permission errors locking .git/index).
+            stderr_lc = (status.stderr or "").lower()
+            if "not a git repository" in stderr_lc:
+                _log(f"WARNING: workspace not a git repo — gate falling open (stderr: {stderr_lc[:120]})")
+                return True
+            _log(f"WARNING: git status failed (rc={status.returncode}); gate FAIL-CLOSED. stderr: {stderr_lc[:200]}")
+            return False
+
+        # 2/3. Local commits ahead of remote tracking branch (or main).
+        for ref in ("@{u}", "origin/main", "origin/master"):
+            ahead = subprocess.run(
+                ["git", "rev-list", "--count", f"{ref}..HEAD"],
+                cwd=WORKSPACE_DIR, capture_output=True, text=True, timeout=10,
+            )
+            if ahead.returncode == 0:
+                try:
+                    if int((ahead.stdout or "0").strip()) > 0:
+                        return True
+                except ValueError:
+                    pass
+                break  # ref resolved (count was 0) — don't try fallbacks
+        return False
+    except Exception as e:
+        # Fail-CLOSED on unexpected errors — silently falling open is what
+        # let the permission-error attack succeed earlier.
+        _log(f"WARNING: _agent_made_edits raised {type(e).__name__}: {e!r}; gate FAIL-CLOSED")
         return False
     except Exception:
         # Any unexpected failure — fall open so we don't trap legitimate sessions
