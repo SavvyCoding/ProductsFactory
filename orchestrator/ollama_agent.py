@@ -401,6 +401,28 @@ _TRANSIENT_GIT_PATTERNS = (
     "resource temporarily unavailable", "device or resource busy",
 )
 
+
+def _git_status_with_retry(max_retries: int = 3, sleep_s: float = 0.5):
+    """Run `git status --porcelain` with retries on transient lock errors."""
+    last = None
+    for attempt in range(max_retries):
+        last = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=WORKSPACE_DIR, capture_output=True, text=True, timeout=10,
+        )
+        if last.returncode == 0:
+            return last
+        stderr_lc = (last.stderr or "").lower()
+        if any(pat in stderr_lc for pat in _TRANSIENT_GIT_PATTERNS):
+            time.sleep(sleep_s)
+            continue
+        return last  # non-transient — surface immediately
+    return last
+
+
+def _agent_made_edits() -> bool:
+    """Detect whether the agent actually wrote code.
+
     Three signals count as proof of edits:
       1. Uncommitted changes in the working tree (`git status --porcelain`)
       2. Commits ahead of the upstream branch (committed but not pushed)
