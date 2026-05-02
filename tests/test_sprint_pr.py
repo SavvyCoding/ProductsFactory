@@ -87,22 +87,41 @@ class TestMergeSprintPr:
         code, _ = merge_sprint_pr("https://github.com/o/r.git", 1, "")
         assert code == 0
 
-    def test_marks_ready_then_merges_squash(self):
+    def test_marks_ready_updates_branch_then_merges_squash(self):
+        """Happy path: un-draft, update-branch up-to-date (422), squash-merge."""
         from orchestrator import sprint_pr
 
         ready = MagicMock(status_code=200, text="")
+        # update-branch returns 422 = already up-to-date so no sleep
+        upd_branch = MagicMock(status_code=422, text='{"message": "branch is up to date"}')
         merge = MagicMock(status_code=200, text="merged")
         with patch.object(sprint_pr.httpx, "patch", return_value=ready) as mock_patch, \
-             patch.object(sprint_pr.httpx, "put", return_value=merge) as mock_put:
+             patch.object(sprint_pr.httpx, "put", side_effect=[upd_branch, merge]) as mock_put:
             code, body = sprint_pr.merge_sprint_pr("https://github.com/o/r.git", 42, "tok")
         assert code == 200
         assert body == "merged"
         # Mark ready first
         assert "/pulls/42" in mock_patch.call_args.args[0]
         assert mock_patch.call_args.kwargs["json"] == {"draft": False}
+        # update-branch happens before merge
+        assert "/pulls/42/update-branch" in mock_put.call_args_list[0].args[0]
         # Then squash-merge
-        assert "/pulls/42/merge" in mock_put.call_args.args[0]
-        assert mock_put.call_args.kwargs["json"] == {"merge_method": "squash"}
+        assert "/pulls/42/merge" in mock_put.call_args_list[1].args[0]
+        assert mock_put.call_args_list[1].kwargs["json"] == {"merge_method": "squash"}
+
+    def test_update_branch_202_sleeps_then_merges(self):
+        """update-branch 202 = job queued; sleeps 5s for GitHub to recompute."""
+        from orchestrator import sprint_pr
+        ready = MagicMock(status_code=200, text="")
+        upd_branch = MagicMock(status_code=202, text="queued")
+        merge = MagicMock(status_code=200, text="merged")
+        # Patch time.sleep so test doesn't actually wait 5s
+        with patch.object(sprint_pr.httpx, "patch", return_value=ready), \
+             patch.object(sprint_pr.httpx, "put", side_effect=[upd_branch, merge]), \
+             patch("time.sleep") as mock_sleep:
+            code, _ = sprint_pr.merge_sprint_pr("https://github.com/o/r.git", 42, "tok")
+        assert code == 200
+        mock_sleep.assert_called_once_with(5)
 
     def test_returns_405_unchanged_on_conflict(self):
         from orchestrator import sprint_pr
