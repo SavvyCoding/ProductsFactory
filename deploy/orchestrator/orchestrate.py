@@ -35,9 +35,100 @@ CYCLE_INTERVAL = int(os.environ.get("ORCHESTRATION_CYCLE_SECONDS", "60"))
 PM_API_URL = os.environ.get("PM_API_URL", "http://pm-api:8080")
 
 
+def _drain_orphan_session_results():
+    """
+    Walk every product's working_dir and apply any unconsumed session_result.json
+    entries to the PM API BEFORE the next cycle's _reset_workspace deletes them.
+
+    Background: when the orchestrator is restarted (deploy, OOM, force-recreate)
+    while an agent session is in flight, the in-process live-poll thread dies
+    with the orchestrator. The agent container survives, finishes its work, and
+    writes Reviewing/Blocked entries to session_result.json — but no-one is left
+    to PATCH them into the PM API. Next launch's _reset_workspace +
+    _delete_session_result then unlinks the file unread.
+
+    This drainer reads the file, applies each entry using the existing
+    _apply_session_entry (which has rank-guarding + persona filtering), then
+    rotates the file to session_result.drained-<ts>.json so it isn't re-applied.
+    Best-effort: any product that fails to drain is logged and skipped.
+    """
+    import datetime as _dt
+    import json as _json
+    import httpx
+    from pathlib import Path
+    from orchestrator.paths import container_path
+    from orchestrator.docker_runner import _apply_session_entry
+
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            resp = client.get("/api/products")
+            products = resp.json() if resp.is_success else []
+    except Exception:
+        log.exception("[reconcile] could not fetch products for session_result drain")
+        return
+
+    drained_total = 0
+    for p in products:
+        wd_host = p.get("working_dir") or ""
+        if not wd_host:
+            continue
+        try:
+            wd = Path(container_path(wd_host))
+        except Exception:
+            continue
+        sr = wd / "session_result.json"
+        if not sr.exists():
+            continue
+        try:
+            lines = sr.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception as e:
+            log.warning("[reconcile] read failed for %s: %s", sr, e)
+            continue
+
+        applied = 0
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                for raw in lines:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        entry = _json.loads(raw)
+                    except Exception:
+                        continue
+                    if not isinstance(entry, dict) or "id" not in entry:
+                        continue
+                    try:
+                        if _apply_session_entry(client, entry):
+                            applied += 1
+                    except Exception:
+                        log.exception("[reconcile] apply failed for entry %s", entry)
+        except Exception:
+            log.exception("[reconcile] PM client error draining %s", sr)
+            continue
+
+        # Rotate so the next cycle's _delete_session_result doesn't unlink
+        # entries we just applied (and so we keep a forensic copy on disk).
+        ts = _dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        backup = sr.with_name(f"session_result.drained-{ts}.json")
+        try:
+            sr.rename(backup)
+        except Exception:
+            log.exception("[reconcile] could not rotate %s", sr)
+
+        log.info("[reconcile] drained %d/%d session_result entries from %s -> %s",
+                 applied, len(lines), wd_host, backup.name)
+        drained_total += applied
+
+    if drained_total:
+        log.info("[reconcile] startup drain: %d total entries applied", drained_total)
+
+
 def startup_reconcile():
     """
     Called once when the orchestrator starts. Reconciles reality:
+      - Drain unconsumed session_result.json (work the agent did but no live-poll
+        thread was around to apply — see _drain_orphan_session_results).
       - Any pf-<product>-<uid> container running with NO matching DB session
         row (or session is already ended) → reap the container.
       - Any DB session with status in {pending,starting,running} whose
@@ -48,6 +139,12 @@ def startup_reconcile():
     sessions would otherwise linger forever.
     """
     import httpx
+
+    # 0. Drain orphaned session_result.json BEFORE workspace resets eat them.
+    try:
+        _drain_orphan_session_results()
+    except Exception:
+        log.exception("[reconcile] session_result drain failed (non-fatal)")
     # 1. Running containers
     try:
         res = subprocess.run(
