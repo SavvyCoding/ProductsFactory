@@ -531,14 +531,19 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
 
             # Sprint PRs (Phase 6.1) are provisioned as drafts. GitHub returns 405
             # "Pull Request is still a draft" — that's NOT a conflict, just a state
-            # we can fix. Mark ready, retry once, then fall through to the regular
-            # 405 handling if the second attempt also fails (real conflict).
+            # we can fix. Mark ready, sleep briefly for GitHub to propagate the
+            # mergeable_state recompute (eventual consistency — observed today: an
+            # immediate retry still sees the PR as draft and the close-as-conflict
+            # path destroys the PR), then retry once. Fall through to regular 405
+            # handling if the second attempt also fails (real conflict).
             if resp.status_code == 405 and "draft" in resp.text.lower():
                 log.info(f"[auto-merge] PR #{pr_number} is draft — marking ready and retrying")
                 httpx.patch(
                     f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}",
                     json={"draft": False}, headers=gh_headers, timeout=10,
                 )
+                import time as _t
+                _t.sleep(3)  # GitHub eventual-consistency for draft→ready
                 resp = _attempt_merge()
 
             if resp.status_code in (200, 201):

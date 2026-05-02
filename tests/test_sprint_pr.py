@@ -211,7 +211,8 @@ class TestAutoMergeDraftHandling:
         un_draft = MagicMock(status_code=200, text="")
 
         with patch.object(auto_merge.httpx, "put", side_effect=[first, second]) as mock_put, \
-             patch.object(auto_merge.httpx, "patch", return_value=un_draft) as mock_patch:
+             patch.object(auto_merge.httpx, "patch", return_value=un_draft) as mock_patch, \
+             patch("time.sleep") as mock_sleep:
             code, _ = auto_merge._try_merge_pr("o/r", 42, "tok")
         assert code == 200
         # Two merges (initial + retry)
@@ -219,6 +220,11 @@ class TestAutoMergeDraftHandling:
         # One un-draft PATCH between them
         assert mock_patch.call_count == 1
         assert mock_patch.call_args.kwargs["json"] == {"draft": False}
+        # Critical: must sleep between un-draft PATCH and retry merge for
+        # GitHub's mergeable_state to recompute (regression: without this
+        # sleep, the immediate retry still saw the PR as draft and the
+        # caller treated it as conflict → closed PR).
+        mock_sleep.assert_called_with(3)
 
     def test_sweep_does_not_retry_on_real_405_conflict(self):
         from orchestrator import auto_merge

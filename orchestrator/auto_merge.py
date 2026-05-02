@@ -92,6 +92,11 @@ def _try_merge_pr(repo_slug: str, pr_num: int, token: str) -> tuple[int, str]:
                 f"https://api.github.com/repos/{repo_slug}/pulls/{pr_num}",
                 headers=headers, json={"draft": False}, timeout=15,
             )
+            # GitHub's mergeable_state is eventually consistent — an immediate
+            # retry can still see the PR as draft. Sleep briefly so the next
+            # merge attempt sees the un-drafted state.
+            import time as _t
+            _t.sleep(3)
             resp = httpx.put(
                 f"https://api.github.com/repos/{repo_slug}/pulls/{pr_num}/merge",
                 headers=headers, json={"merge_method": "squash"}, timeout=30,
