@@ -49,8 +49,12 @@ def _run_and_capture(monkeypatch, docker_runner, product, tmp_path, *,
     monkeypatch.setattr(docker_runner, "_get_gh_token", lambda: "ghp_testtokenXYZ")
     monkeypatch.setattr(docker_runner, "install_templates", lambda *a, **kw: None)
     monkeypatch.setattr(docker_runner, "build_prompt", lambda *a, **kw: "test prompt")
+    # _fetch_assigned_features returns (features, sprint_name, sprint_dict) — 3-tuple.
+    # Pre-#10, this stub returned a 2-tuple and every test in this module crashed
+    # on `(features, sprint_name, active_sprint) = _fetch_assigned_features(...)`
+    # at docker_runner.py:1431 with ValueError.
     monkeypatch.setattr(docker_runner, "_fetch_assigned_features",
-                        lambda *a, **kw: ([], None))
+                        lambda *a, **kw: ([], None, None))
     monkeypatch.setattr(docker_runner, "_format_assigned_features", lambda *a, **kw: "")
     monkeypatch.setattr(docker_runner, "_write_sprint_features_md", lambda *a, **kw: None)
     monkeypatch.setattr(docker_runner, "_reset_workspace", lambda *a, **kw: None)
