@@ -41,9 +41,46 @@ def _err(msg: str, **extra: Any) -> str:
     return json.dumps({"ok": False, "error": msg, **extra})
 
 
+# Optional HMAC signing for internal write endpoints (Phase #9 opt-in).
+# When PF_INTERNAL_API_SECRET is set on BOTH the orchestrator and the website,
+# every outbound POST/PATCH gets an X-PF-Signature header keyed by the secret.
+# The website's verify_internal_signature dependency rejects unsigned writes
+# when the secret is set there. Unset on either side = transparent no-op.
+_INTERNAL_API_SECRET = os.environ.get("PF_INTERNAL_API_SECRET", "")
+
+
+def _sign_internal_body(body: bytes) -> str:
+    """Compute `sha256=<hex>` HMAC-SHA256 of body keyed by the internal secret."""
+    import hashlib, hmac as _hmac
+    digest = _hmac.new(_INTERNAL_API_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    return f"sha256={digest}"
+
+
+class _SigningClient(httpx.Client):
+    """httpx.Client that auto-signs every POST/PATCH/PUT/DELETE body when
+    PF_INTERNAL_API_SECRET is set. Read methods (GET, HEAD) are untouched.
+
+    The signature is computed against the JSON-serialized body matching what
+    the website's verify_internal_signature reads from request.body() — so we
+    must pre-serialize once and pass `content=` rather than `json=` for write
+    methods. Falls back to no-op when the secret is unset.
+    """
+    def request(self, method: str, url, **kwargs):
+        if _INTERNAL_API_SECRET and method.upper() in ("POST", "PATCH", "PUT", "DELETE"):
+            json_body = kwargs.pop("json", None)
+            if json_body is not None and "content" not in kwargs:
+                payload = json.dumps(json_body).encode()
+                kwargs["content"] = payload
+                headers = dict(kwargs.get("headers") or {})
+                headers["X-PF-Signature"] = _sign_internal_body(payload)
+                headers.setdefault("Content-Type", "application/json")
+                kwargs["headers"] = headers
+        return super().request(method, url, **kwargs)
+
+
 def _pm_client() -> httpx.Client:
     auth = (PM_USERNAME, PM_PASSWORD) if PM_PASSWORD else None
-    return httpx.Client(base_url=PM_API_URL, timeout=REQUEST_TIMEOUT, auth=auth)
+    return _SigningClient(base_url=PM_API_URL, timeout=REQUEST_TIMEOUT, auth=auth)
 
 
 # ---------------------------------------------------------------------------
