@@ -357,7 +357,7 @@ def reconcile_in_flight_prs(product: dict):
                         # all_features_done=false and stall DoD).
                         try:
                             client.post(
-                                f"/api/products/{product_id}/sprints/blocked/route",
+                                f"/api/products/{product['id']}/sprints/blocked/route",
                                 json={
                                     "feature_ids": [fid],
                                     "reason": (
