@@ -338,16 +338,54 @@ def run_cycle(args: dict, **kwargs) -> str:
         try:
             with _pm_client() as client:
                 wd_resp = client.get("/api/sessions/watchdog/targets")
-            if wd_resp.is_success:
-                targets = wd_resp.json()
-                for t in targets:
-                    name = t.get("container_id") or f"pf-{t['product_id']}-{t.get('session_uid','')}"
-                    reason = t.get("reason", "watchdog")
-                    log.warning("[watchdog] killing session %s container=%s reason=%s",
-                                t["id"], name, reason)
-                    subprocess.run(["docker", "kill", name], capture_output=True, timeout=10)
-                    with _pm_client() as client:
-                        client.post(f"/api/sessions/{t['id']}/kill", json={"reason": reason})
+                active_resp = client.get("/api/sessions/active")
+            targets = wd_resp.json() if wd_resp.is_success else []
+            active_sessions = active_resp.json() if active_resp.is_success else []
+
+            # Phase II.X.3 fix (#3): also flag any running session whose
+            # container_id is no longer present in `docker ps`. The watchdog
+            # endpoint runs in pm-api which has no docker access, so the
+            # docker-state probe lives here. Closes the orphan-session class
+            # observed today (incident #1698) where the container died but
+            # the session row stayed `running` until expected_deadline 90 min
+            # away. The DB-only check would not have fired in that window.
+            try:
+                ps = subprocess.run(
+                    ["docker", "ps", "--filter", "name=pf-", "--format", "{{.Names}}"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                live_containers = {n for n in ps.stdout.strip().splitlines()
+                                   if n and n.startswith("pf-") and n != "pf-orchestrator"}
+            except Exception:
+                live_containers = None  # docker probe failed — be conservative, don't synthesize targets
+                log.exception("[watchdog] docker ps probe failed")
+
+            if live_containers is not None:
+                already_targeted = {t["id"] for t in targets}
+                for s in active_sessions:
+                    if s.get("id") in already_targeted:
+                        continue
+                    cid = s.get("container_id")
+                    if not cid:
+                        continue
+                    if cid not in live_containers:
+                        targets.append({
+                            "id":           s["id"],
+                            "product_id":   s.get("product_id"),
+                            "persona":      s.get("persona"),
+                            "container_id": cid,
+                            "session_uid":  s.get("session_uid"),
+                            "reason":       "container exited (docker ps does not list it)",
+                        })
+
+            for t in targets:
+                name = t.get("container_id") or f"pf-{t['product_id']}-{t.get('session_uid','')}"
+                reason = t.get("reason", "watchdog")
+                log.warning("[watchdog] killing session %s container=%s reason=%s",
+                            t["id"], name, reason)
+                subprocess.run(["docker", "kill", name], capture_output=True, timeout=10)
+                with _pm_client() as client:
+                    client.post(f"/api/sessions/{t['id']}/kill", json={"reason": reason})
         except Exception:
             log.exception("[watchdog] failed")
 
