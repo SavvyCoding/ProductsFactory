@@ -85,16 +85,21 @@ def check_open_pr_invariant(product: dict, count: int, alerter=None) -> None:
 
 
 def merge_sprint_pr(github_repo: str, pr_number: int, token: str) -> tuple[int, str]:
-    """Squash-merge the sprint PR, marking it ready-for-review first if needed.
+    """Squash-merge the sprint PR, marking it ready and updating the branch first.
 
-    Sprint PRs are provisioned as drafts; GitHub's merge endpoint returns 405
-    on draft PRs, so we PATCH `draft=false` first (idempotent — already-ready
-    PRs accept the same call without error). Then we PUT /merge.
+    Steps:
+      1. PATCH `draft=false` — sprint PRs are provisioned as drafts; the merge
+         endpoint returns 405 on drafts. Idempotent.
+      2. PUT /update-branch — merges base (main) into the sprint branch so the
+         sprint PR is up-to-date. Sprint PRs accumulate commits over days while
+         main moves on; without this step the merge attempt routinely fails on
+         long-lived sprints (#7). 422 = already up-to-date — fine.
+      3. PUT /merge with squash.
 
     Returns (status_code, body_excerpt) of the merge call. Caller interprets:
       - 200 / 201          → merged
       - 422                → already merged (treat as success)
-      - 405                → not mergeable (conflicts / failing CI / branch
+      - 405                → not mergeable (real conflict / failing CI / branch
                               protection) → halt and alert PM
       - 0                  → transport error (network, timeout) → treat as halt
       - anything else      → unexpected → halt and alert PM
@@ -108,6 +113,7 @@ def merge_sprint_pr(github_repo: str, pr_number: int, token: str) -> tuple[int, 
     owner, repo = slug
     h = _headers(token)
     try:
+        # 1. Mark ready (un-draft).
         ready = httpx.patch(
             f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
             headers=h, timeout=_TIMEOUT, json={"draft": False},
@@ -117,6 +123,28 @@ def merge_sprint_pr(github_repo: str, pr_number: int, token: str) -> tuple[int, 
                 f"merge_sprint_pr: mark-ready PATCH returned {ready.status_code} "
                 f"for {owner}/{repo} PR#{pr_number}: {ready.text[:200]}"
             )
+
+        # 2. Pull base (main) into the sprint branch so the merge attempt
+        #    isn't trivially rejected because the branch is behind. 202 = job
+        #    queued (give GitHub a moment to recompute mergeability), 200 =
+        #    success, 422 = already up-to-date. Anything else is logged but
+        #    we still try to merge — caller can decide how to handle a 405.
+        upd = httpx.put(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/update-branch",
+            headers=h, timeout=_TIMEOUT,
+        )
+        if upd.status_code in (200, 202):
+            import time as _time
+            _time.sleep(5)  # GitHub needs a moment to recompute mergeable_state
+        elif upd.status_code == 422:
+            pass  # already up-to-date with base — fine
+        else:
+            log.warning(
+                f"merge_sprint_pr: update-branch returned {upd.status_code} "
+                f"for {owner}/{repo} PR#{pr_number}: {upd.text[:200]}"
+            )
+
+        # 3. Squash-merge.
         merge = httpx.put(
             f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/merge",
             headers=h, timeout=30, json={"merge_method": "squash"},
