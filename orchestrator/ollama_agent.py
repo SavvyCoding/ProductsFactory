@@ -482,33 +482,32 @@ _TRANSIENT_GIT_PATTERNS = (
     "resource temporarily unavailable", "device or resource busy",
 )
 
-def _git_status_with_retry() -> subprocess.CompletedProcess:
-    """Run `git status --porcelain` with one retry on transient errors.
+def _git_status_with_retry(max_retries: int = 3, sleep_s: float = 0.5):
+    """Run `git status --porcelain` with retries on transient lock errors.
 
     On Windows NTFS bind-mounts the index/config locks can fleetingly fail
     when a parallel git process (heartbeat thread, prior-session shutdown,
-    docker_runner cleanup) hasn't released them yet. A single short retry
-    eliminates the spurious fail-closed that otherwise burns the agent's
-    whole turn budget and ends in a 90-min watchdog SIGKILL.
-
-    Real failures (bad object, corrupted .git, write-protected workspace)
-    don't match the transient patterns and fail through to the caller's
-    fail-closed path unchanged.
+    docker_runner cleanup) hasn't released them yet. The single-retry
+    version (commit 69dc967) was insufficient under sustained load (smoke
+    test 2026-05-05 saw the gate fail-close after one retry and the agent
+    looped). Three retries with 0.5 s sleep covers the typical lock release
+    window without busy-waiting.
     """
-    for attempt in (0, 1):
-        r = subprocess.run(
+    last = None
+    for attempt in range(max_retries):
+        last = subprocess.run(
             ["git", "status", "--porcelain"],
-            cwd=WORKSPACE_DIR, capture_output=True, text=True, timeout=15,
+            cwd=WORKSPACE_DIR, capture_output=True, text=True, timeout=10,
         )
-        if r.returncode == 0:
-            return r
-        stderr_lc = (r.stderr or "").lower()
-        if attempt == 0 and any(p in stderr_lc for p in _TRANSIENT_GIT_PATTERNS):
-            _log(f"_agent_made_edits: transient git error (rc={r.returncode}), retrying once")
-            time.sleep(2)
+        if last.returncode == 0:
+            return last
+        stderr_lc = (last.stderr or "").lower()
+        if any(pat in stderr_lc for pat in _TRANSIENT_GIT_PATTERNS):
+            _log(f"_agent_made_edits: transient git error (rc={last.returncode}), retry {attempt+1}/{max_retries}")
+            time.sleep(sleep_s)
             continue
-        return r
-    return r  # unreachable, satisfies type checker
+        return last  # non-transient — surface immediately
+    return last
 
 
 def _reviewer_made_decisions() -> int:
@@ -536,7 +535,7 @@ def _reviewer_made_decisions() -> int:
 
 
 def _agent_made_edits() -> bool:
-    """Return True if the workspace shows any committed or uncommitted changes.
+    """Detect whether the agent actually wrote code.
 
     Three signals count as proof of edits:
       1. Uncommitted changes in the working tree (`git status --porcelain`)
