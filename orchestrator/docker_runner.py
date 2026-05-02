@@ -531,20 +531,36 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
 
             # Sprint PRs (Phase 6.1) are provisioned as drafts. GitHub returns 405
             # "Pull Request is still a draft" — that's NOT a conflict, just a state
-            # we can fix. Mark ready, sleep briefly for GitHub to propagate the
-            # mergeable_state recompute (eventual consistency — observed today: an
-            # immediate retry still sees the PR as draft and the close-as-conflict
-            # path destroys the PR), then retry once. Fall through to regular 405
-            # handling if the second attempt also fails (real conflict).
+            # we can fix. Mark ready, then POLL the PR until GitHub actually
+            # reports draft=false (eventual consistency: observed today the PATCH
+            # returned 200 immediately but a merge attempt 3s later still saw
+            # the old draft state). Only retry the merge once draft has flipped.
             if resp.status_code == 405 and "draft" in resp.text.lower():
-                log.info(f"[auto-merge] PR #{pr_number} is draft — marking ready and retrying")
+                log.info(f"[auto-merge] PR #{pr_number} is draft — marking ready and polling")
                 httpx.patch(
                     f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}",
                     json={"draft": False}, headers=gh_headers, timeout=10,
                 )
                 import time as _t
-                _t.sleep(3)  # GitHub eventual-consistency for draft→ready
-                resp = _attempt_merge()
+                draft_cleared = False
+                for attempt in range(15):  # up to ~30s total
+                    _t.sleep(2)
+                    poll = httpx.get(
+                        f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}",
+                        headers=gh_headers, timeout=10,
+                    )
+                    if poll.status_code == 200 and poll.json().get("draft") is False:
+                        draft_cleared = True
+                        log.info(f"[auto-merge] PR #{pr_number} draft cleared after {(attempt + 1) * 2}s")
+                        break
+                if draft_cleared:
+                    resp = _attempt_merge()
+                else:
+                    # Polling timed out — GitHub still reports draft. Skip this
+                    # cycle rather than fall through to close-as-conflict (which
+                    # would destroy the PR). Next cycle will retry from scratch.
+                    log.warning(f"[auto-merge] PR #{pr_number} draft state did not clear in 30s — skipping (will retry next cycle)")
+                    continue
 
             if resp.status_code in (200, 201):
                 log.info(f"[auto-merge] PR #{pr_number} merged successfully")
@@ -556,8 +572,15 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
                 else:
                     gh_msg = resp.text[:120]
                 log.warning(f"[auto-merge] GitHub {resp.status_code} for PR #{pr_number}: {gh_msg}")
+
+                # SAFETY (#7-followup): only close on REAL conflicts. If 405 still
+                # mentions draft (somehow slipped through the polling above), do
+                # NOT close — that's the destructive bug we keep stepping on.
+                if resp.status_code == 405 and "draft" in gh_msg.lower():
+                    log.warning(f"[auto-merge] PR #{pr_number} still reports draft after polling — skipping (no destructive close)")
+                    continue
                 if resp.status_code == 405 or "not mergeable" in gh_msg.lower():
-                    # Conflicts — close PR and re-queue
+                    # Real conflict — close PR and re-queue
                     httpx.patch(
                         f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}",
                         json={"state": "closed"}, headers=gh_headers, timeout=10,
