@@ -123,6 +123,14 @@ def run_orchestration_loop():
                     product_id = data.get("product_id")
                     persona = data.get("persona")
                     log.info("launched session: product=%s persona=%s", product_id, persona)
+                # action == "skipped_active": run_cycle decided a persona
+                # but launch_session refused because there's already an
+                # active session for that product. The "action=... reason=..."
+                # log line above already captured the decision; no extra
+                # "launched session" line — that was the gaslight bug.
+                # action == "launch_failed": run_cycle couldn't reach
+                # launch_session or it crashed; the run_cycle level would
+                # have logged the exception already.
             else:
                 log.error("run_cycle failed: %s", result.get("error", "unknown"))
 

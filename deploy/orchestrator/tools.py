@@ -296,6 +296,34 @@ def _scaffold_greenfield_pending(products: list, **kwargs) -> int:
     return scaffolded
 
 
+def _action_for_launch(launch_result: dict) -> str:
+    """Translate launch_session's return into the run_cycle outer action.
+
+    launch_session can finish in three states:
+      - status="launched"          → a docker container actually started
+      - status="already_active"    → guard skipped (existing session running)
+      - status="already_launching" → in-memory lock held by a concurrent call
+    Plus error returns ({"ok": False, ...}) when launch_session crashed.
+
+    Pre-fix this function returned "launched" unconditionally — every cycle
+    logged "action=launched" even when the launch was skipped, making real
+    loops indistinguishable from "Ollama session still grinding through
+    turns" in operator diagnostics. (Real incident 2026-05-02: looked like
+    the orchestrator was crash-looping reviewer; it was actually one
+    healthy long-running session.)
+
+    Now we report the truth so cycle logs reflect what happened.
+    """
+    if not isinstance(launch_result, dict) or not launch_result.get("ok"):
+        return "launch_failed"
+    status = (launch_result.get("data") or {}).get("status")
+    if status == "launched":
+        return "launched"
+    if status in ("already_active", "already_launching"):
+        return "skipped_active"
+    return "launched"  # conservative default — newer statuses report as launched
+
+
 def run_cycle(args: dict, **kwargs) -> str:
     """
     Run a complete orchestration cycle in Python:
@@ -412,7 +440,13 @@ def run_cycle(args: dict, **kwargs) -> str:
                 launch_result = json.loads(launch_session(
                     {"product_id": pid, "persona": "reviewer"}, **kwargs
                 ))
-                return _ok({"action": "launched", "product_id": pid, "persona": "reviewer",
+                # Translate launch_session's actual outcome into the action.
+                # Without this the parent log line says "action=launched" even
+                # when launch_session skipped because of an active session,
+                # making real loops indistinguishable from "session still
+                # grinding through Ollama turns" in operator diagnostics.
+                action = _action_for_launch(launch_result)
+                return _ok({"action": action, "product_id": pid, "persona": "reviewer",
                             "reason": f"reviewer work for feature {reviewer_feature.get('id')}",
                             "launch": launch_result})
 
@@ -441,7 +475,8 @@ def run_cycle(args: dict, **kwargs) -> str:
             launch_result = json.loads(launch_session(
                 {"product_id": product_id, "persona": persona}, **kwargs
             ))
-            return _ok({"action": "launched", "product_id": product_id, "persona": persona,
+            outer_action = _action_for_launch(launch_result)
+            return _ok({"action": outer_action, "product_id": product_id, "persona": persona,
                         "reason": action_data.get("reason", ""),
                         "launch": launch_result})
         else:
