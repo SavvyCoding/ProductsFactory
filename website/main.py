@@ -1427,34 +1427,48 @@ async def _evaluate_dod(sprint_id: int, product_id: int, db: AsyncSession) -> di
 
 
 async def _do_complete_sprint(sprint: Sprint, product_id: int, db: AsyncSession) -> None:
-    """Mark sprint completed, generate release notes, merge sprint PR, activate next sprint.
+    """Merge sprint PR, mark sprint completed, generate release notes, activate next.
 
-    The sprint PR merge is a hard gate on activation: if it fails (conflicts,
-    failing CI, branch protection — anything that returns 405), the next
-    sprint is NOT activated and a critical Alert is filed for the PM. Never
-    ships broken code to keep the orchestrator moving.
+    Atomicity contract (#5): the sprint is NOT marked `completed` until the
+    sprint PR has actually merged. Pre-#5 we flipped status='completed' first
+    and then attempted the merge — when the merge returned 405 (conflicts,
+    failing CI, draft, branch protection), the sprint was left in a
+    "completed but not shipped" state with no path to recovery. Today's order
+    is the inverse: merge first, then commit the completion atomically.
+
+    The sprint PR merge is a hard gate on activation: if it fails the sprint
+    stays `active` and a critical Alert is filed for the PM. Never ships
+    broken code to keep the orchestrator moving.
     """
     from datetime import datetime as _dt, timezone as _tz
+
+    # 1. Merge the sprint PR FIRST. Skips no-op cases (no PR, Blocked sprint,
+    #    no PAT) cleanly; only halts on real merge failures (405 / 5xx /
+    #    transport). On halt the Alert path inside the helper has already
+    #    fired — caller can keep going if it has other products to process.
+    if not await _attempt_merge_completed_sprint_pr(sprint, db):
+        log.warning(
+            f"sprint #{sprint.id} merge failed — leaving status='active' for PM "
+            f"resolution; next sprint NOT activated"
+        )
+        return
+
+    # 2. Merge succeeded (or was a no-op). NOW mark completed.
     sprint.status = "completed"
     sprint.completed_at = _dt.now(_tz.utc)
     await db.flush()
 
-    # Generate release notes
+    # 3. Generate release notes against the just-shipped feature set. Best-
+    #    effort: a release-notes failure shouldn't undo the completion.
     try:
         notes = await _generate_sprint_release_notes(sprint.id, product_id, db)
         if notes:
             sprint.release_notes = notes
             await db.flush()
     except Exception:
-        pass
+        log.warning(f"sprint #{sprint.id} release-notes generation failed (non-fatal)")
 
-    # Merge the sprint PR before handing off to the next sprint. Halt
-    # activation on any non-success — the PM resolves the conflict and
-    # re-triggers activation manually.
-    if not await _attempt_merge_completed_sprint_pr(sprint, db):
-        return
-
-    # Activate the next sprint in the same phase, or next phase's first sprint
+    # 4. Activate the next sprint in the same phase, or next phase's first sprint.
     await _activate_next_sprint(sprint, product_id, db)
 
 
