@@ -68,13 +68,20 @@ class _SigningClient(httpx.Client):
     def request(self, method: str, url, **kwargs):
         if _INTERNAL_API_SECRET and method.upper() in ("POST", "PATCH", "PUT", "DELETE"):
             json_body = kwargs.pop("json", None)
-            if json_body is not None and "content" not in kwargs:
+            # httpx.Client.post() passes every body kwarg (content/data/files/json)
+            # in the call to self.request(); content is usually None. We only
+            # take over when there's a json body AND no explicit content.
+            if json_body is not None and not kwargs.get("content"):
                 payload = json.dumps(json_body).encode()
                 kwargs["content"] = payload
                 headers = dict(kwargs.get("headers") or {})
                 headers["X-PF-Signature"] = _sign_internal_body(payload)
                 headers.setdefault("Content-Type", "application/json")
                 kwargs["headers"] = headers
+            elif json_body is not None:
+                # Caller passed both json and content — restore json so the
+                # ambiguity surfaces as an httpx error, don't silently drop it.
+                kwargs["json"] = json_body
         return super().request(method, url, **kwargs)
 
 
