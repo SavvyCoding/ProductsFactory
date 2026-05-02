@@ -71,17 +71,31 @@ def _try_merge_pr(repo_slug: str, pr_num: int, token: str) -> tuple[int, str]:
 
     Status code 0 indicates a transport-level exception (network, timeout) — the
     sweep treats it as a transient skip, not a failure that should block other PRs.
+
+    Sprint PRs are provisioned as drafts (Phase 6.1). GitHub returns 405 with
+    "Pull Request is still a draft" when you try to merge a draft. We detect that
+    specific message, mark the PR ready for review, and retry once. Any other 405
+    is a real conflict / failing CI / branch protection — return it unchanged so
+    the caller can apply its non-mergeable policy.
     """
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+    }
     try:
         resp = httpx.put(
             f"https://api.github.com/repos/{repo_slug}/pulls/{pr_num}/merge",
-            headers={
-                "Authorization": f"token {token}",
-                "Accept": "application/vnd.github+json",
-            },
-            json={"merge_method": "squash"},
-            timeout=30,
+            headers=headers, json={"merge_method": "squash"}, timeout=30,
         )
+        if resp.status_code == 405 and "draft" in resp.text.lower():
+            httpx.patch(
+                f"https://api.github.com/repos/{repo_slug}/pulls/{pr_num}",
+                headers=headers, json={"draft": False}, timeout=15,
+            )
+            resp = httpx.put(
+                f"https://api.github.com/repos/{repo_slug}/pulls/{pr_num}/merge",
+                headers=headers, json={"merge_method": "squash"}, timeout=30,
+            )
         return resp.status_code, resp.text[:200]
     except Exception as e:
         return 0, f"exception: {e}"

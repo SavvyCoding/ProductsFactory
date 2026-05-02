@@ -520,11 +520,27 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
 
         log.info(f"[auto-merge] Merging PR #{pr_number} for feature #{fid}")
         try:
-            resp = httpx.put(
-                f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}/merge",
-                json={"merge_method": "squash", "commit_title": f"feat: auto-merge PR #{pr_number} [ProductFactory]"},
-                headers=gh_headers, timeout=15,
-            )
+            def _attempt_merge():
+                return httpx.put(
+                    f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}/merge",
+                    json={"merge_method": "squash", "commit_title": f"feat: auto-merge PR #{pr_number} [ProductFactory]"},
+                    headers=gh_headers, timeout=15,
+                )
+
+            resp = _attempt_merge()
+
+            # Sprint PRs (Phase 6.1) are provisioned as drafts. GitHub returns 405
+            # "Pull Request is still a draft" — that's NOT a conflict, just a state
+            # we can fix. Mark ready, retry once, then fall through to the regular
+            # 405 handling if the second attempt also fails (real conflict).
+            if resp.status_code == 405 and "draft" in resp.text.lower():
+                log.info(f"[auto-merge] PR #{pr_number} is draft — marking ready and retrying")
+                httpx.patch(
+                    f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}",
+                    json={"draft": False}, headers=gh_headers, timeout=10,
+                )
+                resp = _attempt_merge()
+
             if resp.status_code in (200, 201):
                 log.info(f"[auto-merge] PR #{pr_number} merged successfully")
                 entry.update({"status": "Pushed", "pr_number": None})

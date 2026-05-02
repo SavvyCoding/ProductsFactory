@@ -174,3 +174,55 @@ class TestCheckOpenPrInvariant:
         check_open_pr_invariant({"id": 1, "name": "P"}, 1, alerter=alerter)  # recovered
         check_open_pr_invariant({"id": 1, "name": "P"}, 2, alerter=alerter)  # spike again
         assert len(calls) == 2
+
+
+class TestAutoMergeDraftHandling:
+    """Regression tests for the 405-draft conflation bug.
+
+    Sprint PRs (Phase 6.1) are provisioned as drafts. Pre-fix, the per-cycle
+    auto-merge sweep AND the post-coder _auto_merge_approved both treated 405
+    "draft" the same as 405 "conflict" → closed the PR. After the fix:
+    405-draft → un-draft + retry once; only persistent 405 closes.
+    """
+    def test_sweep_un_drafts_then_merges(self):
+        from orchestrator import auto_merge
+
+        first  = MagicMock(status_code=405, text='{"message": "Pull Request is still a draft"}')
+        second = MagicMock(status_code=200, text='{"merged": true}')
+        un_draft = MagicMock(status_code=200, text="")
+
+        with patch.object(auto_merge.httpx, "put", side_effect=[first, second]) as mock_put, \
+             patch.object(auto_merge.httpx, "patch", return_value=un_draft) as mock_patch:
+            code, _ = auto_merge._try_merge_pr("o/r", 42, "tok")
+        assert code == 200
+        # Two merges (initial + retry)
+        assert mock_put.call_count == 2
+        # One un-draft PATCH between them
+        assert mock_patch.call_count == 1
+        assert mock_patch.call_args.kwargs["json"] == {"draft": False}
+
+    def test_sweep_does_not_retry_on_real_405_conflict(self):
+        from orchestrator import auto_merge
+
+        # 405 without "draft" in body = real merge conflict / failing CI / branch protection
+        conflict = MagicMock(status_code=405, text='{"message": "Pull Request is not mergeable"}')
+
+        with patch.object(auto_merge.httpx, "put", return_value=conflict) as mock_put, \
+             patch.object(auto_merge.httpx, "patch") as mock_patch:
+            code, body = auto_merge._try_merge_pr("o/r", 42, "tok")
+        assert code == 405
+        assert "not mergeable" in body
+        # Single attempt, no un-draft (the caller decides what to do with 405)
+        assert mock_put.call_count == 1
+        assert mock_patch.call_count == 0
+
+    def test_sweep_passes_through_200(self):
+        from orchestrator import auto_merge
+
+        ok = MagicMock(status_code=200, text="merged")
+        with patch.object(auto_merge.httpx, "put", return_value=ok) as mock_put, \
+             patch.object(auto_merge.httpx, "patch") as mock_patch:
+            code, _ = auto_merge._try_merge_pr("o/r", 42, "tok")
+        assert code == 200
+        assert mock_put.call_count == 1
+        assert mock_patch.call_count == 0
