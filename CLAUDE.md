@@ -281,7 +281,7 @@ FastAPI evaluates routes in definition order. The parameterized `GET /api/featur
 - `scripts/recover_db.py` — Restores a database from backup
 - `scripts/test_calculator.py` — End-to-end integration test: creates a greenfield "Calculator" product and runs a full agent cycle (scaffold → discover → coder session → GitHub PR). Use `--dry-run` to stop after scaffolding, `--persona designer` to test other personas.
 - `deploy/docker/test_image.sh` — Smoke test for the agent Docker image; verifies all required tools (git, gh, claude, etc.) are installed. Usage: `bash deploy/docker/test_image.sh [image-tag]`
-- `deploy/docker/startup.sh` — Runs inside the pm-api container before uvicorn; self-heals stale `alembic_version` rows after a volume wipe so migrations can re-run from scratch
+- `deploy/docker/startup.sh` — Runs inside the pm-api container before uvicorn. Sanity-checks DB state (alembic_version presence + core table presence). Refuses to start (exit 2) if alembic_version is populated but all core tables are missing — this used to auto-clear via a "self-heal" that triggered on a single false negative on 2026-05-02 and DROPped the entire schema. Operators must now manually `DELETE FROM alembic_version` to opt into a destructive re-init.
 
 ## Environment Variables
 
