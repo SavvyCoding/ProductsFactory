@@ -203,28 +203,51 @@ class TestAutoMergeDraftHandling:
     "draft" the same as 405 "conflict" → closed the PR. After the fix:
     405-draft → un-draft + retry once; only persistent 405 closes.
     """
-    def test_sweep_un_drafts_then_merges(self):
+    def test_sweep_un_drafts_polls_then_merges(self):
+        """Happy-ish path: 405-draft → un-draft PATCH → poll sees draft cleared
+        on the first poll → retry merge succeeds. The poll loop replaces the
+        old fixed 3s sleep, which wasn't long enough for GitHub eventual
+        consistency (observed in prod: 3s sleep, retry still 405-draft)."""
         from orchestrator import auto_merge
 
-        first  = MagicMock(status_code=405, text='{"message": "Pull Request is still a draft"}')
-        second = MagicMock(status_code=200, text='{"merged": true}')
+        first   = MagicMock(status_code=405, text='{"message": "Pull Request is still a draft"}')
+        second  = MagicMock(status_code=200, text='{"merged": true}')
         un_draft = MagicMock(status_code=200, text="")
+        poll_ready = MagicMock(status_code=200)
+        poll_ready.json.return_value = {"draft": False}
 
         with patch.object(auto_merge.httpx, "put", side_effect=[first, second]) as mock_put, \
              patch.object(auto_merge.httpx, "patch", return_value=un_draft) as mock_patch, \
-             patch("time.sleep") as mock_sleep:
+             patch.object(auto_merge.httpx, "get", return_value=poll_ready) as mock_get, \
+             patch("time.sleep"):
             code, _ = auto_merge._try_merge_pr("o/r", 42, "tok")
         assert code == 200
-        # Two merges (initial + retry)
+        # Two merges (initial 405-draft, then retry after polling)
         assert mock_put.call_count == 2
-        # One un-draft PATCH between them
+        # One un-draft PATCH
         assert mock_patch.call_count == 1
         assert mock_patch.call_args.kwargs["json"] == {"draft": False}
-        # Critical: must sleep between un-draft PATCH and retry merge for
-        # GitHub's mergeable_state to recompute (regression: without this
-        # sleep, the immediate retry still saw the PR as draft and the
-        # caller treated it as conflict → closed PR).
-        mock_sleep.assert_called_with(3)
+        # At least one poll for the draft state
+        assert mock_get.call_count >= 1
+
+    def test_sweep_returns_405_when_draft_never_clears(self):
+        """If polling times out (GitHub still says draft after 15 polls),
+        return 405 unchanged. Caller MUST NOT auto-close on 405-draft —
+        only on 405-not-mergeable (real conflicts)."""
+        from orchestrator import auto_merge
+
+        merge_405 = MagicMock(status_code=405, text='{"message": "Pull Request is still a draft"}')
+        un_draft = MagicMock(status_code=200, text="")
+        poll_still_draft = MagicMock(status_code=200)
+        poll_still_draft.json.return_value = {"draft": True}
+
+        with patch.object(auto_merge.httpx, "put", return_value=merge_405), \
+             patch.object(auto_merge.httpx, "patch", return_value=un_draft), \
+             patch.object(auto_merge.httpx, "get", return_value=poll_still_draft), \
+             patch("time.sleep"):
+            code, body = auto_merge._try_merge_pr("o/r", 42, "tok")
+        assert code == 405
+        assert "draft" in body.lower()
 
     def test_sweep_does_not_retry_on_real_405_conflict(self):
         from orchestrator import auto_merge

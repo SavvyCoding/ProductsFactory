@@ -92,11 +92,21 @@ def _try_merge_pr(repo_slug: str, pr_num: int, token: str) -> tuple[int, str]:
                 f"https://api.github.com/repos/{repo_slug}/pulls/{pr_num}",
                 headers=headers, json={"draft": False}, timeout=15,
             )
-            # GitHub's mergeable_state is eventually consistent — an immediate
-            # retry can still see the PR as draft. Sleep briefly so the next
-            # merge attempt sees the un-drafted state.
+            # GitHub's mergeable_state is eventually consistent. A fixed sleep
+            # isn't enough (observed: PATCH succeeds, 3s wait, retry still sees
+            # draft). POLL the PR until draft actually flips to false, max
+            # ~30s. If polling times out, return the 405 unchanged so the
+            # caller's policy decides — important: caller MUST NOT auto-close
+            # on 405-draft (only on 405-not-mergeable, which is a real conflict).
             import time as _t
-            _t.sleep(3)
+            for _ in range(15):
+                _t.sleep(2)
+                poll = httpx.get(
+                    f"https://api.github.com/repos/{repo_slug}/pulls/{pr_num}",
+                    headers=headers, timeout=10,
+                )
+                if poll.status_code == 200 and poll.json().get("draft") is False:
+                    break
             resp = httpx.put(
                 f"https://api.github.com/repos/{repo_slug}/pulls/{pr_num}/merge",
                 headers=headers, json={"merge_method": "squash"}, timeout=30,
