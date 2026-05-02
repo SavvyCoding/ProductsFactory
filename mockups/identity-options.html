@@ -1,0 +1,1235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ProductFactory — Identity Mockups</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* ============================================================
+     Comparison shell — three vertically stacked identity options
+     applied to the same dashboard content.
+     ============================================================ */
+  *,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Inter', -apple-system, sans-serif;
+    background: #f4f5f7;
+    color: #0a0a0a;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  a { text-decoration: none; color: inherit; }
+  button { font: inherit; cursor: pointer; border: 0; background: none; }
+  ul { list-style: none; }
+
+  .pf-toc {
+    position: fixed;
+    top: 16px; right: 16px;
+    background: rgba(13, 17, 23, 0.95);
+    color: #fff;
+    padding: 12px 14px;
+    border-radius: 10px;
+    z-index: 999;
+    font-size: 12px;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+  }
+  .pf-toc strong { display: block; margin-bottom: 6px; font-weight: 600; }
+  .pf-toc a {
+    display: block; color: #e6edf3; padding: 2px 0; opacity: .8;
+  }
+  .pf-toc a:hover { opacity: 1; }
+  .pf-toc a span { color: #888; margin-right: 6px; }
+
+  .section-label {
+    max-width: 1280px;
+    margin: 64px auto 16px;
+    padding: 0 32px;
+    display: flex; align-items: baseline; gap: 16px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; text-transform: uppercase;
+    letter-spacing: 1.5px; color: #6a737d;
+  }
+  .section-label::before {
+    content: ""; width: 24px; height: 1px; background: #d0d7de;
+  }
+  .section-label .name { color: #0a0a0a; font-weight: 600; }
+  .section-label .desc { color: #888; text-transform: none; letter-spacing: 0; font-family: 'Inter', sans-serif; font-size: 13px; }
+
+  .surface { isolation: isolate; }
+
+  /* ============================================================
+     SHARED: Lucide-ish inline icons (single stroke, 1.5px)
+     ============================================================ */
+  .icon { width: 16px; height: 16px; stroke-width: 1.5; flex-shrink: 0; }
+
+
+  /* ============================================================
+     OPTION A — LINEAR
+       Quiet neutrals, sharp typography, mostly 1px borders,
+       no shadows, monochrome with a single violet accent.
+     ============================================================ */
+  .linear {
+    --bg:        #fafafa;
+    --surface:   #ffffff;
+    --inset:     #f4f4f5;
+    --border:    #e4e4e7;
+    --border-2:  #d4d4d8;
+    --fg:        #18181b;
+    --fg-muted:  #52525b;
+    --fg-subtle: #a1a1aa;
+    --accent:    #5e6ad2;
+    --accent-bg: #eef0fb;
+    --green:     #4cb782;
+    --amber:     #f2c94c;
+    --red:       #eb5757;
+    font-family: 'Inter', sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+  }
+  .linear .nav {
+    position: sticky; top: 0; z-index: 10;
+    height: 48px;
+    display: flex; align-items: center;
+    padding: 0 24px; gap: 8px;
+    background: rgba(250,250,250,0.85);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border);
+  }
+  .linear .logo {
+    width: 22px; height: 22px;
+    background: linear-gradient(135deg, #5e6ad2, #c084fc);
+    border-radius: 6px;
+    margin-right: 8px;
+  }
+  .linear .nav-title { font-weight: 600; font-size: 13px; letter-spacing: -0.2px; }
+  .linear .nav-sep { color: var(--fg-subtle); margin: 0 6px; opacity: .5; }
+  .linear .nav-crumb { font-size: 13px; color: var(--fg-muted); }
+  .linear .nav-actions { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+  .linear .nav-btn {
+    width: 28px; height: 28px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 6px; color: var(--fg-muted);
+  }
+  .linear .nav-btn:hover { background: var(--inset); color: var(--fg); }
+  .linear .nav-cmd {
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border: 1px solid var(--border);
+    background: var(--surface); border-radius: 6px;
+    font-size: 12px; color: var(--fg-subtle);
+  }
+  .linear .nav-cmd kbd {
+    font-family: inherit; font-size: 11px;
+    background: var(--inset); padding: 1px 5px; border-radius: 3px;
+    border: 1px solid var(--border);
+  }
+
+  .linear .page { max-width: 1280px; margin: 0 auto; padding: 28px 32px; }
+  .linear .page-head {
+    display: flex; justify-content: space-between; align-items: flex-end;
+    margin-bottom: 24px;
+  }
+  .linear .page-head h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.4px; }
+  .linear .page-head .sub { font-size: 13px; color: var(--fg-muted); margin-top: 2px; }
+  .linear .btn-primary {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 12px; border-radius: 6px;
+    background: var(--accent); color: white;
+    font-size: 13px; font-weight: 500;
+  }
+  .linear .btn-primary:hover { background: #4f5ac4; }
+
+  .linear .stats {
+    display: grid; grid-template-columns: repeat(5, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden;
+    margin-bottom: 28px;
+  }
+  .linear .stat {
+    background: var(--surface);
+    padding: 14px 16px;
+    cursor: pointer;
+  }
+  .linear .stat:hover { background: var(--inset); }
+  .linear .stat .label {
+    font-size: 11px; color: var(--fg-subtle);
+    text-transform: uppercase; letter-spacing: 0.6px; font-weight: 500;
+  }
+  .linear .stat .value {
+    font-size: 22px; font-weight: 600; margin-top: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+  .linear .stat.active .value { color: var(--accent); }
+  .linear .stat .delta {
+    font-size: 11px; color: var(--fg-subtle); margin-top: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .linear .filter-row {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 16px;
+  }
+  .linear .search-input {
+    flex: 1; max-width: 320px;
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 13px; color: var(--fg-muted);
+  }
+  .linear .filter-chip {
+    padding: 4px 10px; border-radius: 6px;
+    font-size: 12px; font-weight: 500;
+    color: var(--fg-muted); cursor: pointer;
+  }
+  .linear .filter-chip:hover { background: var(--inset); }
+  .linear .filter-chip.active { color: var(--fg); background: var(--inset); }
+  .linear .filter-count {
+    margin-left: 4px; font-variant-numeric: tabular-nums;
+    color: var(--fg-subtle); font-weight: 400;
+  }
+
+  .linear .grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+  }
+  .linear .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    display: flex; flex-direction: column; gap: 12px;
+    transition: border-color .12s, transform .12s;
+  }
+  .linear .card:hover {
+    border-color: var(--border-2);
+    transform: translateY(-1px);
+  }
+  .linear .card-head {
+    display: flex; align-items: center; gap: 8px;
+  }
+  .linear .card-icon {
+    width: 26px; height: 26px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--inset); border-radius: 6px;
+    color: var(--fg-muted);
+  }
+  .linear .card-name {
+    font-size: 14px; font-weight: 600; flex: 1;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .linear .pill {
+    font-size: 11px; font-weight: 500;
+    padding: 2px 8px; border-radius: 12px;
+    display: inline-flex; align-items: center; gap: 4px;
+  }
+  .linear .pill.ready { background: #ecfdf5; color: #047857; }
+  .linear .pill.running { background: #eef0fb; color: var(--accent); }
+  .linear .pill.paused { background: #fef3c7; color: #92400e; }
+  .linear .pill.dot::before {
+    content: ""; width: 6px; height: 6px; border-radius: 50%;
+    background: currentColor;
+  }
+  .linear .pill.running.dot::before { animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+  .linear .stack-row { display: flex; gap: 4px; flex-wrap: wrap; }
+  .linear .stack {
+    font-size: 11px; padding: 1px 6px;
+    background: var(--inset); color: var(--fg-muted);
+    border-radius: 3px; font-family: 'JetBrains Mono', monospace;
+  }
+  .linear .progress {
+    display: flex; height: 4px;
+    background: var(--inset); border-radius: 2px; overflow: hidden;
+  }
+  .linear .progress > * { height: 100%; }
+  .linear .progress .pushed { background: var(--green); }
+  .linear .progress .active-bar { background: var(--accent); }
+  .linear .progress .blocked { background: var(--red); }
+  .linear .progress .pending { background: var(--border-2); }
+  .linear .meta-row {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 12px; color: var(--fg-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+  .linear .meta-row .persona-tag {
+    color: var(--fg-muted);
+    background: var(--inset);
+    padding: 1px 6px; border-radius: 3px;
+    font-size: 11px;
+  }
+
+
+  /* ============================================================
+     OPTION B — VERCEL / GEIST
+       High contrast monochrome, generous whitespace,
+       accent only at decision points, sharp 1px borders.
+     ============================================================ */
+  .vercel {
+    --bg:        #ffffff;
+    --inset:     #fafafa;
+    --border:    #eaeaea;
+    --border-2:  #d4d4d4;
+    --fg:        #000000;
+    --fg-muted:  #666666;
+    --fg-subtle: #999999;
+    --accent:    #0070f3;
+    --green:     #0070f3;
+    --success:   #0070f3;
+    --amber:     #f5a623;
+    --red:       #ee0000;
+    font-family: 'Inter', sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+  }
+  .vercel .nav {
+    position: sticky; top: 0; z-index: 10;
+    height: 60px;
+    display: flex; align-items: center;
+    padding: 0 32px; gap: 16px;
+    background: rgba(255,255,255,0.7);
+    backdrop-filter: blur(12px) saturate(1.4);
+    border-bottom: 1px solid var(--border);
+  }
+  .vercel .logo {
+    width: 24px; height: 24px;
+  }
+  .vercel .logo svg { display: block; }
+  .vercel .nav-title { font-weight: 600; font-size: 14px; }
+  .vercel .nav-sep {
+    color: var(--border); font-size: 22px; font-weight: 200;
+    margin: 0 4px; transform: rotate(15deg);
+  }
+  .vercel .nav-crumb { font-size: 14px; color: var(--fg); font-weight: 500; }
+  .vercel .nav-tabs { display: flex; gap: 0; margin-left: 28px; align-self: stretch; }
+  .vercel .nav-tab {
+    display: flex; align-items: center;
+    padding: 0 12px; font-size: 14px;
+    color: var(--fg-muted);
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .vercel .nav-tab:hover { color: var(--fg); }
+  .vercel .nav-tab.active { color: var(--fg); border-bottom-color: var(--fg); }
+  .vercel .nav-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .vercel .nav-btn {
+    padding: 6px; border-radius: 6px; color: var(--fg-muted);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .vercel .nav-btn:hover { background: var(--inset); color: var(--fg); }
+
+  .vercel .page { max-width: 1200px; margin: 0 auto; padding: 40px 32px; }
+  .vercel .page-head {
+    display: flex; justify-content: space-between; align-items: flex-end;
+    margin-bottom: 32px;
+  }
+  .vercel .page-head h1 {
+    font-size: 32px; font-weight: 600; letter-spacing: -1px;
+  }
+  .vercel .page-head .sub { font-size: 14px; color: var(--fg-muted); margin-top: 6px; }
+  .vercel .btn-primary {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 9px 16px; border-radius: 8px;
+    background: var(--fg); color: white;
+    font-size: 14px; font-weight: 500;
+    transition: opacity .12s;
+  }
+  .vercel .btn-primary:hover { opacity: .85; }
+  .vercel .btn-secondary {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 8px 14px; border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg); color: var(--fg);
+    font-size: 14px; font-weight: 500;
+  }
+  .vercel .btn-secondary:hover { border-color: var(--border-2); background: var(--inset); }
+
+  .vercel .stats {
+    display: grid; grid-template-columns: repeat(5, 1fr);
+    gap: 16px;
+    margin-bottom: 40px;
+  }
+  .vercel .stat {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    cursor: pointer;
+    transition: border-color .12s, transform .12s;
+  }
+  .vercel .stat:hover { border-color: var(--border-2); }
+  .vercel .stat .label {
+    font-size: 13px; color: var(--fg-muted); font-weight: 500;
+  }
+  .vercel .stat .value {
+    font-size: 32px; font-weight: 600; letter-spacing: -1px;
+    margin-top: 8px;
+    font-variant-numeric: tabular-nums;
+  }
+  .vercel .stat .meta {
+    font-size: 12px; color: var(--fg-subtle); margin-top: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+  .vercel .stat.active { border-color: var(--fg); }
+
+  .vercel .filter-row {
+    display: flex; align-items: center; gap: 12px; margin-bottom: 20px;
+  }
+  .vercel .search-input {
+    flex: 1; max-width: 360px;
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px;
+    border: 1px solid var(--border); border-radius: 8px;
+    font-size: 14px; color: var(--fg-subtle);
+  }
+  .vercel .filter-tab {
+    padding: 6px 12px; border-radius: 8px;
+    font-size: 13px; font-weight: 500; color: var(--fg-muted);
+    border: 1px solid transparent;
+  }
+  .vercel .filter-tab:hover { color: var(--fg); }
+  .vercel .filter-tab.active {
+    color: var(--fg);
+    background: var(--bg);
+    border-color: var(--border);
+  }
+
+  .vercel .grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+  }
+  .vercel .card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    display: flex; flex-direction: column; gap: 16px;
+    transition: border-color .12s, transform .12s;
+  }
+  .vercel .card:hover {
+    border-color: var(--fg);
+  }
+  .vercel .card-head {
+    display: flex; align-items: center; gap: 12px;
+  }
+  .vercel .card-mark {
+    width: 32px; height: 32px;
+    background: var(--fg);
+    color: white;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 8px; font-size: 14px; font-weight: 600;
+  }
+  .vercel .card-name {
+    font-size: 16px; font-weight: 600; flex: 1; letter-spacing: -0.3px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .vercel .pill {
+    font-size: 11px; font-weight: 600;
+    padding: 3px 8px; border-radius: 6px;
+    text-transform: uppercase; letter-spacing: 0.4px;
+    display: inline-flex; align-items: center; gap: 4px;
+  }
+  .vercel .pill.ready { background: #f0fdf4; color: #166534; }
+  .vercel .pill.running { background: #eff6ff; color: #1e40af; }
+  .vercel .pill.paused { background: #fffbeb; color: #92400e; }
+  .vercel .pill.dot::before {
+    content: ""; width: 6px; height: 6px; border-radius: 50%;
+    background: currentColor;
+  }
+
+  .vercel .stack-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .vercel .stack {
+    font-size: 12px; padding: 2px 8px;
+    background: var(--inset); color: var(--fg-muted);
+    border-radius: 6px; font-family: 'JetBrains Mono', monospace;
+  }
+  .vercel .progress {
+    display: flex; height: 6px;
+    background: var(--inset); border-radius: 3px; overflow: hidden;
+  }
+  .vercel .progress > * { height: 100%; }
+  .vercel .progress .pushed { background: var(--fg); }
+  .vercel .progress .active-bar { background: var(--accent); }
+  .vercel .progress .blocked { background: var(--red); }
+  .vercel .progress .pending { background: var(--border-2); }
+
+  .vercel .meta-row {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 13px; color: var(--fg-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .vercel .meta-row .ts { color: var(--fg-subtle); }
+
+
+  /* ============================================================
+     OPTION C — STRIPE
+       Soft gradients, generous spacing, layered shadows for depth,
+       indigo + warm accents, friendly density.
+     ============================================================ */
+  .stripe {
+    --bg:        #f6f9fc;
+    --surface:   #ffffff;
+    --inset:     #f6f9fc;
+    --border:    #e3e8ee;
+    --border-2:  #c1c9d2;
+    --fg:        #0a2540;
+    --fg-muted:  #425466;
+    --fg-subtle: #697386;
+    --indigo:    #635bff;
+    --indigo-2:  #5851e6;
+    --teal:      #00d4ff;
+    --green:     #1fb27a;
+    --amber:     #ffb547;
+    --red:       #ff5c5c;
+    font-family: 'Inter', sans-serif;
+    color: var(--fg);
+    background:
+      radial-gradient(ellipse 80% 40% at 50% -10%, rgba(99,91,255,0.08) 0%, transparent 70%),
+      var(--bg);
+  }
+  .stripe .nav {
+    position: sticky; top: 0; z-index: 10;
+    height: 64px;
+    display: flex; align-items: center;
+    padding: 0 32px; gap: 16px;
+    background: rgba(255,255,255,0.85);
+    backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--border);
+  }
+  .stripe .logo {
+    width: 28px; height: 28px;
+    background: linear-gradient(135deg, var(--indigo) 0%, var(--teal) 100%);
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(99,91,255,0.35);
+  }
+  .stripe .nav-title { font-weight: 700; font-size: 16px; letter-spacing: -0.3px; }
+  .stripe .nav-tabs { display: flex; gap: 4px; margin-left: 32px; }
+  .stripe .nav-tab {
+    padding: 8px 14px; border-radius: 8px;
+    font-size: 14px; font-weight: 500;
+    color: var(--fg-muted);
+  }
+  .stripe .nav-tab:hover { color: var(--fg); background: var(--inset); }
+  .stripe .nav-tab.active {
+    color: var(--indigo);
+    background: rgba(99,91,255,0.08);
+  }
+  .stripe .nav-actions { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+  .stripe .nav-btn {
+    width: 36px; height: 36px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--fg-muted);
+    transition: background .12s, color .12s;
+  }
+  .stripe .nav-btn:hover { background: var(--inset); color: var(--indigo); }
+  .stripe .avatar {
+    width: 32px; height: 32px;
+    background: linear-gradient(135deg, var(--indigo), var(--teal));
+    color: white;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 50%;
+    font-size: 13px; font-weight: 600;
+    box-shadow: 0 2px 8px rgba(99,91,255,0.25);
+  }
+
+  .stripe .page { max-width: 1280px; margin: 0 auto; padding: 48px 32px; }
+  .stripe .page-head {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    margin-bottom: 36px;
+  }
+  .stripe .page-head h1 {
+    font-size: 28px; font-weight: 700; letter-spacing: -0.6px;
+  }
+  .stripe .page-head .sub { font-size: 15px; color: var(--fg-muted); margin-top: 4px; }
+  .stripe .btn-primary {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 10px 18px; border-radius: 8px;
+    background: linear-gradient(180deg, var(--indigo), var(--indigo-2));
+    color: white; font-size: 14px; font-weight: 600;
+    box-shadow:
+      0 1px 0 rgba(255,255,255,0.2) inset,
+      0 1px 2px rgba(0,0,0,0.08),
+      0 4px 14px rgba(99,91,255,0.35);
+    transition: transform .12s, box-shadow .12s;
+  }
+  .stripe .btn-primary:hover {
+    transform: translateY(-1px);
+    box-shadow:
+      0 1px 0 rgba(255,255,255,0.2) inset,
+      0 2px 4px rgba(0,0,0,0.1),
+      0 6px 18px rgba(99,91,255,0.45);
+  }
+
+  .stripe .stats {
+    display: grid; grid-template-columns: repeat(5, 1fr);
+    gap: 16px;
+    margin-bottom: 40px;
+  }
+  .stripe .stat {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 22px;
+    cursor: pointer;
+    box-shadow: 0 1px 1px rgba(0,0,0,0.02), 0 2px 8px rgba(10,37,64,0.04);
+    transition: transform .12s, box-shadow .12s;
+  }
+  .stripe .stat:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 2px 4px rgba(0,0,0,0.04), 0 8px 20px rgba(10,37,64,0.08);
+  }
+  .stripe .stat .label {
+    font-size: 12px; color: var(--fg-subtle);
+    font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.6px;
+  }
+  .stripe .stat .value {
+    font-size: 28px; font-weight: 700;
+    margin-top: 8px; letter-spacing: -0.5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .stripe .stat .delta {
+    font-size: 12px; color: var(--green);
+    margin-top: 2px;
+    display: inline-flex; align-items: center; gap: 3px;
+  }
+  .stripe .stat.active {
+    background: linear-gradient(180deg, var(--surface), rgba(99,91,255,0.04));
+    border-color: rgba(99,91,255,0.3);
+  }
+  .stripe .stat.active .value { color: var(--indigo); }
+
+  .stripe .filter-row {
+    display: flex; align-items: center; gap: 12px; margin-bottom: 24px;
+  }
+  .stripe .search-input {
+    flex: 1; max-width: 360px;
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border); border-radius: 10px;
+    font-size: 14px; color: var(--fg-subtle);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.02);
+  }
+  .stripe .filter-chip {
+    padding: 7px 14px; border-radius: 999px;
+    font-size: 13px; font-weight: 500;
+    color: var(--fg-muted);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: all .12s;
+  }
+  .stripe .filter-chip:hover { border-color: var(--border-2); }
+  .stripe .filter-chip.active {
+    background: var(--indigo); color: white;
+    border-color: var(--indigo);
+    box-shadow: 0 2px 8px rgba(99,91,255,0.3);
+  }
+
+  .stripe .grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px;
+  }
+  .stripe .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 22px;
+    display: flex; flex-direction: column; gap: 14px;
+    box-shadow: 0 1px 1px rgba(0,0,0,0.02), 0 2px 8px rgba(10,37,64,0.04);
+    transition: transform .14s, box-shadow .14s;
+    position: relative;
+    overflow: hidden;
+  }
+  .stripe .card::before {
+    content: "";
+    position: absolute; top: 0; left: 0; right: 0; height: 3px;
+    background: linear-gradient(90deg, var(--indigo), var(--teal));
+    opacity: 0; transition: opacity .14s;
+  }
+  .stripe .card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.04), 0 12px 32px rgba(10,37,64,0.1);
+  }
+  .stripe .card:hover::before { opacity: 1; }
+
+  .stripe .card-head {
+    display: flex; align-items: center; gap: 12px;
+  }
+  .stripe .card-mark {
+    width: 36px; height: 36px;
+    background: linear-gradient(135deg, var(--indigo), var(--teal));
+    color: white;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 10px;
+    font-size: 14px; font-weight: 600;
+    box-shadow: 0 2px 6px rgba(99,91,255,0.25);
+  }
+  .stripe .card-mark.brown {
+    background: linear-gradient(135deg, #ff8a4c, #ff5c5c);
+    box-shadow: 0 2px 6px rgba(255,138,76,0.3);
+  }
+  .stripe .card-name {
+    font-size: 15px; font-weight: 600; flex: 1; letter-spacing: -0.2px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .stripe .pill {
+    font-size: 11px; font-weight: 600;
+    padding: 3px 9px; border-radius: 999px;
+    display: inline-flex; align-items: center; gap: 5px;
+  }
+  .stripe .pill.ready { background: #ecfdf5; color: #047857; }
+  .stripe .pill.running { background: rgba(99,91,255,0.12); color: var(--indigo); }
+  .stripe .pill.paused { background: #fffbeb; color: #b45309; }
+  .stripe .pill.dot::before {
+    content: ""; width: 6px; height: 6px; border-radius: 50%;
+    background: currentColor;
+  }
+  .stripe .pill.running.dot::before { animation: pulse 1.6s ease-in-out infinite; }
+
+  .stripe .stack-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .stripe .stack {
+    font-size: 11px; padding: 2px 8px;
+    background: var(--inset); color: var(--fg-muted);
+    border-radius: 6px; font-family: 'JetBrains Mono', monospace;
+    border: 1px solid var(--border);
+  }
+  .stripe .progress {
+    display: flex; height: 6px;
+    background: var(--inset); border-radius: 3px; overflow: hidden;
+  }
+  .stripe .progress > * { height: 100%; }
+  .stripe .progress .pushed { background: linear-gradient(90deg, var(--green), #1fb27a); }
+  .stripe .progress .active-bar { background: linear-gradient(90deg, var(--indigo), var(--teal)); }
+  .stripe .progress .blocked { background: var(--red); }
+  .stripe .progress .pending { background: var(--border-2); }
+
+  .stripe .meta-row {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 12px; color: var(--fg-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+  .stripe .persona-tag {
+    color: var(--indigo);
+    background: rgba(99,91,255,0.08);
+    padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 500;
+  }
+
+
+  /* ============================================================
+     Footer note
+     ============================================================ */
+  .footer-note {
+    max-width: 1280px;
+    margin: 80px auto 60px;
+    padding: 0 32px;
+    color: #888; font-size: 13px;
+  }
+</style>
+</head>
+<body>
+
+<!-- ============================================================
+     TOC
+     ============================================================ -->
+<nav class="pf-toc">
+  <strong>Identity options</strong>
+  <a href="#linear"><span>A</span>Linear</a>
+  <a href="#vercel"><span>B</span>Vercel / Geist</a>
+  <a href="#stripe"><span>C</span>Stripe</a>
+</nav>
+
+<!-- ============================================================
+     INTRO
+     ============================================================ -->
+<div style="max-width:1280px;margin:48px auto 0;padding:0 32px;">
+  <p style="font-family:'JetBrains Mono',monospace;font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:#888;margin-bottom:8px">ProductFactory · UI Identity Comparison</p>
+  <h1 style="font-size:36px;font-weight:700;letter-spacing:-1px;margin-bottom:12px">Three directions, same dashboard</h1>
+  <p style="font-size:16px;color:#666;max-width:680px;line-height:1.55">
+    The same Products dashboard rendered in three identity systems. Same data, same hierarchy, same actions —
+    only the design language changes. Look at type, density, color usage, motion cues, depth.
+  </p>
+</div>
+
+
+<!-- ============================================================
+     OPTION A — LINEAR
+     ============================================================ -->
+<div class="section-label" id="linear">
+  <span class="name">Option A · Linear</span>
+  <span class="desc">Quiet neutrals, sharp typography, 1px borders, almost no shadows. Monochrome with one violet accent. Fastest to scan.</span>
+</div>
+
+<div class="surface linear">
+  <header class="nav">
+    <div class="logo"></div>
+    <span class="nav-title">ProductFactory</span>
+    <span class="nav-sep">/</span>
+    <span class="nav-crumb">Products</span>
+    <div class="nav-actions">
+      <span class="nav-cmd">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        Search...
+        <kbd>⌘K</kbd>
+      </span>
+      <button class="nav-btn" title="Notifications">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+      </button>
+      <button class="nav-btn" title="Theme">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+      <button class="nav-btn" title="Profile">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="8" r="4"/><path d="M6 21v-1a6 6 0 0 1 12 0v1"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="page">
+    <div class="page-head">
+      <div>
+        <h1>Products</h1>
+        <p class="sub">12 products · 3 sprinting · 47 features in flight</p>
+      </div>
+      <button class="btn-primary">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+        New product
+      </button>
+    </div>
+
+    <div class="stats">
+      <div class="stat active">
+        <div class="label">All</div>
+        <div class="value">12</div>
+        <div class="delta">+2 this week</div>
+      </div>
+      <div class="stat">
+        <div class="label">Ready</div>
+        <div class="value">8</div>
+        <div class="delta">66%</div>
+      </div>
+      <div class="stat">
+        <div class="label">Sprinting</div>
+        <div class="value">3</div>
+        <div class="delta">2 due Fri</div>
+      </div>
+      <div class="stat">
+        <div class="label">Paused</div>
+        <div class="value">1</div>
+        <div class="delta">—</div>
+      </div>
+      <div class="stat">
+        <div class="label">Greenfield</div>
+        <div class="value">5</div>
+        <div class="delta">42%</div>
+      </div>
+    </div>
+
+    <div class="filter-row">
+      <div class="search-input">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        Search products...
+      </div>
+      <span class="filter-chip active">All <span class="filter-count">12</span></span>
+      <span class="filter-chip">Ready <span class="filter-count">8</span></span>
+      <span class="filter-chip">Paused <span class="filter-count">1</span></span>
+      <span class="filter-chip">Greenfield <span class="filter-count">5</span></span>
+      <span class="filter-chip">Brownfield <span class="filter-count">7</span></span>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="card-head">
+          <div class="card-icon">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12h8M12 8v8"/></svg>
+          </div>
+          <div class="card-name">Calculator</div>
+          <span class="pill running dot">Running</span>
+        </div>
+        <div class="stack-row">
+          <span class="stack">python</span>
+          <span class="stack">flask</span>
+          <span class="stack">postgres</span>
+        </div>
+        <div class="progress">
+          <div class="pushed" style="flex:6"></div>
+          <div class="active-bar" style="flex:2"></div>
+          <div class="pending" style="flex:1"></div>
+        </div>
+        <div class="meta-row">
+          <span>6/9 shipped · 2 in flight</span>
+          <span class="persona-tag">reviewer</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div class="card-icon">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+          </div>
+          <div class="card-name">Personal Site</div>
+          <span class="pill ready">Ready</span>
+        </div>
+        <div class="stack-row">
+          <span class="stack">nextjs</span>
+          <span class="stack">tailwind</span>
+        </div>
+        <div class="progress">
+          <div class="pushed" style="flex:9"></div>
+          <div class="pending" style="flex:1"></div>
+        </div>
+        <div class="meta-row">
+          <span>9/10 shipped</span>
+          <span>2h ago</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div class="card-icon">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+          </div>
+          <div class="card-name">DocFinder</div>
+          <span class="pill paused">Paused</span>
+        </div>
+        <div class="stack-row">
+          <span class="stack">go</span>
+          <span class="stack">redis</span>
+        </div>
+        <div class="progress">
+          <div class="pushed" style="flex:3"></div>
+          <div class="active-bar" style="flex:1"></div>
+          <div class="blocked" style="flex:1"></div>
+          <div class="pending" style="flex:5"></div>
+        </div>
+        <div class="meta-row">
+          <span>3/10 shipped · 1 blocked</span>
+          <span>5d ago</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ============================================================
+     OPTION B — VERCEL / GEIST
+     ============================================================ -->
+<div class="section-label" id="vercel">
+  <span class="name">Option B · Vercel / Geist</span>
+  <span class="desc">High-contrast monochrome. Big spacing, tabs in nav, accent only at decision points. Most "premium" feel.</span>
+</div>
+
+<div class="surface vercel">
+  <header class="nav">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="black"><polygon points="12,1 23,22 1,22"/></svg>
+    </div>
+    <span class="nav-title">ProductFactory</span>
+    <span class="nav-sep">/</span>
+    <span class="nav-crumb">digvijay's workspace</span>
+    <div class="nav-tabs">
+      <a class="nav-tab active">Overview</a>
+      <a class="nav-tab">Activity</a>
+      <a class="nav-tab">Sprints</a>
+      <a class="nav-tab">Settings</a>
+    </div>
+    <div class="nav-actions">
+      <button class="nav-btn">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+      </button>
+      <button class="btn-secondary">Feedback</button>
+      <button class="nav-btn" style="width:32px;height:32px;background:linear-gradient(135deg,#000,#444);color:white;border-radius:50%">D</button>
+    </div>
+  </header>
+
+  <div class="page">
+    <div class="page-head">
+      <div>
+        <h1>Products</h1>
+        <p class="sub">Manage and monitor your autonomous development pipeline.</p>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn-secondary">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 5v14M5 12h14"/></svg>
+          Import Repo
+        </button>
+        <button class="btn-primary">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 5v14M5 12h14"/></svg>
+          New Product
+        </button>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat active">
+        <div class="label">All Products</div>
+        <div class="value">12</div>
+        <div class="meta">+2 since last week</div>
+      </div>
+      <div class="stat">
+        <div class="label">Ready</div>
+        <div class="value">8</div>
+        <div class="meta">66% of total</div>
+      </div>
+      <div class="stat">
+        <div class="label">Sprinting</div>
+        <div class="value">3</div>
+        <div class="meta">2 due Friday</div>
+      </div>
+      <div class="stat">
+        <div class="label">Paused</div>
+        <div class="value">1</div>
+        <div class="meta">DocFinder</div>
+      </div>
+      <div class="stat">
+        <div class="label">Greenfield</div>
+        <div class="value">5</div>
+        <div class="meta">42% of total</div>
+      </div>
+    </div>
+
+    <div class="filter-row">
+      <div class="search-input">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        Search...
+      </div>
+      <a class="filter-tab active">All</a>
+      <a class="filter-tab">Ready</a>
+      <a class="filter-tab">Paused</a>
+      <a class="filter-tab">Greenfield</a>
+      <a class="filter-tab">Brownfield</a>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="card-head">
+          <div class="card-mark">Ca</div>
+          <div class="card-name">Calculator</div>
+          <span class="pill running dot">Running</span>
+        </div>
+        <div class="stack-row">
+          <span class="stack">python</span>
+          <span class="stack">flask</span>
+          <span class="stack">postgres</span>
+        </div>
+        <div class="progress">
+          <div class="pushed" style="flex:6"></div>
+          <div class="active-bar" style="flex:2"></div>
+          <div class="pending" style="flex:1"></div>
+        </div>
+        <div class="meta-row">
+          <span>6 of 9 shipped</span>
+          <span class="ts">reviewer · 5m ago</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div class="card-mark">Ps</div>
+          <div class="card-name">Personal Site</div>
+          <span class="pill ready">Ready</span>
+        </div>
+        <div class="stack-row">
+          <span class="stack">nextjs</span>
+          <span class="stack">tailwind</span>
+        </div>
+        <div class="progress">
+          <div class="pushed" style="flex:9"></div>
+          <div class="pending" style="flex:1"></div>
+        </div>
+        <div class="meta-row">
+          <span>9 of 10 shipped</span>
+          <span class="ts">2h ago</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div class="card-mark">Df</div>
+          <div class="card-name">DocFinder</div>
+          <span class="pill paused">Paused</span>
+        </div>
+        <div class="stack-row">
+          <span class="stack">go</span>
+          <span class="stack">redis</span>
+        </div>
+        <div class="progress">
+          <div class="pushed" style="flex:3"></div>
+          <div class="active-bar" style="flex:1"></div>
+          <div class="blocked" style="flex:1"></div>
+          <div class="pending" style="flex:5"></div>
+        </div>
+        <div class="meta-row">
+          <span>3 of 10 · 1 blocked</span>
+          <span class="ts">5d ago</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ============================================================
+     OPTION C — STRIPE
+     ============================================================ -->
+<div class="section-label" id="stripe">
+  <span class="name">Option C · Stripe</span>
+  <span class="desc">Soft gradients, layered shadows for depth, indigo/teal accent, generous spacing. Friendliest, most "consumer" feel.</span>
+</div>
+
+<div class="surface stripe">
+  <header class="nav">
+    <div class="logo"></div>
+    <span class="nav-title">ProductFactory</span>
+    <div class="nav-tabs">
+      <a class="nav-tab active">Products</a>
+      <a class="nav-tab">Sprints</a>
+      <a class="nav-tab">Activity</a>
+      <a class="nav-tab">Reports</a>
+    </div>
+    <div class="nav-actions">
+      <button class="nav-btn">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+      </button>
+      <button class="nav-btn">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+      </button>
+      <div class="avatar">D</div>
+    </div>
+  </header>
+
+  <div class="page">
+    <div class="page-head">
+      <div>
+        <h1>Products</h1>
+        <p class="sub">Your autonomous development pipeline · 12 products in flight</p>
+      </div>
+      <button class="btn-primary">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+        Add product
+      </button>
+    </div>
+
+    <div class="stats">
+      <div class="stat active">
+        <div class="label">Total</div>
+        <div class="value">12</div>
+        <div class="delta">↑ 2 this week</div>
+      </div>
+      <div class="stat">
+        <div class="label">Ready</div>
+        <div class="value">8</div>
+        <div class="delta">66% healthy</div>
+      </div>
+      <div class="stat">
+        <div class="label">Sprinting</div>
+        <div class="value">3</div>
+        <div class="delta">2 due Fri</div>
+      </div>
+      <div class="stat">
+        <div class="label">Paused</div>
+        <div class="value">1</div>
+        <div class="delta" style="color:#697386">—</div>
+      </div>
+      <div class="stat">
+        <div class="label">Greenfield</div>
+        <div class="value">5</div>
+        <div class="delta">↑ 1 this week</div>
+      </div>
+    </div>
+
+    <div class="filter-row">
+      <div class="search-input">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        Search products...
+      </div>
+      <span class="filter-chip active">All</span>
+      <span class="filter-chip">Ready</span>
+      <span class="filter-chip">Paused</span>
+      <span class="filter-chip">Greenfield</span>
+      <span class="filter-chip">Brownfield</span>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="card-head">
+          <div class="card-mark">Ca</div>
+          <div class="card-name">Calculator</div>
+          <span class="pill running dot">Running</span>
+        </div>
+        <div class="stack-row">
+          <span class="stack">python</span>
+          <span class="stack">flask</span>
+          <span class="stack">postgres</span>
+        </div>
+        <div class="progress">
+          <div class="pushed" style="flex:6"></div>
+          <div class="active-bar" style="flex:2"></div>
+          <div class="pending" style="flex:1"></div>
+        </div>
+        <div class="meta-row">
+          <span>6 of 9 shipped · 2 in flight</span>
+          <span class="persona-tag">reviewer</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div class="card-mark">Ps</div>
+          <div class="card-name">Personal Site</div>
+          <span class="pill ready">Ready</span>
+        </div>
+        <div class="stack-row">
+          <span class="stack">nextjs</span>
+          <span class="stack">tailwind</span>
+        </div>
+        <div class="progress">
+          <div class="pushed" style="flex:9"></div>
+          <div class="pending" style="flex:1"></div>
+        </div>
+        <div class="meta-row">
+          <span>9 of 10 shipped</span>
+          <span>2h ago</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div class="card-mark brown">Df</div>
+          <div class="card-name">DocFinder</div>
+          <span class="pill paused">Paused</span>
+        </div>
+        <div class="stack-row">
+          <span class="stack">go</span>
+          <span class="stack">redis</span>
+        </div>
+        <div class="progress">
+          <div class="pushed" style="flex:3"></div>
+          <div class="active-bar" style="flex:1"></div>
+          <div class="blocked" style="flex:1"></div>
+          <div class="pending" style="flex:5"></div>
+        </div>
+        <div class="meta-row">
+          <span>3 of 10 · 1 blocked</span>
+          <span>5d ago</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ============================================================
+     FOOTER
+     ============================================================ -->
+<p class="footer-note">
+  Same content, three identities. None of this touches the live website — the file lives at <code>mockups/identity-options.html</code>.
+  Open it in a browser, scroll, then tell me which direction (or which mix) to base the overhaul on.
+</p>
+
+</body>
+</html>
