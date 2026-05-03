@@ -355,11 +355,64 @@ def dispatch_tool(name: str, args: dict) -> tuple[str, bool]:
     URLs) never enter the LLM's conversation context. write_file's return is
     just a status string we generated ourselves, so it doesn't need redaction.
     """
+    # Read-only persona guard: reviewer / qa_tester / security_auditor must NOT
+    # write code or commit to git. Their job is to look at existing artifacts
+    # (diffs, tests, code) and PATCH the PM API with verdicts. The Ollama
+    # qwen3-coder backend has heavy bias toward "fix the problem by writing
+    # code" regardless of persona prompt — model would happily restore
+    # missing functions, rewrite main.py to satisfy failing tests, etc.,
+    # turning reviewer/qa/security sessions into amateur coder runs that
+    # waste turns and produce unreviewed code on the PR branch.
+    #
+    # Hard guard: refuse write_file unconditionally for these personas, and
+    # filter mutating bash commands (git commit, git add, sed -i, awk -i,
+    # tee >>, redirect to file). Read-only bash (ls, cat, grep, pytest,
+    # gh pr view, gh pr review) still works.
+    _READONLY_PERSONAS = {"reviewer", "qa_tester", "security_auditor"}
+    _MUTATING_BASH_PATTERNS = (
+        "git commit", "git add", "git push", "git rebase", "git merge",
+        "git reset", "git checkout -b", "git tag",
+        "sed -i", "awk -i",
+    )
+
     if name == "bash":
-        return _redact_secrets(tool_bash(args.get("command", ""), args.get("cwd", "/workspace"))), False
+        cmd = args.get("command", "")
+        if AGENT_PERSONA in _READONLY_PERSONAS:
+            cmd_lc = cmd.lower()
+            for pat in _MUTATING_BASH_PATTERNS:
+                if pat in cmd_lc:
+                    _log(f"REFUSING mutating bash for {AGENT_PERSONA} persona: {pat!r} in command")
+                    return (
+                        f"REJECTED: persona={AGENT_PERSONA} is read-only — bash commands "
+                        f"that mutate the working tree or git history are not allowed (saw "
+                        f"{pat!r} in your command). Your job is to READ artifacts and decide. "
+                        f"If the code is broken, request changes via the PM API — do NOT "
+                        f"fix it yourself. Use task_done with summary starting 'blocked:' if "
+                        f"you genuinely cannot proceed."
+                    ), False
+            # Crude redirect-to-file check ("foo > bar" or ">> bar"). Allow
+            # heredoc-style "<<" since those are read patterns. Allow stderr
+            # redirects "2>" which are diagnostic. Block plain ">" or ">>" to
+            # any path under /workspace/.
+            if (" > " in cmd or " >> " in cmd) and "/workspace/" in cmd:
+                _log(f"REFUSING file-redirect bash for {AGENT_PERSONA} persona")
+                return (
+                    f"REJECTED: persona={AGENT_PERSONA} is read-only — can't redirect "
+                    f"output into files under /workspace/. Read and decide."
+                ), False
+        return _redact_secrets(tool_bash(cmd, args.get("cwd", "/workspace"))), False
     elif name == "read_file":
         return _redact_secrets(tool_read_file(args.get("path", ""), args.get("max_lines", 500))), False
     elif name == "write_file":
+        if AGENT_PERSONA in _READONLY_PERSONAS:
+            _log(f"REFUSING write_file for {AGENT_PERSONA} persona")
+            return (
+                f"REJECTED: persona={AGENT_PERSONA} is read-only — cannot write files. "
+                f"Your role is to review/test/audit and decide approve vs request-changes. "
+                f"If the code needs changes, post a review via gh pr review --request-changes "
+                f"and PATCH the feature to status=Implementing — do NOT modify files. Use "
+                f"task_done with summary starting 'blocked:' if you genuinely cannot proceed."
+            ), False
         return tool_write_file(args.get("path", ""), args.get("content", "")), False
     elif name == "http_request":
         return _redact_secrets(tool_http_request(
