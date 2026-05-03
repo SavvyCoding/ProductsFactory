@@ -316,11 +316,13 @@ _CFG_DEFAULTS = {
     "ollama_api_key":   "",   # required for Ollama Cloud, ignored for local
     "designer_model":   "gemma3:27b",
     "coder_model":      "qwen3-coder:30b",
+    "ollama_model_map": {},
     "ollama_timeout":   300,
     "bash_timeout":     180,
     "max_turns":        80,
     # Claude profile
     "claude_model":           "claude-sonnet-4-6",
+    "claude_model_map":       {},
     "claude_credentials_dir": "C:/Users/digvi/.claude",
     "ssh_keys_dir":           "",
 }
