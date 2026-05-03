@@ -541,21 +541,29 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
                     gh_msg = resp.text[:120]
                 log.warning(f"[auto-merge] GitHub {resp.status_code} for PR #{pr_number}: {gh_msg}")
                 if resp.status_code == 405 or "not mergeable" in gh_msg.lower():
-                    # Conflicts — close PR and re-queue
-                    httpx.patch(
-                        f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}",
-                        json={"state": "closed"}, headers=gh_headers, timeout=10,
-                    )
+                    # Conflicts — re-queue the feature for the coder to rebase.
+                    # Keep pr_number set and add a review comment to the PR
+                    # explaining the bounce; the coder's rework path (Fix #2 in
+                    # _run_post_coder_pipeline) will detect the existing PR and
+                    # force-push fresh main-based commits to its branch.
+                    # IMPORTANT: review_outcome must be "changes_requested" so
+                    # the dispatcher's codeable check matches and the next coder
+                    # cycle picks this feature up immediately. Setting it to
+                    # None would leave the feature in in_agent_stuck for ~45min
+                    # until reset_stuck nudged it.
                     httpx.post(
                         f"https://api.github.com/repos/{repo_slug}/issues/{pr_number}/comments",
-                        json={"body": "Closing due to merge conflicts — ProductFactory will rebase and reopen."},
+                        json={"body": (
+                            f"Auto-merge bounced ({resp.status_code}, {gh_msg}). "
+                            f"Re-queuing feature(s) {fid} for coder rebase. The PR "
+                            f"is left open — the coder will force-push fresh commits."
+                        )},
                         headers=gh_headers, timeout=10,
                     )
                     entry.update({
                         "status": "Implementing",
-                        "pr_number": None,
-                        "review_outcome": None,
-                        "review_notes": f"Merge failed: conflicts (GitHub {resp.status_code}). Coder must rebase.",
+                        "review_outcome": "changes_requested",
+                        "review_notes": f"Merge failed: conflicts (GitHub {resp.status_code}). Coder must rebase main.",
                     })
         except Exception as e:
             log.warning(f"[auto-merge] Error merging PR #{pr_number}: {e}")
@@ -778,6 +786,10 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     # there's exactly one PR per sprint (no fan-out, no orphan PRs). The branch
     # and PR were provisioned by the website's _maybe_provision_sprint_pr at
     # sprint activation; we just check it out and push commits.
+    # Rework mode (NEW): when all assigned features point at the same existing
+    # open PR (set by a prior coder cycle that got changes_requested), push to
+    # that PR's head branch instead of cutting a new one. Eliminates the PR
+    # fan-out we observed today (PRs 163/164/165 all covering same features).
     # Per-feature mode (default): cut a fresh `coder/<session_uid>` branch and
     # later open a new PR for it.
     feat_ids = [f["id"] for f in assigned_features]
@@ -792,6 +804,49 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                 f"(branch={sprint_branch!r} pr={sprint_pr_num!r}) — falling back to per-feature mode"
             )
             sprint_pr_mode = False
+
+    rework_pr_mode = False
+    rework_pr_number: int | None = None
+    rework_branch_name: str = ""
+    rework_pr_url: str = ""
+    if not sprint_pr_mode:
+        existing_prs = {f.get("pr_number") for f in assigned_features
+                        if isinstance(f.get("pr_number"), int)}
+        if len(existing_prs) == 1:
+            candidate = next(iter(existing_prs))
+            gh_token_for_lookup = _get_gh_token()
+            github_repo = product.get("github_repo", "")
+            if gh_token_for_lookup and github_repo and candidate:
+                try:
+                    repo_slug = _parse_repo_slug(github_repo)
+                    pr_resp = httpx.get(
+                        f"https://api.github.com/repos/{repo_slug}/pulls/{candidate}",
+                        headers={
+                            "Authorization": f"Bearer {gh_token_for_lookup}",
+                            "Accept": "application/vnd.github+json",
+                        },
+                        timeout=10,
+                    )
+                    if pr_resp.status_code == 200:
+                        pr_data = pr_resp.json()
+                        if isinstance(pr_data, dict) and pr_data.get("state") == "open":
+                            rework_pr_mode = True
+                            rework_pr_number = candidate
+                            rework_branch_name = (pr_data.get("head") or {}).get("ref") or ""
+                            rework_pr_url = pr_data.get("html_url") or ""
+                            log.info(
+                                f"[post-coder] {pname}: rework mode — features {feat_ids} "
+                                f"all point at open PR #{candidate} (branch={rework_branch_name!r}); "
+                                f"force-pushing instead of opening a new PR"
+                            )
+                            if not rework_branch_name:
+                                log.warning(
+                                    f"[post-coder] {pname}: rework PR #{candidate} has no head.ref — falling back to per-feature mode"
+                                )
+                                rework_pr_mode = False
+                except Exception as e:
+                    log.warning(f"[post-coder] {pname}: rework lookup for PR #{candidate} failed: {e} — falling back to per-feature mode")
+
     if sprint_pr_mode:
         branch = sprint_branch
         # Fetch first so we have the remote state, then check out (branch exists
@@ -807,6 +862,16 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             log.warning(f"[post-coder] {pname}: git pull --ff-only on {branch} failed — {_fmt_err(pull_r)}")
             # Don't return: a non-fast-forward state is rare and we still want
             # to attempt the push so the operator sees the conflict.
+    elif rework_pr_mode:
+        # Stay on whatever branch we're on (HEAD = origin/main + agent's edits)
+        # and create/reset a local branch with the rework branch name pointing
+        # at HEAD. Force-push later replaces the rejected prior commits on the
+        # remote PR branch with our fresh main-based commits.
+        branch = rework_branch_name
+        co = _run(["git", "checkout", "-B", branch])
+        if co.returncode != 0:
+            log.warning(f"[post-coder] {pname}: rework `git checkout -B {branch}` failed — {_fmt_err(co)}")
+            return
     else:
         branch = f"coder/{session_uid}"
         co = _run(["git", "checkout", "-b", branch])
@@ -840,6 +905,11 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
 
     if sprint_pr_mode:
         push_args = ["git", "push", "origin", branch]
+    elif rework_pr_mode:
+        # Replace the prior (rejected) commits on the remote PR branch with our
+        # fresh main-based commits. --force-with-lease aborts if the remote was
+        # touched by anyone else since our last fetch.
+        push_args = ["git", "push", "--force-with-lease", "origin", branch]
     else:
         push_args = ["git", "push", "-u", "origin", branch]
     push_result = _run(push_args, timeout=180)
@@ -849,11 +919,16 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     log.info(f"[post-coder] {pname}: pushed branch {branch}")
 
     # 4. PR resolution. In sprint mode the PR already exists — just reuse it.
-    # In per-feature mode, open a fresh PR via gh CLI.
+    # In rework mode the PR also already exists (the one we just force-pushed
+    # to); reuse its number+url. In per-feature mode, open a fresh PR via gh.
     if sprint_pr_mode:
         pr_number = int(sprint_pr_num)
         pr_url = sprint_pr_url
         log.info(f"[post-coder] {pname}: reusing sprint PR #{pr_number} — {pr_url}")
+    elif rework_pr_mode:
+        pr_number = int(rework_pr_number)  # type: ignore[arg-type]
+        pr_url = rework_pr_url
+        log.info(f"[post-coder] {pname}: reusing rework PR #{pr_number} — {pr_url}")
     else:
         gh_token = _get_gh_token()
         if not gh_token:
