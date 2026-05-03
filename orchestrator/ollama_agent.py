@@ -368,7 +368,7 @@ def dispatch_tool(name: str, args: dict) -> tuple[str, bool]:
     # filter mutating bash commands (git commit, git add, sed -i, awk -i,
     # tee >>, redirect to file). Read-only bash (ls, cat, grep, pytest,
     # gh pr view, gh pr review) still works.
-    _READONLY_PERSONAS = {"reviewer", "qa_tester", "security_auditor"}
+    _READONLY_PERSONAS = {"reviewer", "security_auditor"}
     _MUTATING_BASH_PATTERNS = (
         "git commit", "git add", "git push", "git rebase", "git merge",
         "git reset", "git checkout -b", "git tag",
@@ -393,13 +393,18 @@ def dispatch_tool(name: str, args: dict) -> tuple[str, bool]:
             # Crude redirect-to-file check ("foo > bar" or ">> bar"). Allow
             # heredoc-style "<<" since those are read patterns. Allow stderr
             # redirects "2>" which are diagnostic. Block plain ">" or ">>" to
-            # any path under /workspace/.
+            # any path under /workspace/ — EXCEPT session_result.json, which
+            # is the reviewer's contract: the prompt instructs `echo '{...}' >>
+            # /workspace/session_result.json`. Without this carve-out, the
+            # filter blocks the very write the reviewer needs to perform.
             if (" > " in cmd or " >> " in cmd) and "/workspace/" in cmd:
-                _log(f"REFUSING file-redirect bash for {AGENT_PERSONA} persona")
-                return (
-                    f"REJECTED: persona={AGENT_PERSONA} is read-only — can't redirect "
-                    f"output into files under /workspace/. Read and decide."
-                ), False
+                if "session_result.json" not in cmd:
+                    _log(f"REFUSING file-redirect bash for {AGENT_PERSONA} persona: {cmd[:120]!r}")
+                    return (
+                        f"REJECTED: persona={AGENT_PERSONA} is read-only — can't redirect "
+                        f"output into files under /workspace/ (except session_result.json). "
+                        f"Read and decide."
+                    ), False
         return _redact_secrets(tool_bash(cmd, args.get("cwd", "/workspace"))), False
     elif name == "read_file":
         return _redact_secrets(tool_read_file(args.get("path", ""), args.get("max_lines", 500))), False
@@ -444,6 +449,29 @@ def dispatch_tool(name: str, args: dict) -> tuple[str, bool]:
                     "This will be allowed.\n"
                     "Continue working — do NOT call task_done(success) again until files are changed."
                 ), False
+        # Reviewer gate: a reviewer that ends without writing review decisions
+        # to session_result.json leaves the assigned features stuck in Reviewing
+        # forever — auto-merge has no entries to act on. Force the model to
+        # commit to a verdict (or self-report blocked) before letting it exit.
+        if AGENT_PERSONA == "reviewer" and _reviewer_made_decisions() == 0:
+            sl = summary.lower()
+            self_reports_failure = any(
+                kw in sl for kw in ("blocked:", "incomplete:", "cannot ", "unable to", "cannot proceed")
+            )
+            if not self_reports_failure:
+                _log("REFUSING task_done — no review decisions in session_result.json")
+                return (
+                    "REJECTED: You called task_done(success) but session_result.json has zero "
+                    "review decisions. Per the reviewer contract you MUST append one NDJSON line "
+                    "for each feature you reviewed BEFORE calling task_done:\n"
+                    '  Approve:         {"id": <feature_id>, "status": "Reviewed", "review_outcome": "approved"}\n'
+                    '  Request changes: {"id": <feature_id>, "status": "Implementing", "review_outcome": "changes_requested"}\n'
+                    "Append via bash: `echo '{\"id\":N,\"status\":\"Reviewed\",\"review_outcome\":\"approved\"}' "
+                    ">> /workspace/session_result.json` (one line per feature). Do NOT PATCH the API "
+                    "directly — the orchestrator picks decisions up from this file and triggers auto-merge.\n"
+                    "If you genuinely cannot reach a decision, call task_done with summary starting "
+                    "'blocked: <reason>' or 'incomplete: <what is partially done>' — that will be allowed."
+                ), False
         _log(f"Task done: {summary}")
         return "Session complete.", True
     return f"ERROR: Unknown tool '{name}'", False
@@ -471,6 +499,30 @@ def _git_status_with_retry(max_retries: int = 3, sleep_s: float = 0.5):
             continue
         return last  # non-transient — surface immediately
     return last
+
+
+def _reviewer_made_decisions() -> int:
+    result_file = Path(WORKSPACE_DIR) / "session_result.json"
+    if not result_file.exists():
+        return 0
+    try:
+        lines = result_file.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return 0
+    count = 0
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("status") in ("Reviewed", "Implementing") and entry.get("review_outcome"):
+            count += 1
+    return count
 
 
 def _agent_made_edits() -> bool:
