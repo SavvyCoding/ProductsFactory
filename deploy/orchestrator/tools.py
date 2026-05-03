@@ -661,6 +661,44 @@ def determine_next_action(args: dict, **kwargs) -> str:
         if in_agent_stuck:
             return _ok({"action": "exit", "reason": f"{len(in_agent_stuck)} features stuck in agent state; reset_stuck will handle"})
 
+        # Sprint backfill: when about to exit idle but there are unsprinted
+        # Approved features (typically filed by audit/retro/recommender), pull
+        # them into the active sprint up to the max_features_per_sprint cap.
+        # Without this, audit findings pile up invisibly while the dispatcher
+        # idles ("No actionable work found") because it only scans the active
+        # sprint when one exists. See deadlock #C in today's analysis.
+        unsprinted = [f for f in features
+                      if f.get("status") == "Approved" and f.get("sprint_id") is None]
+        if unsprinted:
+            cap = int(sys_cfg.get("max_features_per_sprint") or 5)
+            in_sprint_count = len(non_terminal)  # already excludes terminal statuses
+            slots = cap - in_sprint_count
+            if slots > 0:
+                # Prioritise bug > chore > feature, then higher priority, then id.
+                _type_priority = {"bug": 0, "chore": 1, "feature": 2}
+                unsprinted.sort(key=lambda f: (
+                    _type_priority.get(f.get("feature_type", "feature"), 3),
+                    -(f.get("priority") or 0),
+                    f.get("id", 0),
+                ))
+                to_assign = unsprinted[:slots]
+                assigned_ids: list[int] = []
+                with _pm_client() as client:
+                    for f in to_assign:
+                        try:
+                            r = client.patch(f"/api/features/{f['id']}",
+                                             json={"sprint_id": sid,
+                                                   "changed_by": "sprint-backfill"})
+                            if r.is_success:
+                                assigned_ids.append(f["id"])
+                        except Exception:
+                            pass
+                if assigned_ids:
+                    return _ok({"action": "exit",
+                                "reason": f"sprint-backfill: assigned {len(assigned_ids)} unsprinted "
+                                          f"Approved features {assigned_ids} → sprint {sid}; "
+                                          f"next cycle will pick them up"})
+
         return _ok({"action": "exit", "reason": "No actionable work found"})
 
     except Exception as e:
