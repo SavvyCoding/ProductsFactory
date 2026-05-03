@@ -651,8 +651,9 @@ def determine_next_action(args: dict, **kwargs) -> str:
                     or (f.get("status") == "Implementing"
                         and f.get("review_outcome") == "changes_requested")]
         if codeable:
-            if open_pr_count >= max_prs:
-                return _ok({"action": "exit", "reason": f"PR gate: {open_pr_count} open PRs >= max {max_prs}"})
+            new_pr_codeable = [f for f in codeable if not f.get("pr_number")]
+            if new_pr_codeable and open_pr_count >= max_prs:
+                return _ok({"action": "exit", "reason": f"PR gate: {open_pr_count} open PRs >= max {max_prs} (and {len(new_pr_codeable)} features need a new PR)"})
             return _ok({"action": "launch_session", "persona": "coder",
                         "product_id": product_id, "reason": f"{len(codeable)} features ready to code"})
 
