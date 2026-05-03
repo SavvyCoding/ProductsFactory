@@ -1908,6 +1908,15 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         # Fix workspace dir permissions as root immediately after container starts.
         # Windows bind-mounts appear as root-owned inside Docker; the agent user (UID 1001)
         # is "other" and can't write without this chmod.
+        #
+        # Also pre-touches session_result.json with mode 666 so both the agent
+        # (UID 1001) and the orchestrator (different UID, which writes
+        # post-coder fallback entries) can append. Real incident 2026-05-03:
+        # session 1729 (aec9bc24) coder declared only 1 of 5 features; the
+        # post-coder fallback tried to backfill the missing 4 but failed with
+        # `[Errno 13] Permission denied: '/products/Calculator/session_result.json'`
+        # because the agent had created the file with default 0644 perms.
+        # Result: 4 shipped features got stranded in DB until manual fix.
         def _fix_workspace_perms():
             import time as _t
             _t.sleep(3)  # Give container time to initialise
@@ -1915,7 +1924,8 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             subprocess.run(
                 ["docker", "exec", "-u", "0", container_name,
                  "sh", "-c",
-                 "chmod 777 /workspace/docs /workspace/Results /workspace/Temp 2>/dev/null || true"],
+                 "chmod 777 /workspace/docs /workspace/Results /workspace/Temp 2>/dev/null || true; "
+                 "touch /workspace/session_result.json && chmod 666 /workspace/session_result.json 2>/dev/null || true"],
                 capture_output=True,
             )
         threading.Thread(target=_fix_workspace_perms, daemon=True).start()
