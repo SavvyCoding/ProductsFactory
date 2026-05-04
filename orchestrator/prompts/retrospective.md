@@ -92,7 +92,10 @@ Each action item below will be filed as a `chore` feature in the next sprint.
 
 ### Step 4 — File action items as chore features
 
-For each action item in the retro, create a chore feature:
+For each action item in the retro, create a chore feature. Include
+`"status": "Approved"` directly in the create POST — retro action items are
+ready to implement and don't need PM review. This is a SINGLE call; do NOT
+make a second status-update request.
 
 ```bash
 curl -s -X POST {pm_api_url}/api/features \
@@ -103,17 +106,15 @@ curl -s -X POST {pm_api_url}/api/features \
     "description": "<what to do and why — reference the retro>",
     "feature_type": "chore",
     "priority": <60 for High, 40 for Med, 20 for Low>,
-    "source": "ai"
+    "source": "ai",
+    "status": "Approved"
   }'
 ```
 
-Then approve each chore (they're ready to implement, no PM review needed for retro action items):
-
-```bash
-curl -s -X POST {pm_api_url}/api/features/<feature_id>/status \
-  -H "Content-Type: application/json" \
-  -d '{"status": "Approved"}'
-```
+The API only accepts `"Pending"` (default) or `"Approved"` for the initial
+status. If you need to change a feature's status later, the correct endpoint
+is `PATCH /api/features/<id>` with a JSON body — but for retro action items
+the create-with-Approved single call above covers it.
 
 ### Step 5 — Append to product_memory.md
 

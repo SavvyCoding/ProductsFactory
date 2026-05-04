@@ -940,6 +940,35 @@
       </div>
       {% endfor %}
 
+      {# Orphan sprints — phase_id IS NULL. Defensive rendering so a sprint
+         created without a phase (e.g. legacy quarantine sprint, manual API
+         create, bug-fix sprint endpoint) is still visible in the UI. Without
+         this, an active orphan sprint silently blocks plan-sprints and is
+         invisible to the operator. #}
+      {% set orphan_sprints = sprints | selectattr('phase_id', 'none') | list %}
+      {% if orphan_sprints %}
+      <div class="card" style="margin-bottom:16px;border-left:4px solid var(--text-muted);background:var(--surface)">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:6px;color:var(--text-muted)">No phase</div>
+        <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px">Sprints without a phase ({{ orphan_sprints | length }})</div>
+        {% for sprint in orphan_sprints %}
+        {% set sf = features | selectattr('sprint_id', 'equalto', sprint.id) | list %}
+        {% set sp = sf | selectattr('status', 'equalto', 'Pushed') | list %}
+        <div style="margin-left:0;margin-bottom:8px;padding:10px;background:var(--bg);border-radius:8px;border:1px solid var(--border){% if sprint.status == 'active' %};border-color:var(--green);box-shadow:0 0 0 1px var(--green)33{% endif %}">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div>
+              <span style="font-size:13px;font-weight:600;color:var(--text)">{{ sprint.name }}</span>
+              {% if sprint.status == 'active' %}<span style="font-size:10px;background:var(--green);color:#fff;padding:1px 6px;border-radius:8px;margin-left:6px;font-weight:600">ACTIVE</span>{% endif %}
+              {% if sprint.status == 'planned' %}<span style="font-size:10px;background:var(--blue);color:#fff;padding:1px 6px;border-radius:8px;margin-left:6px;font-weight:600">PLANNED</span>{% endif %}
+              {% if sprint.status == 'completed' %}<span style="font-size:10px;background:var(--text-muted);color:#fff;padding:1px 6px;border-radius:8px;margin-left:6px;font-weight:600">COMPLETED</span>{% endif %}
+            </div>
+            <span style="font-size:11px;color:var(--text-muted)">{{ sp | length }}/{{ sf | length }} shipped</span>
+          </div>
+          {% if sprint.goal %}<div style="font-size:11px;color:var(--text-muted);margin-top:4px">{{ sprint.goal }}</div>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
       {% else %}
       <!-- No phases yet — show backlog -->
       {% set backlog = features | selectattr('status', 'equalto', 'Pending') | selectattr('sprint_id', 'none') | list %}
