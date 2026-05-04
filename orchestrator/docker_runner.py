@@ -739,12 +739,19 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         log.info(f"[post-coder] {pname}: no assigned features — skipping commit/PR")
         return
 
-    # The agent may have already pushed + written Reviewing entries to
-    # session_result.json itself. If every assigned feature has a Reviewing
-    # entry with pr_number, this fallback is a no-op.
+    # Symphony-style: this pipeline is a *fallback* now. Strong models open
+    # their own PRs and write Reviewing entries to session_result.json. If
+    # every assigned feature already has a Reviewing entry with a VALID
+    # pr_number AND the PR actually exists on GitHub, skip the deterministic
+    # ceremony. The double check (pr_number > 0 + GitHub existence) catches
+    # agents that hallucinate PRs in session_result.json without actually
+    # running gh pr create — a failure mode observed with deepseek-v4-flash
+    # which wrote pr_number=0 entries that the live-poll later rejected,
+    # leaving features stuck Implementing while we'd already discarded the
+    # local diff.
     try:
         sr_path = Path(working_dir) / "session_result.json"
-        already_handled: set[int] = set()
+        claimed: dict[int, int] = {}  # feature_id -> pr_number from session_result
         if sr_path.exists():
             for ln in sr_path.read_text(encoding="utf-8", errors="replace").splitlines():
                 ln = ln.strip()
@@ -754,14 +761,53 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                     e = _json.loads(ln)
                 except Exception:
                     continue
+                pr_n = e.get("pr_number") if isinstance(e, dict) else None
+                fid_e = e.get("id") if isinstance(e, dict) else None
                 if (isinstance(e, dict) and e.get("status") == "Reviewing"
-                        and isinstance(e.get("pr_number"), int)
-                        and isinstance(e.get("id"), int)):
-                    already_handled.add(e["id"])
+                        and isinstance(pr_n, int) and pr_n > 0
+                        and isinstance(fid_e, int)):
+                    claimed[fid_e] = pr_n
+
+        # Verify each claimed PR exists on GitHub before trusting the agent.
+        already_handled: set[int] = set()
+        if claimed:
+            gh_token_v = _get_gh_token()
+            github_repo_v = product.get("github_repo", "")
+            if gh_token_v and github_repo_v:
+                repo_slug_v = _parse_repo_slug(github_repo_v)
+                gh_headers_v = {
+                    "Authorization": f"Bearer {gh_token_v}",
+                    "Accept": "application/vnd.github+json",
+                }
+                # Cache PR-existence checks so duplicate pr_numbers across
+                # features don't multiply API calls.
+                pr_open: dict[int, bool] = {}
+                for fid_c, pr_n in claimed.items():
+                    if pr_n not in pr_open:
+                        try:
+                            r = httpx.get(
+                                f"https://api.github.com/repos/{repo_slug_v}/pulls/{pr_n}",
+                                headers=gh_headers_v, timeout=10,
+                            )
+                            pr_open[pr_n] = (
+                                r.status_code == 200
+                                and isinstance(r.json(), dict)
+                                and r.json().get("state") == "open"
+                            )
+                        except Exception:
+                            pr_open[pr_n] = False
+                    if pr_open[pr_n]:
+                        already_handled.add(fid_c)
+                    else:
+                        log.warning(
+                            f"[post-coder] {pname}: agent claimed PR #{pr_n} for feature #{fid_c} "
+                            f"but PR is not open on GitHub — running fallback for this feature"
+                        )
+
         assigned_ids = {f["id"] for f in assigned_features}
         if assigned_ids and assigned_ids.issubset(already_handled):
             log.info(
-                f"[post-coder] {pname}: agent pushed for all "
+                f"[post-coder] {pname}: agent opened verified PRs for all "
                 f"{len(assigned_ids)} assigned features — skipping fallback pipeline"
             )
             return
@@ -924,8 +970,24 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     pr_url = sprint_pr_url
     log.info(f"[post-coder] {pname}: reusing sprint PR #{pr_number} — {pr_url}")
 
-    # 5. Append session_result.json entries — one Reviewing per assigned feature.
+    # 5. Mark assigned features as Reviewing + link to the PR.
+    # Two paths, with the API path as a hard fallback:
+    #   (a) Append entries to session_result.json so the live-poll thread (and
+    #       final reconcile) PATCH them — preserves existing audit/event flow.
+    #   (b) If the file write fails for ANY reason (including the permission-
+    #       denied bug we hit when the agent container's UID 1001 leaves the
+    #       file with mode 644 that the orchestrator can't append to), fall
+    #       back to PATCHing the PM API directly. The PR is real on GitHub at
+    #       this point — DB MUST learn about it or features get stranded and
+    #       eventually auto-Blocked at fix_attempts cap.
     sr_path = Path(working_dir) / "session_result.json"
+    file_write_ok = False
+    # Best-effort chmod first — if we own the file, this fixes permission drift.
+    try:
+        if sr_path.exists():
+            os.chmod(sr_path, 0o666)
+    except Exception:
+        pass
     try:
         with sr_path.open("a", encoding="utf-8") as f:
             for feat in assigned_features:
@@ -935,9 +997,40 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                     "pr_number":  pr_number,
                     "pr_url":     pr_url,
                 }) + "\n")
+        file_write_ok = True
         log.info(f"[post-coder] {pname}: wrote {len(assigned_features)} entries to session_result.json")
     except Exception as e:
-        log.warning(f"[post-coder] {pname}: failed to append session_result.json: {e}")
+        log.warning(
+            f"[post-coder] {pname}: failed to append session_result.json: {e} "
+            f"— falling back to direct PM API PATCH so PR #{pr_number} is not stranded"
+        )
+
+    if not file_write_ok:
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                for feat in assigned_features:
+                    fid = feat["id"]
+                    try:
+                        r = client.patch(
+                            f"/api/features/{fid}",
+                            json={
+                                "status": "Reviewing",
+                                "pr_number": pr_number,
+                                "pr_url": pr_url,
+                                "changed_by": "post-coder:fallback",
+                            },
+                        )
+                        r.raise_for_status()
+                        log.info(
+                            f"[post-coder] {pname}: feature #{fid} → Reviewing pr={pr_number} "
+                            f"(direct PM API fallback)"
+                        )
+                    except Exception as e2:
+                        log.warning(
+                            f"[post-coder] {pname}: direct PATCH for feature #{fid} failed: {e2}"
+                        )
+        except Exception as e:
+            log.warning(f"[post-coder] {pname}: PM API client error during fallback PATCH: {e}")
 
 
 def _get_gh_token() -> str | None:
