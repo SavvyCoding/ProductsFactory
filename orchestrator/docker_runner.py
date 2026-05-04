@@ -1574,10 +1574,28 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         log.warning(f"Could not re-install templates for {product.get('name')}: {_te}")
 
     # Ensure standard agent-writable directories exist on the host.
-    # Permissions are fixed inside the container via docker exec -u 0 after startup
-    # (Windows NTFS bind-mounts appear as root-owned inside Docker; host chmod is a no-op).
     for _agent_dir in ("docs", "Results", "Temp"):
         Path(working_dir, _agent_dir).mkdir(exist_ok=True)
+
+    # Make every workspace path world-writable BEFORE the agent container starts.
+    # On Windows bind-mounts, chmod from inside the agent container fails with
+    # "Operation not permitted" even as root — the only working path is to spawn
+    # a throwaway alpine container via the host docker socket, which writes
+    # through the WSL2 layer and the changes are visible to subsequent mounts.
+    # _reset_workspace does this once before git ops, but install_templates and
+    # the mkdir loop above re-create dirs at mode 755 afterwards, so we re-run
+    # it here to catch SRC/, TestCases/, docs/, Results/, Temp/.
+    try:
+        host_base = os.environ.get("PRODUCTS_BASE_DIR", "").rstrip("/\\")
+        rel = str(Path(working_dir).relative_to("/products"))
+        host_wd_path = f"{host_base}/{rel}"
+        subprocess.run(
+            ["docker", "run", "--rm", "-v", f"{host_wd_path}:/ws",
+             "alpine", "sh", "-c", "chmod -R a+rwX /ws 2>/dev/null || true"],
+            capture_output=True, timeout=30,
+        )
+    except Exception:
+        log.warning("[%s] post-template chmod failed (non-fatal)", product.get("name"))
 
     # ── Fetch sys_cfg FIRST — must happen before build_prompt so all substitution
     #    vars (auto_merge_enabled, assigned_features, prev_session_summary) are ready.
@@ -1977,30 +1995,33 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             bufsize=1,
         )
 
-        # Fix workspace dir permissions as root immediately after container starts.
-        # Windows bind-mounts appear as root-owned inside Docker; the agent user (UID 1001)
-        # is "other" and can't write without this chmod.
+        # Workspace directory permissions are fixed BEFORE this docker run via
+        # an alpine container spawned through the host docker socket — the only
+        # path that works for Windows bind-mounts. Trying to chmod /workspace/*
+        # from inside this agent container always fails with "Operation not
+        # permitted" even as root.
         #
-        # Also pre-touches session_result.json with mode 666 so both the agent
-        # (UID 1001) and the orchestrator (different UID, which writes
-        # post-coder fallback entries) can append. Real incident 2026-05-03:
-        # session 1729 (aec9bc24) coder declared only 1 of 5 features; the
-        # post-coder fallback tried to backfill the missing 4 but failed with
-        # `[Errno 13] Permission denied: '/products/Calculator/session_result.json'`
-        # because the agent had created the file with default 0644 perms.
-        # Result: 4 shipped features got stranded in DB until manual fix.
-        def _fix_workspace_perms():
+        # We DO still pre-touch session_result.json from inside the container
+        # though: the file doesn't exist yet at session start, so `touch`
+        # creates it as the agent user (uid 1001) and the chmod afterwards is
+        # by the same user — that combination works on Windows mounts where
+        # chmod-on-bind-mount-imported-files does not. This is load-bearing:
+        # real incident 2026-05-03, session 1729 (aec9bc24) — coder declared
+        # only 1 of 5 features; the post-coder fallback tried to backfill the
+        # missing 4 and failed with `[Errno 13] Permission denied:
+        # '/products/Calculator/session_result.json'` because the agent had
+        # created the file with default 0644 perms. 4 shipped features got
+        # stranded in DB until manual fix.
+        def _fix_session_result_perms():
             import time as _t
             _t.sleep(3)  # Give container time to initialise
-            # Use sh -c to avoid Git Bash converting /workspace/* to Windows paths
             subprocess.run(
                 ["docker", "exec", "-u", "0", container_name,
                  "sh", "-c",
-                 "chmod 777 /workspace/docs /workspace/Results /workspace/Temp 2>/dev/null || true; "
                  "touch /workspace/session_result.json && chmod 666 /workspace/session_result.json 2>/dev/null || true"],
                 capture_output=True,
             )
-        threading.Thread(target=_fix_workspace_perms, daemon=True).start()
+        threading.Thread(target=_fix_session_result_perms, daemon=True).start()
 
         # Heartbeat thread — POST /api/sessions/{id}/heartbeat every 30s so the
         # watchdog knows the session is alive. When the main wait() returns
