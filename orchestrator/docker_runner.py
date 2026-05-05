@@ -583,6 +583,244 @@ def _stage_claude_credentials(sys_cfg: dict, persona: str | None) -> tuple[list[
     return claude_mount, _tmp_claude_dir, claude_model
 
 
+def _stream_session(
+    product: dict,
+    persona: str | None,
+    session_uid: str,
+    session_id: int | None,
+    working_dir: str,
+    container_name: str,
+    cmd: list[str],
+    session_timeout_seconds: int,
+    sys_cfg: dict,
+) -> tuple[int, dict]:
+    """
+    Run the agent docker container and stream its stdout. Spawns four daemon
+    helpers alongside the wait():
+
+      _fix_session_result_perms — `docker exec touch+chmod 666` so the orchestrator
+                                  (different uid than 1001) can later append
+                                  Reviewing entries (incident 2026-05-03)
+      _send_heartbeat            — POST /api/sessions/<id>/heartbeat every 30s
+      _stream_logs               — drain process.stdout, capture the result event
+                                  for cost/token totals, redact secrets, push
+                                  formatted lines to PM API session log buffer
+      _stall_watchdog            — kill the container if no events for
+                                  stall_timeout (default 10m); independent of
+                                  the session_timeout upper bound (default 90m)
+      live-poll thread           — _live_poll_session_result running in parallel
+
+    Returns (exit_code, session_meta). Exit code mapping:
+      process.returncode      → as-is on clean exit
+      session_timeout fired   → 1 (alerts "error: timed out")
+      _stall_kill triggered   → 1 (alerts "warning: agent stalled")
+      docker not on PATH      → 1 (logs error)
+      PermissionError         → 1 (logs error)
+      any other exception     → 1 (logs full traceback)
+
+    Extracted from run_claude_in_docker during Phase 3 of OrchestratorRefactor.
+    """
+    exit_code = 1
+    session_meta: dict = {}
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+
+        # Workspace directory permissions are fixed BEFORE this docker run via
+        # an alpine container spawned through the host docker socket — the only
+        # path that works for Windows bind-mounts. Trying to chmod /workspace/*
+        # from inside this agent container always fails with "Operation not
+        # permitted" even as root.
+        #
+        # We DO still pre-touch session_result.json from inside the container
+        # though: the file doesn't exist yet at session start, so `touch`
+        # creates it as the agent user (uid 1001) and the chmod afterwards is
+        # by the same user — that combination works on Windows mounts where
+        # chmod-on-bind-mount-imported-files does not. This is load-bearing:
+        # real incident 2026-05-03, session 1729 (aec9bc24) — coder declared
+        # only 1 of 5 features; the post-coder fallback tried to backfill the
+        # missing 4 and failed with `[Errno 13] Permission denied:
+        # '/products/Calculator/session_result.json'` because the agent had
+        # created the file with default 0644 perms. 4 shipped features got
+        # stranded in DB until manual fix.
+        def _fix_session_result_perms():
+            import time as _t
+            _t.sleep(3)  # Give container time to initialise
+            subprocess.run(
+                ["docker", "exec", "-u", "0", container_name,
+                 "sh", "-c",
+                 "touch /workspace/session_result.json && chmod 666 /workspace/session_result.json 2>/dev/null || true"],
+                capture_output=True,
+            )
+        threading.Thread(target=_fix_session_result_perms, daemon=True).start()
+
+        # Heartbeat thread — POST /api/sessions/{id}/heartbeat every 30s so the
+        # watchdog knows the session is alive. When the main wait() returns
+        # (container exited, timed out, killed), _hb_stop fires and the loop exits.
+        _hb_stop = threading.Event()
+        def _send_heartbeat():
+            while not _hb_stop.wait(30):
+                if session_id is None:
+                    continue
+                try:
+                    httpx.post(f"{PM_API_URL}/api/sessions/{session_id}/heartbeat", timeout=5)
+                except Exception:
+                    pass  # transient failures are fine; watchdog has grace period
+        if session_id is not None:
+            threading.Thread(target=_send_heartbeat, daemon=True).start()
+
+        # Stall detection (Symphony pattern): track timestamp of the last
+        # event seen on the agent's stdout. A separate watchdog thread kills
+        # the container if no event arrives within stall_timeout. Distinct
+        # from session_timeout: that's the upper bound on a productive run;
+        # stall detects stuck-but-alive containers (Ollama 500s, hung pytest,
+        # claude waiting on a hung child) much sooner.
+        stall_state = {"last_event_at": time.monotonic()}
+        _stall_kill = threading.Event()  # signal the wait loop that we killed for stall
+
+        def _stream_logs():
+            buffer: list[str] = []
+            for raw_line in process.stdout:
+                line = raw_line.rstrip("\n")
+                if not line:
+                    continue
+                # Bump the stall timer on every non-empty event line.
+                stall_state["last_event_at"] = time.monotonic()
+                # Fast-path: capture the single result event that closes a
+                # claude stream-json session (one per session). Cheap string
+                # check first so we don't JSON-parse every assistant turn twice.
+                if '"type":"result"' in line:
+                    try:
+                        _ev = json.loads(line)
+                        if isinstance(_ev, dict) and _ev.get("type") == "result":
+                            session_meta["cost_usd"] = _ev.get("total_cost_usd")
+                            _u = _ev.get("usage") if isinstance(_ev.get("usage"), dict) else {}
+                            session_meta["tokens_input"]  = _u.get("input_tokens")
+                            session_meta["tokens_output"] = _u.get("output_tokens")
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                formatted = _format_agent_event(line)
+                if formatted is None:
+                    continue
+                # Strip credential-shaped substrings (GH PATs, Anthropic API
+                # keys, Bearer tokens, etc.) before they hit docker stdout or
+                # the PM API session-log buffer. Catches the case where the
+                # agent inlines a token literal into a Bash command.
+                formatted = _redact_secrets(formatted)
+                # Surface tool calls, errors, and the final result at INFO so they
+                # appear in `docker logs pf-orchestrator`. Routine assistant text
+                # stays at DEBUG. PM API session log buffer gets everything.
+                if any(token in formatted for token in (
+                    "[tool]", "[tool_err]", "[result:", "WARNING:", "ERROR",
+                    "Traceback", "non-retryable", "exit=2", "task_done",
+                )):
+                    log.info(f"[agent] {formatted}")
+                else:
+                    log.debug(f"[agent] {formatted}")
+                buffer.append(formatted)
+                if len(buffer) >= 10:
+                    _post_log_lines(product["id"], buffer)
+                    buffer = []
+            if buffer:
+                _post_log_lines(product["id"], buffer)
+
+        log_thread = threading.Thread(target=_stream_logs, daemon=True)
+        log_thread.start()
+
+        # Stall watchdog (Symphony pattern). Runs alongside session_timeout:
+        #   - session_timeout (90 min default) — upper bound on a productive run
+        #   - stall_timeout (10 min default)   — no agent events for this long
+        # The stall window is much shorter, so a hung pytest / Ollama 500-loop /
+        # silent claude child gets caught at minute 10 instead of minute 90.
+        # Bumped 5→10 in fix #6: at 5 min, the Ollama backoff (2/4/8/16s × 5
+        # retries × N models = 30+s/turn) would trip the stall during normal
+        # retry handling, contributing to the 35-39% kill rate.
+        # Disabled when stall_timeout_minutes <= 0.
+        stall_timeout_seconds = int(sys_cfg.get("stall_timeout_minutes")
+                                    or os.environ.get("STALL_TIMEOUT_MINUTES", "10")) * 60
+        _stall_stop = threading.Event()
+        def _stall_watchdog():
+            if stall_timeout_seconds <= 0:
+                return
+            while not _stall_stop.wait(30):  # check every 30s
+                idle = time.monotonic() - stall_state["last_event_at"]
+                if idle > stall_timeout_seconds:
+                    log.warning(
+                        f"[stall] {product.get('name')}: no agent events for "
+                        f"{int(idle)}s (>{stall_timeout_seconds}s) — killing container"
+                    )
+                    _stall_kill.set()
+                    try:
+                        subprocess.run(
+                            ["docker", "kill", f"pf-{product['id']}-{session_uid}"],
+                            capture_output=True, timeout=30,
+                        )
+                    except Exception:
+                        log.exception("[stall] docker kill failed")
+                    return
+        threading.Thread(target=_stall_watchdog, daemon=True).start()
+
+        # Live-poll session_result.json while container runs — applies DB updates in real-time
+        # as the agent writes phase transitions (Implementing → Reviewing, Blocked, etc.).
+        _poll_stop = threading.Event()
+        poll_thread = threading.Thread(
+            target=_live_poll_session_result,
+            args=(working_dir, _poll_stop, persona),
+            daemon=True,
+        )
+        poll_thread.start()
+
+        try:
+            process.wait(timeout=session_timeout_seconds)
+        except subprocess.TimeoutExpired:
+            log.error(f"Session timed out after {session_timeout_seconds}s — killing container")
+            try:
+                subprocess.run(
+                    ["docker", "kill", f"pf-{product['id']}-{session_uid}"],
+                    capture_output=True, timeout=30,
+                )
+            except subprocess.TimeoutExpired:
+                log.error(f"docker kill timed out — container may still be running: pf-{product['id']}-{session_uid}")
+            send_alert("error", f"{product['name']}: session timed out after {session_timeout_seconds//60}m")
+            exit_code = 1
+        else:
+            exit_code = process.returncode
+            # Distinguish a stall-kill (we killed the container due to no events)
+            # from a normal exit so the alert + exit_code reflect reality.
+            if _stall_kill.is_set():
+                send_alert("warning",
+                           f"{product['name']}: agent stalled (no events for "
+                           f"{stall_timeout_seconds//60}m) — killed by stall watchdog")
+                exit_code = 1
+        finally:
+            _hb_stop.set()         # stop heartbeat thread
+            _poll_stop.set()       # signal live-poll thread to stop
+            _stall_stop.set()      # stop stall watchdog
+            log_thread.join(timeout=10)
+            if log_thread.is_alive():
+                log.warning(f"[{product.get('name')}] log_thread did not exit after 10s — orphaned (daemon)")
+            poll_thread.join(timeout=5)
+            if poll_thread.is_alive():
+                log.warning(f"[{product.get('name')}] poll_thread did not exit after 5s — orphaned (daemon)")
+
+    except FileNotFoundError:
+        log.error("'docker' not found in PATH — is Docker installed and on PATH?")
+        exit_code = 1
+    except PermissionError as e:
+        log.error(f"Permission denied running docker: {e}")
+        exit_code = 1
+    except Exception as e:
+        log.exception(f"docker run failed unexpectedly: {e}")
+        exit_code = 1
+
+    return exit_code, session_meta
+
+
 def _finalize_session(
     product: dict,
     persona: str | None,
@@ -1063,207 +1301,18 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     except Exception:
         pass
 
-    exit_code = 1
     try:
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
+        exit_code, session_meta = _stream_session(
+            product=product,
+            persona=persona,
+            session_uid=session_uid,
+            session_id=session_id,
+            working_dir=working_dir,
+            container_name=container_name,
+            cmd=cmd,
+            session_timeout_seconds=session_timeout_seconds,
+            sys_cfg=sys_cfg,
         )
-
-        # Workspace directory permissions are fixed BEFORE this docker run via
-        # an alpine container spawned through the host docker socket — the only
-        # path that works for Windows bind-mounts. Trying to chmod /workspace/*
-        # from inside this agent container always fails with "Operation not
-        # permitted" even as root.
-        #
-        # We DO still pre-touch session_result.json from inside the container
-        # though: the file doesn't exist yet at session start, so `touch`
-        # creates it as the agent user (uid 1001) and the chmod afterwards is
-        # by the same user — that combination works on Windows mounts where
-        # chmod-on-bind-mount-imported-files does not. This is load-bearing:
-        # real incident 2026-05-03, session 1729 (aec9bc24) — coder declared
-        # only 1 of 5 features; the post-coder fallback tried to backfill the
-        # missing 4 and failed with `[Errno 13] Permission denied:
-        # '/products/Calculator/session_result.json'` because the agent had
-        # created the file with default 0644 perms. 4 shipped features got
-        # stranded in DB until manual fix.
-        def _fix_session_result_perms():
-            import time as _t
-            _t.sleep(3)  # Give container time to initialise
-            subprocess.run(
-                ["docker", "exec", "-u", "0", container_name,
-                 "sh", "-c",
-                 "touch /workspace/session_result.json && chmod 666 /workspace/session_result.json 2>/dev/null || true"],
-                capture_output=True,
-            )
-        threading.Thread(target=_fix_session_result_perms, daemon=True).start()
-
-        # Heartbeat thread — POST /api/sessions/{id}/heartbeat every 30s so the
-        # watchdog knows the session is alive. When the main wait() returns
-        # (container exited, timed out, killed), _hb_stop fires and the loop exits.
-        _hb_stop = threading.Event()
-        def _send_heartbeat():
-            while not _hb_stop.wait(30):
-                if session_id is None:
-                    continue
-                try:
-                    httpx.post(f"{PM_API_URL}/api/sessions/{session_id}/heartbeat", timeout=5)
-                except Exception:
-                    pass  # transient failures are fine; watchdog has grace period
-        if session_id is not None:
-            threading.Thread(target=_send_heartbeat, daemon=True).start()
-
-        # Captured from the final claude -p `result` event so we can persist
-        # cost / turn count / token totals onto the session record at end.
-        # Claude only — Ollama agent doesn't emit a result event in this shape.
-        session_meta: dict = {}
-
-        # Stall detection (Symphony pattern): track timestamp of the last
-        # event seen on the agent's stdout. A separate watchdog thread kills
-        # the container if no event arrives within stall_timeout. Distinct
-        # from session_timeout: that's the upper bound on a productive run;
-        # stall detects stuck-but-alive containers (Ollama 500s, hung pytest,
-        # claude waiting on a hung child) much sooner.
-        stall_state = {"last_event_at": time.monotonic()}
-        _stall_kill = threading.Event()  # signal the wait loop that we killed for stall
-
-        def _stream_logs():
-            buffer: list[str] = []
-            for raw_line in process.stdout:
-                line = raw_line.rstrip("\n")
-                if not line:
-                    continue
-                # Bump the stall timer on every non-empty event line.
-                stall_state["last_event_at"] = time.monotonic()
-                # Fast-path: capture the single result event that closes a
-                # claude stream-json session (one per session). Cheap string
-                # check first so we don't JSON-parse every assistant turn twice.
-                if '"type":"result"' in line:
-                    try:
-                        _ev = json.loads(line)
-                        if isinstance(_ev, dict) and _ev.get("type") == "result":
-                            session_meta["cost_usd"] = _ev.get("total_cost_usd")
-                            _u = _ev.get("usage") if isinstance(_ev.get("usage"), dict) else {}
-                            session_meta["tokens_input"]  = _u.get("input_tokens")
-                            session_meta["tokens_output"] = _u.get("output_tokens")
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-                formatted = _format_agent_event(line)
-                if formatted is None:
-                    continue
-                # Strip credential-shaped substrings (GH PATs, Anthropic API
-                # keys, Bearer tokens, etc.) before they hit docker stdout or
-                # the PM API session-log buffer. Catches the case where the
-                # agent inlines a token literal into a Bash command.
-                formatted = _redact_secrets(formatted)
-                # Surface tool calls, errors, and the final result at INFO so they
-                # appear in `docker logs pf-orchestrator`. Routine assistant text
-                # stays at DEBUG. PM API session log buffer gets everything.
-                if any(token in formatted for token in (
-                    "[tool]", "[tool_err]", "[result:", "WARNING:", "ERROR",
-                    "Traceback", "non-retryable", "exit=2", "task_done",
-                )):
-                    log.info(f"[agent] {formatted}")
-                else:
-                    log.debug(f"[agent] {formatted}")
-                buffer.append(formatted)
-                if len(buffer) >= 10:
-                    _post_log_lines(product["id"], buffer)
-                    buffer = []
-            if buffer:
-                _post_log_lines(product["id"], buffer)
-
-        log_thread = threading.Thread(target=_stream_logs, daemon=True)
-        log_thread.start()
-
-        # Stall watchdog (Symphony pattern). Runs alongside session_timeout:
-        #   - session_timeout (90 min default) — upper bound on a productive run
-        #   - stall_timeout (10 min default)   — no agent events for this long
-        # The stall window is much shorter, so a hung pytest / Ollama 500-loop /
-        # silent claude child gets caught at minute 10 instead of minute 90.
-        # Bumped 5→10 in fix #6: at 5 min, the Ollama backoff (2/4/8/16s × 5
-        # retries × N models = 30+s/turn) would trip the stall during normal
-        # retry handling, contributing to the 35-39% kill rate.
-        # Disabled when stall_timeout_minutes <= 0.
-        stall_timeout_seconds = int(sys_cfg.get("stall_timeout_minutes")
-                                    or os.environ.get("STALL_TIMEOUT_MINUTES", "10")) * 60
-        _stall_stop = threading.Event()
-        def _stall_watchdog():
-            if stall_timeout_seconds <= 0:
-                return
-            while not _stall_stop.wait(30):  # check every 30s
-                idle = time.monotonic() - stall_state["last_event_at"]
-                if idle > stall_timeout_seconds:
-                    log.warning(
-                        f"[stall] {product.get('name')}: no agent events for "
-                        f"{int(idle)}s (>{stall_timeout_seconds}s) — killing container"
-                    )
-                    _stall_kill.set()
-                    try:
-                        subprocess.run(
-                            ["docker", "kill", f"pf-{product['id']}-{session_uid}"],
-                            capture_output=True, timeout=30,
-                        )
-                    except Exception:
-                        log.exception("[stall] docker kill failed")
-                    return
-        threading.Thread(target=_stall_watchdog, daemon=True).start()
-
-        # Live-poll session_result.json while container runs — applies DB updates in real-time
-        # as the agent writes phase transitions (Implementing → Reviewing, Blocked, etc.).
-        _poll_stop = threading.Event()
-        poll_thread = threading.Thread(
-            target=_live_poll_session_result,
-            args=(working_dir, _poll_stop, persona),
-            daemon=True,
-        )
-        poll_thread.start()
-
-        try:
-            process.wait(timeout=session_timeout_seconds)
-        except subprocess.TimeoutExpired:
-            log.error(f"Session timed out after {session_timeout_seconds}s — killing container")
-            try:
-                subprocess.run(
-                    ["docker", "kill", f"pf-{product['id']}-{session_uid}"],
-                    capture_output=True, timeout=30,
-                )
-            except subprocess.TimeoutExpired:
-                log.error(f"docker kill timed out — container may still be running: pf-{product['id']}-{session_uid}")
-            send_alert("error", f"{product['name']}: session timed out after {session_timeout_seconds//60}m")
-            exit_code = 1
-        else:
-            exit_code = process.returncode
-            # Distinguish a stall-kill (we killed the container due to no events)
-            # from a normal exit so the alert + exit_code reflect reality.
-            if _stall_kill.is_set():
-                send_alert("warning",
-                           f"{product['name']}: agent stalled (no events for "
-                           f"{stall_timeout_seconds//60}m) — killed by stall watchdog")
-                exit_code = 1
-        finally:
-            _hb_stop.set()         # stop heartbeat thread
-            _poll_stop.set()       # signal live-poll thread to stop
-            _stall_stop.set()      # stop stall watchdog
-            log_thread.join(timeout=10)
-            if log_thread.is_alive():
-                log.warning(f"[{product.get('name')}] log_thread did not exit after 10s — orphaned (daemon)")
-            poll_thread.join(timeout=5)
-            if poll_thread.is_alive():
-                log.warning(f"[{product.get('name')}] poll_thread did not exit after 5s — orphaned (daemon)")
-
-    except FileNotFoundError:
-        log.error("'docker' not found in PATH — is Docker installed and on PATH?")
-        exit_code = 1
-    except PermissionError as e:
-        log.error(f"Permission denied running docker: {e}")
-        exit_code = 1
-    except Exception as e:
-        log.exception(f"docker run failed unexpectedly: {e}")
-        exit_code = 1
     finally:
         # Clean up temp credentials copy if we created one
         if _tmp_claude_dir:
