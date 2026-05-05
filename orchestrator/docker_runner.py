@@ -452,6 +452,137 @@ from orchestrator.integrations.git_ops import (
 )
 
 
+def _stage_gh_token_mount(gh_token: str | None) -> tuple[str | None, list[str]]:
+    """
+    Write gh_token to a 0600 temp file and return (path, mount_args).
+    Caller is responsible for unlinking the file in its finally block.
+    Returns (None, []) when no token or staging fails.
+    """
+    if not gh_token:
+        return None, []
+    gh_token_file: str | None = None
+    try:
+        _fd, gh_token_file = tempfile.mkstemp(prefix="pf_gh_", suffix=".token")
+        os.close(_fd)
+        Path(gh_token_file).write_text(gh_token)
+        try:
+            os.chmod(gh_token_file, 0o600)
+        except Exception:
+            pass  # Windows: NTFS perms don't map cleanly; 0600 is best-effort
+        return gh_token_file, ["-v", f"{host_path(gh_token_file)}:/run/secrets/gh_token:ro"]
+    except Exception as e:
+        log.warning(f"Could not write gh token file: {e} — agent will have no gh auth")
+        if gh_token_file:
+            try:
+                Path(gh_token_file).unlink()
+            except Exception:
+                pass
+        return None, []
+
+
+def _stage_claude_credentials(sys_cfg: dict, persona: str | None) -> tuple[list[str], str | None, str]:
+    """
+    Prepare the Claude OAuth credential mount. Returns (mount_args, tmp_dir, claude_model).
+    Caller must shutil.rmtree(tmp_dir) in its finally block when not None.
+
+    Selectively copies only auth-essential files (.credentials.json, settings.json,
+    settings.local.json, .claude.json) to a temp dir rather than bind-mounting
+    the whole ~/.claude — a full copytree races with the host's active Claude
+    Code (which writes sessions/, history.jsonl, projects/, cache/ constantly)
+    and causes 9P filesystem RPC hangs on Docker Desktop for Windows.
+
+    On any copy failure, returns a read-only direct mount of the original
+    creds dir as the fallback (Bash tool will be broken but auth still works).
+    """
+    creds_src, claude_model = _get_claude_profile(sys_cfg, persona=persona)
+    log.info("Claude model for persona=%s: %s", persona, claude_model)
+    # Files to copy verbatim from the host .claude dir. Everything else
+    # (sessions/, history.jsonl, projects/, cache/, plugins/, etc.) is
+    # skipped to avoid races with the host's live Claude Code process.
+    _AUTH_FILES = [".credentials.json", "settings.json", "settings.local.json"]
+    _tmp_claude_dir: str | None = None
+    try:
+        _tmp_claude_dir = tempfile.mkdtemp(prefix="pf_claude_creds_")
+        src_path = Path(creds_src)
+        if src_path.exists():
+            copied: list[str] = []
+            for name in _AUTH_FILES:
+                src_file = src_path / name
+                if src_file.exists() and src_file.is_file():
+                    try:
+                        shutil.copy2(str(src_file), str(Path(_tmp_claude_dir) / name))
+                        copied.append(name)
+                    except Exception as ce:
+                        log.warning(f"Could not copy {name}: {ce}")
+            log.info(f"Copied Claude auth files ({copied}) from {creds_src} to {_tmp_claude_dir}")
+            # Ensure settings.json has the permissions + model we want
+            import json as _json
+            settings_path = Path(_tmp_claude_dir) / "settings.json"
+            try:
+                settings = _json.loads(settings_path.read_text()) if settings_path.exists() else {}
+                settings["skipDangerousModePermissionPrompt"] = True
+                settings["model"] = claude_model
+                settings_path.write_text(_json.dumps(settings, indent=2))
+            except Exception as se:
+                log.warning(f"Could not patch settings.json: {se}")
+        else:
+            log.warning(f"Claude credentials dir not found: {creds_src} — container may fail auth")
+    except Exception as e:
+        log.warning(f"Could not copy Claude credentials: {e} — falling back to direct mount")
+        if _tmp_claude_dir:
+            shutil.rmtree(_tmp_claude_dir, ignore_errors=True)
+        _tmp_claude_dir = None
+
+    mount_dir = _tmp_claude_dir or creds_src
+
+    # Pre-create subdirectories the Claude Code harness expects to write to,
+    # and make them world-writable so the agent UID (1001) can use them.
+    # mkdtemp creates 0700 dirs owned by the orchestrator user (UID 999) —
+    # agent can't write there without this chmod.
+    if _tmp_claude_dir:
+        for _sub in ("session-env", "todos", "projects", "shell-snapshots",
+                     "statsig", "sessions"):
+            _sub_path = Path(_tmp_claude_dir) / _sub
+            _sub_path.mkdir(exist_ok=True)
+        try:
+            # 0777 on the root + all children so any UID inside the container can write.
+            os.chmod(_tmp_claude_dir, 0o777)
+            for _child in Path(_tmp_claude_dir).rglob("*"):
+                try:
+                    os.chmod(_child, 0o777 if _child.is_dir() else 0o666)
+                except Exception:
+                    pass
+        except Exception as _ce:
+            log.warning(f"chmod on staged claude dir failed: {_ce}")
+        # Mount read-write — safe because mount_dir is a temp copy, not the original.
+        claude_mount = ["-v", f"{host_path(mount_dir)}:/home/agent/.claude"]
+    else:
+        # Fallback: direct mount — keep read-only to protect original credentials.
+        # session-env writes will fail but that's better than exposing originals as rw.
+        claude_mount = ["-v", f"{host_path(mount_dir)}:/home/agent/.claude:ro"]
+        log.warning("Mounting original .claude dir read-only — Bash tool may be broken")
+
+    # Also include .claude.json (sits alongside .claude/ in the host home dir).
+    # Copy it INTO the staged dir rather than bind-mounting from host — the
+    # live file is rewritten constantly by the host's Claude Code and would
+    # race with the container mount.
+    # Mount RW (not :ro): the claude CLI needs to update this file on init
+    # (telemetry, project state). On read-only mounts it hits EROFS, stops
+    # emitting debug logs, and hangs in epoll_wait — silently. The staged
+    # copy is per-session disposable, so writes here never reach the host.
+    creds_parent = str(Path(creds_src).parent)
+    claude_json_src_host = Path(creds_parent) / ".claude.json"
+    if _tmp_claude_dir and claude_json_src_host.exists():
+        try:
+            _staged_cj = Path(_tmp_claude_dir) / ".claude.json"
+            shutil.copy2(str(claude_json_src_host), str(_staged_cj))
+            claude_mount += ["-v", f"{host_path(_staged_cj)}:/home/agent/.claude.json"]
+        except Exception as ce:
+            log.warning(f"Could not stage .claude.json: {ce}")
+
+    return claude_mount, _tmp_claude_dir, claude_model
+
+
 def _finalize_session(
     product: dict,
     persona: str | None,
@@ -806,31 +937,10 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     if deploy_key:
         ssh_mount = ["-v", f"{host_path(deploy_key)}:/home/agent/.ssh/id_ed25519:ro"]
 
-    # GH_TOKEN — write to a 0600 temp file and bind-mount at /run/secrets/gh_token.
+    # GH_TOKEN — staged to a 0600 temp file and bind-mounted at /run/secrets/gh_token.
     # The agent_cmd wrapper (below) sources it into GH_TOKEN at runtime, so `gh` CLI
     # works but the token is never visible in `docker inspect` / process listings.
-    gh_token = _get_gh_token()
-    gh_token_file: str | None = None
-    gh_mount: list[str] = []
-    if gh_token:
-        try:
-            _fd, gh_token_file = tempfile.mkstemp(prefix="pf_gh_", suffix=".token")
-            os.close(_fd)
-            Path(gh_token_file).write_text(gh_token)
-            try:
-                os.chmod(gh_token_file, 0o600)
-            except Exception:
-                pass  # Windows: NTFS perms don't map cleanly; 0600 is best-effort
-            gh_mount = ["-v", f"{host_path(gh_token_file)}:/run/secrets/gh_token:ro"]
-        except Exception as e:
-            log.warning(f"Could not write gh token file: {e} — agent will have no gh auth")
-            if gh_token_file:
-                try:
-                    Path(gh_token_file).unlink()
-                except Exception:
-                    pass
-            gh_token_file = None
-            gh_mount = []
+    gh_token_file, gh_mount = _stage_gh_token_mount(_get_gh_token())
     gh_env: list[str] = []  # legacy name retained — now always empty (token comes via file)
 
     persona_env = ["-e", f"AGENT_PERSONA={persona}"] if persona else []
@@ -856,96 +966,10 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         claude_mount = []
         log.info(f"Using Ollama backend — host={effective_ollama_host} persona={persona} model={effective_persona_model}")
     else:
-        # Claude backend: SELECTIVELY copy only auth-essential files to a temp dir.
-        # A full copytree of ~/.claude races with the host's active Claude Code
-        # (which writes sessions/, history.jsonl, projects/, cache/ constantly)
-        # and causes 9P filesystem RPC hangs on Docker Desktop for Windows.
-        # We only need credentials + settings; per-session state is generated
-        # fresh inside the agent container.
-        creds_src, claude_model = _get_claude_profile(sys_cfg, persona=persona)
-        log.info("Claude model for persona=%s: %s", persona, claude_model)
-        # Files to copy verbatim from the host .claude dir. Everything else
-        # (sessions/, history.jsonl, projects/, cache/, plugins/, etc.) is
-        # skipped to avoid races with the host's live Claude Code process.
-        _AUTH_FILES = [".credentials.json", "settings.json", "settings.local.json"]
-        try:
-            _tmp_claude_dir = tempfile.mkdtemp(prefix="pf_claude_creds_")
-            src_path = Path(creds_src)
-            if src_path.exists():
-                copied: list[str] = []
-                for name in _AUTH_FILES:
-                    src_file = src_path / name
-                    if src_file.exists() and src_file.is_file():
-                        try:
-                            shutil.copy2(str(src_file), str(Path(_tmp_claude_dir) / name))
-                            copied.append(name)
-                        except Exception as ce:
-                            log.warning(f"Could not copy {name}: {ce}")
-                log.info(f"Copied Claude auth files ({copied}) from {creds_src} to {_tmp_claude_dir}")
-                # Ensure settings.json has the permissions + model we want
-                import json as _json
-                settings_path = Path(_tmp_claude_dir) / "settings.json"
-                try:
-                    settings = _json.loads(settings_path.read_text()) if settings_path.exists() else {}
-                    settings["skipDangerousModePermissionPrompt"] = True
-                    settings["model"] = claude_model
-                    settings_path.write_text(_json.dumps(settings, indent=2))
-                except Exception as se:
-                    log.warning(f"Could not patch settings.json: {se}")
-            else:
-                log.warning(f"Claude credentials dir not found: {creds_src} — container may fail auth")
-        except Exception as e:
-            log.warning(f"Could not copy Claude credentials: {e} — falling back to direct mount")
-            if _tmp_claude_dir:
-                shutil.rmtree(_tmp_claude_dir, ignore_errors=True)
-            _tmp_claude_dir = None
-
-        mount_dir = _tmp_claude_dir or creds_src
-
-        # Pre-create subdirectories the Claude Code harness expects to write to,
-        # and make them world-writable so the agent UID (1001) can use them.
-        # mkdtemp creates 0700 dirs owned by the orchestrator user (UID 999) —
-        # agent can't write there without this chmod.
-        if _tmp_claude_dir:
-            for _sub in ("session-env", "todos", "projects", "shell-snapshots",
-                         "statsig", "sessions"):
-                _sub_path = Path(_tmp_claude_dir) / _sub
-                _sub_path.mkdir(exist_ok=True)
-            try:
-                # 0777 on the root + all children so any UID inside the container can write.
-                os.chmod(_tmp_claude_dir, 0o777)
-                for _child in Path(_tmp_claude_dir).rglob("*"):
-                    try:
-                        os.chmod(_child, 0o777 if _child.is_dir() else 0o666)
-                    except Exception:
-                        pass
-            except Exception as _ce:
-                log.warning(f"chmod on staged claude dir failed: {_ce}")
-            # Mount read-write — safe because mount_dir is a temp copy, not the original.
-            claude_mount = ["-v", f"{host_path(mount_dir)}:/home/agent/.claude"]
-        else:
-            # Fallback: direct mount — keep read-only to protect original credentials.
-            # session-env writes will fail but that's better than exposing originals as rw.
-            claude_mount = ["-v", f"{host_path(mount_dir)}:/home/agent/.claude:ro"]
-            log.warning("Mounting original .claude dir read-only — Bash tool may be broken")
-
-        # Also include .claude.json (sits alongside .claude/ in the host home dir).
-        # Copy it INTO the staged dir rather than bind-mounting from host — the
-        # live file is rewritten constantly by the host's Claude Code and would
-        # race with the container mount.
-        # Mount RW (not :ro): the claude CLI needs to update this file on init
-        # (telemetry, project state). On read-only mounts it hits EROFS, stops
-        # emitting debug logs, and hangs in epoll_wait — silently. The staged
-        # copy is per-session disposable, so writes here never reach the host.
-        creds_parent = str(Path(creds_src).parent)
-        claude_json_src_host = Path(creds_parent) / ".claude.json"
-        if _tmp_claude_dir and claude_json_src_host.exists():
-            try:
-                _staged_cj = Path(_tmp_claude_dir) / ".claude.json"
-                shutil.copy2(str(claude_json_src_host), str(_staged_cj))
-                claude_mount += ["-v", f"{host_path(_staged_cj)}:/home/agent/.claude.json"]
-            except Exception as ce:
-                log.warning(f"Could not stage .claude.json: {ce}")
+        # Claude backend: stage credentials to a temp dir to avoid 9P races with
+        # the host's live Claude Code process. Returns the mount args + cleanup
+        # tmpdir + resolved per-persona model.
+        claude_mount, _tmp_claude_dir, claude_model = _stage_claude_credentials(sys_cfg, persona)
 
         # --dangerously-skip-permissions works now that container runs as non-root.
         # --output-format stream-json + --verbose turns claude -p into a streaming
