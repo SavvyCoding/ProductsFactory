@@ -452,6 +452,54 @@ from orchestrator.integrations.git_ops import (
 )
 
 
+def _prepare_workspace(product: dict) -> tuple[str, str]:
+    """
+    Run pre-launch workspace prep, idempotently:
+      1. _reset_workspace (git fetch + reset --hard origin/main + clean)
+      2. delete any session_result.json the previous session committed to git
+      3. re-install template files that git clean removed
+      4. ensure docs/Results/Temp dirs exist
+      5. chmod a+rwX so the agent UID (1001) can write everywhere
+
+    Returns (working_dir_host, working_dir) — the first is what Docker sees
+    on the host, the second is what THIS Python process sees (translated to
+    /products/... when running inside Hermes, identical otherwise).
+
+    Extracted from run_claude_in_docker during Phase 3 of OrchestratorRefactor.
+    """
+    working_dir_host = product["working_dir"]
+    working_dir = container_path(working_dir_host)
+
+    # Always reset workspace to clean main before starting a new session.
+    # This discards any half-baked code from failed/incomplete previous sessions.
+    _reset_workspace(working_dir, product.get("name", str(working_dir)))
+
+    # Delete stale session_result.json BEFORE launch — previous agents may have
+    # committed it to git, so git clean won't remove it.
+    _delete_session_result(working_dir)
+
+    # Re-install templates after reset — git clean may have removed untracked template files.
+    # force=False ensures we never overwrite files the agent has customised and committed.
+    try:
+        # Pass product dict with the container-side working_dir so Path(...).exists() works
+        # when docker_runner runs inside Hermes (where the DB stores the host/Windows path).
+        install_templates({**product, "working_dir": working_dir}, PM_API_URL, force=False)
+    except Exception as _te:
+        log.warning(f"Could not re-install templates for {product.get('name')}: {_te}")
+
+    # Ensure standard agent-writable directories exist on the host.
+    for _agent_dir in ("docs", "Results", "Temp"):
+        Path(working_dir, _agent_dir).mkdir(exist_ok=True)
+
+    # Make every workspace path world-writable BEFORE the agent container starts.
+    # _reset_workspace already ran one chmod, but install_templates and the
+    # mkdir loop above re-create dirs at mode 755 afterwards — re-run to catch
+    # SRC/, TestCases/, docs/, Results/, Temp/.
+    _chmod_workspace_via_alpine(working_dir, product.get("name", "?"))
+
+    return working_dir_host, working_dir
+
+
 def _stage_gh_token_mount(gh_token: str | None) -> tuple[str | None, list[str]]:
     """
     Write gh_token to a 0600 temp file and return (path, mount_args).
@@ -990,35 +1038,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # working_dir_host  = what the Docker daemon sees (Windows path from DB)
     # working_dir       = what THIS Python process sees (translated to /products/... inside Hermes,
     #                     unchanged in host-mode). Used for every subsequent file op.
-    working_dir_host = product["working_dir"]
-    working_dir = container_path(working_dir_host)
-
-    # Always reset workspace to clean main before starting a new session.
-    # This discards any half-baked code from failed/incomplete previous sessions.
-    _reset_workspace(working_dir, product.get("name", str(working_dir)))
-
-    # Delete stale session_result.json BEFORE launch — previous agents may have
-    # committed it to git, so git clean won't remove it.
-    _delete_session_result(working_dir)
-
-    # Re-install templates after reset — git clean may have removed untracked template files.
-    # force=False ensures we never overwrite files the agent has customised and committed.
-    try:
-        # Pass product dict with the container-side working_dir so Path(...).exists() works
-        # when docker_runner runs inside Hermes (where the DB stores the host/Windows path).
-        install_templates({**product, "working_dir": working_dir}, PM_API_URL, force=False)
-    except Exception as _te:
-        log.warning(f"Could not re-install templates for {product.get('name')}: {_te}")
-
-    # Ensure standard agent-writable directories exist on the host.
-    for _agent_dir in ("docs", "Results", "Temp"):
-        Path(working_dir, _agent_dir).mkdir(exist_ok=True)
-
-    # Make every workspace path world-writable BEFORE the agent container starts.
-    # _reset_workspace already ran one chmod, but install_templates and the
-    # mkdir loop above re-create dirs at mode 755 afterwards — re-run to catch
-    # SRC/, TestCases/, docs/, Results/, Temp/.
-    _chmod_workspace_via_alpine(working_dir, product.get("name", "?"))
+    working_dir_host, working_dir = _prepare_workspace(product)
 
     # ── Fetch sys_cfg FIRST — must happen before build_prompt so all substitution
     #    vars (auto_merge_enabled, assigned_features, prev_session_summary) are ready.
