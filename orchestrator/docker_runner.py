@@ -452,6 +452,165 @@ from orchestrator.integrations.git_ops import (
 )
 
 
+def _finalize_session(
+    product: dict,
+    persona: str | None,
+    session_uid: str,
+    working_dir: str,
+    session_id: int | None,
+    exit_code: int,
+    session_meta: dict,
+) -> int:
+    """
+    Post-exit reconciliation. Runs unconditionally after the agent container
+    exits, regardless of exit code. Five steps, in order:
+
+      0. Path B post-session pipeline:
+           coder            → _run_post_coder_pipeline (git+PR ceremony)
+           planner/designer → _run_post_doc_pipeline   (commit docs to main)
+                              + supervisor.detect_false_success
+      1. Read session_result.json ONCE (shared with step 2)
+      2. Auto-merge approved PRs (reviewer sessions with auto_merge_enabled)
+      3. _reconcile_session_result — apply state machine, delete the file
+      4. (in finally) supervisor.detect_kill_recovery on non-zero exit; PATCH
+         the session record with end status + cost/token totals
+      5. _rollback_stuck_features for non-zero exits or zero-progress runs
+         (coder/designer only); _cleanup_workspace_post_session
+
+    On a successful coder run, recursively launches qa_tester then
+    security_auditor before returning. Returns the final exit_code (or 2
+    propagated unchanged when the agent reported a non-retryable error).
+
+    Extracted from run_claude_in_docker during Phase 3 of OrchestratorRefactor.
+    """
+    _session_features: list = []
+    attempted = 0
+    pushed = 0
+    try:
+        # 0. Path B post-* ceremony — orchestrator owns ALL git for personas
+        # that produce files. Agent only edits files + writes session_result.json;
+        # we commit, push, and (for coder) open/update the PR. Replaces the
+        # Symphony "agent owns git, fallback handles laggards" model: agents
+        # were fake-claiming Reviewing in sprint-PR mode, leaving reviewers
+        # to crawl over empty PRs. See commit 6b0473b for the symptom history.
+        if exit_code == 0 and persona == "coder":
+            try:
+                _run_post_coder_pipeline(product, session_uid, working_dir,
+                                         product.get("_assigned_features", []))
+            except Exception:
+                log.exception(f"Post-coder pipeline failed for {product.get('name')}")
+        elif exit_code == 0 and persona in ("product_planner", "designer"):
+            try:
+                _run_post_doc_pipeline(product, session_uid, working_dir,
+                                       product.get("_assigned_features", []),
+                                       persona)
+            except Exception:
+                log.exception(f"Post-{persona} pipeline failed for {product.get('name')}")
+
+            # Phase-1 supervisor: detect false-success (exit 0, no PR pushed,
+            # no features advanced). Bumps fix_attempts + demotes to
+            # changes_requested so the feature doesn't sit Implementing
+            # forever waiting on reset_stuck. Best-effort — never raises.
+            try:
+                from orchestrator.supervisor import detect_false_success
+                detect_false_success(
+                    product_id=product["id"],
+                    session_uid=session_uid,
+                    exit_code=exit_code,
+                    assigned_features=product.get("_assigned_features", []),
+                )
+            except Exception:
+                log.exception(f"Supervisor detect_false_success failed for {product.get('name')}")
+
+        # 1. Read session_result.json ONCE — shared between auto_merge and reconcile so
+        #    the file isn't deleted before auto_merge can act on it.
+        _session_features = _read_session_result(working_dir)
+
+        # 2. Auto-merge BEFORE reconcile so merge/re-queue decisions override raw agent state.
+        if exit_code == 0 and persona == "reviewer" and product.get("_auto_merge_enabled"):
+            _session_features = _auto_merge_approved(product, _session_features)
+
+        # 3. Apply status updates (deletes session_result.json at end).
+        _reconcile_session_result(working_dir, product["id"], exit_code, features=_session_features, persona=persona)
+
+        assigned_ids = {f["id"] for f in product.get("_assigned_features", [])}
+        attempted = len(assigned_ids)
+        pushed = sum(1 for f in _session_features
+                     if isinstance(f, dict)
+                     and f.get("id") in assigned_ids
+                     and f.get("status") in ("Pushed", "Reviewing", "Reviewed", "Designed"))
+    except Exception:
+        log.exception(f"Post-exit reconciliation failed for {product.get('name')}")
+    finally:
+        # Phase-1 supervisor: kill-recovery. Bumps fix_attempts on every
+        # assigned feature still in agent state when the session died non-
+        # zero (watchdog kill, container OOM, manual kill). Without this the
+        # same feature gets re-assigned next cycle and gets killed again,
+        # because reset_stuck only resets status (not fix_attempts) — the
+        # auto-Block route never triggers.
+        if exit_code is not None and exit_code != 0:
+            try:
+                from orchestrator.supervisor import detect_kill_recovery
+                detect_kill_recovery(
+                    product_id=product["id"],
+                    session_uid=session_uid,
+                    persona=persona,
+                    exit_code=exit_code,
+                    assigned_features=product.get("_assigned_features", []),
+                )
+            except Exception:
+                log.exception(f"Supervisor detect_kill_recovery failed for {product.get('name')}")
+
+        # 4. Always record session end — guaranteed even if reconciliation raises.
+        if session_id is not None:
+            try:
+                # FSM transition: exit_code=0 → ended, non-zero → killed (watchdog
+                # may have already set status=killed if it was the one that fired).
+                end_status = "ended" if exit_code == 0 else "killed"
+                with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                    patch_body = {
+                        "status":            end_status,
+                        "ended_at":          datetime.now(timezone.utc).isoformat(),
+                        "exit_code":         exit_code,
+                        "features_attempted": attempted,
+                        "features_pushed":   pushed,
+                    }
+                    # Merge captured cost/token totals from the claude result
+                    # event (None values dropped — they'd overwrite anything
+                    # an earlier reconcile already set).
+                    patch_body.update({k: v for k, v in session_meta.items() if v is not None})
+                    client.patch(f"/api/sessions/{session_id}", json=patch_body)
+            except Exception as e:
+                log.warning(f"Could not update session record: {e}")
+
+    # 5. Roll back any intermediate-state features with no PR evidence.
+    #    Covers cases where agent claimed a feature but never finished it.
+    #    Also rolls back on exit_code==0 with no progress (claimed but never written session_result).
+    if exit_code != 0:
+        log.warning(f"Non-zero exit ({exit_code}) for {product['name']} — rolling back incomplete features")
+        _rollback_stuck_features(product["id"], persona)
+    elif attempted == 0 and persona in ("coder", "designer"):
+        log.info(f"Zero-progress exit for {product['name']} — rolling back claimed features")
+        _rollback_stuck_features(product["id"], persona)
+
+    # Post-session cleanup: return workspace to clean main so next session starts fresh
+    _cleanup_workspace_post_session(working_dir, product.get("name", str(working_dir)))
+
+    if exit_code == 2:
+        return 2
+
+    # After a successful coder session: QA → Security (feature-level, run per PR).
+    # Recommender runs post-sprint via the poller's _post_sprint_persona_due gate.
+    if exit_code == 0 and persona == "coder":
+        log.info(f"Coder succeeded — launching QA Tester for {product['name']}")
+        run_claude_in_docker(product, persona="qa_tester")
+
+        log.info(f"Launching Security Auditor for {product['name']}")
+        run_claude_in_docker(product, persona="security_auditor")
+
+    return exit_code
+
+
 def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     """
     Launches the agent container. Blocks until container exits.
@@ -1096,132 +1255,15 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 pass
 
     # ── Post-exit reconciliation (runs regardless of exit code) ─────────────────
-    _session_features: list = []
-    attempted = 0
-    pushed = 0
-    try:
-        # 0. Path B post-* ceremony — orchestrator owns ALL git for personas
-        # that produce files. Agent only edits files + writes session_result.json;
-        # we commit, push, and (for coder) open/update the PR. Replaces the
-        # Symphony "agent owns git, fallback handles laggards" model: agents
-        # were fake-claiming Reviewing in sprint-PR mode, leaving reviewers
-        # to crawl over empty PRs. See commit 6b0473b for the symptom history.
-        if exit_code == 0 and persona == "coder":
-            try:
-                _run_post_coder_pipeline(product, session_uid, working_dir,
-                                         product.get("_assigned_features", []))
-            except Exception:
-                log.exception(f"Post-coder pipeline failed for {product.get('name')}")
-        elif exit_code == 0 and persona in ("product_planner", "designer"):
-            try:
-                _run_post_doc_pipeline(product, session_uid, working_dir,
-                                       product.get("_assigned_features", []),
-                                       persona)
-            except Exception:
-                log.exception(f"Post-{persona} pipeline failed for {product.get('name')}")
-
-            # Phase-1 supervisor: detect false-success (exit 0, no PR pushed,
-            # no features advanced). Bumps fix_attempts + demotes to
-            # changes_requested so the feature doesn't sit Implementing
-            # forever waiting on reset_stuck. Best-effort — never raises.
-            try:
-                from orchestrator.supervisor import detect_false_success
-                detect_false_success(
-                    product_id=product["id"],
-                    session_uid=session_uid,
-                    exit_code=exit_code,
-                    assigned_features=product.get("_assigned_features", []),
-                )
-            except Exception:
-                log.exception(f"Supervisor detect_false_success failed for {product.get('name')}")
-
-        # 1. Read session_result.json ONCE — shared between auto_merge and reconcile so
-        #    the file isn't deleted before auto_merge can act on it.
-        _session_features = _read_session_result(working_dir)
-
-        # 2. Auto-merge BEFORE reconcile so merge/re-queue decisions override raw agent state.
-        if exit_code == 0 and persona == "reviewer" and product.get("_auto_merge_enabled"):
-            _session_features = _auto_merge_approved(product, _session_features)
-
-        # 3. Apply status updates (deletes session_result.json at end).
-        _reconcile_session_result(working_dir, product["id"], exit_code, features=_session_features, persona=persona)
-
-        assigned_ids = {f["id"] for f in product.get("_assigned_features", [])}
-        attempted = len(assigned_ids)
-        pushed = sum(1 for f in _session_features
-                     if isinstance(f, dict)
-                     and f.get("id") in assigned_ids
-                     and f.get("status") in ("Pushed", "Reviewing", "Reviewed", "Designed"))
-    except Exception:
-        log.exception(f"Post-exit reconciliation failed for {product.get('name')}")
-    finally:
-        # Phase-1 supervisor: kill-recovery. Bumps fix_attempts on every
-        # assigned feature still in agent state when the session died non-
-        # zero (watchdog kill, container OOM, manual kill). Without this the
-        # same feature gets re-assigned next cycle and gets killed again,
-        # because reset_stuck only resets status (not fix_attempts) — the
-        # auto-Block route never triggers.
-        if exit_code is not None and exit_code != 0:
-            try:
-                from orchestrator.supervisor import detect_kill_recovery
-                detect_kill_recovery(
-                    product_id=product["id"],
-                    session_uid=session_uid,
-                    persona=persona,
-                    exit_code=exit_code,
-                    assigned_features=product.get("_assigned_features", []),
-                )
-            except Exception:
-                log.exception(f"Supervisor detect_kill_recovery failed for {product.get('name')}")
-
-        # 4. Always record session end — guaranteed even if reconciliation raises.
-        if session_id is not None:
-            try:
-                # FSM transition: exit_code=0 → ended, non-zero → killed (watchdog
-                # may have already set status=killed if it was the one that fired).
-                end_status = "ended" if exit_code == 0 else "killed"
-                with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-                    patch_body = {
-                        "status":            end_status,
-                        "ended_at":          datetime.now(timezone.utc).isoformat(),
-                        "exit_code":         exit_code,
-                        "features_attempted": attempted,
-                        "features_pushed":   pushed,
-                    }
-                    # Merge captured cost/token totals from the claude result
-                    # event (None values dropped — they'd overwrite anything
-                    # an earlier reconcile already set).
-                    patch_body.update({k: v for k, v in session_meta.items() if v is not None})
-                    client.patch(f"/api/sessions/{session_id}", json=patch_body)
-            except Exception as e:
-                log.warning(f"Could not update session record: {e}")
-
-    # 5. Roll back any intermediate-state features with no PR evidence.
-    #    Covers cases where agent claimed a feature but never finished it.
-    #    Also rolls back on exit_code==0 with no progress (claimed but never written session_result).
-    if exit_code != 0:
-        log.warning(f"Non-zero exit ({exit_code}) for {product['name']} — rolling back incomplete features")
-        _rollback_stuck_features(product["id"], persona)
-    elif attempted == 0 and persona in ("coder", "designer"):
-        log.info(f"Zero-progress exit for {product['name']} — rolling back claimed features")
-        _rollback_stuck_features(product["id"], persona)
-
-    # Post-session cleanup: return workspace to clean main so next session starts fresh
-    _cleanup_workspace_post_session(working_dir, product.get("name", str(working_dir)))
-
-    if exit_code == 2:
-        return 2
-
-    # After a successful coder session: QA → Security (feature-level, run per PR).
-    # Recommender runs post-sprint via the poller's _post_sprint_persona_due gate.
-    if exit_code == 0 and persona == "coder":
-        log.info(f"Coder succeeded — launching QA Tester for {product['name']}")
-        run_claude_in_docker(product, persona="qa_tester")
-
-        log.info(f"Launching Security Auditor for {product['name']}")
-        run_claude_in_docker(product, persona="security_auditor")
-
-    return exit_code
+    return _finalize_session(
+        product=product,
+        persona=persona,
+        session_uid=session_uid,
+        working_dir=working_dir,
+        session_id=session_id,
+        exit_code=exit_code,
+        session_meta=session_meta,
+    )
 
 
 def _post_log_lines(product_id: int, lines: list[str]) -> None:
