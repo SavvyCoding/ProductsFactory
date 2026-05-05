@@ -350,139 +350,15 @@ def _parse_repo_slug(github_repo: str) -> str:
     return m.group(1) if m else github_repo
 
 
-import re as _re_secrets
-
-# Patterns for credentials that must never appear in logs. Anything matching
-# is replaced with ***REDACTED*** before lines are sent to docker stdout or
-# POSTed to the PM API session log buffer. List grows as new auth schemes are
-# discovered in the wild — over-redaction is fine; under-redaction is not.
-_SECRET_PATTERNS = [
-    _re_secrets.compile(r'gh[psoua]_[A-Za-z0-9]{20,}'),                                    # GitHub classic + variants
-    _re_secrets.compile(r'github_pat_[A-Za-z0-9_]{20,}'),                                  # GitHub fine-grained
-    _re_secrets.compile(r'sk-ant-(?:oat|ort|api|admin)[A-Za-z0-9_\-]{20,}'),               # Anthropic
-    _re_secrets.compile(r'sk-[A-Za-z0-9]{20,}'),                                           # Generic OpenAI-shape
-    _re_secrets.compile(r'AKIA[A-Z0-9]{16}'),                                              # AWS access key id
-    _re_secrets.compile(r'xox[bpasr]-[A-Za-z0-9-]+'),                                      # Slack tokens
-    _re_secrets.compile(r'(Bearer\s+)[A-Za-z0-9_.\-=]{12,}', _re_secrets.IGNORECASE),       # HTTP Bearer
-]
-
-
-def _redact_secrets(s: str) -> str:
-    """Strip credential-shaped substrings before logging."""
-    for pat in _SECRET_PATTERNS:
-        s = pat.sub('***REDACTED***', s)
-    return s
-
-
-def _format_agent_event(line: str) -> str | None:
-    """
-    Parse one stream-json event from `claude -p --output-format stream-json --verbose`
-    into a single readable log line. Falls back to the raw line if it isn't JSON
-    (so Ollama agent's plain-text output still flows through unchanged).
-
-    Returns None for events worth dropping (init noise) so we don't spam the log.
-    """
-    try:
-        ev = json.loads(line)
-        if not isinstance(ev, dict):
-            return line
-    except (json.JSONDecodeError, ValueError):
-        return line
-
-    t = ev.get("type")
-
-    if t == "system":
-        sub = ev.get("subtype", "")
-        sid = (ev.get("session_id") or "?")[:8]
-        model = ev.get("model", "?")
-        return f"[system:{sub}] sid={sid} model={model}"
-
-    if t == "assistant":
-        msg = ev.get("message") or {}
-        out: list[str] = []
-        for block in (msg.get("content") or []):
-            if not isinstance(block, dict):
-                continue
-            bt = block.get("type")
-            if bt == "text":
-                txt = (block.get("text") or "").strip().replace("\n", " ⏎ ")
-                if txt:
-                    out.append(f"[text] {txt[:300]}")
-            elif bt == "tool_use":
-                name = block.get("name", "?")
-                inp = block.get("input") or {}
-                # Surface the most distinguishing input field per tool
-                if name == "Bash":
-                    summary = (inp.get("command") or "")[:200]
-                elif name in ("Read", "Edit", "Write", "NotebookEdit"):
-                    summary = inp.get("file_path") or inp.get("path") or ""
-                elif name == "Grep":
-                    summary = f"pattern={(inp.get('pattern') or '')[:80]} path={inp.get('path') or ''}"
-                elif name in ("Glob",):
-                    summary = inp.get("pattern") or ""
-                else:
-                    summary = json.dumps(inp, default=str)[:200]
-                out.append(f"[tool] {name}({summary})")
-        return " | ".join(out) if out else None
-
-    if t == "user":
-        # tool_result feedback — we only surface a one-line summary; full content
-        # is too large to log per-event.
-        msg = ev.get("message") or {}
-        for block in (msg.get("content") or []):
-            if not isinstance(block, dict) or block.get("type") != "tool_result":
-                continue
-            content = block.get("content", "")
-            if isinstance(content, list):
-                content = " ".join(
-                    c.get("text", "") if isinstance(c, dict) else str(c)
-                    for c in content
-                )
-            content = str(content).strip()
-            tag = "tool_err" if block.get("is_error") else "tool_ok"
-            first = content.split("\n", 1)[0][:200]
-            return f"[{tag}] {first}"
-        return None
-
-    if t == "result":
-        sub = ev.get("subtype", "")
-        cost = ev.get("total_cost_usd")
-        turns = ev.get("num_turns")
-        dur = ev.get("duration_ms")
-        return f"[result:{sub}] turns={turns} cost=${cost} duration={dur}ms"
-
-    # Unknown event type — log a short summary so we don't lose anything.
-    return f"[{t}] {json.dumps(ev, default=str)[:300]}"
-
-
-def _chmod_workspace_via_alpine(working_dir: str, product_name: str = "?") -> None:
-    """
-    Make the workspace readable/writable to the orchestrator UID after an agent
-    session left files owned by uid 1001. Runs an alpine container as root via
-    the host docker socket — the only path that works on Windows bind-mounts
-    (in-container `chmod` returns EPERM even as root). See commit b301048.
-
-    Translates the orchestrator-container view (/products/X) to the host view
-    via PRODUCTS_BASE_DIR so the bind mount on the throwaway alpine resolves
-    to the same Windows path the agent container saw. In legacy host-poller
-    mode (working_dir already host-side) the translation is a no-op.
-    """
-    try:
-        wd = Path(working_dir)
-        try:
-            host_base = os.environ.get("PRODUCTS_BASE_DIR", "").rstrip("/\\")
-            rel = wd.relative_to("/products")
-            host_wd_path = f"{host_base}/{rel}" if host_base else str(wd)
-        except ValueError:
-            # working_dir isn't under /products — assume it's already a host path
-            host_wd_path = str(wd)
-        subprocess.run(
-            ["docker", "run", "--rm", "-v", f"{host_wd_path}:/ws",
-             "alpine", "sh", "-c", "chmod -R a+rwX /ws 2>/dev/null || true"],
-            capture_output=True, timeout=30,
-        )
-    except Exception:
-        log.warning(f"[{product_name}] alpine chmod helper failed (non-fatal)")
+# Phase 2 of OrchestratorRefactor: redaction helpers and host-side Docker
+# plumbing moved into orchestrator/{infra,integrations}/. Re-exported here so
+# existing call sites continue to work unchanged.
+from orchestrator.infra.redaction import (
+    _SECRET_PATTERNS,
+    _redact_secrets,
+    _format_agent_event,
+)
+from orchestrator.integrations.docker_cli import _chmod_workspace_via_alpine
 
 
 def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
@@ -1360,164 +1236,16 @@ def _get_claude_profile(sys_cfg: dict, persona: str | None = None) -> tuple[str,
     return credentials_dir, claude_model
 
 
-def _reset_workspace(working_dir: str, product_name: str) -> None:
-    """
-    Sync the product workspace to the latest state on origin/main before each session.
-    Uses git fetch + reset --hard (not pull --ff-only) so it succeeds even if local
-    has diverged from remote (e.g. partial commits from a crashed previous session).
-    """
-    wd = Path(working_dir)
-    if not (wd / ".git").exists():
-        return  # Not a git repo yet — skip
-
-    # Fix workspace perms so the orchestrator (different uid than the agent's
-    # 1001) can reset/checkout/clean. See _chmod_workspace_via_alpine for why
-    # we have to detour through a host-docker alpine sidecar on Windows.
-    _chmod_workspace_via_alpine(working_dir, product_name)
-
-    def _run(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
-        """Run a git command with a hard timeout so network hangs don't freeze the poller."""
-        try:
-            return subprocess.run(
-                cmd, cwd=str(wd), capture_output=True, text=True, timeout=timeout,
-            )
-        except subprocess.TimeoutExpired as te:
-            log.warning(f"[{product_name}] git {' '.join(cmd[1:])} timed out after {timeout}s")
-            # Synthesize a failed CompletedProcess so callers uniformly check returncode
-            return subprocess.CompletedProcess(
-                cmd, returncode=124,
-                stdout=(te.stdout.decode() if isinstance(te.stdout, bytes) else (te.stdout or "")),
-                stderr=f"timed out after {timeout}s",
-            )
-
-    # 1. Fetch latest from origin (updates remote-tracking refs, prunes deleted branches)
-    # Longer timeout — fetch can legitimately take a while on slow networks.
-    r = _run(["git", "fetch", "origin", "--prune"], timeout=120)
-    if r.returncode != 0:
-        log.warning(f"[{product_name}] git fetch failed: {r.stderr.strip()[:200]}")
-
-    # 2. Switch to main (or master) — abandon any half-baked feature branch.
-    #    Use -f to discard tracked-file changes from a prior session that didn't
-    #    clean up; the subsequent `git reset --hard` and `git clean` would have
-    #    discarded them anyway. Without -f, dirty trees from Path B sessions
-    #    block the switch and the entire reset is silently skipped.
-    main_branch: str | None = None
-    for branch in ("main", "master"):
-        r = _run(["git", "checkout", "-f", branch])
-        if r.returncode == 0:
-            main_branch = branch
-            break
-    if not main_branch:
-        log.warning(f"[{product_name}] Could not checkout main/master — workspace reset skipped")
-        return
-
-    # 3. Hard-reset to origin — discards any local commits or staged changes
-    r = _run(["git", "reset", "--hard", f"origin/{main_branch}"])
-    if r.returncode != 0:
-        log.warning(f"[{product_name}] git reset --hard failed: {r.stderr.strip()[:200]}")
-
-    # 4. Remove untracked and ignored files (session artifacts, .pyc, etc.)
-    #    Preserve output/ and Results/ which may contain artefacts the PM cares about.
-    _run(["git", "clean", "-fdx", "--exclude=output/", "--exclude=Results/", "--exclude=Temp/"])
-
-    # 5. Delete stale local feature branches (not main/master)
-    r = _run(["git", "branch"])
-    for line in r.stdout.splitlines():
-        branch = line.strip().lstrip("* ")
-        if branch and branch not in ("main", "master"):
-            _run(["git", "branch", "-D", branch])
-            log.info(f"[{product_name}] Deleted stale local branch: {branch}")
-
-    log.info(f"[{product_name}] Workspace synced to origin/{main_branch} (hard reset)")
-
-
-def _checkout_sprint_branch(working_dir: str, sprint_branch: str, product_name: str) -> bool:
-    """
-    Pre-checkout the sprint branch before launching the agent so the agent's
-    very first tool call lands on the right branch regardless of whether it
-    follows the prompt's MANDATORY-FIRST-ACTION instruction.
-
-    Runs after `_reset_workspace` (which leaves us on main) and assumes the
-    sprint branch already exists on origin (provisioned by
-    `orchestrator.sprint_pr.provision_sprint_pr` at sprint activation time).
-
-    Returns True on success. On failure logs a warning and returns False —
-    caller should leave the agent on `main` and rely on the post-coder
-    pipeline's own checkout to recover, but flag this loudly so the operator
-    knows the sprint branch wasn't pre-set.
-    """
-    if not sprint_branch:
-        return False
-    wd = Path(working_dir)
-    if not (wd / ".git").exists():
-        log.warning(f"[{product_name}] sprint pre-checkout: not a git repo, skipping")
-        return False
-
-    def _run(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
-        try:
-            return subprocess.run(
-                cmd, cwd=str(wd), capture_output=True, text=True, timeout=timeout,
-            )
-        except subprocess.TimeoutExpired as te:
-            return subprocess.CompletedProcess(
-                cmd, returncode=124,
-                stdout=(te.stdout.decode() if isinstance(te.stdout, bytes) else (te.stdout or "")),
-                stderr=f"timed out after {timeout}s",
-            )
-
-    # Fetch first so the remote ref is current. _reset_workspace already
-    # fetched, but it was for origin/main with --prune; the sprint ref may
-    # not have existed at fetch time if just provisioned.
-    r = _run(["git", "fetch", "origin", sprint_branch], timeout=60)
-    if r.returncode != 0:
-        log.warning(
-            f"[{product_name}] sprint pre-checkout: fetch origin {sprint_branch} failed: "
-            f"{r.stderr.strip()[:200]}"
-        )
-        return False
-
-    # Check it out as a tracking branch. -B forces creation/reset so we always
-    # end up on a clean local branch tracking origin/<sprint_branch>.
-    r = _run(["git", "checkout", "-B", sprint_branch, f"origin/{sprint_branch}"])
-    if r.returncode != 0:
-        log.warning(
-            f"[{product_name}] sprint pre-checkout: checkout {sprint_branch} failed: "
-            f"{r.stderr.strip()[:200]}"
-        )
-        return False
-
-    log.info(f"[{product_name}] sprint pre-checkout: now on {sprint_branch}")
-    return True
-
-
-def _cleanup_workspace_post_session(working_dir: str, product_name: str) -> None:
-    """
-    Post-exit cleanup: return to main branch and remove uncommitted session artifacts.
-    Runs after container exits (success or failure) so the next session starts clean.
-    Does NOT delete the working directory — git history and pushed branches are preserved.
-    """
-    wd = Path(working_dir)
-    if not (wd / ".git").exists():
-        return
-
-    def _run(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
-        try:
-            return subprocess.run(
-                cmd, cwd=str(wd), capture_output=True, text=True, timeout=timeout,
-            )
-        except subprocess.TimeoutExpired:
-            log.warning(f"[{product_name}] git {' '.join(cmd[1:])} timed out after {timeout}s")
-            return subprocess.CompletedProcess(cmd, returncode=124, stdout="", stderr="timed out")
-
-    # Return to main branch (agent may have left us on a feature branch)
-    for branch in ("main", "master"):
-        if _run(["git", "checkout", branch]).returncode == 0:
-            break
-
-    # Remove any files the agent created but didn't commit/push
-    # Keep docs/, Results/, Temp/ — those may contain artefacts the PM cares about
-    _run(["git", "clean", "-fd", "--exclude=docs/", "--exclude=Results/", "--exclude=Temp/"])
-    log.info(f"[{product_name}] Post-session workspace cleanup complete")
+# Phase 2 of OrchestratorRefactor: workspace git helpers and a unified
+# safe_run subprocess wrapper now live in orchestrator/integrations/git_ops.py.
+# The 4× duplicated _run helpers across these three functions are replaced by
+# the single safe_run. Re-exported here so docker_runner.run_claude_in_docker
+# (and any future callers) keep the same import path.
+from orchestrator.integrations.git_ops import (
+    _reset_workspace,
+    _checkout_sprint_branch,
+    _cleanup_workspace_post_session,
+)
 
 
 def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
