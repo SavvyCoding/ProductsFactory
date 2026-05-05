@@ -88,14 +88,7 @@ For each assigned feature (in order):
 
 4. **Repeat** steps 1–3 for each assigned feature (up to {max_features_per_run} total).
 
-5. **Push progress** — commit the design docs and session_result.json and push:
-   ```
-   git add docs/ session_result.json session_summary.md
-   git commit -m "design: feature design docs [designer-{session_uid}]"
-   git push
-   ```
-
-6. **Exit 0** when done.
+5. **Exit 0 when done.** Do **not** run `git add`, `git commit`, or `git push` — the orchestrator commits and pushes your design docs after this session exits. Your job is to write the docs and append entries to `session_result.json`.
 
 ---
 

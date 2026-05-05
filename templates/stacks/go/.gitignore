@@ -1,0 +1,32 @@
+# Build outputs
+/bin/
+/build/
+/dist/
+*.exe
+*.exe~
+*.test
+*.out
+
+# Vendor (uncomment if you DON'T vendor deps)
+# vendor/
+
+# Coverage
+*.coverprofile
+coverage.txt
+coverage.html
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Environment
+.env
+.env.local
+
+# ProductFactory session artefacts
+session_summary.md
+session_result.json
+Results/
+Temp/

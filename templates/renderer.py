@@ -166,6 +166,18 @@ def install_templates(
         context, force,
     )
 
+    # 3b. .gitignore — stack-specific. Critical: without this, npm/pip/etc.
+    # install pulls thousands of files into the working tree and the post-coder
+    # `git stash` walks them all, blowing past the 120s timeout. Stack-specific
+    # so we ship the right ignore list per product type.
+    stack_gitignore = STACKS_DIR / stack / ".gitignore"
+    if stack_gitignore.exists():
+        written += _write_file(
+            working_dir / ".gitignore",
+            stack_gitignore,
+            context, force,
+        )
+
     # 4. features.md — no longer created (DB is single source of truth)
 
     # 5. Create required directories if they don't exist (greenfield only)

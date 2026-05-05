@@ -1,0 +1,35 @@
+# Common build artefacts
+build/
+dist/
+out/
+*.o
+*.a
+*.so
+*.dll
+*.dylib
+*.exe
+
+# Common dependency dirs (covers many ecosystems)
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+target/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# ProductFactory session artefacts
+session_summary.md
+session_result.json
+Results/
+Temp/
