@@ -485,20 +485,37 @@ _TRANSIENT_GIT_PATTERNS = (
 def _git_status_with_retry(max_retries: int = 3, sleep_s: float = 0.5):
     """Run `git status --porcelain` with retries on transient lock errors.
 
-    On Windows NTFS bind-mounts the index/config locks can fleetingly fail
-    when a parallel git process (heartbeat thread, prior-session shutdown,
-    docker_runner cleanup) hasn't released them yet. The single-retry
-    version (commit 69dc967) was insufficient under sustained load (smoke
-    test 2026-05-05 saw the gate fail-close after one retry and the agent
-    looped). Three retries with 0.5 s sleep covers the typical lock release
-    window without busy-waiting.
+    Two transient failure modes get retried:
+
+    1. **stderr-fail-fast** — git returns non-zero quickly with a lock-message
+       (e.g. `fatal: Unable to create '.../index.lock': File exists`).
+       Matched by `_TRANSIENT_GIT_PATTERNS`.
+
+    2. **hang-then-timeout** — git makes no progress for `timeout=10`s and
+       `subprocess.run` raises `TimeoutExpired`. Observed in the smoke test
+       on 2026-05-05 when a parallel docker_runner heartbeat held the
+       index lock for >10s; previously this propagated out and fail-closed
+       the gate immediately, looping the agent on retries it could never
+       satisfy.
+
+    Real failures (corrupted .git, write-protected tree, ENOSPC) hit
+    neither path and surface to the caller with the original return value
+    (or a `TimeoutExpired` from the final attempt) so the gate still
+    fail-closes when there's no recovery path.
     """
     last = None
     for attempt in range(max_retries):
-        last = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=WORKSPACE_DIR, capture_output=True, text=True, timeout=10,
-        )
+        try:
+            last = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=WORKSPACE_DIR, capture_output=True, text=True, timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            if attempt < max_retries - 1:
+                _log(f"_agent_made_edits: git status timed out, retry {attempt+1}/{max_retries}")
+                time.sleep(sleep_s)
+                continue
+            raise  # final attempt — let caller fail-closed
         if last.returncode == 0:
             return last
         stderr_lc = (last.stderr or "").lower()
