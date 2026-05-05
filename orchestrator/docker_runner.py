@@ -722,6 +722,138 @@ def _format_agent_event(line: str) -> str | None:
     return f"[{t}] {json.dumps(ev, default=str)[:300]}"
 
 
+def _chmod_workspace_via_alpine(working_dir: str, product_name: str = "?") -> None:
+    """
+    Make the workspace readable/writable to the orchestrator UID after an agent
+    session left files owned by uid 1001. Runs an alpine container as root via
+    the host docker socket — the only path that works on Windows bind-mounts
+    (in-container `chmod` returns EPERM even as root). See commit b301048.
+
+    Translates the orchestrator-container view (/products/X) to the host view
+    via PRODUCTS_BASE_DIR so the bind mount on the throwaway alpine resolves
+    to the same Windows path the agent container saw. In legacy host-poller
+    mode (working_dir already host-side) the translation is a no-op.
+    """
+    try:
+        wd = Path(working_dir)
+        try:
+            host_base = os.environ.get("PRODUCTS_BASE_DIR", "").rstrip("/\\")
+            rel = wd.relative_to("/products")
+            host_wd_path = f"{host_base}/{rel}" if host_base else str(wd)
+        except ValueError:
+            # working_dir isn't under /products — assume it's already a host path
+            host_wd_path = str(wd)
+        subprocess.run(
+            ["docker", "run", "--rm", "-v", f"{host_wd_path}:/ws",
+             "alpine", "sh", "-c", "chmod -R a+rwX /ws 2>/dev/null || true"],
+            capture_output=True, timeout=30,
+        )
+    except Exception:
+        log.warning(f"[{product_name}] alpine chmod helper failed (non-fatal)")
+
+
+def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
+                            assigned_features: list[dict], persona: str) -> None:
+    """
+    Path B: orchestrator owns ALL git for planner/designer too. Agents only
+    write docs/ files and append `Designed` entries to session_result.json
+    (the live-poll has already PATCHed the DB by the time this runs). Here we
+    commit those docs and push to origin/main. On push failure we PATCH the
+    affected features back to Approved + clear design_doc_path so the next
+    cycle re-plans them rather than coders running against missing docs.
+    """
+    import subprocess as _sp
+
+    pname = product.get("name", "?")
+    if not assigned_features:
+        log.info(f"[post-{persona}] {pname}: no assigned features — skipping commit")
+        return
+
+    _chmod_workspace_via_alpine(working_dir, pname)
+
+    def _run(cmd: list[str], **kw) -> _sp.CompletedProcess:
+        timeout = kw.pop("timeout", 120)
+        return _sp.run(cmd, cwd=working_dir, capture_output=True, text=True, timeout=timeout, **kw)
+
+    # Detect docs changes (and session_result.json — we want the agent's
+    # Designed/Blocked record committed alongside its output).
+    status = _run(["git", "status", "--porcelain"])
+    changed = [ln for ln in status.stdout.splitlines() if ln.strip()
+               and "/Temp/" not in ln and "/Results/" not in ln]
+    if not changed:
+        log.warning(f"[post-{persona}] {pname}: agent exited 0 with no doc changes — rolling back assigned features")
+        _rollback_doc_features(product, assigned_features)
+        return
+    log.info(f"[post-{persona}] {pname}: {len(changed)} changed file(s) — sample {changed[:3]}")
+
+    # Sync to origin/main first; planner/designer always commit on main.
+    _run(["git", "fetch", "origin"])
+    co = _run(["git", "checkout", "main"])
+    if co.returncode != 0:
+        log.warning(f"[post-{persona}] {pname}: git checkout main failed — rc={co.returncode} {co.stderr.strip()[:200]}")
+        _rollback_doc_features(product, assigned_features)
+        return
+    pull_r = _run(["git", "pull", "--ff-only", "origin", "main"])
+    if pull_r.returncode != 0:
+        log.warning(f"[post-{persona}] {pname}: git pull failed — {pull_r.stderr.strip()[:200]} (continuing)")
+
+    add_r = _run(["git", "add", "-A"])
+    if add_r.returncode != 0:
+        log.warning(f"[post-{persona}] {pname}: git add failed — {add_r.stderr.strip()[:200]}")
+        _rollback_doc_features(product, assigned_features)
+        return
+
+    # Skip commit if nothing actually staged (untracked Temp/Results filtered above).
+    cached = _run(["git", "diff", "--cached", "--quiet"])
+    if cached.returncode == 0:
+        log.warning(f"[post-{persona}] {pname}: nothing staged after add — rolling back")
+        _rollback_doc_features(product, assigned_features)
+        return
+
+    feat_summary = ", ".join(f"#{f['id']}" for f in assigned_features)
+    verb = "plan" if persona == "product_planner" else "design"
+    commit_msg = f"{verb}: {feat_summary} [{persona}-{session_uid}]"
+    commit_r = _run(["git", "commit", "-m", commit_msg])
+    if commit_r.returncode != 0:
+        log.warning(f"[post-{persona}] {pname}: git commit failed — {commit_r.stderr.strip()[:200]}")
+        _rollback_doc_features(product, assigned_features)
+        return
+
+    push_r = _run(["git", "push", "origin", "main"], timeout=180)
+    if push_r.returncode != 0:
+        log.warning(f"[post-{persona}] {pname}: git push failed — {push_r.stderr.strip()[:200]}")
+        # Local commit exists; the next _reset_workspace will discard it.
+        # Roll back DB so the next planner cycle re-plans these features.
+        _rollback_doc_features(product, assigned_features)
+        return
+
+    log.info(f"[post-{persona}] {pname}: pushed {len(assigned_features)} doc(s) to origin/main")
+
+
+def _rollback_doc_features(product: dict, assigned_features: list[dict]) -> None:
+    """
+    When the post-doc push fails, roll affected features back so the next cycle
+    re-runs the planner/designer rather than coders running against docs that
+    aren't on origin. Uses changed_by='pm' to bypass the rank-downgrade guard.
+    """
+    pname = product.get("name", "?")
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            for f in assigned_features:
+                fid = f["id"]
+                try:
+                    client.patch(f"/api/features/{fid}", json={
+                        "status": "Approved",
+                        "design_doc_path": None,
+                        "changed_by": "post-doc:rollback",
+                    })
+                    log.info(f"[post-doc-rollback] {pname}: feature #{fid} → Approved (push failed)")
+                except Exception as e:
+                    log.warning(f"[post-doc-rollback] {pname}: feature #{fid} rollback failed: {e}")
+    except Exception as e:
+        log.warning(f"[post-doc-rollback] {pname}: PM client error: {e}")
+
+
 def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                               assigned_features: list[dict]) -> None:
     """
@@ -747,13 +879,20 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         log.info(f"[post-coder] {pname}: no assigned features — skipping commit/PR")
         return
 
-    # Symphony-style: this pipeline is a *fallback* now. Strong models open
-    # their own PRs and write Reviewing entries to session_result.json. If
-    # every assigned feature already has a Reviewing entry with a VALID
-    # pr_number AND the PR actually exists on GitHub, skip the deterministic
-    # ceremony. The double check (pr_number > 0 + GitHub existence) catches
-    # agents that hallucinate PRs in session_result.json without actually
-    # running gh pr create — a failure mode observed with deepseek-v4-flash
+    # Path B: agent left files owned by uid 1001; orchestrator (different uid)
+    # needs them writable to append to .git/logs/HEAD during checkout. The only
+    # path that works on Windows bind-mounts is an alpine sidecar via the host
+    # docker socket. See commit b301048 for why an in-container chmod fails.
+    _chmod_workspace_via_alpine(working_dir, pname)
+
+    # Path B: orchestrator owns ALL git ceremony. Agents no longer commit or
+    # push (see prompts/{greenfield,brownfield}.md, refactored on this branch).
+    # The legacy "agent already pushed" verification block below is dead in
+    # normal flow but kept as defense-in-depth: if a stale-cached prompt or a
+    # weak model reverts to the old behavior, we still skip the duplicate push.
+    # The double check (pr_number > 0 + GitHub existence + [feature-N] commits)
+    # catches agents that hallucinate PRs in session_result.json without
+    # actually running git push — a failure mode observed with deepseek-v4-flash
     # which wrote pr_number=0 entries that the live-poll later rejected,
     # leaving features stuck Implementing while we'd already discarded the
     # local diff.
@@ -999,19 +1138,54 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
 
     if sprint_pr_mode:
         branch = sprint_branch
-        # Fetch first so we have the remote state, then check out (branch exists
-        # remotely from sprint provisioning). Pull --ff-only catches the case
-        # where another coder run already pushed and we'd otherwise diverge.
+        # In Path B the agent runs on main (or whatever branch _reset_workspace
+        # left us on) and writes code there as untracked/modified files. We need
+        # those diffs on sprint_branch instead. Plain `git checkout sprint/79`
+        # fails when the agent's changes conflict with sprint_branch's content
+        # (e.g. agent recreated a file that sprint_branch already had a different
+        # version of). Stash → switch → pop carries the diffs across. On stash-
+        # pop conflict we resolve in favor of the agent ("theirs" in stash terms)
+        # since the post-coder force-push will overwrite the sprint branch tree
+        # anyway.
         _run(["git", "fetch", "origin"])
+        # Stash TRACKED changes only (no -u). Untracked files (agent's new
+        # source files + node_modules from npm install) stay in the working
+        # tree across the branch switch. Without this restriction, `stash -u`
+        # walks the full untracked set — for products that ran npm/pip/go-mod
+        # install that's tens of thousands of files and stash takes minutes,
+        # busting the 120s subprocess timeout. After the switch, `git add -A`
+        # picks up everything (tracked stash-pop + untracked still on disk).
+        stash_r = _run(["git", "stash", "push", "-m",
+                        f"post-coder-{session_uid}"], timeout=300)
+        stashed = (stash_r.returncode == 0
+                   and "No local changes to save" not in (stash_r.stdout or ""))
         co = _run(["git", "checkout", branch])
         if co.returncode != 0:
             log.warning(f"[post-coder] {pname}: git checkout {branch} failed — {_fmt_err(co)}")
+            if stashed:
+                _run(["git", "stash", "pop"])  # best-effort restore
             return
         pull_r = _run(["git", "pull", "--ff-only", "origin", branch])
         if pull_r.returncode != 0:
             log.warning(f"[post-coder] {pname}: git pull --ff-only on {branch} failed — {_fmt_err(pull_r)}")
             # Don't return: a non-fast-forward state is rare and we still want
             # to attempt the push so the operator sees the conflict.
+        if stashed:
+            pop_r = _run(["git", "stash", "pop"])
+            if pop_r.returncode != 0:
+                # Conflict — agent's file overlaps with sprint_branch's. Resolve
+                # in favor of the agent (its diff is the "theirs" side relative
+                # to the stash apply). `git checkout --theirs <path>` keeps the
+                # incoming version; we then `git add` to mark resolved.
+                conflicts = _run(["git", "diff", "--name-only", "--diff-filter=U"])
+                paths = [p for p in conflicts.stdout.splitlines() if p.strip()]
+                if paths:
+                    _run(["git", "checkout", "--theirs", "--"] + paths)
+                    _run(["git", "add", "--"] + paths)
+                    log.info(f"[post-coder] {pname}: resolved {len(paths)} stash-pop conflict(s) "
+                             f"in favor of agent's diff (sprint branch will be force-overwritten anyway)")
+                # Drop whatever's left in the stash list to avoid accumulation.
+                _run(["git", "stash", "drop"])
     elif rework_pr_mode:
         # Stay on whatever branch we're on (HEAD = origin/main + agent's edits)
         # and create/reset a local branch with the rework branch name pointing
@@ -1047,8 +1221,40 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         )
         return
 
+    # Binary / oversize guard. GitHub rejects pushes with any single file >100 MB
+    # (warns at 50 MB). The agent shouldn't be committing build artefacts at all,
+    # but if .gitignore is missing or stale on the sprint branch (legacy state)
+    # then npm/pip/go-mod outputs end up staged. Refuse to commit + surface the
+    # offenders. On size violation we abort the pipeline rather than commit a
+    # broken state — the next coder cycle will retry once .gitignore is fixed.
+    SIZE_LIMIT_BYTES = 50 * 1024 * 1024  # 50 MB; GitHub's hard cap is 100 MB
+    sized = _run(["git", "diff", "--cached", "--name-only", "-z"])
+    paths = [p for p in (sized.stdout or "").split("\x00") if p]
+    oversized = []
+    for path in paths:
+        try:
+            sz = (Path(working_dir) / path).stat().st_size
+        except OSError:
+            continue
+        if sz >= SIZE_LIMIT_BYTES:
+            oversized.append((path, sz))
+    if oversized:
+        listing = ", ".join(f"{p} ({sz/1e6:.1f} MB)" for p, sz in oversized[:5])
+        log.warning(
+            f"[post-coder] {pname}: refusing to commit — {len(oversized)} oversized "
+            f"file(s) staged (limit {SIZE_LIMIT_BYTES//1024//1024} MB). Sample: {listing}. "
+            f"Likely missing or stale .gitignore on this branch — fix before retry."
+        )
+        # Reset the index so the bad files don't sit half-committed for the next session.
+        _run(["git", "reset"])
+        return
+
+    # Include one [feature-<id>] tag per assigned feature so post-coder's
+    # verification block (and future reviewer scoping) can scan PR commits
+    # by feature. Tags appear as a sequence prefix on the same commit.
     feat_summary = ", ".join(f"#{i}" for i in feat_ids)
-    commit_msg = f"feat: implement features {feat_summary} [coder-{session_uid}]"
+    feat_tags    = "".join(f"[feature-{i}]" for i in feat_ids)
+    commit_msg = f"{feat_tags} feat: implement features {feat_summary} [coder-{session_uid}]"
     commit_result = _run(["git", "commit", "-m", commit_msg])
     if commit_result.returncode != 0:
         log.warning(f"[post-coder] {pname}: git commit failed — {_fmt_err(commit_result)}")
@@ -1431,20 +1637,10 @@ def _reset_workspace(working_dir: str, product_name: str) -> None:
     if not (wd / ".git").exists():
         return  # Not a git repo yet — skip
 
-    # Fix workspace + .git/log permissions so Hermes (uid 999) can reset files that
-    # agent containers (uid 1001) created.  p.chmod() from uid 999 fails on alien-owned
-    # files, so we run a throwaway alpine container as root via the Docker socket.
-    try:
-        host_base = os.environ.get("PRODUCTS_BASE_DIR", "").rstrip("/\\")
-        rel = str(wd.relative_to("/products"))
-        host_wd_path = f"{host_base}/{rel}"
-        subprocess.run(
-            ["docker", "run", "--rm", "-v", f"{host_wd_path}:/ws",
-             "alpine", "sh", "-c", "chmod -R a+w /ws 2>/dev/null || true"],
-            capture_output=True, timeout=30,
-        )
-    except Exception:
-        pass
+    # Fix workspace perms so the orchestrator (different uid than the agent's
+    # 1001) can reset/checkout/clean. See _chmod_workspace_via_alpine for why
+    # we have to detour through a host-docker alpine sidecar on Windows.
+    _chmod_workspace_via_alpine(working_dir, product_name)
 
     def _run(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
         """Run a git command with a hard timeout so network hangs don't freeze the poller."""
@@ -1467,10 +1663,14 @@ def _reset_workspace(working_dir: str, product_name: str) -> None:
     if r.returncode != 0:
         log.warning(f"[{product_name}] git fetch failed: {r.stderr.strip()[:200]}")
 
-    # 2. Switch to main (or master) — abandon any half-baked feature branch
+    # 2. Switch to main (or master) — abandon any half-baked feature branch.
+    #    Use -f to discard tracked-file changes from a prior session that didn't
+    #    clean up; the subsequent `git reset --hard` and `git clean` would have
+    #    discarded them anyway. Without -f, dirty trees from Path B sessions
+    #    block the switch and the entire reset is silently skipped.
     main_branch: str | None = None
     for branch in ("main", "master"):
-        r = _run(["git", "checkout", branch])
+        r = _run(["git", "checkout", "-f", branch])
         if r.returncode == 0:
             main_branch = branch
             break
@@ -1622,24 +1822,10 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         Path(working_dir, _agent_dir).mkdir(exist_ok=True)
 
     # Make every workspace path world-writable BEFORE the agent container starts.
-    # On Windows bind-mounts, chmod from inside the agent container fails with
-    # "Operation not permitted" even as root — the only working path is to spawn
-    # a throwaway alpine container via the host docker socket, which writes
-    # through the WSL2 layer and the changes are visible to subsequent mounts.
-    # _reset_workspace does this once before git ops, but install_templates and
-    # the mkdir loop above re-create dirs at mode 755 afterwards, so we re-run
-    # it here to catch SRC/, TestCases/, docs/, Results/, Temp/.
-    try:
-        host_base = os.environ.get("PRODUCTS_BASE_DIR", "").rstrip("/\\")
-        rel = str(Path(working_dir).relative_to("/products"))
-        host_wd_path = f"{host_base}/{rel}"
-        subprocess.run(
-            ["docker", "run", "--rm", "-v", f"{host_wd_path}:/ws",
-             "alpine", "sh", "-c", "chmod -R a+rwX /ws 2>/dev/null || true"],
-            capture_output=True, timeout=30,
-        )
-    except Exception:
-        log.warning("[%s] post-template chmod failed (non-fatal)", product.get("name"))
+    # _reset_workspace already ran one chmod, but install_templates and the
+    # mkdir loop above re-create dirs at mode 755 afterwards — re-run to catch
+    # SRC/, TestCases/, docs/, Results/, Temp/.
+    _chmod_workspace_via_alpine(working_dir, product.get("name", "?"))
 
     # ── Fetch sys_cfg FIRST — must happen before build_prompt so all substitution
     #    vars (auto_merge_enabled, assigned_features, prev_session_summary) are ready.
@@ -2249,17 +2435,25 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     attempted = 0
     pushed = 0
     try:
-        # 0. Coder ceremony — if a coder session exited cleanly, run the
-        # deterministic commit/push/PR pipeline. Coders only write code; Python
-        # handles git + gh, which makes the LLM's job 10× simpler and more
-        # reliable. The pipeline appends Reviewing entries to session_result.json
-        # so the existing reconcile picks them up below.
+        # 0. Path B post-* ceremony — orchestrator owns ALL git for personas
+        # that produce files. Agent only edits files + writes session_result.json;
+        # we commit, push, and (for coder) open/update the PR. Replaces the
+        # Symphony "agent owns git, fallback handles laggards" model: agents
+        # were fake-claiming Reviewing in sprint-PR mode, leaving reviewers
+        # to crawl over empty PRs. See commit 6b0473b for the symptom history.
         if exit_code == 0 and persona == "coder":
             try:
                 _run_post_coder_pipeline(product, session_uid, working_dir,
                                          product.get("_assigned_features", []))
             except Exception:
                 log.exception(f"Post-coder pipeline failed for {product.get('name')}")
+        elif exit_code == 0 and persona in ("product_planner", "designer"):
+            try:
+                _run_post_doc_pipeline(product, session_uid, working_dir,
+                                       product.get("_assigned_features", []),
+                                       persona)
+            except Exception:
+                log.exception(f"Post-{persona} pipeline failed for {product.get('name')}")
 
             # Phase-1 supervisor: detect false-success (exit 0, no PR pushed,
             # no features advanced). Bumps fix_attempts + demotes to

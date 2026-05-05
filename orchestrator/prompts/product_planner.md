@@ -21,7 +21,7 @@ For each feature, you go through these phases in order:
 3. **Record** — append one line to `session_result.json`
 4. **STOP** — do not start the next feature until the previous file exists on disk
 
-After the last feature, you commit + push everything and call `task_done`.
+After the last feature, you call `task_done`. **Do not run git commands** — the orchestrator commits and pushes your story files for you. You only edit files and append lines to `session_result.json`.
 
 **Rules for tiny models / quantised backends:**
 - One tool call per turn. After each tool result, decide ONE next step.
@@ -119,20 +119,13 @@ Verify completeness with:
 read_file("/workspace/session_result.json")
 ```
 
-Confirm the file has one line per assigned feature ID. If any are missing, return to Phase 2 for that feature. If all are present:
-
-```bash
-cd /workspace
-git add docs/ session_result.json
-git commit -m "plan: user stories [product_planner-{session_uid}]"
-git push
-```
-
-Then:
+Confirm the file has one line per assigned feature ID. If any are missing, return to Phase 2 for that feature. If all are present, call:
 
 ```
 task_done(status="success", summary="Planned <N> features")
 ```
+
+**Do not run `git add`, `git commit`, or `git push`.** The orchestrator picks up the story files you wrote and commits them after this session exits. Running git yourself just risks leaving the workspace in a half-committed state that the orchestrator then has to clean up.
 
 ---
 

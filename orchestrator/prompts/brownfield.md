@@ -4,38 +4,32 @@ Working dir: `/workspace`. Stack: {tech_stack}. Session: `{session_uid}`.
 
 ---
 
-## ⚠️ MANDATORY FIRST ACTION — sprint branch checkout
-
-`sprint_branch  = {sprint_branch}`
-`sprint_pr      = #{sprint_pr_number}`
-
-**Your first tool call MUST be:**
-```bash
-cd /workspace && git fetch origin && git checkout {sprint_branch} && git pull origin {sprint_branch}
-```
-
-You will work on the existing `{sprint_branch}` branch. Every commit pushes to the open sprint PR `#{sprint_pr_number}`. **DO NOT create your own branch and DO NOT open a new PR — the sprint PR is the only PR for this product.**
-
-DO NOT skip this step. DO NOT begin reading files or running tests until the sprint branch is checked out — the post-coder pipeline relies on you being on it.
-
----
-
 ## Assigned features ({assigned_feature_count})
 
 {assigned_features}
 
 If the list is empty, exit cleanly (final assistant message, no tool calls).
 
-If a `docs/story_<ID>.md` exists for the feature, read it AFTER the branch checkout above.
+If a `docs/story_<ID>.md` exists for the feature, read it first.
+
+---
+
+## Sprint PR mode
+
+`sprint_pr_mode = {sprint_pr_mode}`
+`sprint_branch  = {sprint_branch}`
+`sprint_pr      = #{sprint_pr_number}` ({sprint_pr_url})
+
+**When `sprint_pr_mode` is `True`:** push every commit to the existing sprint branch — DO NOT create your own branch and DO NOT open a new PR. The sprint PR is already open. Steps 2 and 5 below have a "sprint mode" sub-step you must use instead of the per-feature default.
+
+**When `sprint_pr_mode` is `False`:** follow steps 2 and 5 as written — one branch + one PR per feature, the legacy flow.
 
 ---
 
 {reviewer_patterns}
 ## Your job
 
-For each assigned feature you implement code, run tests, then commit and push to `{sprint_branch}`. The sprint PR `#{sprint_pr_number}` is already open — your push appears as a new commit on it.
-
-You have access to `git` and `gh` CLI in `/workspace`. The remote is configured.
+For each assigned feature you implement code and run tests. **You do not run git or gh.** The orchestrator commits and pushes everything you wrote after this session exits.
 
 ---
 
@@ -49,48 +43,50 @@ For each assigned feature (one at a time):
 - Any source files relevant to the feature
 - The story doc at `/workspace/docs/story_<ID>.md` if it exists
 
-**2. Make the code changes**
+**2. The orchestrator handles all git for you**
+
+When this session starts, the workspace is already on the right branch (sprint branch in sprint-PR mode, fresh main otherwise). **Do not run `git checkout`, `git fetch`, `git pull`, `git branch`, `git commit`, `git push`, or `gh pr create`.** Just edit files. After this session exits, the orchestrator commits everything you wrote, force-pushes to the sprint branch (or cuts a per-feature branch + opens a PR in non-sprint mode), and updates the DB.
+
+**3. Make the code changes**
 - Use your file-write tool for code edits — **never** `sed -i` or `awk -i`, which corrupt Python indentation.
 - Add tests in the project's test directory.
 - New code goes in the `new_feature_source` path from product_config.json (if specified).
 
-**3. Verify with tests**
+**4. Verify with tests**
 - Run tests scoped to the files you changed (e.g. `pytest TestCases/test_<feature>.py -q`). Avoid running the full suite — it can be slow or flaky in this env.
 - If a previously-passing test now fails: investigate. Fix or revert the change.
 - If you cannot fix after 2 attempts: write `BLOCKED: <one-line reason>` to `/workspace/session_summary.md` and exit cleanly.
 
-**4. Commit and push**
+**5. Record what you implemented in session_result.json**
 
+Append ONE JSON object per line — never an array, never a wrapping object. The orchestrator reads this file to know which features you actually implemented (and to fabricate the `[feature-<id>]` commit tag on your behalf).
+
+For each implemented feature:
 ```bash
-git add -A
-git commit -m "[feature-<id>] <short description> [coder-{session_uid}]"
-git push origin {sprint_branch}
+echo '{"id": <feature_id>, "status": "Implemented"}' >> /workspace/session_result.json
 ```
 
-The `[feature-<id>]` tag is REQUIRED — it lets the reviewer scope per-commit feedback to the right feature. **Do NOT run `gh pr create`** — sprint PR `#{sprint_pr_number}` is the only PR.
-
-**5. Record progress in session_result.json**
-
-Append ONE JSON object per line — never an array, never a wrapping object. Every feature reuses the sprint PR:
-
-```bash
-echo '{"id": <feature_id>, "status": "Reviewing", "pr_number": {sprint_pr_number}, "pr_url": "{sprint_pr_url}"}' >> /workspace/session_result.json
-```
-
-Blocked variant:
+For each blocked feature:
 ```bash
 echo '{"id": <feature_id>, "status": "Blocked", "blocked_reason": "<one-line reason>"}' >> /workspace/session_result.json
 ```
 
 **6. When all features are done**
-- Append a final-summary line to `/workspace/session_summary.md` listing the feature IDs you handled.
+- Append a final-summary line to `/workspace/session_summary.md` listing feature IDs touched.
 - Exit cleanly.
 
 ---
 
-## Safety net
+## What the orchestrator does after you exit
 
-If you exit cleanly without a `Reviewing` entry in `session_result.json` for an assigned feature (e.g. you wrote code but didn't commit), the orchestrator runs a deterministic Python fallback that commits + pushes to `{sprint_branch}` for you. No new PR is ever opened. Try it yourself first — you have full context (good commit messages, scoped per-feature commits).
+After your session exits, the orchestrator:
+1. Reads `session_result.json` to learn which features you implemented.
+2. Stages all your file changes (`git add -A`).
+3. Commits one `[feature-<id>]` commit per feature in `Implemented` state.
+4. Pushes to the sprint branch (sprint mode) or opens a fresh PR (per-feature mode).
+5. PATCHes the DB to set each feature → `Reviewing` with the sprint PR number.
+
+You never run git. You never run gh. You never write `Reviewing` to `session_result.json` — only `Implemented` or `Blocked`.
 
 ---
 
@@ -99,7 +95,7 @@ If you exit cleanly without a `Reviewing` entry in `session_result.json` for an 
 - One feature at a time. Finish #N completely before starting #N+1.
 - Existing passing tests must stay passing.
 - ONE JSON object per line in `session_result.json`. No arrays. No `{"features": [...]}` wrapping.
-- `status` must be exactly `"Reviewing"` (with integer `pr_number`) or `"Blocked"`.
+- `status` must be exactly `"Implemented"` or `"Blocked"`. Never `"Reviewing"` — that's the orchestrator's job.
 - Use a file-write tool for code edits. Never `sed -i` / `awk -i`.
-- Never create a branch. Never run `gh pr create`. The sprint branch and PR already exist.
+- **No git, no gh.** Never run `git checkout`, `git commit`, `git push`, `git branch`, `gh pr create`, etc. The orchestrator owns all of that.
 - If stuck, write your reason to `session_summary.md` and exit. Don't loop on the same failing command.

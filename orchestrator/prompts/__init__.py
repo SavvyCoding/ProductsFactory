@@ -72,20 +72,19 @@ HOW to do it on this backend specifically:
    work. If the list is empty, call `task_done(status="success", summary="no work")`
    immediately.
 
-3. **Git is optional on this backend.** The base prompt asks you to commit
-   to the sprint branch and push yourself. If you can do that reliably,
-   great — write the Reviewing entry to `session_result.json` afterwards.
-   If you find git operations too complex (you only have a small turn
-   budget), you can skip them: just write the code and exit. The
-   orchestrator's deterministic Python pipeline will commit + push to the
-   sprint branch as a fallback. **Never run `gh pr create`** — the sprint
-   PR already exists. Either complete the full git sequence yourself OR
-   don't run any git commands at all.
+3. **Do NOT run git or gh.** The orchestrator owns all git/PR ceremony on
+   this backend. Your only job is to edit files and append entries to
+   `session_result.json`. After your session exits, the orchestrator
+   stages, commits with the right `[feature-<id>]` tag, pushes, and
+   updates the PM API. Running git yourself produces orphan local commits
+   that get wiped on the next workspace reset.
 
-4. **Touching `session_result.json` is required ONLY if you pushed
-   yourself.** If you let the fallback do it, leave the file alone and
-   the orchestrator will populate the Reviewing entry. The reviewer
-   persona always writes its own session_result.json regardless.
+4. **Touching `session_result.json` is required.** Append one line per
+   assigned feature with `"status": "Implemented"` (coder), `"Designed"`
+   (planner / designer), or `"Blocked"` with a `blocked_reason`. Never
+   write `"Reviewing"` — that's the orchestrator's downstream state, not
+   yours. The reviewer persona writes its own session_result.json with
+   `"Reviewed"` entries.
 
 5. **Call `task_done()` BEFORE your turn budget runs out.** Statuses:
    - `success` — all assigned work done
