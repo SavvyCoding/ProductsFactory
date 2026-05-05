@@ -788,24 +788,68 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                     "Accept": "application/vnd.github+json",
                 }
                 # Cache PR-existence checks so duplicate pr_numbers across
-                # features don't multiply API calls.
-                pr_open: dict[int, bool] = {}
+                # features don't multiply API calls. A PR counts as "agent
+                # actually shipped code" only when (a) the PR exists and is
+                # open AND (b) the commit log contains at least one commit
+                # whose message tags the feature `[feature-<id>]` — the
+                # convention the coder prompt mandates. The PR-exists check
+                # alone is too lax: in sprint-PR-mode the PR is opened by
+                # provision_sprint_pr at sprint activation with a single
+                # `chore(sprint-<id>): scaffold sprint branch` commit, so
+                # any agent that hallucinates a Reviewing entry pointing at
+                # the existing PR passes the open-PR check without ever
+                # calling git push.
+                pr_status: dict[int, dict] = {}  # pr_number -> {"open": bool, "feature_commits": set[int]}
                 for fid_c, pr_n in claimed.items():
-                    if pr_n not in pr_open:
+                    if pr_n not in pr_status:
+                        info = {"open": False, "feature_commits": set()}
                         try:
                             r = httpx.get(
                                 f"https://api.github.com/repos/{repo_slug_v}/pulls/{pr_n}",
                                 headers=gh_headers_v, timeout=10,
                             )
-                            pr_open[pr_n] = (
+                            info["open"] = (
                                 r.status_code == 200
                                 and isinstance(r.json(), dict)
                                 and r.json().get("state") == "open"
                             )
                         except Exception:
-                            pr_open[pr_n] = False
-                    if pr_open[pr_n]:
+                            pass
+                        if info["open"]:
+                            try:
+                                cr = httpx.get(
+                                    f"https://api.github.com/repos/{repo_slug_v}/pulls/{pr_n}/commits",
+                                    headers=gh_headers_v,
+                                    params={"per_page": 100},
+                                    timeout=15,
+                                )
+                                if cr.status_code == 200:
+                                    import re as _re
+                                    tag_re = _re.compile(r"\[feature-(\d+)\]")
+                                    for c in cr.json() or []:
+                                        msg = (c.get("commit") or {}).get("message", "")
+                                        for m in tag_re.finditer(msg):
+                                            try:
+                                                info["feature_commits"].add(int(m.group(1)))
+                                            except ValueError:
+                                                pass
+                            except Exception:
+                                pass
+                        pr_status[pr_n] = info
+                    info = pr_status[pr_n]
+                    if info["open"] and fid_c in info["feature_commits"]:
                         already_handled.add(fid_c)
+                    elif info["open"] and not info["feature_commits"]:
+                        log.warning(
+                            f"[post-coder] {pname}: agent claimed PR #{pr_n} for feature #{fid_c} "
+                            f"but PR has no [feature-N] commits — agent never pushed; running fallback"
+                        )
+                    elif info["open"]:
+                        log.warning(
+                            f"[post-coder] {pname}: agent claimed PR #{pr_n} for feature #{fid_c} "
+                            f"but PR has no commit tagged [feature-{fid_c}] (found tags: "
+                            f"{sorted(info['feature_commits'])}) — running fallback"
+                        )
                     else:
                         log.warning(
                             f"[post-coder] {pname}: agent claimed PR #{pr_n} for feature #{fid_c} "
