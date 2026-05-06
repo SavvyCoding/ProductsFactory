@@ -2037,12 +2037,24 @@ async def api_update_feature(
     # caller gets the same protection — including auto_merge sweep,
     # supervisor, github_client direct writes, and features_sync.
     #
-    # PMs go through /api/features/{id}/pm-status which has its own
-    # PM_ALLOWED_TRANSITIONS validation; PMs that PATCH this endpoint with
-    # changed_by="pm" bypass the rank check explicitly (consistent with the
-    # Blocked-quarantine carve-out above).
+    # Trusted internal callers bypass the guard via changed_by ∈
+    # _RANK_GUARD_BYPASS. PMs go through /api/features/{id}/pm-status which
+    # has its own PM_ALLOWED_TRANSITIONS validation. The rollback /
+    # kill_recovery / supervisor / post-doc:rollback paths are legitimate
+    # downgrades the orchestrator runs after a session crash — without this
+    # bypass list every rollback PATCH was a silent 422 (incident 2026-05-06,
+    # 5 features stuck in Implementing after an Ollama exit=2 storm).
     new_status_for_rank = updates.get("status")
-    if new_status_for_rank and updates.get("changed_by") != "pm":
+    _caller = updates.get("changed_by") or ""
+    _RANK_GUARD_BYPASS = {
+        "pm",
+        "rollback",
+        "kill_recovery",
+        "supervisor",
+        "post-doc:rollback",
+        "post-coder:fallback",
+    }
+    if new_status_for_rank and _caller not in _RANK_GUARD_BYPASS:
         cur_rank = _FEATURE_PROGRESS_RANK.get(feature.status, 0)
         new_rank = _FEATURE_PROGRESS_RANK.get(new_status_for_rank, 0)
         if (
@@ -2059,7 +2071,9 @@ async def api_update_feature(
                         f"Cannot downgrade feature #{feature_id} from "
                         f"{feature.status!r} to {new_status_for_rank!r}. Use "
                         f"PATCH /api/features/{feature_id}/pm-status for PM moves "
-                        f"or pass changed_by='pm' to bypass."
+                        f"or pass changed_by ∈ {{rollback,kill_recovery,supervisor,"
+                        f"post-doc:rollback,post-coder:fallback,pm}} for trusted "
+                        f"internal callers."
                     ),
                 },
             )

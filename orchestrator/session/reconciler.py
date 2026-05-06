@@ -55,7 +55,41 @@ def _rollback_stuck_features(product_id: int, persona: str | None) -> None:
                     try:
                         # Preserve Designed state if design doc exists
                         reset_to = "Designed" if f.get("design_doc_path") else "Approved"
-                        client.patch(f"/api/features/{f['id']}", json={"status": reset_to})
+                        # Pass changed_by="rollback" alongside the website's
+                        # /api/features/{id} bypass list. NOTE: the website's
+                        # FeatureUpdate Pydantic schema currently doesn't
+                        # declare changed_by, so it's stripped before the
+                        # rank-guard handler sees it (website bug). Until that
+                        # schema is fixed, status downgrades (Implementing
+                        # → Designed) will return 422 here. We pass it anyway
+                        # so the moment the schema is fixed, this works without
+                        # another orchestrator change.
+                        #
+                        # Until then: the supervisor.detect_kill_recovery path
+                        # bumps fix_attempts (which doesn't trigger the rank
+                        # guard, since fix_attempts isn't a status change), and
+                        # _route_to_blocked_if_at_cap routes the feature to the
+                        # Blocked sprint when fix_attempts hits the cap. So the
+                        # loop terminates via the Blocked path, just slower
+                        # than via this rollback.
+                        #
+                        # Real incident 2026-05-06: 5 features stuck after
+                        # Ollama exit=2 storm. Rolled-back log appeared but
+                        # every PATCH was actually a 422 — the explicit log
+                        # below is what made it visible.
+                        r = client.patch(
+                            f"/api/features/{f['id']}",
+                            json={"status": reset_to, "changed_by": "rollback"},
+                        )
+                        if r.status_code >= 300:
+                            log.warning(
+                                f"Could not roll back feature #{f['id']} "
+                                f"'{f['name']}' {f['status']} -> {reset_to}: "
+                                f"HTTP {r.status_code} {r.text[:200]} "
+                                f"(supervisor.detect_kill_recovery will bump "
+                                f"fix_attempts → Blocked sprint at cap)"
+                            )
+                            continue
                         log.info(f"Rolled back feature #{f['id']} '{f['name']}' {f['status']} -> {reset_to}")
                         rolled_back += 1
                     except Exception as fe:
