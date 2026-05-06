@@ -437,12 +437,24 @@ class SprintCreate(BaseModel):
 
 
 class SprintUpdate(BaseModel):
-    phase_id:   Optional[int]  = None
-    name:       Optional[str]  = None
-    goal:       Optional[str]  = None
-    start_date: Optional[date] = None
-    end_date:   Optional[date] = None
-    status:     Optional[str]  = None
+    phase_id:    Optional[int]  = None
+    name:        Optional[str]  = None
+    goal:        Optional[str]  = None
+    start_date:  Optional[date] = None
+    end_date:    Optional[date] = None
+    status:      Optional[str]  = None
+    # Sprint-PR-mode metadata. These were missing from the schema so PATCH
+    # /api/sprints/{id} silently dropped them — every attempt to update the
+    # sprint's branch/PR pointer no-op'd at HTTP level (returned 200 with
+    # the OLD values intact). Real incident 2026-05-06: PR #1 on DigitalSign
+    # got closed unmerged but the sprint metadata still pointed at it; the
+    # orchestrator manual-recovery PATCH to swap to PR #2 succeeded HTTP-wise
+    # but did nothing, requiring a direct DB UPDATE. Mirrors the
+    # FeatureUpdate.changed_by gap fixed earlier on the OrchestratorRefactor
+    # branch.
+    branch_name: Optional[str]  = None
+    pr_number:   Optional[int]  = None
+    pr_url:      Optional[str]  = None
 
 
 class SprintOut(BaseModel):
