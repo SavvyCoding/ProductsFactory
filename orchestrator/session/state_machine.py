@@ -36,9 +36,20 @@ _VALID_FEATURE_STATUSES = frozenset({
 # are explicit exceptions in _ALLOWED_BACKWARD (IV.2) — without those the
 # reviewer's "changes_requested" PATCH would be silently dropped because
 # Implementing(4) < Reviewing(5), trapping the feature in Reviewing forever.
+#
+# `Implemented` (4), `Testing` (5), `Committed` (5) appear in the
+# `_VALID_FEATURE_STATUSES` set and the agent prompt instructs coders to
+# write `{"status": "Implemented"}` to session_result.json. Without them in
+# this rank table they fall to default 0 and EVERY agent progress write
+# triggered the rank-downgrade path silently — the keystone bug behind the
+# "9-hour, millions-of-tokens, 0 features released" incident on 2026-05-06.
+# Ranks chosen so the natural pipeline order Designed→Implementing→
+# Implemented→Reviewing→Reviewed→Pushed never trips the guard.
 _PROGRESS_RANK = {
     "Pending": 0, "Approved": 1, "Designing": 2, "Designed": 3,
-    "Implementing": 4, "Reviewing": 5, "Reviewed": 6, "Pushed": 7,
+    "Implementing": 4, "Implemented": 4,
+    "Reviewing": 5, "Testing": 5, "Committed": 5,
+    "Reviewed": 6, "Pushed": 7,
     "Blocked": 2, "Deferred": 7, "Rejected": 7, "Reverted": 0,
 }
 _ALLOWED_BACKWARD = {("Reviewing", "Implementing"), ("Reviewed", "Implementing")}
@@ -97,7 +108,15 @@ def _apply_session_entry(client: httpx.Client, entry: dict) -> bool:
                     _PROGRESS_RANK.get(current_status, 0) > _PROGRESS_RANK.get(status, 0)
                     and (current_status, status) not in _ALLOWED_BACKWARD
                 ):
-                    log.debug(f"[progress] Feature #{fid}: skipping downgrade {current_status} → {status}")
+                    # Logged at INFO so cap-the-loop diagnostics work — until
+                    # 2026-05-06 this was log.debug and the orchestrator silently
+                    # dropped every progress write, masking the "0 features
+                    # released" incident for 9h. If you're spelunking pipeline
+                    # stalls and the [progress] log is empty, look here first.
+                    log.info(
+                        f"[progress] Feature #{fid}: rejecting downgrade "
+                        f"{current_status} → {status} (not in _ALLOWED_BACKWARD)"
+                    )
                     return False
         except Exception:
             pass  # proceed with update if check fails

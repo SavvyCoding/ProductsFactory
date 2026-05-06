@@ -37,15 +37,19 @@ PM_API_URL = os.environ["PM_API_URL"]
 
 
 def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
-                              assigned_features: list[dict]) -> None:
+                              assigned_features: list[dict]) -> list[int]:
     """
     Deterministic git fallback after the coder LLM exits cleanly.
     The coder ONLY writes code; this function pushes to the sprint branch:
       1. Detect if there are any changes in the workspace
       2. Check out the sprint branch (provisioned at sprint activation)
       3. git add + commit + push
-      4. Append one Reviewing entry per assigned feature to session_result.json
-         pointing at the existing sprint PR
+      4. PATCH each assigned feature to Reviewing + pr_number on the PM API
+         directly (no session_result.json roundtrip; see step 5 comment for
+         why the file-based handoff was removed on 2026-05-06).
+
+    Returns the list of feature IDs successfully PATCHed to Reviewing — used
+    by the caller to set the session record's `features_pushed` counter.
 
     Sprint-PR mode is the only supported flow: PR creation happens once at
     sprint activation (`orchestrator.sprint_pr.provision_sprint_pr`); coder
@@ -53,10 +57,11 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     has no provisioned branch + PR, the pipeline marks the assigned features
     Blocked with a clear reason — never opens a fresh PR.
     """
+    pushed_ids: list[int] = []
     pname = product.get("name", "?")
     if not assigned_features:
         log.info(f"[post-coder] {pname}: no assigned features — skipping commit/PR")
-        return
+        return pushed_ids
 
     # Path B: agent left files owned by uid 1001; orchestrator (different uid)
     # needs them writable to append to .git/logs/HEAD during checkout. The only
@@ -180,7 +185,7 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                 f"[post-coder] {pname}: agent opened verified PRs for all "
                 f"{len(assigned_ids)} assigned features — skipping fallback pipeline"
             )
-            return
+            return pushed_ids
         if already_handled & assigned_ids:
             # Partial coverage. Narrow `assigned_features` to the unhandled
             # subset so the no-diff Blocked-flip and the session_result.json
@@ -199,7 +204,7 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                 # caught this, but rely on it here too in case the set
                 # math races with a concurrent live-poll application.)
                 log.info(f"[post-coder] {pname}: all features handled by agent — skipping fallback pipeline")
-                return
+                return pushed_ids
     except Exception:
         log.exception(f"[post-coder] {pname}: agent-handled detection failed — running pipeline")
 
@@ -239,7 +244,7 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                     })
         except Exception:
             pass
-        return
+        return pushed_ids
     log.info(f"[post-coder] {pname}: {len(changed)} changed file(s) detected — sample: {changed[:3]}")
 
     def _fmt_err(r) -> str:
@@ -395,7 +400,7 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             log.warning(f"[post-coder] {pname}: git checkout {branch} failed — {_fmt_err(co)}")
             if stashed:
                 _run(["git", "stash", "pop"])  # best-effort restore
-            return
+            return pushed_ids
         pull_r = _run(["git", "pull", "--ff-only", "origin", branch])
         if pull_r.returncode != 0:
             log.warning(f"[post-coder] {pname}: git pull --ff-only on {branch} failed — {_fmt_err(pull_r)}")
@@ -426,19 +431,19 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         co = _run(["git", "checkout", "-B", branch])
         if co.returncode != 0:
             log.warning(f"[post-coder] {pname}: rework `git checkout -B {branch}` failed — {_fmt_err(co)}")
-            return
+            return pushed_ids
     else:
         branch = f"coder/{session_uid}"
         co = _run(["git", "checkout", "-b", branch])
         if co.returncode != 0:
             log.warning(f"[post-coder] {pname}: git checkout -b {branch} failed — {_fmt_err(co)}")
-            return
+            return pushed_ids
 
     # 3. Add + commit + push
     add_r = _run(["git", "add", "-A"])
     if add_r.returncode != 0:
         log.warning(f"[post-coder] {pname}: git add -A failed — {_fmt_err(add_r)}")
-        return
+        return pushed_ids
     # Sanity: was anything actually staged? `diff --cached --quiet` exits 1 if
     # there are staged changes, 0 if none. Catches the "porcelain showed lines
     # but add staged nothing" scenario (e.g. all changes inside a submodule or
@@ -450,7 +455,7 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             f"[post-coder] {pname}: nothing staged after `git add -A` "
             f"despite {len(changed)} porcelain entries. status={ls.stdout.strip()[:400]!r}"
         )
-        return
+        return pushed_ids
 
     # Binary / oversize guard. GitHub rejects pushes with any single file >100 MB
     # (warns at 50 MB). The agent shouldn't be committing build artefacts at all,
@@ -478,7 +483,7 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         )
         # Reset the index so the bad files don't sit half-committed for the next session.
         _run(["git", "reset"])
-        return
+        return pushed_ids
 
     # Include one [feature-<id>] tag per assigned feature so post-coder's
     # verification block (and future reviewer scoping) can scan PR commits
@@ -489,7 +494,7 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     commit_result = _run(["git", "commit", "-m", commit_msg])
     if commit_result.returncode != 0:
         log.warning(f"[post-coder] {pname}: git commit failed — {_fmt_err(commit_result)}")
-        return
+        return pushed_ids
 
     if sprint_pr_mode:
         push_args = ["git", "push", "origin", branch]
@@ -503,7 +508,7 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     push_result = _run(push_args, timeout=180)
     if push_result.returncode != 0:
         log.warning(f"[post-coder] {pname}: git push failed: {push_result.stderr.strip()[:300]}")
-        return
+        return pushed_ids
     log.info(f"[post-coder] {pname}: pushed branch {branch}")
 
     # 4. PR resolution. In sprint mode the PR already exists — just reuse it.
@@ -521,66 +526,43 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         gh_token = _get_gh_token()
         if not gh_token:
             log.warning(f"[post-coder] {pname}: no GH_TOKEN — cannot open PR. Branch pushed; PM must open manually.")
-            return
+            return pushed_ids
 
-    # 5. Mark assigned features as Reviewing + link to the PR.
-    # Two paths, with the API path as a hard fallback:
-    #   (a) Append entries to session_result.json so the live-poll thread (and
-    #       final reconcile) PATCH them — preserves existing audit/event flow.
-    #   (b) If the file write fails for ANY reason (including the permission-
-    #       denied bug we hit when the agent container's UID 1001 leaves the
-    #       file with mode 644 that the orchestrator can't append to), fall
-    #       back to PATCHing the PM API directly. The PR is real on GitHub at
-    #       this point — DB MUST learn about it or features get stranded and
-    #       eventually auto-Blocked at fix_attempts cap.
-    sr_path = Path(working_dir) / "session_result.json"
-    file_write_ok = False
-    # Best-effort chmod first — if we own the file, this fixes permission drift.
+    # 5. Mark assigned features as Reviewing + link to the PR via direct PM
+    # API PATCH. Until 2026-05-06 this used a session_result.json append +
+    # reconcile read, but that file is also the agent's progress channel and
+    # cross-session-pollution / Windows-bind-mount-cache races meant the
+    # reconciler routinely never saw the post-coder's writes (every session's
+    # log: "wrote 1 entries to session_result.json" + "0/1 feature updates
+    # applied" — 0 progress events in 9h, the keystone of "0 features
+    # released"). The PR is real on GitHub at this point; the DB MUST learn
+    # about it or features get stranded and eventually auto-Blocked at
+    # fix_attempts cap. changed_by="post-coder:fallback" is in the website's
+    # _RANK_GUARD_BYPASS list — defends the rare case where the feature has
+    # already been advanced past Reviewing by another path (auto_merge race).
     try:
-        if sr_path.exists():
-            os.chmod(sr_path, 0o666)
-    except Exception:
-        pass
-    try:
-        with sr_path.open("a", encoding="utf-8") as f:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
             for feat in assigned_features:
-                f.write(_json.dumps({
-                    "id":         feat["id"],
-                    "status":     "Reviewing",
-                    "pr_number":  pr_number,
-                    "pr_url":     pr_url,
-                }) + "\n")
-        file_write_ok = True
-        log.info(f"[post-coder] {pname}: wrote {len(assigned_features)} entries to session_result.json")
+                fid = feat["id"]
+                try:
+                    r = client.patch(
+                        f"/api/features/{fid}",
+                        json={
+                            "status": "Reviewing",
+                            "pr_number": pr_number,
+                            "pr_url": pr_url,
+                            "changed_by": "post-coder:fallback",
+                        },
+                    )
+                    r.raise_for_status()
+                    pushed_ids.append(int(fid))
+                    log.info(
+                        f"[post-coder] {pname}: feature #{fid} → Reviewing pr={pr_number}"
+                    )
+                except Exception as e2:
+                    log.warning(
+                        f"[post-coder] {pname}: direct PATCH for feature #{fid} failed: {e2}"
+                    )
     except Exception as e:
-        log.warning(
-            f"[post-coder] {pname}: failed to append session_result.json: {e} "
-            f"— falling back to direct PM API PATCH so PR #{pr_number} is not stranded"
-        )
-
-    if not file_write_ok:
-        try:
-            with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-                for feat in assigned_features:
-                    fid = feat["id"]
-                    try:
-                        r = client.patch(
-                            f"/api/features/{fid}",
-                            json={
-                                "status": "Reviewing",
-                                "pr_number": pr_number,
-                                "pr_url": pr_url,
-                                "changed_by": "post-coder:fallback",
-                            },
-                        )
-                        r.raise_for_status()
-                        log.info(
-                            f"[post-coder] {pname}: feature #{fid} → Reviewing pr={pr_number} "
-                            f"(direct PM API fallback)"
-                        )
-                    except Exception as e2:
-                        log.warning(
-                            f"[post-coder] {pname}: direct PATCH for feature #{fid} failed: {e2}"
-                        )
-        except Exception as e:
-            log.warning(f"[post-coder] {pname}: PM API client error during fallback PATCH: {e}")
+        log.warning(f"[post-coder] {pname}: PM API client error during reviewing PATCH: {e}")
+    return pushed_ids

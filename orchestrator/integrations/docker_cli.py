@@ -17,6 +17,21 @@ from pathlib import Path
 log = logging.getLogger("poller.docker")
 
 
+def _resolve_host_path(path: str) -> str:
+    """Translate orchestrator-container path (/products/X) to host bind-mount source.
+
+    No-op when the path is already host-side (legacy host-poller mode) or when
+    PRODUCTS_BASE_DIR is unset.
+    """
+    p = Path(path)
+    try:
+        host_base = os.environ.get("PRODUCTS_BASE_DIR", "").rstrip("/\\")
+        rel = p.relative_to("/products")
+        return f"{host_base}/{rel}" if host_base else str(p)
+    except ValueError:
+        return str(p)
+
+
 def _chmod_workspace_via_alpine(working_dir: str, product_name: str = "?") -> None:
     """
     Make the workspace readable/writable to the orchestrator UID after an agent
@@ -30,14 +45,7 @@ def _chmod_workspace_via_alpine(working_dir: str, product_name: str = "?") -> No
     mode (working_dir already host-side) the translation is a no-op.
     """
     try:
-        wd = Path(working_dir)
-        try:
-            host_base = os.environ.get("PRODUCTS_BASE_DIR", "").rstrip("/\\")
-            rel = wd.relative_to("/products")
-            host_wd_path = f"{host_base}/{rel}" if host_base else str(wd)
-        except ValueError:
-            # working_dir isn't under /products — assume it's already a host path
-            host_wd_path = str(wd)
+        host_wd_path = _resolve_host_path(working_dir)
         subprocess.run(
             ["docker", "run", "--rm", "-v", f"{host_wd_path}:/ws",
              "alpine", "sh", "-c", "chmod -R a+rwX /ws 2>/dev/null || true"],
@@ -45,3 +53,35 @@ def _chmod_workspace_via_alpine(working_dir: str, product_name: str = "?") -> No
         )
     except Exception:
         log.warning(f"[{product_name}] alpine chmod helper failed (non-fatal)")
+
+
+def _rm_path_via_alpine(working_dir: str, relative_path: str, product_name: str = "?") -> bool:
+    """
+    Force-delete a single file inside the workspace via an alpine sidecar.
+    Used as a fallback for `_delete_session_result` when the orchestrator
+    process can't unlink an agent-owned file (UID drift on Windows bind-
+    mounts: file is mode 644 owned by 1001, orchestrator runs as a different
+    uid → EACCES). Same trick as `_chmod_workspace_via_alpine`.
+
+    `relative_path` is joined onto the workspace root inside the alpine
+    container; pass a leaf filename like ``session_result.json``, not an
+    absolute path. Returns True on success, False otherwise — caller logs.
+    """
+    try:
+        host_wd_path = _resolve_host_path(working_dir)
+        # Single-quote the relative path inside the shell command so spaces
+        # and shell-meta characters in agent-written filenames can't escape.
+        # Refuse a path with a single quote in it (vanishingly rare, would
+        # need explicit handling — fail loud rather than mis-interpret).
+        if "'" in relative_path:
+            log.warning(f"[{product_name}] _rm_path_via_alpine refused suspicious path: {relative_path!r}")
+            return False
+        r = subprocess.run(
+            ["docker", "run", "--rm", "-v", f"{host_wd_path}:/ws",
+             "alpine", "sh", "-c", f"rm -f '/ws/{relative_path}'"],
+            capture_output=True, timeout=30,
+        )
+        return r.returncode == 0
+    except Exception as e:
+        log.warning(f"[{product_name}] alpine rm helper failed: {e}")
+        return False
