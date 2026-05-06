@@ -71,7 +71,46 @@ For each blocked feature:
 echo '{"id": <feature_id>, "status": "Blocked", "blocked_reason": "<reason>"}' >> /workspace/session_result.json
 ```
 
-**6. When all features are done**
+**6. Pre-exit self-verification checklist**
+
+Before you call `task_done` for the last assigned feature, walk through
+this checklist OUT LOUD (in your reasoning), one item at a time, and
+either confirm it ✓ or fix the issue and re-check. The reviewer that
+runs after you flags these same items every cycle — handling them now
+saves a rework round (each rework costs you 20-60 min and bumps
+`fix_attempts` toward the auto-block cap of 5).
+
+For each implemented feature:
+
+- [ ] **Acceptance criteria.** Re-read `/workspace/docs/story_<id>.md`
+  and confirm every numbered acceptance criterion has a corresponding
+  code path AND a test that exercises it. If the design doc lists 5
+  test cases, the test file should have 5 non-skipped cases — not
+  3 with `.skip` / `.todo` markers on the others.
+- [ ] **No skipped or pending tests.** `grep -rn "\.skip\|\.todo\|xit(\|xdescribe(" TestCases/` (or
+  the language equivalent) on the files you touched. If anything
+  matches: either un-skip and make it pass, or delete it. Reviewers
+  treat `.skip` as missing coverage.
+- [ ] **No raw error.message in HTTP responses.** `grep -rn "error\.message\|err\.message" SRC/ pages/api/ app/api/`
+  on the files you touched. Replace any matches with generic messages
+  ("Service unavailable", "Internal error") and log the raw error
+  server-side instead. Information disclosure is the #1 security
+  issue the auditor flags.
+- [ ] **No hardcoded secrets / credentials.** `grep -rnE "(api[_-]?key|password|secret|token)\\s*[:=]\\s*[\"']" SRC/ app/`
+  on changed files. Move anything matched to env vars.
+- [ ] **Tests actually pass.** Re-run the tests scoped to the
+  feature one more time. A passing test before refactor doesn't
+  guarantee a passing test now.
+- [ ] **Reviewer feedback addressed (rework cycles only).** If the
+  prompt above contains a `## Reviewer feedback to address` section,
+  read each bullet again and confirm your code changes actually
+  addressed it. Don't claim done if you only addressed 2 of 3 items.
+
+If every box is ✓ across every assigned feature, append final-summary
+to `session_summary.md` and call `task_done`. If any box is ✗, fix
+it and re-check before exiting — don't just write `Blocked`.
+
+**7. When all features are done**
 - Append a final-summary line to `/workspace/session_summary.md` listing feature IDs touched.
 - Exit cleanly.
 
