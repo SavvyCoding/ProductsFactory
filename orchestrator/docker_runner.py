@@ -475,8 +475,12 @@ def _prepare_workspace(product: dict) -> tuple[str, str]:
     _reset_workspace(working_dir, product.get("name", str(working_dir)))
 
     # Delete stale session_result.json BEFORE launch — previous agents may have
-    # committed it to git, so git clean won't remove it.
-    _delete_session_result(working_dir)
+    # committed it to git, so git clean won't remove it. Robust to UID drift /
+    # permission errors via alpine sidecar fallback (incident 2026-05-06: a
+    # stale session_result.json from session 1942 survived 12+ subsequent
+    # session starts, polluting reconcile reads with `Implemented` entries
+    # that silently failed the rank guard).
+    _delete_session_result(working_dir, product.get("name", "?"))
 
     # Re-install templates after reset — git clean may have removed untracked template files.
     # force=False ensures we never overwrite files the agent has customised and committed.
@@ -903,6 +907,7 @@ def _finalize_session(
     _session_features: list = []
     attempted = 0
     pushed = 0
+    post_coder_pushed: list[int] = []
     try:
         # 0. Path B post-* ceremony — orchestrator owns ALL git for personas
         # that produce files. Agent only edits files + writes session_result.json;
@@ -912,8 +917,10 @@ def _finalize_session(
         # to crawl over empty PRs. See commit 6b0473b for the symptom history.
         if exit_code == 0 and persona == "coder":
             try:
-                _run_post_coder_pipeline(product, session_uid, working_dir,
-                                         product.get("_assigned_features", []))
+                post_coder_pushed = _run_post_coder_pipeline(
+                    product, session_uid, working_dir,
+                    product.get("_assigned_features", []),
+                )
             except Exception:
                 log.exception(f"Post-coder pipeline failed for {product.get('name')}")
         elif exit_code == 0 and persona in ("product_planner", "designer"):
@@ -952,10 +959,19 @@ def _finalize_session(
 
         assigned_ids = {f["id"] for f in product.get("_assigned_features", [])}
         attempted = len(assigned_ids)
-        pushed = sum(1 for f in _session_features
-                     if isinstance(f, dict)
-                     and f.get("id") in assigned_ids
-                     and f.get("status") in ("Pushed", "Reviewing", "Reviewed", "Designed"))
+        # `pushed` = features the orchestrator (post-coder) actually moved to
+        # Reviewing on this run, plus any session_result.json self-reports the
+        # reconciler accepted. Counted once per feature ID so a feature
+        # advanced by both paths doesn't double-count. Pre-2026-05-06 this
+        # counted Designed entries as pushed — wrong, since Designed is a
+        # regression — and ignored post-coder's direct PATCHes entirely.
+        from_session_result = {
+            f["id"] for f in _session_features
+            if isinstance(f, dict)
+            and f.get("id") in assigned_ids
+            and f.get("status") in ("Pushed", "Reviewing", "Reviewed")
+        }
+        pushed = len(set(post_coder_pushed) | from_session_result)
     except Exception:
         log.exception(f"Post-exit reconciliation failed for {product.get('name')}")
     finally:

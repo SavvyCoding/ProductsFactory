@@ -17,6 +17,7 @@ from pathlib import Path
 
 import httpx
 
+from orchestrator.integrations.docker_cli import _rm_path_via_alpine
 from orchestrator.session.state_machine import _apply_session_entry
 
 log = logging.getLogger("poller.docker")
@@ -63,11 +64,54 @@ def _read_session_result(working_dir: str) -> list[dict]:
     return entries
 
 
-def _delete_session_result(working_dir: str) -> None:
+def _delete_session_result(working_dir: str, product_name: str = "?") -> None:
+    """
+    Robust delete of session_result.json.
+
+    Two failure modes the simple `unlink(missing_ok=True)` couldn't handle:
+      1. The agent ran as UID 1001 inside the container and left the file
+         mode 644 owned by 1001. The orchestrator (different UID) can't
+         unlink it → silent EACCES. Until 2026-05-06 this caused stale
+         agent writes to leak into the next session's reconcile.
+      2. On Windows Docker bind-mounts the host filesystem occasionally
+         holds the inode briefly after the agent container exits.
+
+    Order of attempts:
+      a. chmod 0o666 + unlink — works in container-mode where the orchestrator
+         and the agent share UID/GID space.
+      b. alpine sidecar rm — runs as root via the host docker socket, the same
+         escape hatch `_chmod_workspace_via_alpine` uses for the same bind-
+         mount permission class.
+
+    Logs a warning if the file still exists after both attempts. Idempotent:
+    a missing file is success.
+    """
+    sr_path = Path(working_dir) / "session_result.json"
+    if not sr_path.exists():
+        return
     try:
-        (Path(working_dir) / "session_result.json").unlink(missing_ok=True)
+        try:
+            os.chmod(sr_path, 0o666)
+        except Exception:
+            pass
+        sr_path.unlink(missing_ok=True)
     except Exception:
         pass
+    if not sr_path.exists():
+        return
+    # Direct unlink failed — escalate to alpine sidecar.
+    if _rm_path_via_alpine(working_dir, "session_result.json", product_name):
+        if not sr_path.exists():
+            log.info(f"[{product_name}] cleared stale session_result.json via alpine sidecar")
+            return
+    # Both attempts failed; surface so the next reconcile's "0/N applied"
+    # has a breadcrumb back to the cause. The reconciler already filters
+    # out unknown statuses, so a leftover file isn't catastrophic — just
+    # confusing.
+    log.warning(
+        f"[{product_name}] could NOT delete stale session_result.json — "
+        f"next session may pick up cross-session entries"
+    )
 
 
 def _live_poll_session_result(working_dir: str, stop_event: threading.Event, persona: str = "") -> None:
