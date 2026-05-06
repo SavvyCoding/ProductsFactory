@@ -2203,6 +2203,17 @@ async def api_update_feature(
                 new_value="Blocked",
                 changed_by=f"{changed_by} (auto-blocked at cap)",
             ))
+
+    # Flush + refresh so response serialization can read server-computed
+    # columns (updated_at uses onupdate=func.now()) without triggering a
+    # lazy-load. Without this the response serializer hits MissingGreenlet
+    # and the PATCH returns a spurious 500 even though the DB write
+    # succeeded — incident 2026-05-06 03:39 UTC: post-coder Reviewing
+    # PATCHes 500'd while the underlying writes had already committed,
+    # leaving features visibly Implementing even though they should have
+    # transitioned to Reviewing.
+    await db.flush()
+    await db.refresh(feature)
     return feature
 
 
