@@ -501,20 +501,33 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     feat_summary = ", ".join(f"#{i}" for i in feat_ids)
     feat_tags    = "".join(f"[feature-{i}]" for i in feat_ids)
     commit_msg = f"{feat_tags} feat: implement features {feat_summary} [coder-{session_uid}]"
-    commit_result = _run(["git", "commit", "-m", commit_msg])
+    # --no-verify on the orchestrator's commit + push.
+    # Pre-commit/pre-push hooks are valuable for HUMAN commits — they catch
+    # lint/type/test regressions before code lands. The post-coder pipeline
+    # is a deterministic system step that ships agent-generated code; it
+    # runs under the orchestrator's UID with the orchestrator's PATH, not
+    # the agent's. Agent-installed hooks (husky calling `npx`, lint-staged,
+    # pre-commit, etc.) routinely fail in this environment because their
+    # required binaries aren't on PATH. Real incident 2026-05-06 18:09:
+    # husky's pre-commit script exited 127 (`npx not found`), git commit
+    # rc=1, post-coder bailed, feature 183 stranded at Implemented.
+    # Hooks would also catch nothing useful here — the agent's code is
+    # what we WANT to commit, not what we want to gate. CI on the PR side
+    # is the right place for those checks.
+    commit_result = _run(["git", "commit", "--no-verify", "-m", commit_msg])
     if commit_result.returncode != 0:
         log.warning(f"[post-coder] {pname}: git commit failed — {_fmt_err(commit_result)}")
         return pushed_ids
 
     if sprint_pr_mode:
-        push_args = ["git", "push", "origin", branch]
+        push_args = ["git", "push", "--no-verify", "origin", branch]
     elif rework_pr_mode:
         # Replace the prior (rejected) commits on the remote PR branch with our
         # fresh main-based commits. --force-with-lease aborts if the remote was
         # touched by anyone else since our last fetch.
-        push_args = ["git", "push", "--force-with-lease", "origin", branch]
+        push_args = ["git", "push", "--no-verify", "--force-with-lease", "origin", branch]
     else:
-        push_args = ["git", "push", "-u", "origin", branch]
+        push_args = ["git", "push", "--no-verify", "-u", "origin", branch]
     push_result = _run(push_args, timeout=180)
     if push_result.returncode != 0:
         log.warning(f"[post-coder] {pname}: git push failed: {push_result.stderr.strip()[:300]}")
