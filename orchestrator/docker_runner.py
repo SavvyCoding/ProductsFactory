@@ -1093,6 +1093,58 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                 f"(branch={sprint_branch!r} pr={sprint_pr_num!r}) — falling back to per-feature mode"
             )
             sprint_pr_mode = False
+    if sprint_pr_mode:
+        # Verify the cached sprint PR is still open on GitHub before pushing.
+        # The sprint metadata (`product._sprint_pr_*`) is read from the DB at
+        # session-start, but a PR can be closed/merged between then and now —
+        # by a human, by auto_merge.sweep, or by an external script. Pushing
+        # to a closed PR's head branch leaves commits on a branch with no
+        # active PR; the website thinks features are Reviewing but reconcile
+        # bounces them back to Implementing because the PR is closed.
+        # Real incident 2026-05-06: PR #1 on DigitalSign was closed
+        # 2026-05-05 18:38 UTC; orchestrator kept pushing to sprint/79 for
+        # ~16h with the website reporting "0 features in Reviewing" while
+        # the agent burned cycles producing commits no PR pointed at.
+        gh_token_chk = _get_gh_token()
+        github_repo_chk = product.get("github_repo", "")
+        if gh_token_chk and github_repo_chk:
+            try:
+                repo_slug_chk = _parse_repo_slug(github_repo_chk)
+                pr_chk = httpx.get(
+                    f"https://api.github.com/repos/{repo_slug_chk}/pulls/{int(sprint_pr_num)}",
+                    headers={"Authorization": f"Bearer {gh_token_chk}",
+                             "Accept": "application/vnd.github+json"},
+                    timeout=10,
+                )
+                if pr_chk.status_code == 200:
+                    state = pr_chk.json().get("state")
+                    if state != "open":
+                        log.warning(
+                            f"[post-coder] {pname}: sprint PR #{sprint_pr_num} is "
+                            f"{state!r} on GitHub (not open) — falling back to "
+                            f"per-feature mode. Sprint metadata is stale; "
+                            f"reconcile.reconcile_sprint_pr_state will null it "
+                            f"out next cycle."
+                        )
+                        sprint_pr_mode = False
+                elif pr_chk.status_code == 404:
+                    log.warning(
+                        f"[post-coder] {pname}: sprint PR #{sprint_pr_num} not "
+                        f"found on GitHub (404) — falling back to per-feature mode"
+                    )
+                    sprint_pr_mode = False
+                else:
+                    # Transient GitHub error — proceed in sprint_pr_mode and
+                    # let the push attempt itself surface any real failure.
+                    log.warning(
+                        f"[post-coder] {pname}: GitHub returned {pr_chk.status_code} "
+                        f"checking PR #{sprint_pr_num} — proceeding optimistically"
+                    )
+            except Exception as e:
+                log.warning(
+                    f"[post-coder] {pname}: sprint PR state check failed: {e} "
+                    f"— proceeding optimistically with cached metadata"
+                )
 
     rework_pr_mode = False
     rework_pr_number: int | None = None
