@@ -27,6 +27,7 @@ If a `docs/story_<ID>.md` exists for the feature, read it first.
 ---
 
 {reviewer_patterns}
+{reviewer_feedback}
 ## Your job
 
 For each assigned feature you implement code and run tests. **You do not run git or gh.** The orchestrator commits and pushes everything you wrote after this session exits.

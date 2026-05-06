@@ -27,6 +27,7 @@ If a `docs/story_<ID>.md` exists for the feature, read it first.
 ---
 
 {reviewer_patterns}
+{reviewer_feedback}
 ## Your job
 
 For each assigned feature you implement code, run tests, then commit and push. PR creation only fires in per-feature mode (sprint mode reuses the open sprint PR).

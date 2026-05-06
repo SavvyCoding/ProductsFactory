@@ -213,6 +213,13 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
         "{sprint_pr_url}": str(product.get("_sprint_pr_url", "")),
         "{assigned_features}": product.get("_assigned_features_md", ""),
         "{assigned_feature_count}": str(len(product.get("_assigned_features", []))),
+        # Reviewer/security_auditor comments for features in a rework cycle.
+        # Empty for fresh first-pass assignments. Wired only for coder
+        # (docker_runner._format_reviewer_feedback returns "" for other
+        # personas). Closes the reviewer→coder feedback gap surfaced on
+        # 2026-05-06: reviewer 1975 left specific line-numbered comments
+        # that coder 1976 never saw because the prompt didn't render them.
+        "{reviewer_feedback}": product.get("_reviewer_feedback_md", ""),
         "{prev_session_summary}": (
             f"## Previous session context\n\n{prev}\n\n---\n" if prev else ""
         ),

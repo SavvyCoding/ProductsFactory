@@ -312,6 +312,12 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                 "pr_url": f.get("pr_url"),
                 "fix_attempts": f.get("fix_attempts", 0),
                 "blocked_reason": f.get("blocked_reason"),
+                # `review_outcome` lets the prompt-builder distinguish a fresh
+                # rework cycle (changes_requested) from a normal first-pass
+                # assignment, and so we know when to fetch the reviewer's
+                # per-feature feedback below. Stripping it here used to be
+                # the reason the rework coder had no idea WHY it was running.
+                "review_outcome": f.get("review_outcome"),
             }
             for f in selected
         ], active_sprint_name, active_sprint
@@ -348,6 +354,85 @@ def _write_sprint_features_md(working_dir: str, features: list[dict], sprint_nam
         log.info(f"Wrote sprint features.md ({len(features)} features) to {md_path}")
     except Exception as e:
         log.warning(f"Could not write features.md to {working_dir}: {e}")
+
+
+def _fetch_recent_review_comments(feature_id: int, limit: int = 6) -> list[dict]:
+    """
+    Pull the last `limit` reviewer/security_auditor/qa_tester comments for a
+    feature from the PM API. Returns oldest-first within the slice so the
+    prompt-renderer can stack them in chronological order under the feature.
+
+    Used by `_format_reviewer_feedback` to bridge the reviewer→coder feedback
+    gap. Until 2026-05-06 the rework coder had no signal for WHY it was
+    rerunning — review_outcome=changes_requested was the only hint, with the
+    actual line numbers / failing test names buried in feature_comments that
+    the prompt never read. Real example: reviewer 1975 left specific
+    comments on feature 179 (`SRC/healthCheckService.js` lines 34/44/54/84/122,
+    three skipped test cases by name) that coder 1976 never saw.
+    """
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            r = client.get(f"/api/features/{feature_id}/comments")
+            if r.status_code != 200:
+                return []
+            data = r.json()
+            if not isinstance(data, list):
+                return []
+            # API may return newest-first OR oldest-first depending on impl;
+            # sort defensively by created_at ascending and keep the tail.
+            data.sort(key=lambda c: (c.get("created_at") or ""))
+            relevant = [c for c in data
+                        if (c.get("author") or "").lower()
+                        in ("reviewer", "security_auditor", "qa_tester")]
+            return relevant[-limit:]
+    except Exception as e:
+        log.debug(f"[reviewer-feedback] could not fetch comments for #{feature_id}: {e}")
+        return []
+
+
+def _format_reviewer_feedback(features: list[dict]) -> str:
+    """
+    Render the most recent reviewer/auditor comments per feature as a
+    Markdown block. Empty string when no feature in `features` has
+    `review_outcome=changes_requested` — i.e. fresh first-pass assignments
+    don't get this section, only reworks do.
+
+    Goes into the coder prompt as `{reviewer_feedback}`.
+    """
+    rework_features = [f for f in features
+                       if (f.get("review_outcome") == "changes_requested"
+                           or (f.get("fix_attempts") or 0) > 0)]
+    if not rework_features:
+        return ""
+    sections: list[str] = [
+        "## Reviewer feedback to address",
+        "",
+        "These features are in a **rework cycle** — the reviewer or "
+        "security auditor flagged specific issues on the prior commit. "
+        "Address each item below before re-pushing. Don't reimplement "
+        "from scratch — keep the working parts and patch the listed gaps.",
+        "",
+    ]
+    for f in rework_features:
+        comments = _fetch_recent_review_comments(int(f["id"]))
+        if not comments:
+            continue
+        sections.append(f"### Feature #{f['id']} — {f.get('name','')}")
+        sections.append(
+            f"_review_outcome={f.get('review_outcome') or '-'}, "
+            f"fix_attempts={f.get('fix_attempts', 0)}_"
+        )
+        sections.append("")
+        for c in comments:
+            ts = (c.get("created_at") or "")[:19]
+            author = c.get("author") or "?"
+            body = (c.get("body") or "").rstrip()
+            sections.append(f"**{ts} · {author}**")
+            sections.append(body)
+            sections.append("")
+    if len(sections) <= 4:  # only the header survived — no comments found
+        return ""
+    return "\n".join(sections).rstrip() + "\n"
 
 
 def _format_assigned_features(features: list[dict], persona: str | None) -> str:
@@ -1118,6 +1203,13 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     _claim_features(assigned_features, persona)
     product["_assigned_features"] = assigned_features
     product["_assigned_features_md"] = _format_assigned_features(assigned_features, persona)
+    # Pull recent reviewer/auditor comments for any feature in a rework cycle
+    # so the coder prompt can render them under {reviewer_feedback}. Coder
+    # only — other personas don't need it (designer writes docs, reviewer
+    # IS the source of comments, qa/security manage their own context).
+    product["_reviewer_feedback_md"] = (
+        _format_reviewer_feedback(assigned_features) if persona == "coder" else ""
+    )
     product["_active_sprint"] = active_sprint or {}
 
     # Sprint-PR-mode context: when the product opts in via config.sprint_pr_mode
