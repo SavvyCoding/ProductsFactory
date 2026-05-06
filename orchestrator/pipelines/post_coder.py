@@ -384,20 +384,30 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         # since the post-coder force-push will overwrite the sprint branch tree
         # anyway.
         _run(["git", "fetch", "origin"])
-        # Stash TRACKED changes only (no -u). Untracked files (agent's new
-        # source files + node_modules from npm install) stay in the working
-        # tree across the branch switch. Without this restriction, `stash -u`
-        # walks the full untracked set — for products that ran npm/pip/go-mod
-        # install that's tens of thousands of files and stash takes minutes,
-        # busting the 120s subprocess timeout. After the switch, `git add -A`
-        # picks up everything (tracked stash-pop + untracked still on disk).
-        stash_r = _run(["git", "stash", "push", "-m",
+        # Stash with -u so UNTRACKED files survive the branch switch too. The
+        # agent's brand-new source files (e.g. SRC/healthz.ts, app/api/.../route.ts)
+        # are untracked at this point; without -u, `git checkout sprint/79`
+        # errors with "untracked working tree files would be overwritten by
+        # checkout" the moment local sprint/79 has tracked content at the
+        # same path — which it does after any prior session committed there.
+        # Real incident 2026-05-06 17:14: 10 changed files detected, checkout
+        # sprint/79 failed on SRC/healthz.{js,ts} + package.json conflicts,
+        # post-coder bailed, agent's work was hard-reset away on next cycle's
+        # _reset_workspace, feature 179 stranded at Implemented.
+        # -u respects .gitignore (node_modules/, .next/, dist/) so the stash
+        # stays small even on Node/Python/Go projects.
+        stash_r = _run(["git", "stash", "push", "-u", "-m",
                         f"post-coder-{session_uid}"], timeout=300)
         stashed = (stash_r.returncode == 0
                    and "No local changes to save" not in (stash_r.stdout or ""))
-        co = _run(["git", "checkout", branch])
+        # Force-reset local `branch` to origin/`branch` before switching. If a
+        # prior session committed junk to local sprint/79 and that branch
+        # wasn't cleaned up by _reset_workspace, plain `git checkout BRANCH`
+        # would land us on stale tracked content. `-B` overwrites the local
+        # ref, ensuring we always start from the canonical remote state.
+        co = _run(["git", "checkout", "-B", branch, f"origin/{branch}"])
         if co.returncode != 0:
-            log.warning(f"[post-coder] {pname}: git checkout {branch} failed — {_fmt_err(co)}")
+            log.warning(f"[post-coder] {pname}: git checkout -B {branch} origin/{branch} failed — {_fmt_err(co)}")
             if stashed:
                 _run(["git", "stash", "pop"])  # best-effort restore
             return pushed_ids
