@@ -23,8 +23,15 @@ docker-compose up -d
 # Run migrations
 alembic upgrade head
 
-# Run tests (requires DATABASE_URL or TEST_DATABASE_URL env var)
-pytest tests/ -v
+# Run tests
+# REQUIRED: TEST_DATABASE_URL must point at a DB whose name contains 'test'.
+# There is NO fallback to DATABASE_URL — pointing tests at production wiped
+# it twice (2026-05-03, 2026-05-05) before the fallback was removed.
+# One-time test-DB setup:
+#   docker exec ProductsFactoryDB createdb -U productfactory productfactory_test
+#   DATABASE_URL=postgresql://...:.../productfactory_test alembic upgrade head
+TEST_DATABASE_URL=postgresql://productfactory:PASSWORD@localhost:5432/productfactory_test \
+  pytest tests/ -v
 
 # Run a single test file
 pytest tests/test_poller.py -v
@@ -115,7 +122,7 @@ Additionally, a `product_config.json` file in the product working directory (rea
 - Key tables: `products`, `features`, `sessions`, `alerts`, `feature_reviews`, `sprints`, `phases`
 - JIRA-like tracking tables: `feature_comments` (per-feature discussion), `feature_changelog` (auto-tracked field-level audit trail), `labels` + `feature_labels` (product-scoped color tags, many-to-many), `feature_links` (directed relationships: blocks/is_blocked_by/relates_to/duplicates)
 - Notable columns: `features.skip_design`, `features.design_doc`, `features.design_doc_path`, `features.review_outcome`, `features.review_notes`, `features.feature_type` (`feature | bug | chore`), `features.due_date`, `features.story_points`, `features.fix_attempts`, `features.blocked_reason`; `sprints.dod_status` (JSONB — gate booleans + agent notes), `sprints.phase_id`, `sprints.release_notes`, `sprints.completed_at`, `sprints.retro_doc_path`, `sprints.kind` (`normal | blocked`)
-- Tests use real PostgreSQL (not mocks) — each test runs inside a rolled-back transaction for isolation; requires `TEST_DATABASE_URL`
+- Tests use real PostgreSQL (not mocks) — each test runs inside a rolled-back transaction for isolation. **`TEST_DATABASE_URL` is required and must contain `test` in the database name.** No fallback to `DATABASE_URL`; conftest aborts the session on a banned name (`productfactory`, `postgres`) or any name without a `test` substring. Engine teardown does NOT call `drop_all` — per-test rollback is the only cleanup. Set up the test DB once with `createdb productfactory_test` then `alembic upgrade head` against it.
 
 **Feature tracking REST endpoints** (agents and PM can call these):
 - Comments: `POST/GET /api/features/{id}/comments` — author field: `pm`, `poller`, or persona name
