@@ -17,11 +17,44 @@ Extracted from docker_runner.py during Phase 2 of OrchestratorRefactor.
 
 import logging
 import subprocess
+import time
 from pathlib import Path
 
 from orchestrator.integrations.docker_cli import _chmod_workspace_via_alpine
 
 log = logging.getLogger("poller.docker")
+
+
+def _remove_stale_git_lock(working_dir: str, product_name: str, max_age_seconds: int = 60) -> None:
+    """
+    Remove ``.git/index.lock`` if it's older than ``max_age_seconds``.
+
+    Git creates ``.git/index.lock`` during writes (commit, checkout, reset, clean)
+    and removes it on completion. A crashed or killed git process leaves a stale
+    lock that blocks every subsequent git operation with
+    ``Unable to create '.git/index.lock': File exists`` — and the entire
+    ``_reset_workspace`` cascade silently fails.
+
+    Real incident 2026-05-05: an index.lock from 11:28 (a previously-crashed
+    session) blocked every subsequent coder session for the rest of the day.
+    The agent's ``git status`` calls timed out, ``_agent_made_edits`` repeatedly
+    fail-closed, and the agent burned 200 turns without making progress.
+
+    Conservative threshold: 60s. A live git process holding the lock should
+    finish in seconds; anything older is necessarily abandoned.
+    """
+    lock_path = Path(working_dir) / ".git" / "index.lock"
+    if not lock_path.exists():
+        return
+    try:
+        age = time.time() - lock_path.stat().st_mtime
+        if age < max_age_seconds:
+            log.info(f"[{product_name}] .git/index.lock present but age={int(age)}s — leaving (may be live)")
+            return
+        lock_path.unlink()
+        log.warning(f"[{product_name}] removed stale .git/index.lock (age={int(age)}s)")
+    except Exception as e:
+        log.warning(f"[{product_name}] could not check/remove .git/index.lock: {e}")
 
 
 def safe_run(
@@ -68,6 +101,12 @@ def _reset_workspace(working_dir: str, product_name: str) -> None:
     # 1001) can reset/checkout/clean. See _chmod_workspace_via_alpine for why
     # we have to detour through a host-docker alpine sidecar on Windows.
     _chmod_workspace_via_alpine(working_dir, product_name)
+
+    # Clear any stale .git/index.lock from a previous crashed/killed session.
+    # Without this, every subsequent git operation in this workspace fails
+    # with "Unable to create index.lock: File exists" — silently breaking
+    # the rest of this _reset_workspace cascade. See helper docstring.
+    _remove_stale_git_lock(working_dir, product_name)
 
     # 1. Fetch latest from origin (updates remote-tracking refs, prunes deleted branches)
     # Longer timeout — fetch can legitimately take a while on slow networks.
