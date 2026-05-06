@@ -396,9 +396,18 @@ async def _next_planned_sprint(product_id: int, db: AsyncSession) -> Sprint | No
 # the harness (auto_merge sweep, supervisor, github_client direct writes,
 # features_sync) used to silently downgrade status. Now rejected at the website
 # boundary with 422.
+#
+# Implemented (4), Testing (5), Committed (5) are in the agent's status
+# vocabulary (the coder prompt instructs `{"status": "Implemented"}` writes).
+# Without explicit ranks they defaulted to 0 here, which made every PATCH
+# carrying those statuses get rejected as "downgrade from current" at the
+# website boundary too — same root cause as the orchestrator-side rank
+# table. Both tables MUST agree on every status the agent can write.
 _FEATURE_PROGRESS_RANK = {
     "Pending":      0, "Approved":     1, "Designing":    2, "Designed":     3,
-    "Implementing": 4, "Reviewing":    5, "Reviewed":     6, "Pushed":       7,
+    "Implementing": 4, "Implemented":  4,
+    "Reviewing":    5, "Testing":      5, "Committed":    5,
+    "Reviewed":     6, "Pushed":       7,
     "Blocked":      2, "Deferred":     7, "Rejected":     7, "Reverted":     0,
 }
 _FEATURE_ALLOWED_BACKWARD = frozenset({
@@ -2037,12 +2046,25 @@ async def api_update_feature(
     # caller gets the same protection — including auto_merge sweep,
     # supervisor, github_client direct writes, and features_sync.
     #
-    # PMs go through /api/features/{id}/pm-status which has its own
-    # PM_ALLOWED_TRANSITIONS validation; PMs that PATCH this endpoint with
-    # changed_by="pm" bypass the rank check explicitly (consistent with the
-    # Blocked-quarantine carve-out above).
+    # Trusted internal callers bypass the guard via changed_by ∈
+    # _RANK_GUARD_BYPASS. PMs go through /api/features/{id}/pm-status which
+    # has its own PM_ALLOWED_TRANSITIONS validation. The rollback /
+    # kill_recovery / supervisor / post-doc:rollback paths are legitimate
+    # downgrades the orchestrator runs after a session crash — without this
+    # bypass list every rollback PATCH was a silent 422 (incident 2026-05-06,
+    # 5 features stuck in Implementing after an Ollama exit=2 storm).
     new_status_for_rank = updates.get("status")
-    if new_status_for_rank and updates.get("changed_by") != "pm":
+    _caller = updates.get("changed_by") or ""
+    _RANK_GUARD_BYPASS = {
+        "pm",
+        "rollback",
+        "kill_recovery",
+        "supervisor",
+        "post-doc:rollback",
+        "post-coder:fallback",
+        "reset_stuck",
+    }
+    if new_status_for_rank and _caller not in _RANK_GUARD_BYPASS:
         cur_rank = _FEATURE_PROGRESS_RANK.get(feature.status, 0)
         new_rank = _FEATURE_PROGRESS_RANK.get(new_status_for_rank, 0)
         if (
@@ -2059,7 +2081,9 @@ async def api_update_feature(
                         f"Cannot downgrade feature #{feature_id} from "
                         f"{feature.status!r} to {new_status_for_rank!r}. Use "
                         f"PATCH /api/features/{feature_id}/pm-status for PM moves "
-                        f"or pass changed_by='pm' to bypass."
+                        f"or pass changed_by ∈ {{rollback,kill_recovery,supervisor,"
+                        f"post-doc:rollback,post-coder:fallback,pm}} for trusted "
+                        f"internal callers."
                     ),
                 },
             )
@@ -2189,6 +2213,17 @@ async def api_update_feature(
                 new_value="Blocked",
                 changed_by=f"{changed_by} (auto-blocked at cap)",
             ))
+
+    # Flush + refresh so response serialization can read server-computed
+    # columns (updated_at uses onupdate=func.now()) without triggering a
+    # lazy-load. Without this the response serializer hits MissingGreenlet
+    # and the PATCH returns a spurious 500 even though the DB write
+    # succeeded — incident 2026-05-06 03:39 UTC: post-coder Reviewing
+    # PATCHes 500'd while the underlying writes had already committed,
+    # leaving features visibly Implementing even though they should have
+    # transitioned to Reviewing.
+    await db.flush()
+    await db.refresh(feature)
     return feature
 
 
@@ -2283,6 +2318,13 @@ async def api_reset_stuck(db: AsyncSession = Depends(get_db)):
     """
     Poller calls this each cycle.
     Resets features stuck in in-progress agent states for >45min back to their prior ready state.
+
+    Writes a FeatureChangelog row for every status mutation with
+    changed_by="reset_stuck". Until 2026-05-06 this path silently mutated
+    the ORM with no audit trail — features 164/177/179/182/183 had hours
+    of "Designed → Implementing → ??? → Designed" loops with the second
+    arrow invisible because reset_stuck was the demoter. If feature
+    archaeology turns up gaps, look for "reset_stuck" entries.
     """
     sys_cfg = await _get_system_config(db)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=_cfg(sys_cfg, "stuck_feature_timeout_hours"))
@@ -2294,6 +2336,7 @@ async def api_reset_stuck(db: AsyncSession = Depends(get_db)):
     )
     stuck = result.scalars().all()
     for f in stuck:
+        old_status = f.status
         if f.status == "Implementing":
             # Reset to Designed if a design doc was written, otherwise back to Approved
             f.status = "Designed" if f.design_doc_path else "Approved"
@@ -2301,6 +2344,14 @@ async def api_reset_stuck(db: AsyncSession = Depends(get_db)):
             f.status = "Approved"
         elif f.status == "Reviewing":
             f.status = "Implementing"  # Coder will re-open or reviewer will re-pick
+        if old_status != f.status:
+            db.add(FeatureChangelog(
+                feature_id=f.id,
+                field="status",
+                old_value=old_status,
+                new_value=f.status,
+                changed_by="reset_stuck",
+            ))
     await db.flush()
     return {"reset_count": len(stuck)}
 
