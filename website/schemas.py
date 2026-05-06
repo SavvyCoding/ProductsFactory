@@ -132,6 +132,15 @@ class FeatureUpdate(BaseModel):
     session_uid:     Optional[str]  = None  # review authorship — stored in feature_reviews, not on feature
     sprint_id:       Optional[int]  = None  # reassign to a different sprint
     expected_version: Optional[int] = None  # optimistic lock — if provided, update is rejected on mismatch
+    # Caller-supplied attribution: who/what is making this change. Read by
+    # the rank-guard handler in main.py to allow trusted internal callers
+    # (rollback, kill_recovery, supervisor, post-doc:rollback, pm) to bypass
+    # the IV.1 rank-downgrade rule. Without this field declared here, Pydantic
+    # silently strips it from the PATCH body and every legitimate downgrade
+    # got rejected with 422 — incident 2026-05-06 left 5 features stuck after
+    # an Ollama exit=2 storm because every rollback was actually a silent 422.
+    # Also written to feature_changelog as the "changed_by" attribution.
+    changed_by:      Optional[str]  = None
 
 
 class FeatureStatusUpdate(BaseModel):

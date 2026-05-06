@@ -181,28 +181,16 @@ def get_system_config() -> dict:
         return {}
 
 
-def get_next_product(products: list[dict]) -> dict | None:
-    """
-    Select next product to run:
-    1. run_now=True products have priority (first one found)
-    2. Otherwise: status=ready, has Approved features, round-robin by last_run_at
-    """
-    # Priority: run_now flag
-    for p in products:
-        if p.get("run_now") and p["status"] == "ready":
-            return p
-
-    # Normal round-robin via API
-    try:
-        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-            resp = client.get("/api/products/next")
-        if resp.status_code == 204:
-            return None
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.HTTPError as e:
-        log.error(f"get_next_product failed: {e}")
-        return None
+# Phase 4b: round-robin and retro/reviewer selection helpers moved to
+# orchestrator/cycle/selection.py. Re-exported below alongside is_quiet_hours
+# and the _POST_SPRINT_PERSONAS cadence list.
+from orchestrator.cycle.selection import (
+    get_next_product,
+    get_next_reviewer_product,
+    get_next_retro_product,
+    is_quiet_hours,
+    _POST_SPRINT_PERSONAS,
+)
 
 
 def _clear_sprint_context(working_dir: str) -> None:
@@ -235,19 +223,6 @@ def reset_stuck_features():
         log.error(f"reset_stuck_features failed: {e}")
 
 
-def is_quiet_hours(product: dict) -> bool:
-    """Return True if current UTC hour falls within the product's quiet window."""
-    start = product.get("quiet_hours_start")
-    end   = product.get("quiet_hours_end")
-    if start is None or end is None:
-        return False
-    current_hour = datetime.now(timezone.utc).hour
-    if start <= end:
-        return start <= current_hour < end
-    else:  # wraps midnight e.g. 22-6
-        return current_hour >= start or current_hour < end
-
-
 def is_daily_cap_reached(product: dict) -> bool:
     """Return True if this product has hit its daily session cap."""
     cap = product.get("daily_session_cap")
@@ -258,205 +233,14 @@ def is_daily_cap_reached(product: dict) -> bool:
         return _daily_session_counts.get(product["id"], 0) >= cap
 
 
-def get_next_reviewer_product(products: list[dict]) -> tuple[dict | None, str | None]:
-    """
-    Check if any ready product has features in 'Reviewing' state with a PR number.
-    Reviewer sessions take global priority over normal designer/coder scheduling.
-    Returns (product, 'reviewer') or (None, None).
-    """
-    ready_ids = {p["id"] for p in products if p["status"] == "ready"}
-    try:
-        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-            resp = client.get("/api/features/next-for-persona", params={"persona": "reviewer"})
-        if resp.status_code == 200 and resp.json():
-            feature = resp.json()
-            pid = feature["product_id"]
-            if pid in ready_ids:
-                product = next((p for p in products if p["id"] == pid), None)
-                return product, "reviewer"
-    except httpx.HTTPError as e:
-        log.error(f"get_next_reviewer_product failed: {e}")
-    return None, None
-
-
-def get_next_retro_product(products: list[dict]) -> dict | None:
-    """
-    Check if any ready product has a sprint needing a retrospective:
-    - Active sprint where all features are terminal and retro_doc_path is not set
-    - OR a completed sprint with no retro_doc_path
-    Returns the product dict or None.
-    """
-    TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted"}
-    ready = [p for p in products if p["status"] == "ready"]
-    try:
-        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-            for product in ready:
-                pid = product["id"]
-                active_resp = client.get(f"/api/products/{pid}/sprints/active")
-                if active_resp.status_code == 200 and active_resp.json():
-                    sprint = active_resp.json()
-                    if not sprint.get("retro_doc_path"):
-                        feat_resp = client.get(f"/api/products/{pid}/features")
-                        features = feat_resp.json() if feat_resp.status_code == 200 else []
-                        sprint_features = [f for f in features if f.get("sprint_id") == sprint["id"]]
-                        non_terminal = [f for f in sprint_features if f.get("status") not in TERMINAL]
-                        if sprint_features and not non_terminal:
-                            return product
-                    continue  # active sprint not yet done — retro not due
-                # No active sprint — check for completed sprint missing retro
-                sprints_resp = client.get(f"/api/products/{pid}/sprints")
-                if sprints_resp.status_code == 200:
-                    completed_no_retro = [
-                        s for s in sprints_resp.json()
-                        if s.get("status") == "completed" and not s.get("retro_doc_path")
-                    ]
-                    if completed_no_retro:
-                        return product
-    except httpx.HTTPError as e:
-        log.error(f"get_next_retro_product failed: {e}")
-    return None
-
-
-# Post-sprint personas — run once after each sprint completes, in this order.
-# Agents write last_{persona}_at on completion; the poller compares that timestamp
-# against the sprint's completed_at to decide if the persona is due again.
-_POST_SPRINT_PERSONAS = [
-    "documenter",
-    "analytics",
-    "refactorer",
-    "devops",
-    "recommender",
-]
-
-
-class _LoopDetector:
-    """
-    Tracks recent persona selections per product and detects repeating patterns.
-    In-memory only - resets on poller restart. No DB storage needed.
-    """
-    def __init__(self, window: int = 10):
-        self._history: dict[int, list[str]] = {}
-        self._window = window
-        self._alert_cooldown: dict[int, datetime] = {}
-
-    def record(self, product_id: int, persona: str):
-        buf = self._history.setdefault(product_id, [])
-        buf.append(persona)
-        if len(buf) > self._window:
-            buf.pop(0)
-
-    # Feature-delivery and backlog personas naturally run back-to-back — exclude them
-    # from single-persona 3x detection. Real stalls in these are caught by
-    # stuck_feature_timeout. Only maintenance personas (documenter, analytics, etc.)
-    # should rotate; repeated maintenance is a scheduling bug worth flagging.
-    _EXPECTED_REPEATS = frozenset({
-        "planner", "product_trainer",
-        "coder", "reviewer", "designer",
-        "qa_tester", "security_auditor",
-        "retrospective", "product_planner",
-    })
-
-    def detect_loop(self, product_id: int) -> str | None:
-        """Returns a description of the loop pattern, or None."""
-        buf = self._history.get(product_id, [])
-        # 2-persona alternating: A-B-A-B (skip if either is an expected repeater)
-        if len(buf) >= 4:
-            last4 = buf[-4:]
-            if (last4[0] == last4[2] and last4[1] == last4[3] and last4[0] != last4[1]
-                    and last4[0] not in self._EXPECTED_REPEATS
-                    and last4[1] not in self._EXPECTED_REPEATS):
-                return f"{last4[0]}->{last4[1]} alternating loop"
-        # Same persona 3x in a row (skip expected repeaters)
-        if len(buf) >= 3 and buf[-1] == buf[-2] == buf[-3]:
-            if buf[-1] not in self._EXPECTED_REPEATS:
-                return f"{buf[-1]} repeated 3x"
-        return None
-
-    def should_alert(self, product_id: int) -> bool:
-        last = self._alert_cooldown.get(product_id)
-        now = datetime.now(timezone.utc)
-        if last and (now - last).total_seconds() < 900:
-            return False
-        self._alert_cooldown[product_id] = now
-        return True
-
-    def clear(self, product_id: int):
-        self._history.pop(product_id, None)
-
-_loop_detector = _LoopDetector()
-
-
-def _heal_loop(product: dict, pattern: str) -> bool:
-    """
-    Diagnose and fix the root cause of a detected persona loop.
-    Returns True if a fix was applied (caller should retry).
-    """
-    pid = product["id"]
-    log.warning(f"[loop-heal] Detected loop for {product['name']}: {pattern}")
-
-    try:
-        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-            active_resp = client.get(f"/api/products/{pid}/sprints/active")
-            if active_resp.status_code != 200 or not active_resp.json():
-                return False
-            sid = active_resp.json()["id"]
-
-            feat_resp = client.get(f"/api/products/{pid}/features")
-            all_features = feat_resp.json() if feat_resp.status_code == 200 else []
-            sprint_features = [f for f in all_features if f.get("sprint_id") == sid]
-
-            healed = 0
-
-            # Fix 1: Approved features with design docs -> should be Designed
-            for f in sprint_features:
-                if f.get("status") == "Approved" and f.get("design_doc_path"):
-                    client.patch(f"/api/features/{f['id']}", json={"status": "Designed"})
-                    log.info(f"[loop-heal] Feature #{f['id']}: Approved->Designed (has design doc)")
-                    healed += 1
-
-            # Fix 2: In-agent state with no active session -> reset properly
-            active_sess = client.get("/api/sessions/active", params={"product_id": pid})
-            has_active = active_sess.status_code == 200 and active_sess.json()
-            if not has_active:
-                for f in sprint_features:
-                    if f.get("status") in ("Implementing", "Designing", "Reviewing"):
-                        reset_to = "Designed" if f.get("design_doc_path") else "Approved"
-                        client.patch(f"/api/features/{f['id']}", json={"status": reset_to})
-                        log.info(f"[loop-heal] Feature #{f['id']}: {f['status']}->{reset_to} (no active session)")
-                        healed += 1
-
-            # Fix 3: Delete stale session_result.json
-            working_dir = product.get("working_dir")
-            if working_dir:
-                sr = Path(working_dir) / "session_result.json"
-                if sr.exists():
-                    sr.unlink()
-                    log.info(f"[loop-heal] Deleted stale session_result.json in {working_dir}")
-                    healed += 1
-
-            # Fix 4: All features terminal but sprint still active -> complete it
-            TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted"}
-            non_terminal = [f for f in sprint_features if f.get("status") not in TERMINAL]
-            if sprint_features and not non_terminal:
-                log.info(f"[loop-heal] All sprint features terminal - forcing sprint completion")
-                for gate in ("qa_passed", "security_clean"):
-                    try:
-                        client.post(f"/api/sprints/{sid}/sign-off", json={
-                            "gate": gate, "value": True,
-                            "notes": "Auto-signed by loop healer",
-                        })
-                    except Exception:
-                        pass
-                client.patch(f"/api/sprints/{sid}", json={"status": "completed"})
-                healed += 1
-
-            if healed:
-                log.info(f"[loop-heal] Applied {healed} fix(es) for {product['name']}")
-            return healed > 0
-
-    except Exception as e:
-        log.warning(f"[loop-heal] Error: {e}")
-        return False
+# Phase 4 of OrchestratorRefactor: in-memory persona-loop detection moved
+# into orchestrator/cycle/loop_detector.py. Re-exported here so main() and
+# tests still see _LoopDetector / _loop_detector / _heal_loop on poller.
+from orchestrator.cycle.loop_detector import (
+    _LoopDetector,
+    _loop_detector,
+    _heal_loop,
+)
 
 
 def _post_sprint_persona_due(product: dict, last_completed_sprint: dict | None) -> str | None:
@@ -660,66 +444,23 @@ def _cleanup_pid_file():
             _PID_FILE.unlink()
     except Exception:
         pass
-# These must stay in sync with the server's TTL logic in /api/poller/heartbeat.
-# Do NOT make them env-configurable without also updating the server endpoint.
-_HEARTBEAT_INTERVAL = 15   # seconds between heartbeat updates
-_LOCK_TTL           = 30   # seconds - stale lock threshold (must match server)
+# Phase 4 of OrchestratorRefactor (option A — partial extraction):
+# _acquire_db_lock and _heartbeat_loop moved to orchestrator/cycle/locks.py
+# along with their immutable per-process state (PID, hostname, TTL constants).
+# _release_db_lock stays here because it reads the mutable _hb_stop global
+# that main() rebinds at runtime — keeping both in the same namespace
+# preserves the behavior of the `global _hb_stop` rebinding pattern.
+from orchestrator.cycle.locks import (
+    _HEARTBEAT_INTERVAL,
+    _LOCK_TTL,
+    _LOCK_PID,
+    _LOCK_HOST,
+    _hb_lock_stolen,
+    _acquire_db_lock,
+    _heartbeat_loop,
+)
 
 _hb_stop: threading.Event | None = None
-_hb_lock_stolen = threading.Event()  # set by heartbeat thread when lock is stolen/expired
-
-
-def _acquire_db_lock() -> bool:
-    """
-    Atomically acquire the poller distributed lock via PM API.
-    Uses a single PostgreSQL UPDATE WHERE so two callers can never both succeed.
-    Returns True on success, False if another live poller holds the lock.
-    Falls back to True (allow start) if the API is unreachable - better to risk
-    a duplicate than to prevent all pollers from ever starting.
-
-    On 409, if the holder is on the same host but the PID is dead, force-unlock
-    and retry once — recovers from hard-crashed pollers without waiting for the
-    30s TTL.
-    """
-    try:
-        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-            resp = client.post("/api/poller/lock", json={"pid": _LOCK_PID, "host": _LOCK_HOST})
-            if resp.status_code == 200:
-                log.info(f"Poller lock acquired (pid={_LOCK_PID}, host={_LOCK_HOST})")
-                return True
-            if resp.status_code == 409:
-                d = resp.json().get("detail", {})
-                holder_pid  = d.get("holder_pid")
-                holder_host = d.get("holder_host")
-                # Same-host stale-PID recovery: probe the holder PID locally.
-                if holder_host == _LOCK_HOST and isinstance(holder_pid, int) and holder_pid != _LOCK_PID:
-                    try:
-                        os.kill(holder_pid, 0)
-                        # Holder is alive — genuine conflict.
-                    except OSError:
-                        log.warning(
-                            f"Lock holder pid={holder_pid} on this host is dead — "
-                            f"force-unlocking and retrying."
-                        )
-                        client.post("/api/poller/force-unlock")
-                        retry = client.post(
-                            "/api/poller/lock",
-                            json={"pid": _LOCK_PID, "host": _LOCK_HOST},
-                        )
-                        if retry.status_code == 200:
-                            log.info(f"Poller lock acquired after force-unlock (pid={_LOCK_PID})")
-                            return True
-                log.error(
-                    f"Another poller holds the lock - "
-                    f"pid={holder_pid}, host={holder_host}, "
-                    f"last_heartbeat={d.get('heartbeat_at')}. Exiting."
-                )
-                return False
-            log.error(f"Unexpected response from lock endpoint: {resp.status_code} - allowing start")
-            return True
-    except Exception as e:
-        log.warning(f"Could not acquire DB lock ({e}) - allowing start (API may be starting up)")
-        return True
 
 
 def _release_db_lock():
@@ -733,25 +474,6 @@ def _release_db_lock():
         log.info("Poller lock released")
     except Exception:
         pass
-
-
-def _heartbeat_loop(stop_event: threading.Event):
-    """
-    Background thread: refreshes the DB lock heartbeat every 15s.
-    If the API returns 404, the lock was stolen (another poller took over) - signal the
-    main thread to abort the current cycle and re-acquire the lock or exit.
-    """
-    while not stop_event.wait(_HEARTBEAT_INTERVAL):
-        try:
-            with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
-                resp = client.post("/api/poller/heartbeat", json={"pid": _LOCK_PID, "host": _LOCK_HOST})
-            if resp.status_code == 404:
-                log.critical("Heartbeat 404 - lock was stolen or expired. Signalling main thread to abort cycle.")
-                _hb_lock_stolen.set()
-            elif resp.status_code != 200:
-                log.warning(f"Heartbeat unexpected status: {resp.status_code}")
-        except Exception as e:
-            log.warning(f"Heartbeat failed: {e}")
 
 
 def _close_orphaned_sessions():

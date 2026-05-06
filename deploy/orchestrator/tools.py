@@ -599,184 +599,20 @@ def run_cycle(args: dict, **kwargs) -> str:
 def determine_next_action(args: dict, **kwargs) -> str:
     """
     Deterministic persona decision tree for a product.
-    Returns {"action": "launch_session"|"plan_sprints"|"exit", "persona": ..., "reason": ...}.
-    Call this after preflight to get the exact action to take.
+
+    Phase 5 of OrchestratorRefactor: the body now lives in
+    ``orchestrator.cycle.persona._decide_action``. This function is a thin
+    wrapper that supplies the signing _pm_client() and JSON-wraps the
+    response in tools.py's standard {"ok": ..., "data": ...} envelope.
+
+    Returns ``{"ok": True, "data": {"action": "launch_session"|"plan_sprints"|"exit", ...}}``.
     """
     product_id = args.get("product_id")
-    _TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted"}
-    _IN_AGENT = {"Designing", "Implementing", "Reviewing"}
-
     try:
+        from orchestrator.cycle.persona import _decide_action  # type: ignore
         with _pm_client() as client:
-            features_resp  = client.get(f"/api/products/{product_id}/features")
-            sprint_resp    = client.get(f"/api/products/{product_id}/sprints/active")
-            syscfg_resp    = client.get("/api/system-config")
-
-        features = features_resp.json() if features_resp.is_success else []
-        active_sprint = sprint_resp.json() if sprint_resp.is_success else None
-        sys_cfg = syscfg_resp.json() if syscfg_resp.is_success else {}
-
-        # No active sprint
-        if active_sprint is None:
-            unsprinted = [f for f in features
-                          if f.get("status") == "Approved" and f.get("sprint_id") is None]
-            if unsprinted:
-                return _ok({"action": "plan_sprints", "product_id": product_id,
-                            "reason": f"{len(unsprinted)} Approved features have no sprint; call pm_api POST /api/products/{product_id}/plan-sprints"})
-            # Backpressure: don't generate more features if backlog is already deep.
-            # Counts ALL Approved features regardless of sprint, because planner
-            # creates unsprinted Approved features — reaching cap means coder is
-            # behind and making more ideas will just pile up more "Approved" work.
-            all_approved = [f for f in features if f.get("status") == "Approved"]
-            max_pending = (sys_cfg.get("max_pending_approved")
-                           or int(os.environ.get("MAX_PENDING_APPROVED", "10")))
-            if len(all_approved) >= max_pending:
-                return _ok({"action": "exit",
-                            "reason": f"Planner gated: {len(all_approved)} Approved features already pending (cap {max_pending})"})
-            return _ok({"action": "launch_session", "persona": "planner",
-                        "product_id": product_id, "reason": "No active sprint, no approved features — planner generates backlog"})
-
-        sid = active_sprint["id"]
-        sprint_features = [f for f in features if f.get("sprint_id") == sid]
-        non_terminal = [f for f in sprint_features if f.get("status") not in _TERMINAL]
-
-        if not non_terminal:
-            # All features in the active sprint are merged. Run the post-sprint
-            # regression chain — each persona launches as its own session so
-            # the History tab shows a real audit trail of what verified the
-            # sprint, and each can sign off its DoD gate independently:
-            #   1. qa_tester        → runs full test suite on main, signs qa_passed
-            #   2. security_auditor → audits merged code, signs security_clean
-            #   3. check-dod auto-completes the sprint once both above are signed
-            #   4. retrospective    → writes retro_sprint_<id>.md, signs retro_done
-            #
-            # Source of truth for gate state is /api/sprints/{id}/check-dod
-            # (POST returns the live evaluation including the auto-recompute
-            # rules from earlier today). The active_sprint payload from
-            # /products/{id}/sprints/active also carries dod_status + status.
-            try:
-                with _pm_client() as client:
-                    cd = client.post(f"/api/sprints/{sid}/check-dod").json()
-                # Skip-action paths ({"action":"skipped"}) return no `dod`
-                # key — `cd.get("dod")` returns None then, not {}. `or {}`
-                # collapses both Nones and missing keys into a safe empty
-                # dict so subsequent dod.get(...) calls don't AttributeError.
-                # Triggered when the post-sprint regression chain auto-
-                # completes the sprint between this cycle's active_sprint
-                # fetch and the check-dod POST.
-                dod = (cd.get("dod") if isinstance(cd, dict) else None) or {}
-            except Exception:
-                cd, dod = {}, {}
-
-            if not dod.get("qa_passed"):
-                return _ok({"action": "launch_session", "persona": "qa_tester",
-                            "product_id": product_id,
-                            "reason": f"sprint {sid}: all features Pushed — running QA regression to sign qa_passed"})
-            if not dod.get("security_clean"):
-                return _ok({"action": "launch_session", "persona": "security_auditor",
-                            "product_id": product_id,
-                            "reason": f"sprint {sid}: all features Pushed — running security audit to sign security_clean"})
-
-            # Both verification gates signed. check-dod above will have
-            # auto-completed the sprint already if the structural gates pass
-            # too (it returns action=auto_completed in that case).
-            #
-            # Retrospective writes retro_sprint_<id>.md, files action items,
-            # and signs retro_done. Triggered on completed sprints with no
-            # retro_doc_path yet. We use the active_sprint payload's status +
-            # retro_doc_path here (active_sprint is fetched at the top of
-            # determine_next_action and is the freshest snapshot).
-            sprint_status_now = active_sprint.get("status")
-            retro_done_path   = active_sprint.get("retro_doc_path")
-            if cd.get("action") == "auto_completed" or sprint_status_now == "completed":
-                if not retro_done_path:
-                    return _ok({"action": "launch_session", "persona": "retrospective",
-                                "product_id": product_id,
-                                "reason": f"sprint {sid} completed — retrospective writing retro_sprint_{sid}.md"})
-                return _ok({"action": "exit", "reason": f"sprint {sid} fully signed off + retro done"})
-
-            return _ok({"action": "exit",
-                        "reason": f"sprint {sid}: both gates signed but check-dod returned {cd.get('action','?')}"})
-
-        reviewing = [f for f in non_terminal if f.get("status") == "Reviewing" and f.get("pr_number")]
-        if reviewing:
-            return _ok({"action": "launch_session", "persona": "reviewer",
-                        "product_id": product_id, "reason": f"{len(reviewing)} features in Reviewing with PR"})
-
-        approved_no_design = [f for f in non_terminal
-                              if f.get("status") == "Approved" and not f.get("design_doc_path")]
-        if approved_no_design:
-            return _ok({"action": "launch_session", "persona": "product_planner",
-                        "product_id": product_id, "reason": f"{len(approved_no_design)} Approved features need design docs"})
-
-        # Coder-eligible features:
-        #   - Designed (fresh from designer)
-        #   - Approved with design_doc_path (skip-design products)
-        #   - Implementing + review_outcome=changes_requested
-        #     (reviewer rejected, coder needs another pass — without this,
-        #     these sit "stuck in agent state" for 45 min until reset_stuck
-        #     drops them back to Designed, even though /next-for-persona?
-        #     persona=coder already returns them)
-        codeable = [f for f in non_terminal
-                    if f.get("status") == "Designed"
-                    or (f.get("status") == "Approved" and f.get("design_doc_path"))
-                    or (f.get("status") == "Implementing"
-                        and f.get("review_outcome") == "changes_requested")]
-        if codeable:
-            return _ok({"action": "launch_session", "persona": "coder",
-                        "product_id": product_id, "reason": f"{len(codeable)} features ready to code"})
-
-        in_agent_stuck = [f for f in non_terminal if f.get("status") in _IN_AGENT]
-        if in_agent_stuck:
-            return _ok({"action": "exit", "reason": f"{len(in_agent_stuck)} features stuck in agent state; reset_stuck will handle"})
-
-        # Phase-1 supervisor: detector D — sprint all-Reviewed but no merge.
-        # Compute last-activity ts from non_terminal updated_at; skip the
-        # detector entirely if we can't (avoids a perpetual false-fire when
-        # updated_at isn't serialized).
-        try:
-            from datetime import datetime as _dt
-            from orchestrator.supervisor import detect_merge_stall  # type: ignore
-            ts_strs = [f.get("updated_at") for f in non_terminal if f.get("updated_at")]
-            last_activity_ts = None
-            if ts_strs:
-                parsed_ts = []
-                for s in ts_strs:
-                    try:
-                        parsed_ts.append(_dt.fromisoformat(s.replace("Z", "+00:00")).timestamp())
-                    except (ValueError, AttributeError):
-                        pass
-                if parsed_ts:
-                    last_activity_ts = max(parsed_ts)
-            if last_activity_ts is not None:
-                detect_merge_stall(
-                    product_id=product_id, sprint_id=sid,
-                    sprint_features=sprint_features, last_merge_ts=last_activity_ts,
-                )
-        except Exception:
-            log.exception("supervisor merge_stall detector failed")
-
-        # Phase-1 supervisor: detector C — auto-plan when active sprint has
-        # nothing actionable but unsprinted Approved features are piling up.
-        # Detector POSTs /plan-sprints itself; we just exit this cycle.
-        try:
-            from orchestrator.supervisor import detect_auto_plan  # type: ignore
-            unsprinted_approved = sum(
-                1 for f in features
-                if f.get("status") == "Approved" and f.get("sprint_id") is None
-            )
-            if detect_auto_plan(
-                product_id=product_id,
-                active_sprint_has_codeable=False,
-                unsprinted_approved_count=unsprinted_approved,
-            ):
-                return _ok({"action": "exit",
-                            "reason": f"supervisor auto_plan triggered for product {product_id}"})
-        except Exception:
-            log.exception("supervisor auto_plan detector failed")
-
-        return _ok({"action": "exit", "reason": "No actionable work found"})
-
+            result = _decide_action(product_id, client)
+        return _ok(result)
     except Exception as e:
         return _err(f"determine_next_action failed: {e}")
 
