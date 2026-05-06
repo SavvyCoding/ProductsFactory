@@ -134,6 +134,46 @@ def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
 
     log.info(f"[post-{persona}] {pname}: pushed {len(assigned_features)} doc(s) to origin/main")
 
+    # Mark each assigned feature Designed + link to its story file directly.
+    # Mirrors post_coder's direct-PATCH-to-Reviewing fix (commit df898e8) for
+    # the planner/designer pipeline. Until 2026-05-06 this step relied on
+    # the agent appending `{"status": "Designed", "design_doc_path": ...}`
+    # to session_result.json; agents that exited via task_done without
+    # writing that line left the feature stuck Approved while the file was
+    # already on origin/main. Result: the orchestrator launched another
+    # planner next cycle, which created a second story file with the same
+    # name (idempotent on disk but wasted tokens), pushed again, looped.
+    # Real loop observed: DigitalSign feature 164, sessions 1963→1964→1966,
+    # ~3 planner sessions back-to-back to push the same docs/story_164.md.
+    # changed_by="post-doc:fallback" mirrors the post-coder bypass label.
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            for f in assigned_features:
+                fid = f["id"]
+                # Convention: agents write docs/story_{id}.md. If the agent
+                # used a different filename we don't try to discover it —
+                # the next coder run will read whatever's at the conventional
+                # path; mismatch is logged via post-coder's "no design doc"
+                # warning rather than corrupting state here.
+                doc_path = f.get("design_doc_path") or f"docs/story_{fid}.md"
+                try:
+                    r = client.patch(f"/api/features/{fid}", json={
+                        "status": "Designed",
+                        "design_doc_path": doc_path,
+                        "changed_by": "post-doc:fallback",
+                    })
+                    r.raise_for_status()
+                    log.info(
+                        f"[post-{persona}] {pname}: feature #{fid} → Designed "
+                        f"(doc={doc_path})"
+                    )
+                except Exception as e:
+                    log.warning(
+                        f"[post-{persona}] {pname}: direct PATCH for #{fid} failed: {e}"
+                    )
+    except Exception as e:
+        log.warning(f"[post-{persona}] {pname}: PM client error during designed PATCH: {e}")
+
 
 def _rollback_doc_features(product: dict, assigned_features: list[dict]) -> None:
     """
