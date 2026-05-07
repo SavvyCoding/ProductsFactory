@@ -101,50 +101,26 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
         non_terminal = [f for f in sprint_features if f.get("status") not in _TERMINAL]
 
         if not non_terminal:
-            # All features in the active sprint are merged. Run the post-sprint
-            # regression chain — each persona launches as its own session so
-            # the History tab shows a real audit trail of what verified the
-            # sprint, and each can sign off its DoD gate independently:
-            #   1. qa_tester        → runs full test suite on main, signs qa_passed
-            #   2. security_auditor → audits merged code, signs security_clean
-            #   3. check-dod auto-completes the sprint once both above are signed
-            #   4. retrospective    → writes retro_sprint_<id>.md, signs retro_done
+            # Phase 2/4 simplification (2026-05-06): the post-sprint
+            # qa_tester + security_auditor regression chain was removed.
+            # Tests + security are now reviewed PER FEATURE inside the
+            # merged reviewer persona's tri-section review (functional +
+            # tests + security). The qa_passed and security_clean DoD
+            # gates are dropped (no signers, no consumers). Only retro
+            # remains — and Phase 3 will replace it with a templated
+            # generator.
             #
-            # Source of truth for gate state is /api/sprints/{id}/check-dod
-            # (POST returns the live evaluation including the auto-recompute
-            # rules from earlier today). The active_sprint payload from
-            # /products/{id}/sprints/active also carries dod_status + status.
+            # Pipeline now goes straight from "all features Pushed" to
+            # "auto-complete sprint" via check-dod, then retro.
             try:
                 cd = client.post(f"/api/sprints/{sid}/check-dod").json()
-                # Skip-action paths ({"action":"skipped"}) return no `dod`
-                # key — `cd.get("dod")` returns None then, not {}. `or {}`
-                # collapses both Nones and missing keys into a safe empty
-                # dict so subsequent dod.get(...) calls don't AttributeError.
-                # Triggered when the post-sprint regression chain auto-
-                # completes the sprint between this cycle's active_sprint
-                # fetch and the check-dod POST.
                 dod = (cd.get("dod") if isinstance(cd, dict) else None) or {}
             except Exception:
                 cd, dod = {}, {}
 
-            if not dod.get("qa_passed"):
-                return {"action": "launch_session", "persona": "qa_tester",
-                        "product_id": product_id,
-                        "reason": f"sprint {sid}: all features Pushed — running QA regression to sign qa_passed"}
-            if not dod.get("security_clean"):
-                return {"action": "launch_session", "persona": "security_auditor",
-                        "product_id": product_id,
-                        "reason": f"sprint {sid}: all features Pushed — running security audit to sign security_clean"}
-
-            # Both verification gates signed. check-dod above will have
-            # auto-completed the sprint already if the structural gates pass
-            # too (it returns action=auto_completed in that case).
-            #
             # Retrospective writes retro_sprint_<id>.md, files action items,
             # and signs retro_done. Triggered on completed sprints with no
-            # retro_doc_path yet. We use the active_sprint payload's status +
-            # retro_doc_path here (active_sprint is fetched at the top of
-            # _decide_action and is the freshest snapshot).
+            # retro_doc_path yet.
             sprint_status_now = active_sprint.get("status")
             retro_done_path   = active_sprint.get("retro_doc_path")
             if cd.get("action") == "auto_completed" or sprint_status_now == "completed":

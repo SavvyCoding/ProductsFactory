@@ -55,12 +55,13 @@ class _LoopDetector:
     _EXPECTED_REPEATS = frozenset({
         "planner", "product_trainer",
         "coder", "reviewer", "designer",
-        "qa_tester", "security_auditor",
         "retrospective",
-        # "product_planner" was merged into "designer" 2026-05-06 (Phase 1
-        # of futureplan.md). Kept in this allow-list as a no-op alias for
-        # stale persona-history entries from before the merge.
-        "product_planner",
+        # Defensive aliases for stale persona-history entries from before
+        # the persona merges (2026-05-06). All of these are now subsumed:
+        #   product_planner → designer (Phase 1)
+        #   qa_tester       → reviewer (Phase 2)
+        #   security_auditor→ reviewer (Phase 2)
+        "product_planner", "qa_tester", "security_auditor",
     })
 
     def detect_loop(self, product_id: int) -> str | None:

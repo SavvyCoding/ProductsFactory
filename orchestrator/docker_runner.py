@@ -487,7 +487,7 @@ def _claim_features(features: list[dict], persona: str | None) -> None:
 # production code; light personas summarise, document, or generate text. The
 # default mapping keeps heavy work on Sonnet and light work on Haiku (~5x
 # cheaper, ~3x faster). Override per-persona via sys_cfg.claude_model_map.
-_HEAVY_PERSONAS = {"coder", "reviewer", "designer", "security_auditor", "qa_tester"}
+_HEAVY_PERSONAS = {"coder", "reviewer", "designer"}
 _LIGHT_PERSONAS = {"planner", "documenter", "retrospective",
                    "analytics", "recommender", "devops", "refactorer"}
 
@@ -1120,15 +1120,13 @@ def _finalize_session(
     if exit_code == 2:
         return 2
 
-    # After a successful coder session: QA → Security (feature-level, run per PR).
-    # Recommender runs post-sprint via the poller's _post_sprint_persona_due gate.
-    if exit_code == 0 and persona == "coder":
-        log.info(f"Coder succeeded — launching QA Tester for {product['name']}")
-        run_claude_in_docker(product, persona="qa_tester")
-
-        log.info(f"Launching Security Auditor for {product['name']}")
-        run_claude_in_docker(product, persona="security_auditor")
-
+    # Phase 2 simplification (2026-05-06): qa_tester and security_auditor
+    # were merged into the reviewer persona. The reviewer's prompt now
+    # covers tri-section review (functional + tests + security) on the
+    # same diff in a single session. Post-coder cascade collapses to
+    # just-launch-the-cycle — the next poller pass will pick up the
+    # feature in Reviewing/pr_number set and dispatch the merged reviewer.
+    # See futureplan.md.
     return exit_code
 
 
