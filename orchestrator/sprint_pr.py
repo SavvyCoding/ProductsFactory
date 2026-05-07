@@ -1,4 +1,4 @@
-"""Sprint PR provisioning — owner of the `sprint/<id>` branch + draft PR.
+"""Sprint PR provisioning — owner of the `sprint/<id>` branch + PR.
 
 The orchestrator is the single owner of sprint PR creation. Sprint activation
 (in the website) calls into this module via a thin shim; the module hits the
@@ -8,7 +8,16 @@ GitHub API to:
      re-activation).
   2. Commit a `.productfactory/sprint-<id>.md` manifest so the branch has at
      least one commit ahead of base (GitHub rejects PRs with no diff).
-  3. Open a draft PR (or return the existing open PR if one is already there).
+  3. Open a non-draft PR (or return the existing open PR if one is already
+     there). Sprint PRs were originally created as drafts to signal "WIP";
+     2026-05-07 incident showed GitHub's REST `PATCH .../pulls/{n}` with
+     `{"draft": false}` silently fails on some account/repo/PAT combos
+     (returns 200 but the state stays draft). That broke fully-autonomous
+     sprint completion: the auto-merge sweep would loop forever on draft
+     state. The orchestrator's own merge-eligibility gate (all features
+     Reviewed/approved + sprint DoD pass) IS the control; the draft state
+     was redundant signaling. Creating non-draft from day 1 eliminates the
+     entire un-draft dance for new sprints.
 
 Idempotent on re-entry: the manifest commit is updated in place, and an
 already-open PR is returned unchanged.
@@ -248,7 +257,10 @@ def provision_sprint_pr(
                 "head": branch,
                 "base": default_branch,
                 "body": body,
-                "draft": True,
+                # Non-draft: see module docstring. The auto-merge sweep gates
+                # on all-features-approved; draft state added no enforcement,
+                # only an unreliable mark-ready-before-merge step.
+                "draft": False,
             },
         )
         if pr_resp.status_code in (200, 201):
