@@ -2043,6 +2043,16 @@ async def api_update_feature(
         "supervisor",
         "post-doc:rollback",
         "post-coder:fallback",
+        "post-coder:lint-guard",  # added 2026-05-07: post-coder auto-rejects
+                                  # commits that fail deterministic lint checks
+                                  # (raw error.message, .skip'd tests,
+                                  # hardcoded secrets) BEFORE reviewer runs,
+                                  # bouncing the feature back to Implementing+
+                                  # changes_requested. The bounce direction is
+                                  # always rank-equal (Implemented→Implementing,
+                                  # both rank 4) or in _ALLOWED_BACKWARD
+                                  # (Reviewing→Implementing), so this bypass is
+                                  # defense-in-depth only.
         "reset_stuck",
     }
     if new_status_for_rank and _caller not in _RANK_GUARD_BYPASS:

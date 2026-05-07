@@ -162,7 +162,10 @@ from orchestrator.infra.redaction import (
     _redact_secrets,
     _format_agent_event,
 )
-from orchestrator.integrations.docker_cli import _chmod_workspace_via_alpine
+from orchestrator.integrations.docker_cli import (
+    _chmod_workspace_via_alpine,
+    _ensure_session_result_writable,
+)
 
 
 # Phase 2b of OrchestratorRefactor: planner/designer post-session pipeline
@@ -588,6 +591,14 @@ def _prepare_workspace(product: dict) -> tuple[str, str]:
     # mkdir loop above re-create dirs at mode 755 afterwards — re-run to catch
     # SRC/, TestCases/, docs/, Results/, Temp/.
     _chmod_workspace_via_alpine(working_dir, product.get("name", "?"))
+
+    # Pre-create session_result.json mode 666 so the agent (uid 1001) can
+    # always append to it, regardless of who owned it before. The
+    # `_fix_session_result_perms` thread inside `run_claude_in_docker` runs
+    # 3s POST-launch — too late if the agent races ahead. See
+    # docker_cli._ensure_session_result_writable docstring for the full
+    # uid-999-vs-1001 incident analysis (reviewer 1983, 2026-05-07 01:32).
+    _ensure_session_result_writable(working_dir, product.get("name", "?"))
 
     return working_dir_host, working_dir
 
