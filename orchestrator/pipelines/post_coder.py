@@ -30,6 +30,7 @@ import httpx
 
 from orchestrator.integrations.docker_cli import _chmod_workspace_via_alpine
 from orchestrator.integrations.github import _get_gh_token, _parse_repo_slug
+from orchestrator.session.result_io import _filter_session_result_by_id
 
 log = logging.getLogger("poller.docker")
 
@@ -716,6 +717,20 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                         )
         except Exception as e:
             log.warning(f"[post-coder] {pname}: lint-guard PM client error: {e}")
+
+        # Drop the agent's stale claims for the bounced features from
+        # session_result.json. Without this, the subsequent
+        # _reconcile_session_result re-applies the agent's "Implemented"
+        # claim and undoes our Implementing+changes_requested PATCH (race
+        # observed 2026-05-07: post-coder PATCH at 09:38:04.505, agent
+        # PATCH at 09:38:04.521 — same wall-clock millisecond, opposite
+        # direction; feature ended up Implemented + changes_requested,
+        # which neither coder nor reviewer dispatch will claim → stuck).
+        _filter_session_result_by_id(
+            working_dir,
+            {f["id"] for f in assigned_features},
+            pname,
+        )
         # Commit was pushed (record of attempt). Feature in rework cycle. Exit.
         return pushed_ids
 

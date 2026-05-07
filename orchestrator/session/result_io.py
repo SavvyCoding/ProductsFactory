@@ -64,6 +64,62 @@ def _read_session_result(working_dir: str) -> list[dict]:
     return entries
 
 
+def _filter_session_result_by_id(working_dir: str, exclude_ids: set[int],
+                                  product_name: str = "?") -> int:
+    """
+    Drop NDJSON entries from session_result.json whose ``id`` is in ``exclude_ids``.
+
+    Used by post_coder's lint-guard to remove the agent's stale "Implemented"
+    claims for features it has just bounced back to Implementing for rework.
+    Without this, the subsequent ``_reconcile_session_result`` re-applies the
+    agent's claim and undoes the rework downgrade — a 16ms race observed
+    2026-05-07 on MySalesforce feature #255 (changelog: post-coder:lint-guard
+    Implemented→Implementing at 09:38:04.505, agent Implementing→Implemented
+    at 09:38:04.521 — same wall-clock millisecond, opposite direction).
+
+    Idempotent. Malformed/blank lines are preserved (filter only acts on JSON
+    objects with an "id" field). Returns the count of entries dropped.
+    """
+    if not exclude_ids:
+        return 0
+    sr_path = Path(working_dir) / "session_result.json"
+    if not sr_path.exists():
+        return 0
+    try:
+        original = sr_path.read_text(encoding="utf-8").splitlines()
+    except Exception as e:
+        log.warning(f"[{product_name}] _filter_session_result_by_id read failed: {e}")
+        return 0
+    kept: list[str] = []
+    dropped = 0
+    for line in original:
+        stripped = line.strip()
+        if not stripped:
+            kept.append(line)
+            continue
+        try:
+            entry = json.loads(stripped)
+            if isinstance(entry, dict) and entry.get("id") in exclude_ids:
+                dropped += 1
+                continue
+        except Exception:
+            pass  # malformed — leave it; reconcile will skip it too
+        kept.append(line)
+    if dropped == 0:
+        return 0
+    try:
+        sr_path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+        log.info(
+            f"[{product_name}] _filter_session_result_by_id: dropped {dropped} "
+            f"entry/entries for feature ids {sorted(exclude_ids)} "
+            f"(post-coder authoritative; reconcile must not re-apply)"
+        )
+    except Exception as e:
+        log.warning(f"[{product_name}] _filter_session_result_by_id write failed: {e}")
+        return 0
+    return dropped
+
+
 def _delete_session_result(working_dir: str, product_name: str = "?") -> None:
     """
     Robust delete of session_result.json.
