@@ -153,6 +153,25 @@ class TestInstallTemplatesPositive:
         assert "AGENT_WORKFLOW.md" in names
         assert "CLAUDE.md" in names
         assert "ARCHITECTURE.md" in names
+        assert "CONTRIBUTING.md" in names
+
+    def test_contributing_md_describes_sprint_pr_flow(self, product_dir):
+        """Pre-filled CONTRIBUTING.md must describe the sprint-PR-mode flow,
+        not generic fork→feature-branch→PR-against-main boilerplate, so a
+        later 'Developer Documentation' feature finds an existing file the
+        coder agent can leave alone instead of regenerating with contradictory
+        instructions."""
+        p = make_product(product_dir)
+        install_templates(p, PM_API)
+        contributing = (product_dir / "CONTRIBUTING.md").read_text(encoding='utf-8')
+        # Mentions the sprint-branch concept (the actual workflow).
+        assert "sprint/" in contributing
+        # Does NOT advise the standard fork-and-PR-to-main flow.
+        assert "fork" in contributing.lower()  # only as a "Do not fork" warning
+        assert "Do not fork" in contributing
+        # Resolves the product name placeholder.
+        assert "Test Product" in contributing
+        assert "{PRODUCT_NAME}" not in contributing
 
     def test_placeholders_resolved(self, product_dir):
         p = make_product(product_dir)
