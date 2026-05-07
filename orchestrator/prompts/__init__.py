@@ -128,10 +128,15 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
         template_name = "recommender"
     elif persona == "planner":
         template_name = "planner"
+    # Phase 2 (2026-05-06): qa_tester and security_auditor were merged
+    # into reviewer. The merged reviewer's prompt covers tri-section
+    # review (functional + tests + security). Defensive aliases — if
+    # anything still routes one of those persona names here, fall back
+    # to the reviewer prompt rather than 404 the build.
     elif persona == "qa_tester":
-        template_name = "qa_tester"
+        template_name = "reviewer"
     elif persona == "security_auditor":
-        template_name = "security_auditor"
+        template_name = "reviewer"
     elif persona == "documenter":
         template_name = "documenter"
     elif persona == "refactorer":

@@ -48,12 +48,14 @@ def test_persona_prompt_contains_required_invariants(persona: str) -> None:
 
 def test_all_personas_produce_nonempty_prompt() -> None:
     """Sanity check — every known persona should produce a non-trivial prompt."""
-    # product_planner was merged into designer on 2026-05-06 (Phase 1 of
-    # futureplan.md). The persona dispatch routes lingering callers to the
-    # designer prompt, but the standalone product_planner.md is deleted.
+    # 2026-05-06 persona simplification (futureplan.md):
+    #   Phase 1: product_planner merged into designer
+    #   Phase 2: qa_tester + security_auditor merged into reviewer
+    # The standalone .md files for those merged personas are deleted;
+    # persona dispatch routes any lingering callers to the survivor.
     all_personas = [
         "designer", "reviewer", "retrospective",
-        "qa_tester", "security_auditor", "recommender", "planner",
+        "recommender", "planner",
         "documenter", "refactorer", "devops", "analytics", "product_trainer",
     ]
     for p in all_personas:
