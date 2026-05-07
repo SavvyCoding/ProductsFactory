@@ -30,10 +30,127 @@ import httpx
 
 from orchestrator.integrations.docker_cli import _chmod_workspace_via_alpine
 from orchestrator.integrations.github import _get_gh_token, _parse_repo_slug
+from orchestrator.session.result_io import _filter_session_result_by_id
 
 log = logging.getLogger("poller.docker")
 
 PM_API_URL = os.environ["PM_API_URL"]
+
+
+def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> list[str]:
+    """
+    Deterministic lint guards on the files in the most recent commit.
+
+    Returns a list of human-readable violation strings. Empty = clean.
+
+    Targets the rejection categories that dominate the reviewer's
+    `changes_requested` outcomes per the 2026-05-07 audit (10/10 sampled
+    rejections clustered in these categories):
+
+      1. **Info disclosure** — raw `error.message` / `err.message` /
+         `*.stack` returned in HTTP responses (4 of 10 sampled rejections)
+      2. **Skipped/todo'd tests** — `.skip`, `.todo`, `xit(`, `xdescribe(`,
+         `@unittest.skip` in changed test files (2 of 10 sampled)
+      3. **Hardcoded credentials** — `api_key`, `password`, `secret`, `token`
+         literally embedded in code (catches a class of security flags
+         that the audit hasn't seen yet but is on the auditor's radar)
+
+    Returns early on any tooling failure — the lint check is best-effort,
+    not load-bearing. A failed grep should never block a feature.
+
+    The `_run` callable is the same `subprocess.run` wrapper the post-coder
+    pipeline uses (cwd=working_dir, capture_output, text). Reusing it
+    keeps the timeout discipline + cwd consistent.
+    """
+    try:
+        files_r = _run(["git", "show", "HEAD", "--name-only", "--pretty=",
+                        "--diff-filter=AM"], timeout=20)
+        if files_r.returncode != 0:
+            return []
+        files = [
+            f.strip() for f in (files_r.stdout or "").splitlines()
+            if f.strip()
+            and not f.endswith("session_result.json")
+            and not f.endswith("session_summary.md")
+            and not f.startswith(".sprint-79")  # scaffold marker
+        ]
+    except Exception:
+        return []
+
+    if not files:
+        return []
+
+    violations: list[str] = []
+
+    # --- Guard 1: raw error.message in HTTP-facing source files ---
+    src_files = [
+        f for f in files
+        if any(f.startswith(p) for p in ("SRC/", "src/", "lib/", "app/", "pages/"))
+        and any(f.endswith(ext) for ext in (".js", ".ts", ".jsx", ".tsx", ".py"))
+    ]
+    if src_files:
+        try:
+            r = _run(["grep", "-l", "-E",
+                      r"(error|err)\.message|(error|err)\.stack"] + src_files,
+                     timeout=15)
+            if r.returncode == 0:
+                hits = [h for h in (r.stdout or "").splitlines() if h.strip()]
+                if hits:
+                    sample = ", ".join(hits[:3])
+                    more = "..." if len(hits) > 3 else ""
+                    violations.append(
+                        f"raw error.message/stack in HTTP-facing files (info "
+                        f"disclosure): {sample}{more}. Replace with a generic "
+                        f"message and log raw error server-side."
+                    )
+        except Exception:
+            pass  # grep failure is non-fatal
+
+    # --- Guard 2: skipped/todo'd tests in changed test files ---
+    test_files = [
+        f for f in files
+        if ("test" in f.lower() or "spec" in f.lower())
+        and any(f.endswith(ext) for ext in (".js", ".ts", ".jsx", ".tsx", ".py"))
+    ]
+    if test_files:
+        try:
+            r = _run(["grep", "-l", "-E",
+                      r"\.skip|\.todo|xit\(|xdescribe\(|@unittest\.skip"]
+                     + test_files,
+                     timeout=15)
+            if r.returncode == 0:
+                hits = [h for h in (r.stdout or "").splitlines() if h.strip()]
+                if hits:
+                    sample = ", ".join(hits[:3])
+                    more = "..." if len(hits) > 3 else ""
+                    violations.append(
+                        f"skipped/todo'd tests in changed test files: "
+                        f"{sample}{more}. Un-skip and make them pass, or "
+                        f"delete them. Reviewers treat .skip as missing coverage."
+                    )
+        except Exception:
+            pass
+
+    # --- Guard 3: hardcoded credentials ---
+    if src_files:
+        try:
+            r = _run(["grep", "-l", "-n", "-E",
+                      r"""(api[_-]?key|password|secret|token)\s*[:=]\s*["'][^"']{4,}"""]
+                     + src_files,
+                     timeout=15)
+            if r.returncode == 0:
+                hits = [h for h in (r.stdout or "").splitlines() if h.strip()]
+                if hits:
+                    sample = ", ".join(hits[:3])
+                    more = "..." if len(hits) > 3 else ""
+                    violations.append(
+                        f"hardcoded secret-looking literals in source: "
+                        f"{sample}{more}. Move to env vars / secrets store."
+                    )
+        except Exception:
+            pass
+
+    return violations
 
 
 def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
@@ -550,6 +667,72 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         if not gh_token:
             log.warning(f"[post-coder] {pname}: no GH_TOKEN — cannot open PR. Branch pushed; PM must open manually.")
             return pushed_ids
+
+    # 4.5 Lint guards — auto-reject obviously-broken commits before they hit
+    # the LLM reviewer. Per the 2026-05-07 audit, ~80% of reviewer rejections
+    # cluster in 3-4 grep-able categories. Catching them here saves a slow
+    # reviewer cycle (avg 15-60 min per rejection) and gives the next coder
+    # cycle deterministic feedback in {reviewer_feedback}.
+    lint_violations = _post_coder_lint_check(working_dir, _run, pname)
+    if lint_violations:
+        log.warning(
+            f"[post-coder] {pname}: lint-guard fired ({len(lint_violations)} "
+            f"violation(s)); bouncing back to Implementing+changes_requested"
+        )
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                for feat in assigned_features:
+                    fid = feat["id"]
+                    body = (
+                        f"❌ lint-guard auto-reject "
+                        f"({len(lint_violations)} violation(s) on commit before review):\n"
+                        + "\n".join(f"- {v}" for v in lint_violations)
+                        + f"\n\nThe orchestrator's deterministic post-coder lint guard "
+                          f"caught these before the reviewer ran. Fix and re-push."
+                    )
+                    try:
+                        client.post(
+                            f"/api/features/{fid}/comments",
+                            json={"author": "lint-guard", "body": body},
+                        )
+                        # Bounce feature back to Implementing+changes_requested.
+                        # Implementing(4) ← Implemented(4) is rank-equal (no guard).
+                        # Implementing ← Reviewing is in _ALLOWED_BACKWARD.
+                        client.patch(
+                            f"/api/features/{fid}",
+                            json={
+                                "status": "Implementing",
+                                "review_outcome": "changes_requested",
+                                "changed_by": "post-coder:lint-guard",
+                            },
+                        )
+                        log.info(
+                            f"[post-coder] {pname}: feature #{fid} bounced by "
+                            f"lint-guard ({len(lint_violations)} issue(s))"
+                        )
+                    except Exception as e2:
+                        log.warning(
+                            f"[post-coder] {pname}: lint-guard PATCH for #{fid} "
+                            f"failed: {e2}"
+                        )
+        except Exception as e:
+            log.warning(f"[post-coder] {pname}: lint-guard PM client error: {e}")
+
+        # Drop the agent's stale claims for the bounced features from
+        # session_result.json. Without this, the subsequent
+        # _reconcile_session_result re-applies the agent's "Implemented"
+        # claim and undoes our Implementing+changes_requested PATCH (race
+        # observed 2026-05-07: post-coder PATCH at 09:38:04.505, agent
+        # PATCH at 09:38:04.521 — same wall-clock millisecond, opposite
+        # direction; feature ended up Implemented + changes_requested,
+        # which neither coder nor reviewer dispatch will claim → stuck).
+        _filter_session_result_by_id(
+            working_dir,
+            {f["id"] for f in assigned_features},
+            pname,
+        )
+        # Commit was pushed (record of attempt). Feature in rework cycle. Exit.
+        return pushed_ids
 
     # 5. Mark assigned features as Reviewing + link to the PR via direct PM
     # API PATCH. Until 2026-05-06 this used a session_result.json append +

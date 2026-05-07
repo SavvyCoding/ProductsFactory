@@ -2,8 +2,9 @@
 Template renderer — instantiates ProductFactory templates into a product repo.
 
 Called by setup_product.py after discovery.
-Writes AGENT_WORKFLOW.md, CLAUDE.md, ARCHITECTURE.md, and an empty features.md
-into the product's working directory. Never overwrites existing files unless force=True.
+Writes AGENT_WORKFLOW.md, CONTRIBUTING.md, CLAUDE.md, and ARCHITECTURE.md
+into the product's working directory. Never overwrites existing files
+unless force=True.
 
 Stack selection priority:
   1. First entry in product["tech_stack"] that matches a known stack
@@ -149,6 +150,18 @@ def install_templates(
     written += _write_file(
         working_dir / "AGENT_WORKFLOW.md",
         TEMPLATES_DIR / "AGENT_WORKFLOW.md",
+        context, force,
+    )
+
+    # 1b. CONTRIBUTING.md — stack-agnostic. Pre-fills the human-contributor
+    # guide with the sprint-PR-mode flow this repo actually uses, so that
+    # later "Developer Documentation" features don't trigger the agent to
+    # write generic CONTRIBUTING boilerplate (fork → feature-branch →
+    # PR-against-main) that contradicts the orchestrator's actual
+    # workflow.
+    written += _write_file(
+        working_dir / "CONTRIBUTING.md",
+        TEMPLATES_DIR / "CONTRIBUTING.md",
         context, force,
     )
 

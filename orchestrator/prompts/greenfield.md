@@ -30,9 +30,7 @@ If a `docs/story_<ID>.md` exists for the feature, read it first.
 {reviewer_feedback}
 ## Your job
 
-For each assigned feature you implement code, run tests, then commit and push. PR creation only fires in per-feature mode (sprint mode reuses the open sprint PR).
-
-You have access to `git` and `gh` CLI in `/workspace`. The `GH_TOKEN` env var is already set; `gh pr create` will authenticate automatically. The remote is configured.
+For each assigned feature you implement code and run tests. **You do not run git or gh.** The orchestrator commits and pushes everything you wrote after this session exits — to the sprint branch in sprint-PR mode (reusing the open sprint PR), or to a per-feature branch in non-sprint mode.
 
 ---
 

@@ -460,7 +460,12 @@ _CFG_DEFAULTS = {
     "supervisor_orphan_approved_threshold":      1,
     "supervisor_rapid_flap_enabled":             True,
     "supervisor_rapid_flap_window_hours":        1,
-    "supervisor_rapid_flap_min_transitions":     5,
+    # 10 = ~one full designer→coder→reviewer cycle (7 transitions) plus one
+    # rework iteration (~4 more). 5 was tripping on the *first* reviewer
+    # round-trip and auto-blocking features that just needed normal rework
+    # (observed 2026-05-07 on MySalesforce #251 + #252 after a single
+    # changes_requested). Genuine flap loops still cross 10 within an hour.
+    "supervisor_rapid_flap_min_transitions":     10,
 }
 
 
@@ -876,6 +881,17 @@ async def change_feature_status_form(
     feature.status = status
     if status == "Approved" and feature.fix_attempts > 0:
         feature.fix_attempts = 0
+    # PM-initiated "park for later consideration": clear sprint membership and
+    # review-cycle artifacts so the feature is a clean slate when re-picked-up.
+    # design_doc_path is preserved (the design itself may still be reusable);
+    # pr_number is preserved (Pushed → Pending isn't allowed, so any pr_number
+    # here is stale state from an earlier cycle and the auto-merge sweep
+    # already won't merge it once status≠Reviewed).
+    if status == "Pending":
+        feature.sprint_id = None
+        feature.review_outcome = None
+        if feature.fix_attempts > 0:
+            feature.fix_attempts = 0
     return RedirectResponse(f"/product/{product_id}", status_code=303)
 
 
@@ -1031,6 +1047,29 @@ async def admin_save_poller_settings(
     config.ollama_host                 = _str("ollama_host")
     config.designer_model              = _str("designer_model")
     config.coder_model                 = _str("coder_model")
+    # Per-persona overrides for the orchestrator's runtime model resolver
+    # (orchestrator/docker_runner.py reads ollama_model_map[persona] BEFORE
+    # falling back to designer_model/coder_model). Form fields are named
+    # ollama_chain_<persona>, value is comma-separated chain. Empty string
+    # → drop the override for that persona. Personas not in this list are
+    # left untouched in the JSONB so manual DB edits or future additions
+    # survive a save through the UI.
+    _personas_for_override = ("coder", "reviewer", "designer", "planner",
+                              "documenter", "analytics", "recommender",
+                              "devops", "refactorer", "product_trainer")
+    _new_map = dict(config.ollama_model_map or {})
+    for _p in _personas_for_override:
+        _raw = form.get(f"ollama_chain_{_p}", "").strip()
+        if _raw:
+            _chain = [m.strip() for m in _raw.split(",") if m.strip()]
+            if _chain:
+                _new_map[_p] = _chain
+            elif _p in _new_map:
+                del _new_map[_p]
+        else:
+            if _p in _new_map:
+                del _new_map[_p]
+    config.ollama_model_map = _new_map or None
     config.ollama_timeout              = _int("ollama_timeout")
     config.bash_timeout                = _int("bash_timeout")
     config.max_turns                   = _int("max_turns")
@@ -1253,17 +1292,16 @@ async def api_sprint_report(sprint_id: int, db: AsyncSession = Depends(get_db)):
             "retro_doc_path": sprint.retro_doc_path,
         },
         "gates": {
+            # Phase 4 simplification (2026-05-06): qa_passed and
+            # security_clean were retired alongside the qa_tester +
+            # security_auditor → reviewer merge (Phase 2). Tests +
+            # security are now reviewed per-feature in the merged
+            # reviewer's tri-section review. Persisted gate values
+            # remain in dod_status for historical sprints; new sprints
+            # don't need them.
             "all_features_done": {
                 "passed": all(f.status in terminal for f in sprint_features) if sprint_features else False,
                 "detail": f"{sum(1 for f in sprint_features if f.status in terminal)}/{len(sprint_features)} features completed",
-            },
-            "qa_passed": {
-                "passed": bool(dod.get("qa_passed")),
-                "notes": dod.get("qa_passed_notes", ""),
-            },
-            "security_clean": {
-                "passed": bool(dod.get("security_clean")),
-                "notes": dod.get("security_clean_notes", ""),
             },
             "retro_done": {
                 "passed": bool(dod.get("retro_done")),
@@ -1291,13 +1329,12 @@ async def api_force_complete_sprint(sprint_id: int, db: AsyncSession = Depends(g
     if sprint.status == "completed":
         return {"action": "already_completed"}
 
-    # Auto-sign structural gates — retro_done is agent-owned and preserved as-is
-    current = dict(sprint.dod_status or {})
-    for gate in ("qa_passed", "security_clean"):
-        current[gate] = True
-        current[f"{gate}_notes"] = current.get(f"{gate}_notes") or "Auto-signed on sprint completion"
-    sprint.dod_status = current
-    await db.flush()
+    # Phase 4 simplification (2026-05-06): qa_passed/security_clean
+    # gates retired with the qa_tester + security_auditor → reviewer
+    # merge. force-complete now only ensures retro_done is left as-is
+    # (agent-owned). No structural gates need auto-signing here.
+    # Pre-existing sprints with the legacy gates set keep them in
+    # dod_status for archaeology.
 
     # Full completion: set completed_at, generate release notes, activate next sprint
     await _do_complete_sprint(sprint, sprint.product_id, db)
@@ -1325,10 +1362,9 @@ async def api_get_dod(sprint_id: int, db: AsyncSession = Depends(get_db)):
     dod = await _evaluate_dod(sprint_id, sprint.product_id, db)
 
     # Surface the *blocking* features so callers don't need to re-derive them.
-    # security_clean blockers = non-terminal bugs anywhere in the product
-    #   (sprint-scoped or unsprinted), since unsprinted bugs filed by the
-    #   security_auditor are exactly what blocks the gate from clearing.
-    # all_features_done blockers = non-terminal features in this sprint.
+    # Phase 4 (2026-05-06): security_clean gate retired, but the
+    # blocking-bugs list stays useful for the dashboard ("what's
+    # blocking sprint completion") so we keep computing it.
     terminal = {"Pushed", "Deferred", "Rejected"}
     feat_result = await db.execute(
         select(Feature).where(Feature.product_id == sprint.product_id)
@@ -1340,7 +1376,7 @@ async def api_get_dod(sprint_id: int, db: AsyncSession = Depends(get_db)):
         for f in all_product_features
         if f.sprint_id == sprint_id and f.status not in terminal
     ]
-    open_security_bugs = [
+    open_bugs = [
         {"id": f.id, "name": f.name, "status": f.status, "sprint_id": f.sprint_id}
         for f in all_product_features
         if f.feature_type == "bug" and f.status not in terminal
@@ -1351,7 +1387,7 @@ async def api_get_dod(sprint_id: int, db: AsyncSession = Depends(get_db)):
         "dod": dod,
         "blockers": {
             "all_features_done": sprint_non_terminal,
-            "security_clean":    open_security_bugs,
+            "open_bugs":         open_bugs,
         },
     }
 
@@ -1366,21 +1402,17 @@ async def api_check_dod(sprint_id: int, db: AsyncSession = Depends(get_db)):
     if not sprint or sprint.status == "completed":
         return {"action": "skipped"}
     dod = await _evaluate_dod(sprint_id, sprint.product_id, db)
-    # Completion gates (verified BEFORE the sprint can be marked done):
-    #   - all_features_done   structural
-    #   - no_open_prs         structural
-    #   - qa_passed           QA Tester sign-off
-    #   - security_clean      Security Auditor sign-off
-    # retro_done is intentionally NOT a completion gate. Per the
-    # architecture, the retrospective agent runs AFTER the sprint is
-    # `completed` (it reads release_notes, writes retro_sprint_<id>.md,
-    # files action items, then signs off retro_done). Requiring it here
-    # was a chicken-and-egg deadlock.
+    # Phase 4 simplification (2026-05-06): qa_passed and security_clean
+    # were retired alongside the qa_tester + security_auditor → reviewer
+    # merge (Phase 2). Test + security review now happens PER FEATURE in
+    # the merged reviewer's tri-section review; per-feature
+    # `review_outcome=approved` is the gate. Sprint-level completion
+    # only requires the structural gates: all_features_done + no_open_prs.
+    # retro_done is intentionally NOT a completion gate (it's a post-
+    # completion deliverable).
     all_pass = (
         dod["all_features_done"]
         and dod["no_open_prs"]
-        and dod["qa_passed"]
-        and dod["security_clean"]
     )
     if all_pass:
         await _do_complete_sprint(sprint, sprint.product_id, db)
@@ -1393,9 +1425,12 @@ async def _evaluate_dod(sprint_id: int, product_id: int, db: AsyncSession) -> di
     Compute DoD gate states for a sprint:
       all_features_done — all sprint features are Pushed or Deferred
       no_open_prs       — no sprint features have an open PR
-      qa_passed         — QA agent has signed off (stored in dod_status)
-      security_clean    — Security agent has signed off (stored in dod_status)
-      retro_done        — Retrospective agent has completed (stored in dod_status)
+      retro_done        — Retrospective has completed (stored in dod_status)
+
+    Phase 4 simplification (2026-05-06): qa_passed and security_clean
+    were retired with the qa_tester + security_auditor → reviewer merge
+    (Phase 2). Test + security checks moved into the merged reviewer's
+    tri-section per-feature review.
     """
     sprint = await db.get(Sprint, sprint_id)
     if not sprint:
@@ -1414,36 +1449,21 @@ async def _evaluate_dod(sprint_id: int, product_id: int, db: AsyncSession) -> di
     # Empty sprint = nothing to do = vacuously done. Without this, sprints
     # whose features all moved to the Blocked-sprint holdpen (or were
     # individually rejected/deleted) get stuck active forever — no work
-    # to advance, no completion path. The qa_passed + security_clean gates
-    # still apply, so a brand-new empty sprint with unsigned gates won't
-    # auto-complete spuriously.
+    # to advance, no completion path.
     all_features_done = all(f.status in terminal for f in sprint_features)
     no_open_prs = all(f.pr_number is None or f.status == "Pushed" for f in sprint_features)
-
-    # security_clean: auto-clear stale `false` once all bugs in the sprint are
-    # terminal. The auditor records a snapshot at the moment it ran; if it
-    # filed a security bug and marked security_clean=false, that snapshot
-    # stays false forever even after the bug is fixed and merged. Result: the
-    # sprint deadlocks on a gate that's already structurally satisfied.
-    # Rule:
-    #   persisted=True  → True (auditor explicitly cleared)
-    #   persisted=False → recompute: True iff the sprint has bug features and
-    #                     all of them are terminal; else False
-    #   persisted=None  → False (auditor never ran — gate requires sign-off)
-    _sc_persisted = persisted.get("security_clean")
-    if _sc_persisted is True:
-        security_clean = True
-    elif _sc_persisted is False:
-        _sprint_bugs = [f for f in sprint_features if f.feature_type == "bug"]
-        security_clean = bool(_sprint_bugs) and all(f.status in terminal for f in _sprint_bugs)
-    else:
-        security_clean = False
 
     return {
         "all_features_done": all_features_done,
         "no_open_prs":       no_open_prs,
+        # Phase 4 (2026-05-06): qa_passed + security_clean retired with
+        # the qa_tester + security_auditor → reviewer merge. Surfaced
+        # here as the historical persisted value (True if a pre-Phase-4
+        # sprint signed it, False otherwise) so the dashboard can still
+        # render archaeology, but they no longer participate in the
+        # all_pass calculation in /check-dod.
         "qa_passed":         bool(persisted.get("qa_passed")),
-        "security_clean":    security_clean,
+        "security_clean":    bool(persisted.get("security_clean")),
         "retro_done":        bool(persisted.get("retro_done")),
         "feature_count":     len(sprint_features),
         "features_terminal": sum(1 for f in sprint_features if f.status in terminal),
@@ -2062,6 +2082,16 @@ async def api_update_feature(
         "supervisor",
         "post-doc:rollback",
         "post-coder:fallback",
+        "post-coder:lint-guard",  # added 2026-05-07: post-coder auto-rejects
+                                  # commits that fail deterministic lint checks
+                                  # (raw error.message, .skip'd tests,
+                                  # hardcoded secrets) BEFORE reviewer runs,
+                                  # bouncing the feature back to Implementing+
+                                  # changes_requested. The bounce direction is
+                                  # always rank-equal (Implemented→Implementing,
+                                  # both rank 4) or in _ALLOWED_BACKWARD
+                                  # (Reviewing→Implementing), so this bypass is
+                                  # defense-in-depth only.
         "reset_stuck",
     }
     if new_status_for_rank and _caller not in _RANK_GUARD_BYPASS:
@@ -2691,8 +2721,10 @@ async def api_feature_story(feature_id: int, db: AsyncSession = Depends(get_db))
 
     Resolution order (first hit wins):
       1. `<working_dir>/docs/story_{feature_id:03d}.md` — the file the
-         product_planner persona writes for sprint-driven products.
-      2. `<working_dir>/<feature.design_doc_path>` — older designer flow.
+         former product_planner persona used to write (merged into
+         designer 2026-05-06; existing files keep this path).
+      2. `<working_dir>/<feature.design_doc_path>` — designer's preferred
+         path (`docs/feature_<NNN>_design.md`); also covers any custom path.
       3. `feature.design_doc` — inline content stored on the row.
     Returns {source, path, raw, html} where html is mistune-rendered markdown.
     Returns 200 with source=None and empty content if no story exists.
@@ -2954,13 +2986,13 @@ async def api_sprint_sign_off(
     sprint.dod_status = current
     await db.flush()
 
-    # Re-evaluate all gates — if all pass, auto-complete sprint
+    # Re-evaluate all gates — if all pass, auto-complete sprint.
+    # Phase 4 (2026-05-06): qa_passed + security_clean retired from
+    # the all_pass check (matches /check-dod above).
     dod = await _evaluate_dod(sprint_id, sprint.product_id, db)
     all_pass = (
         dod["all_features_done"]
         and dod["no_open_prs"]
-        and dod["qa_passed"]
-        and dod["security_clean"]
     )
     auto_completed = False
     if all_pass and sprint.status != "completed":
