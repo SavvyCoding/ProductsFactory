@@ -488,7 +488,7 @@ def _claim_features(features: list[dict], persona: str | None) -> None:
 # default mapping keeps heavy work on Sonnet and light work on Haiku (~5x
 # cheaper, ~3x faster). Override per-persona via sys_cfg.claude_model_map.
 _HEAVY_PERSONAS = {"coder", "reviewer", "designer"}
-_LIGHT_PERSONAS = {"planner", "documenter", "retrospective",
+_LIGHT_PERSONAS = {"planner", "documenter",
                    "analytics", "recommender", "devops", "refactorer"}
 
 

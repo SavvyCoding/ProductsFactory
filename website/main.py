@@ -2937,13 +2937,13 @@ async def api_sprint_sign_off(
     sprint.dod_status = current
     await db.flush()
 
-    # Re-evaluate all gates — if all pass, auto-complete sprint
+    # Re-evaluate all gates — if all pass, auto-complete sprint.
+    # Phase 4 (2026-05-06): qa_passed + security_clean retired from
+    # the all_pass check (matches /check-dod above).
     dod = await _evaluate_dod(sprint_id, sprint.product_id, db)
     all_pass = (
         dod["all_features_done"]
         and dod["no_open_prs"]
-        and dod["qa_passed"]
-        and dod["security_clean"]
     )
     auto_completed = False
     if all_pass and sprint.status != "completed":
