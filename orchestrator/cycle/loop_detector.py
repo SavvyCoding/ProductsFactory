@@ -56,7 +56,11 @@ class _LoopDetector:
         "planner", "product_trainer",
         "coder", "reviewer", "designer",
         "qa_tester", "security_auditor",
-        "retrospective", "product_planner",
+        "retrospective",
+        # "product_planner" was merged into "designer" 2026-05-06 (Phase 1
+        # of futureplan.md). Kept in this allow-list as a no-op alias for
+        # stale persona-history entries from before the merge.
+        "product_planner",
     })
 
     def detect_loop(self, product_id: int) -> str | None:

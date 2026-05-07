@@ -114,9 +114,13 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
     """
     if persona == "retrospective":
         template_name = "retrospective"
-    elif persona == "product_planner":
-        template_name = "product_planner"
     elif persona == "designer":
+        template_name = "designer"
+    # "product_planner" was merged into "designer" on 2026-05-06 (Phase 1
+    # of futureplan.md — they shared the same filter and wrote
+    # near-identical per-feature docs). Route any lingering callers to the
+    # designer prompt rather than 404 the build.
+    elif persona == "product_planner":
         template_name = "designer"
     elif persona == "reviewer":
         template_name = "reviewer"

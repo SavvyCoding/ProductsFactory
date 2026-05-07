@@ -34,6 +34,8 @@ def _rollback_stuck_features(product_id: int, persona: str | None) -> None:
     """
     stuck_statuses = {
         "designer":         ["Designing"],
+        # product_planner merged into designer 2026-05-06 — kept here as a
+        # rollback alias in case a stale session record still references it.
         "product_planner":  ["Designing"],
         "coder":            ["Implementing"],
         "reviewer":         [],
