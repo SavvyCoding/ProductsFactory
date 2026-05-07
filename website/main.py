@@ -881,6 +881,17 @@ async def change_feature_status_form(
     feature.status = status
     if status == "Approved" and feature.fix_attempts > 0:
         feature.fix_attempts = 0
+    # PM-initiated "park for later consideration": clear sprint membership and
+    # review-cycle artifacts so the feature is a clean slate when re-picked-up.
+    # design_doc_path is preserved (the design itself may still be reusable);
+    # pr_number is preserved (Pushed → Pending isn't allowed, so any pr_number
+    # here is stale state from an earlier cycle and the auto-merge sweep
+    # already won't merge it once status≠Reviewed).
+    if status == "Pending":
+        feature.sprint_id = None
+        feature.review_outcome = None
+        if feature.fix_attempts > 0:
+            feature.fix_attempts = 0
     return RedirectResponse(f"/product/{product_id}", status_code=303)
 
 
