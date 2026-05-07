@@ -162,7 +162,10 @@ from orchestrator.infra.redaction import (
     _redact_secrets,
     _format_agent_event,
 )
-from orchestrator.integrations.docker_cli import _chmod_workspace_via_alpine
+from orchestrator.integrations.docker_cli import (
+    _chmod_workspace_via_alpine,
+    _ensure_session_result_writable,
+)
 
 
 # Phase 2b of OrchestratorRefactor: planner/designer post-session pipeline
@@ -247,7 +250,7 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
     pr_number, pr_url, ...) so callers can wire sprint-PR-mode context into
     prompts and the post-coder pipeline without an extra round trip.
     """
-    if persona not in ("coder", "designer", "product_planner", "reviewer"):
+    if persona not in ("coder", "designer", "reviewer"):
         return [], None, None
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
@@ -292,7 +295,10 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                 features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
                 if not features:
                     features = candidates
-            elif persona in ("designer", "product_planner"):
+            elif persona == "designer":
+                # product_planner was merged into designer 2026-05-06 (Phase 1
+                # of futureplan.md). They shared this same filter and wrote
+                # near-identical per-feature docs.
                 candidates = [f for f in all_features
                               if f.get("status") == "Approved" and not f.get("design_doc_path")]
                 features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
@@ -484,8 +490,8 @@ def _claim_features(features: list[dict], persona: str | None) -> None:
 # production code; light personas summarise, document, or generate text. The
 # default mapping keeps heavy work on Sonnet and light work on Haiku (~5x
 # cheaper, ~3x faster). Override per-persona via sys_cfg.claude_model_map.
-_HEAVY_PERSONAS = {"coder", "reviewer", "designer", "security_auditor", "qa_tester"}
-_LIGHT_PERSONAS = {"planner", "product_planner", "documenter", "retrospective",
+_HEAVY_PERSONAS = {"coder", "reviewer", "designer"}
+_LIGHT_PERSONAS = {"planner", "documenter",
                    "analytics", "recommender", "devops", "refactorer"}
 
 
@@ -585,6 +591,14 @@ def _prepare_workspace(product: dict) -> tuple[str, str]:
     # mkdir loop above re-create dirs at mode 755 afterwards — re-run to catch
     # SRC/, TestCases/, docs/, Results/, Temp/.
     _chmod_workspace_via_alpine(working_dir, product.get("name", "?"))
+
+    # Pre-create session_result.json mode 666 so the agent (uid 1001) can
+    # always append to it, regardless of who owned it before. The
+    # `_fix_session_result_perms` thread inside `run_claude_in_docker` runs
+    # 3s POST-launch — too late if the agent races ahead. See
+    # docker_cli._ensure_session_result_writable docstring for the full
+    # uid-999-vs-1001 incident analysis (reviewer 1983, 2026-05-07 01:32).
+    _ensure_session_result_writable(working_dir, product.get("name", "?"))
 
     return working_dir_host, working_dir
 
@@ -1008,7 +1022,7 @@ def _finalize_session(
                 )
             except Exception:
                 log.exception(f"Post-coder pipeline failed for {product.get('name')}")
-        elif exit_code == 0 and persona in ("product_planner", "designer"):
+        elif exit_code == 0 and persona == "designer":
             try:
                 _run_post_doc_pipeline(product, session_uid, working_dir,
                                        product.get("_assigned_features", []),
@@ -1117,15 +1131,13 @@ def _finalize_session(
     if exit_code == 2:
         return 2
 
-    # After a successful coder session: QA → Security (feature-level, run per PR).
-    # Recommender runs post-sprint via the poller's _post_sprint_persona_due gate.
-    if exit_code == 0 and persona == "coder":
-        log.info(f"Coder succeeded — launching QA Tester for {product['name']}")
-        run_claude_in_docker(product, persona="qa_tester")
-
-        log.info(f"Launching Security Auditor for {product['name']}")
-        run_claude_in_docker(product, persona="security_auditor")
-
+    # Phase 2 simplification (2026-05-06): qa_tester and security_auditor
+    # were merged into the reviewer persona. The reviewer's prompt now
+    # covers tri-section review (functional + tests + security) on the
+    # same diff in a single session. Post-coder cascade collapses to
+    # just-launch-the-cycle — the next poller pass will pick up the
+    # feature in Reviewing/pr_number set and dispatch the merged reviewer.
+    # See futureplan.md.
     return exit_code
 
 

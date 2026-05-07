@@ -51,10 +51,32 @@ faster, and removes two handoff seams.
 
 ### Merge 2 — `planner` + `product_planner` → `planner`
 
-Currently split between "vision → epics" (product_planner) and
-"epics → features" (planner). One agent, one prompt covering both.
-The orchestrator's persona dispatch already routes both to a similar
-candidate filter; the merge is mostly prompt consolidation.
+Code-level audit (2026-05-06, post-pipeline-debug) revealed the
+actual duplication: `product_planner` and `designer` share the SAME
+`_fetch_assigned_features` candidate filter (`status == "Approved"
+AND not design_doc_path`) and both write near-identical per-feature
+docs to `/workspace/docs/` — just with different filenames
+(`story_<NNN>.md` vs `feature_<NNN>_design.md`). `planner` is a
+DIFFERENT role: it analyses the product and generates feature ideas
+via the PM API; it writes no files, and runs only when the product
+needs new ideas.
+
+So the corrected merge:
+
+- **KEEP `planner`** — distinct role, no overlap.
+- **MERGE `product_planner` → `designer`.** Delete `product_planner.md`,
+  use designer's prompt as the canonical per-feature doc writer.
+  Remove `product_planner` from persona dispatch in
+  `cycle/persona.py` (replaces it with `designer`).
+  Update `_fetch_assigned_features` to drop the
+  `("designer", "product_planner")` tuple to just `("designer",)`.
+- Existing `docs/story_<NNN>.md` files stay valid — designer's
+  prompt should accept either filename pattern when reading
+  back, or do a one-time rename pass.
+
+(The original Phase-1 draft proposed `planner + product_planner`
+based on names; the actual runtime overlap was between
+`product_planner` and `designer`.)
 
 ### Keep — `designer`
 

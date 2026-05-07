@@ -104,7 +104,11 @@ _DEFAULTS = {
     "supervisor_orphan_approved_threshold":     1,
     "supervisor_rapid_flap_enabled":            True,
     "supervisor_rapid_flap_window_hours":       1,
-    "supervisor_rapid_flap_min_transitions":    5,
+    # 10 = ~one full designer→coder→reviewer cycle (7 transitions) plus one
+    # rework iteration. Was 5 — too aggressive; auto-blocked features after
+    # a single changes_requested round-trip. Must match the website default
+    # in website/main.py to keep cross-process behaviour consistent.
+    "supervisor_rapid_flap_min_transitions":    10,
 }
 
 

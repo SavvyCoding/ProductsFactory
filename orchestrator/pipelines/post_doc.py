@@ -3,10 +3,10 @@ Path B planner/designer post-session pipeline.
 
 The agent only writes docs/ files and appends Designed entries to
 session_result.json (the live-poll thread has already PATCHed the DB by the
-time this runs). Here we commit those docs and push to origin/main. On any
-failure we roll the affected features back to Approved + clear
-design_doc_path so the next cycle re-plans them rather than coders running
-against missing docs.
+time this runs). Here we commit those docs and push to the right branch:
+sprint_branch when sprint_pr_mode is on, otherwise main. On any failure we
+roll the affected features back to Approved + clear design_doc_path so the
+next cycle re-plans them rather than coders running against missing docs.
 
 Extracted from docker_runner.py during Phase 2 of OrchestratorRefactor.
 """
@@ -30,9 +30,10 @@ def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
     Path B: orchestrator owns ALL git for planner/designer too. Agents only
     write docs/ files and append `Designed` entries to session_result.json
     (the live-poll has already PATCHed the DB by the time this runs). Here we
-    commit those docs and push to origin/main. On push failure we PATCH the
-    affected features back to Approved + clear design_doc_path so the next
-    cycle re-plans them rather than coders running against missing docs.
+    commit those docs and push to the sprint branch (sprint_pr_mode) or main
+    (legacy). On push failure we PATCH the affected features back to Approved
+    + clear design_doc_path so the next cycle re-plans them rather than
+    coders running against missing docs.
     """
     pname = product.get("name", "?")
     if not assigned_features:
@@ -56,30 +57,42 @@ def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
         return
     log.info(f"[post-{persona}] {pname}: {len(changed)} changed file(s) — sample {changed[:3]}")
 
-    # Sync to origin/main first; planner/designer always commit on main.
-    # In sprint_pr_mode the orchestrator pre-checks-out sprint/79 for every
-    # persona at session start (so agents that forget MANDATORY-FIRST-ACTION
-    # still land on the right branch). For planner/designer that's wrong —
-    # docs must commit to main. The agent's tracked changes (`features.md`)
-    # and untracked writes (`docs/story_NNN.md`, `session_result_NNN.json`)
-    # would block `git checkout main` with "your local changes would be
-    # overwritten" / "untracked files would be overwritten".
+    # Sync and commit to the right branch:
+    #   - sprint_pr_mode on  → commit to sprint_branch (the unit of merge for
+    #     the sprint PR). Coder runs on sprint_branch and must be able to read
+    #     the design docs from its working tree.
+    #   - sprint_pr_mode off → commit to main (legacy per-feature-PR flow).
+    #
+    # The agent's tracked changes (`features.md`) and untracked writes
+    # (`docs/story_NNN.md`, `session_result_NNN.json`) would block a plain
+    # `git checkout TARGET` with "your local changes would be overwritten"
+    # / "untracked files would be overwritten".
     # Real incident 2026-05-06 18:42: post-product_planner aborted at the
     # checkout for feature 164, _rollback_doc_features kicked the feature
     # back to Approved, next cycle re-ran the planner, exact same failure
     # — infinite loop, no story file ever made it to origin/main.
-    # Fix mirrors post_coder: stash -u (covers both tracked + untracked,
+    # Real incident 2026-05-07 03:30: docs landed on origin/main (target
+    # was hardcoded "main") but coder runs on sprint_branch, branched from
+    # origin/main at provision time and never picked up subsequent main-side
+    # docs. Result: every coder session saw an empty docs/, found no story
+    # for its assigned feature, stranded with no progress. Fix: target
+    # sprint_branch when sprint_pr_mode is on.
+    # Pattern mirrors post_coder: stash -u (covers both tracked + untracked,
     # respects .gitignore so node_modules stays out), then checkout -B
-    # to force-reset local main against origin, then stash pop with
+    # to force-reset local TARGET against origin, then stash pop with
     # conflict resolution favoring the agent's content.
+    sprint_pr_mode = bool(product.get("_sprint_pr_mode"))
+    sprint_branch = product.get("_sprint_branch") or ""
+    target_branch = sprint_branch if (sprint_pr_mode and sprint_branch) else "main"
+
     _run(["git", "fetch", "origin"])
     stash_r = _run(["git", "stash", "push", "-u", "-m",
                     f"post-{persona}-{session_uid}"], timeout=300)
     stashed = (stash_r.returncode == 0
                and "No local changes to save" not in (stash_r.stdout or ""))
-    co = _run(["git", "checkout", "-B", "main", "origin/main"])
+    co = _run(["git", "checkout", "-B", target_branch, f"origin/{target_branch}"])
     if co.returncode != 0:
-        log.warning(f"[post-{persona}] {pname}: git checkout -B main origin/main failed — rc={co.returncode} {co.stderr.strip()[:200]}")
+        log.warning(f"[post-{persona}] {pname}: git checkout -B {target_branch} origin/{target_branch} failed — rc={co.returncode} {co.stderr.strip()[:200]}")
         if stashed:
             _run(["git", "stash", "pop"])  # best-effort restore
         _rollback_doc_features(product, assigned_features)
@@ -111,8 +124,9 @@ def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
         return
 
     feat_summary = ", ".join(f"#{f['id']}" for f in assigned_features)
-    verb = "plan" if persona == "product_planner" else "design"
-    commit_msg = f"{verb}: {feat_summary} [{persona}-{session_uid}]"
+    # product_planner merged into designer 2026-05-06 — both produce per-
+    # feature design docs, single verb is fine.
+    commit_msg = f"design: {feat_summary} [{persona}-{session_uid}]"
     # --no-verify: same rationale as post_coder commit. The post-doc
     # pipeline runs outside the agent's environment; agent-installed
     # pre-commit hooks (husky, lint-staged) routinely fail because their
@@ -124,15 +138,15 @@ def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
         _rollback_doc_features(product, assigned_features)
         return
 
-    push_r = _run(["git", "push", "--no-verify", "origin", "main"], timeout=180)
+    push_r = _run(["git", "push", "--no-verify", "origin", target_branch], timeout=180)
     if push_r.returncode != 0:
-        log.warning(f"[post-{persona}] {pname}: git push failed — {push_r.stderr.strip()[:200]}")
+        log.warning(f"[post-{persona}] {pname}: git push origin {target_branch} failed — {push_r.stderr.strip()[:200]}")
         # Local commit exists; the next _reset_workspace will discard it.
         # Roll back DB so the next planner cycle re-plans these features.
         _rollback_doc_features(product, assigned_features)
         return
 
-    log.info(f"[post-{persona}] {pname}: pushed {len(assigned_features)} doc(s) to origin/main")
+    log.info(f"[post-{persona}] {pname}: pushed {len(assigned_features)} doc(s) to origin/{target_branch}")
 
     # Mark each assigned feature Designed + link to its story file directly.
     # Mirrors post_coder's direct-PATCH-to-Reviewing fix (commit df898e8) for

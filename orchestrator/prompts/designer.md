@@ -34,7 +34,9 @@ For each assigned feature (in order):
    - /workspace/product_config.json (if it exists)
    - Any relevant existing source files for this feature area
 
-2. **Write a design document** to `/workspace/docs/feature_{feature_id:03d}_design.md`:
+2. **Write a design document** to `/workspace/docs/story_{feature_id:03d}.md`
+   (the canonical path coder + reviewer + website all read from; legacy
+   `feature_<NNN>_design.md` paths still work but new files go here):
 
    ```markdown
    # Feature Design: {feature_name}
@@ -72,7 +74,7 @@ For each assigned feature (in order):
 
    Design complete:
    ```
-   {"id": <feature_id>, "status": "Designed", "design_doc_path": "docs/feature_<NNN>_design.md"}
+   {"id": <feature_id>, "status": "Designed", "design_doc_path": "docs/story_<NNN>.md"}
    ```
    Too vague to design:
    ```
@@ -102,7 +104,7 @@ echo "Started: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /workspace/session_summary.md
 
 Append a line after each significant step:
 ```
-echo "Designed #<id> <name> — doc at docs/feature_<NNN>_design.md" >> /workspace/session_summary.md
+echo "Designed #<id> <name> — doc at docs/story_<NNN>.md" >> /workspace/session_summary.md
 echo "Design decision: <choice> because <reason>" >> /workspace/session_summary.md
 echo "Blocked #<id> — spec too vague: <detail>" >> /workspace/session_summary.md
 echo "Coder note: implement <X> before <Y> — dependency order matters" >> /workspace/session_summary.md
@@ -122,13 +124,13 @@ echo "" >> /workspace/product_memory.md
 
 Good entries: "Redis cache key format changed in v2 — always use prefix `pf:`", "Test suite requires DB_URL env var — set it in conftest.py", "auth middleware rejects X-Forwarded-For — use real IP only".
 Bad entries: session-specific status updates, things already in CLAUDE.md, obvious stuff.
-Commit product_memory.md with your final push to main.
+Just append to `/workspace/product_memory.md` — the orchestrator commits and pushes it alongside your design docs.
 
 ---
 
 ## Rules
 
-- Write design docs on the **main branch** (not a feature branch).
+- Do NOT run git commands (`git add`, `git commit`, `git push`, `git checkout`). The orchestrator handles all git operations — including selecting the right branch (sprint branch when sprint-PR mode is on, main otherwise). Your job is to write files and append to `session_result.json`.
 - Do NOT write any application code — design documents only.
 - Design docs must be specific enough that a Coder can implement without asking questions.
 - Keep each design doc under 400 lines — if more is needed, split the feature.

@@ -48,9 +48,19 @@ def test_persona_prompt_contains_required_invariants(persona: str) -> None:
 
 def test_all_personas_produce_nonempty_prompt() -> None:
     """Sanity check — every known persona should produce a non-trivial prompt."""
+    # 2026-05-06 persona simplification (futureplan.md):
+    #   Phase 1: product_planner merged into designer
+    #   Phase 2: qa_tester + security_auditor merged into reviewer
+    #   Phase 3: retrospective replaced by inline templated generator
+    #            (orchestrator/pipelines/retro_generator.py) — no LLM
+    #            session, no prompt file. Dispatch returns
+    #            action=run_inline instead of launch_session.
+    # The standalone .md files for those merged/replaced personas are
+    # deleted; persona dispatch routes any lingering callers to the
+    # survivor (or to planner.md as a defensive fallback for retrospective).
     all_personas = [
-        "designer", "reviewer", "product_planner", "retrospective",
-        "qa_tester", "security_auditor", "recommender", "planner",
+        "designer", "reviewer",
+        "recommender", "planner",
         "documenter", "refactorer", "devops", "analytics", "product_trainer",
     ]
     for p in all_personas:

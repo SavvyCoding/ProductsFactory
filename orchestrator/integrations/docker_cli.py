@@ -55,6 +55,42 @@ def _chmod_workspace_via_alpine(working_dir: str, product_name: str = "?") -> No
         log.warning(f"[{product_name}] alpine chmod helper failed (non-fatal)")
 
 
+def _ensure_session_result_writable(working_dir: str, product_name: str = "?") -> None:
+    """
+    Pre-create or chmod /workspace/session_result.json so the next agent
+    (uid 1001) can append to it regardless of who owned it before.
+
+    Background (2026-05-07): the orchestrator container's process runs as
+    `uid=999(orchestrator)`, while the agent container runs as `uid=1001(agent)`.
+    Any orchestrator-side write (or Windows host-mapped uid that lands on
+    999 inside containers) creates the file with default umask → mode 644,
+    owned by 999. The agent (1001) is "other" — mode 644 has no write bit
+    for "other" → EACCES on append.
+
+    Real incident 2026-05-07 01:32: reviewer 1983 burned 50 turns trying to
+    write its decision before calling task_done with
+    `blocked: file owned by uid 999, agent is uid 1001`. The pre-existing
+    `_fix_session_result_perms` thread inside `run_claude_in_docker` only
+    runs 3s AFTER container start — too late if the agent's first write
+    races ahead.
+
+    This helper runs as part of `_prepare_workspace`, BEFORE the agent
+    container launches. It's idempotent: file exists → chmod 666; file
+    doesn't exist → touch creates empty + chmod 666. Either way the
+    agent's first append succeeds regardless of pre-existing ownership.
+    """
+    try:
+        host_wd_path = _resolve_host_path(working_dir)
+        subprocess.run(
+            ["docker", "run", "--rm", "-v", f"{host_wd_path}:/ws",
+             "alpine", "sh", "-c",
+             "touch /ws/session_result.json && chmod 666 /ws/session_result.json"],
+            capture_output=True, timeout=30,
+        )
+    except Exception:
+        log.warning(f"[{product_name}] alpine session_result_writable helper failed (non-fatal)")
+
+
 def _rm_path_via_alpine(working_dir: str, relative_path: str, product_name: str = "?") -> bool:
     """
     Force-delete a single file inside the workspace via an alpine sidecar.

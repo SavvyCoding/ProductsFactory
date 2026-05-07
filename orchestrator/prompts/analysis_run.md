@@ -53,9 +53,9 @@ For each meaningful existing capability, POST to {pm_api_url}/api/features:
 (Status = Pushed because they already exist on main.)
 
 ### Step 5 — Commit and push
-- Commit ARCHITECTURE.md + product_config.json to main branch
+- Commit ARCHITECTURE.md + product_config.json to `main`
 - Message: "chore: Analysis Run — ARCHITECTURE.md + product_config.json [ProductFactory]"
-- Push to main (this is the only time Claude pushes directly to main)
+- Push to `main` (this is a one-off scaffolding pass that runs before any sprint exists, so it correctly targets `main`)
 
 ### Step 6 — Mark analysis complete
 PATCH {pm_api_url}/api/products/{product_id} → analysis_status = "done", status = "ready"

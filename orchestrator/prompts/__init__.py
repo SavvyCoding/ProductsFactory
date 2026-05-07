@@ -112,11 +112,22 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
       coder     → greenfield.md or brownfield.md (existing coder path)
       None      → legacy routing (analysis_run / brownfield / greenfield)
     """
+    # Phase 3 (2026-05-06): "retrospective" persona was replaced by an
+    # inline templated generator (orchestrator/pipelines/retro_generator.py).
+    # No prompt is rendered for it anymore — persona dispatch returns
+    # action="run_inline" instead of "launch_session". The branch below
+    # is a defensive alias for any caller that still requests a
+    # retrospective prompt build; it returns the planner template since
+    # the standalone retrospective.md file is deleted.
     if persona == "retrospective":
-        template_name = "retrospective"
-    elif persona == "product_planner":
-        template_name = "product_planner"
+        template_name = "planner"
     elif persona == "designer":
+        template_name = "designer"
+    # "product_planner" was merged into "designer" on 2026-05-06 (Phase 1
+    # of futureplan.md — they shared the same filter and wrote
+    # near-identical per-feature docs). Route any lingering callers to the
+    # designer prompt rather than 404 the build.
+    elif persona == "product_planner":
         template_name = "designer"
     elif persona == "reviewer":
         template_name = "reviewer"
@@ -124,10 +135,15 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
         template_name = "recommender"
     elif persona == "planner":
         template_name = "planner"
+    # Phase 2 (2026-05-06): qa_tester and security_auditor were merged
+    # into reviewer. The merged reviewer's prompt covers tri-section
+    # review (functional + tests + security). Defensive aliases — if
+    # anything still routes one of those persona names here, fall back
+    # to the reviewer prompt rather than 404 the build.
     elif persona == "qa_tester":
-        template_name = "qa_tester"
+        template_name = "reviewer"
     elif persona == "security_auditor":
-        template_name = "security_auditor"
+        template_name = "reviewer"
     elif persona == "documenter":
         template_name = "documenter"
     elif persona == "refactorer":

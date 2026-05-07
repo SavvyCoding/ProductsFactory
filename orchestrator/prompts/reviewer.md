@@ -77,52 +77,110 @@ For each assigned feature (in order):
 
 2. **Read the design doc** if it exists:
    ```
-   cat /workspace/docs/feature_<id>_design.md
+   cat /workspace/docs/story_<id>.md
    ```
+   (Legacy `docs/feature_<id>_design.md` paths also still exist on
+   older features — try both.)
 
 3. **Review the per-feature diff** (only the files touched by this feature's commits, not the whole PR):
    ```bash
    git show <sha>          # for each commit SHA from step 1
    ```
-   Use `gh pr view {sprint_pr_number}` if you need PR-level metadata, but per-commit is the right granularity here.
 
-4. **Check tests pass** for the changed code (run the test command from CLAUDE.md scoped to the affected files).
+4. **Run the three review sections** for this feature (Phase 2 of the
+   persona-simplification — the former separate qa_tester and
+   security_auditor sessions are now sub-sections of THIS review).
+
+   **(a) Functional correctness** — does the diff implement the
+   acceptance criteria from `docs/story_<id>.md`?
+   - Each numbered AC has a code path AND a test that exercises it.
+   - Code follows ARCHITECTURE.md conventions.
+   - No obvious logic bugs / TODO comments / placeholder code.
+
+   **(b) Test coverage** — are tests sufficient and actually running?
+   - `grep -rn "\.skip\|\.todo\|xit(\|xdescribe(" TestCases/`
+     on changed test files. Skipped tests count as missing coverage.
+   - Run the test command from CLAUDE.md scoped to the affected
+     files. They must actually pass — a green CI from before the
+     diff doesn't help.
+   - Coverage of the new code paths (eyeball — exact threshold
+     isn't enforced here, but obvious gaps in error paths get flagged).
+
+   **(c) Security review** — scan the diff for the common red flags:
+   - Information disclosure: raw `error.message`/`err.message`/
+     stack-trace strings in HTTP response bodies.
+   - SQL injection: untemplated string-concat into SQL queries.
+   - XSS: untemplated user input in HTML/JSX output without explicit
+     `escape()`/`safe()` annotation.
+   - Hardcoded secrets: `grep -rnE "(api[_-]?key|password|secret|token)\\s*[:=]\\s*[\"']" SRC/ app/`
+     on changed files.
+   - Missing auth: API routes that take user input without an auth
+     check above them.
+   - Unvalidated input at API boundaries: untrusted strings flowing
+     into eval/exec/shell/sql/path operations.
 
 5. **Make a decision per feature:**
 
-   **APPROVE** if:
-   - Acceptance criteria from the design doc are met
-   - Tests pass and no coverage regression
-   - No bugs, security issues, or architectural violations
-   - Code follows existing conventions (ARCHITECTURE.md)
+   **APPROVE** if all three sections pass.
 
-   **REQUEST CHANGES** if:
-   - Tests fail
-   - Acceptance criteria not met
-   - Security issues found (see checklist below)
-   - Significant deviation from design doc without justification
+   **REQUEST CHANGES** if any section fails. Cite the exact section
+   and the specific files/line numbers in your comment so the rework
+   coder has a fix list (the orchestrator pipes feature comments
+   into the rework coder's prompt automatically).
 
-6. **Post a per-feature review comment** via the PM API (one per feature):
+6. **File a bug feature for material security findings** that
+   shouldn't block this sprint but need triage:
 
-   Approve:
    ```bash
-   curl -sS -X POST {pm_api_url}/api/features/<id>/comments \
+   # Only for issues you DON'T flag as changes_requested but want
+   # tracked. Critical/blocking findings go in the comment instead.
+   curl -sS -X POST {pm_api_url}/api/features \
      -H "Content-Type: application/json" \
-     -d '{"author":"reviewer","body":"✅ Commit <short_sha>: LGTM — all acceptance criteria met. [{session_uid}]"}'
+     -d '{
+       "product_id": {product_id},
+       "name": "Security: <one-line>",
+       "description": "<finding details + remediation>",
+       "feature_type": "bug",
+       "priority": 30,
+       "labels": ["security"]
+     }'
    ```
 
-   Request changes:
+   The orchestrator's bug-routing logic will assign these to a
+   sprint when capacity allows.
+
+7. **Post per-feature review comment(s)** via the PM API. For
+   `changes_requested`, post ONE comment per failing section so the
+   rework coder can address them line-by-line:
+
+   Approve (single comment):
    ```bash
    curl -sS -X POST {pm_api_url}/api/features/<id>/comments \
      -H "Content-Type: application/json" \
-     -d '{"author":"reviewer","body":"❌ Commit <short_sha>: changes requested.\n- <issue_1>\n- <issue_2>\n[{session_uid}]"}'
+     -d '{"author":"reviewer","body":"✅ Commit <short_sha>: LGTM — functional/tests/security all pass. [{session_uid}]"}'
+   ```
+
+   Request changes (one comment per failing section):
+   ```bash
+   # Functional finding
+   curl -sS -X POST {pm_api_url}/api/features/<id>/comments \
+     -H "Content-Type: application/json" \
+     -d '{"author":"reviewer","body":"❌ functional: <issue at file:line>. [{session_uid}]"}'
+   # Test finding
+   curl -sS -X POST {pm_api_url}/api/features/<id>/comments \
+     -H "Content-Type: application/json" \
+     -d '{"author":"reviewer","body":"❌ tests: <issue, e.g. test_X is .skip>. [{session_uid}]"}'
+   # Security finding
+   curl -sS -X POST {pm_api_url}/api/features/<id>/comments \
+     -H "Content-Type: application/json" \
+     -d '{"author":"reviewer","body":"❌ security: <issue at file:line>. [{session_uid}]"}'
    ```
 
    Comments are visible in the PM dashboard under the feature. Do NOT
    try `gh pr comment` / `gh pr review` — those are not available in
    the agent container and the PM-API path is the canonical trail.
 
-7. **Append one JSON line to `/workspace/session_result.json`** immediately after each per-feature decision.
+8. **Append one JSON line to `/workspace/session_result.json`** immediately after each per-feature decision.
    The poller polls this file every 30 s and updates the DB in real-time. Do NOT call PATCH /api/features/{id}.
 
    Approval:
@@ -142,9 +200,9 @@ For each assigned feature (in order):
    - NEVER wrap entries in `{"features": [...]}`
    - One JSON object per line
 
-8. **Repeat** steps 1–7 for each assigned feature (up to {max_features_per_run} total).
+9. **Repeat** steps 1–8 for each assigned feature (up to {max_features_per_run} total).
 
-9. **Exit 0** when done. Don't `git commit`, `git add`, `git push`,
+10. **Exit 0** when done. Don't `git commit`, `git add`, `git push`,
    `git rebase`, `git merge`, `git reset`, `git tag`, `sed -i`, or
    `awk -i` — the harness rejects all of those for this persona.
    `git checkout`, `git fetch`, `git pull`, `git log`, `git diff`,
