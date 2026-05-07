@@ -124,13 +124,13 @@ echo "" >> /workspace/product_memory.md
 
 Good entries: "Redis cache key format changed in v2 — always use prefix `pf:`", "Test suite requires DB_URL env var — set it in conftest.py", "auth middleware rejects X-Forwarded-For — use real IP only".
 Bad entries: session-specific status updates, things already in CLAUDE.md, obvious stuff.
-Commit product_memory.md with your final push to main.
+Just append to `/workspace/product_memory.md` — the orchestrator commits and pushes it alongside your design docs.
 
 ---
 
 ## Rules
 
-- Write design docs on the **main branch** (not a feature branch).
+- Do NOT run git commands (`git add`, `git commit`, `git push`, `git checkout`). The orchestrator handles all git operations — including selecting the right branch (sprint branch when sprint-PR mode is on, main otherwise). Your job is to write files and append to `session_result.json`.
 - Do NOT write any application code — design documents only.
 - Design docs must be specific enough that a Coder can implement without asking questions.
 - Keep each design doc under 400 lines — if more is needed, split the feature.
