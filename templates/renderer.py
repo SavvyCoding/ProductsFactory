@@ -59,9 +59,17 @@ STACK_DEFAULTS: dict[str, dict] = {
         "RUNTIME":        "See CLAUDE.md",
         "TEST_COMMAND":   "# TODO: configure test command",
         "AUDIT_COMMAND":  "# TODO: configure audit command",
-        "SOURCE_PATH":    "SRC",
-        "TEST_PATH":      "TestCases",
-        "NEW_FEATURE_SOURCE": "SRC",
+        # 2026-05-07: switched default from "SRC"/"TestCases" (Salesforce-style
+        # uppercase) to lowercase "src"/"tests" — matches the Node stack's
+        # convention and avoids the case-mismatch confusion seen on MySalesforce
+        # feature #224 where reviewer comments oscillated between
+        # `SRC/app/api/...` and `src/app/api/...` paths and the coder created
+        # files in one casing while imports/tests resolved against the other
+        # (Windows is case-insensitive on disk but Node's module resolver and
+        # tsconfig are case-sensitive).
+        "SOURCE_PATH":    "src",
+        "TEST_PATH":      "tests",
+        "NEW_FEATURE_SOURCE": "src",
     },
 }
 
@@ -193,9 +201,20 @@ def install_templates(
 
     # 4. features.md — no longer created (DB is single source of truth)
 
-    # 5. Create required directories if they don't exist (greenfield only)
+    # 5. Create required directories if they don't exist (greenfield only).
+    # Use the stack's SOURCE_PATH/TEST_PATH so e.g. a Node project gets `src/`
+    # + `tests/` (matching what npm/Next/jest expect), not the legacy
+    # `SRC/TestCases/`. Pre-2026-05-07 this hardcoded "SRC"/"TestCases" for
+    # every stack, so a Node greenfield ended up with BOTH `SRC/` (init) and
+    # `src/` (agent-created) — case-only siblings on Windows that broke the
+    # coder/reviewer feedback loop.
     if product.get("type", "greenfield") == "greenfield":
-        for dir_name in ("SRC", "TestCases", "Results", "Temp"):
+        src_dir  = context.get("SOURCE_PATH") or "src"
+        test_dir = context.get("TEST_PATH")   or "tests"
+        # Dedupe (e.g. go stack uses "internal" for both) and add Results/Temp
+        # which are universal scratch dirs.
+        scratch_dirs = ("Results", "Temp")
+        for dir_name in tuple(dict.fromkeys((src_dir, test_dir, *scratch_dirs))):
             d = working_dir / dir_name
             if not d.exists():
                 d.mkdir(parents=True, exist_ok=True)
