@@ -12,13 +12,20 @@ PM_ALLOWED_TRANSITIONS: dict[str, list[str]] = {
     # PM can make these status changes via the website.
     # Note: agent endpoints (PATCH /api/features/{id}) bypass this table entirely —
     # agents have unrestricted status authority so they can drive the full pipeline.
-    "Pending":  ["Approved", "Rejected", "Deferred"],
-    "Approved": ["Pending"],
-    "Blocked":  ["Approved", "Rejected"],
-    "Pushed":   ["Reverted"],
-    "Rejected": ["Approved", "Pending"],
-    "Reverted": ["Pending"],
-    "Deferred": ["Approved", "Pending"],
+    # Pending is the "park for later consideration" state; PM can pull a feature
+    # back from any active sprint state into Pending (the handler also clears
+    # sprint_id and review_outcome so it's a clean slate).
+    "Pending":     ["Approved", "Rejected", "Deferred"],
+    "Approved":    ["Pending"],
+    "Designed":    ["Pending"],
+    "Implementing":["Pending"],
+    "Reviewing":   ["Pending"],
+    "Reviewed":    ["Pending"],
+    "Blocked":     ["Approved", "Rejected", "Pending"],
+    "Pushed":      ["Reverted"],
+    "Rejected":    ["Approved", "Pending"],
+    "Reverted":    ["Pending"],
+    "Deferred":    ["Approved", "Pending"],
 }
 
 

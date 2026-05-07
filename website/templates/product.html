@@ -919,6 +919,21 @@
               <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;margin-left:6px">
                 <span class="badge badge-status-{{ f.status | lower }}" style="font-size:10px">{{ f.status }}</span>
                 {% if f.status == 'Pushed' %}<span style="font-size:11px;color:var(--text-muted)" title="View activity">&#x25B6;</span>{% endif %}
+                {# "Move back to Pending" — only show when the transition is
+                   PM-allowed (excludes Pushed/Pending itself). Submits a
+                   regular form post; onclick stops propagation so the
+                   surrounding row's click handler doesn't also fire. #}
+                {% if f.status in ['Approved','Designed','Implementing','Reviewing','Reviewed','Blocked','Rejected','Reverted','Deferred'] %}
+                <form method="post" action="/product/{{ product.id }}/features/{{ f.id }}/status"
+                      style="display:inline;margin:0;padding:0"
+                      onclick="event.stopPropagation()"
+                      onsubmit="return confirm('Move feature #{{ f.id }} back to Pending? This clears the sprint assignment and resets fix_attempts and review_outcome. The design doc is kept.');">
+                  <input type="hidden" name="status" value="Pending">
+                  <button type="submit"
+                          title="Move back to Pending (remove from sprint)"
+                          style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:11px;padding:0 2px;line-height:1">↩</button>
+                </form>
+                {% endif %}
               </div>
             </div>
             {% endfor %}
