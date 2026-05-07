@@ -1036,6 +1036,29 @@ async def admin_save_poller_settings(
     config.ollama_host                 = _str("ollama_host")
     config.designer_model              = _str("designer_model")
     config.coder_model                 = _str("coder_model")
+    # Per-persona overrides for the orchestrator's runtime model resolver
+    # (orchestrator/docker_runner.py reads ollama_model_map[persona] BEFORE
+    # falling back to designer_model/coder_model). Form fields are named
+    # ollama_chain_<persona>, value is comma-separated chain. Empty string
+    # → drop the override for that persona. Personas not in this list are
+    # left untouched in the JSONB so manual DB edits or future additions
+    # survive a save through the UI.
+    _personas_for_override = ("coder", "reviewer", "designer", "planner",
+                              "documenter", "analytics", "recommender",
+                              "devops", "refactorer", "product_trainer")
+    _new_map = dict(config.ollama_model_map or {})
+    for _p in _personas_for_override:
+        _raw = form.get(f"ollama_chain_{_p}", "").strip()
+        if _raw:
+            _chain = [m.strip() for m in _raw.split(",") if m.strip()]
+            if _chain:
+                _new_map[_p] = _chain
+            elif _p in _new_map:
+                del _new_map[_p]
+        else:
+            if _p in _new_map:
+                del _new_map[_p]
+    config.ollama_model_map = _new_map or None
     config.ollama_timeout              = _int("ollama_timeout")
     config.bash_timeout                = _int("bash_timeout")
     config.max_turns                   = _int("max_turns")

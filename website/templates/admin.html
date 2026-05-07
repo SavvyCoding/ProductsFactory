@@ -267,6 +267,24 @@
                  placeholder="gpt-oss:120b, qwen3-coder:480b, deepseek-v4-flash" autocomplete="off">
           <p class="field-hint">Ollama model(s) for Coder persona. Comma-separated for fallback chain.</p>
         </div>
+        <div class="form-group form-group-wide">
+          <label>Per-persona model overrides</label>
+          <p class="field-hint" style="margin-top:0;margin-bottom:8px">
+            Optional. When set, the orchestrator uses these models for the named persona instead of the Designer/Coder chain above. Comma-separated; primary first. Leave blank to fall back to the chains above.
+          </p>
+          {% set _override_personas = ['coder', 'reviewer', 'designer', 'planner', 'documenter', 'analytics', 'recommender', 'devops', 'refactorer', 'product_trainer'] %}
+          {% set _model_map = config.ollama_model_map or {} %}
+          <div class="admin-fields-grid" style="grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px">
+            {% for _p in _override_personas %}
+            <div class="form-group" style="margin:0">
+              <label for="p-mc-{{ _p }}" style="font-size:0.85em">{{ _p }}</label>
+              <input type="text" id="p-mc-{{ _p }}" name="ollama_chain_{{ _p }}"
+                     value="{% if _model_map.get(_p) %}{{ _model_map[_p] | join(', ') }}{% endif %}"
+                     placeholder="(uses default chain)" autocomplete="off">
+            </div>
+            {% endfor %}
+          </div>
+        </div>
         <div class="form-group">
           <label for="p-ollama-to">Ollama timeout <span class="field-unit">seconds</span></label>
           <input type="number" id="p-ollama-to" name="ollama_timeout"
