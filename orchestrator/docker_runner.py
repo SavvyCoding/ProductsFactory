@@ -247,7 +247,7 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
     pr_number, pr_url, ...) so callers can wire sprint-PR-mode context into
     prompts and the post-coder pipeline without an extra round trip.
     """
-    if persona not in ("coder", "designer", "product_planner", "reviewer"):
+    if persona not in ("coder", "designer", "reviewer"):
         return [], None, None
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
@@ -292,7 +292,10 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                 features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
                 if not features:
                     features = candidates
-            elif persona in ("designer", "product_planner"):
+            elif persona == "designer":
+                # product_planner was merged into designer 2026-05-06 (Phase 1
+                # of futureplan.md). They shared this same filter and wrote
+                # near-identical per-feature docs.
                 candidates = [f for f in all_features
                               if f.get("status") == "Approved" and not f.get("design_doc_path")]
                 features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
@@ -485,7 +488,7 @@ def _claim_features(features: list[dict], persona: str | None) -> None:
 # default mapping keeps heavy work on Sonnet and light work on Haiku (~5x
 # cheaper, ~3x faster). Override per-persona via sys_cfg.claude_model_map.
 _HEAVY_PERSONAS = {"coder", "reviewer", "designer", "security_auditor", "qa_tester"}
-_LIGHT_PERSONAS = {"planner", "product_planner", "documenter", "retrospective",
+_LIGHT_PERSONAS = {"planner", "documenter", "retrospective",
                    "analytics", "recommender", "devops", "refactorer"}
 
 
@@ -1008,7 +1011,7 @@ def _finalize_session(
                 )
             except Exception:
                 log.exception(f"Post-coder pipeline failed for {product.get('name')}")
-        elif exit_code == 0 and persona in ("product_planner", "designer"):
+        elif exit_code == 0 and persona == "designer":
             try:
                 _run_post_doc_pipeline(product, session_uid, working_dir,
                                        product.get("_assigned_features", []),

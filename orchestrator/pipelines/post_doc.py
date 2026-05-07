@@ -111,8 +111,9 @@ def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
         return
 
     feat_summary = ", ".join(f"#{f['id']}" for f in assigned_features)
-    verb = "plan" if persona == "product_planner" else "design"
-    commit_msg = f"{verb}: {feat_summary} [{persona}-{session_uid}]"
+    # product_planner merged into designer 2026-05-06 — both produce per-
+    # feature design docs, single verb is fine.
+    commit_msg = f"design: {feat_summary} [{persona}-{session_uid}]"
     # --no-verify: same rationale as post_coder commit. The post-doc
     # pipeline runs outside the agent's environment; agent-installed
     # pre-commit hooks (husky, lint-staged) routinely fail because their

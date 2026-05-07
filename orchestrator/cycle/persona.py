@@ -165,7 +165,13 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
         approved_no_design = [f for f in non_terminal
                               if f.get("status") == "Approved" and not f.get("design_doc_path")]
         if approved_no_design:
-            return {"action": "launch_session", "persona": "product_planner",
+            # Phase-1 simplification (2026-05-06): product_planner merged into
+            # designer. Both used to write near-identical per-feature docs to
+            # /workspace/docs/ against the same candidate filter — duplicating
+            # work and adding a handoff seam for no benefit. designer is now
+            # the single canonical doc writer for Approved + no-doc features.
+            # See futureplan.md.
+            return {"action": "launch_session", "persona": "designer",
                     "product_id": product_id, "reason": f"{len(approved_no_design)} Approved features need design docs"}
 
         # Coder-eligible features:

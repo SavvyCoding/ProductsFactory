@@ -2691,8 +2691,10 @@ async def api_feature_story(feature_id: int, db: AsyncSession = Depends(get_db))
 
     Resolution order (first hit wins):
       1. `<working_dir>/docs/story_{feature_id:03d}.md` — the file the
-         product_planner persona writes for sprint-driven products.
-      2. `<working_dir>/<feature.design_doc_path>` — older designer flow.
+         former product_planner persona used to write (merged into
+         designer 2026-05-06; existing files keep this path).
+      2. `<working_dir>/<feature.design_doc_path>` — designer's preferred
+         path (`docs/feature_<NNN>_design.md`); also covers any custom path.
       3. `feature.design_doc` — inline content stored on the row.
     Returns {source, path, raw, html} where html is mistune-rendered markdown.
     Returns 200 with source=None and empty content if no story exists.
