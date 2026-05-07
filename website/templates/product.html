@@ -867,25 +867,19 @@
             <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
               <span style="font-size:11px;color:var(--text-muted)">{{ sp | length }}/{{ sf | length }}</span>
               {% if sprint.status in ('active', 'completed') %}
-              {% set dod = sprint.dod_status or {} %}
               {% set sf_count = features | selectattr('sprint_id', 'equalto', sprint.id) | list | length %}
               {% set sf_terminal = features | selectattr('sprint_id', 'equalto', sprint.id) | selectattr('status', 'in', ['Pushed','Deferred','Rejected']) | list | length %}
               {% set gate_features = (sf_count == 0 or sf_terminal == sf_count) %}
-              {% set gate_qa       = dod.get('qa_passed', False) %}
-              {% set gate_security = dod.get('security_clean', False) %}
-              {% set gate_retro    = dod.get('retro_done', False) %}
-              {% set all_gates     = gate_features and gate_qa and gate_security %}
+              {# Active completion gates (Phase 4 dropped qa_passed + security_clean):
+                 all_features_done + no_open_prs. Both are auto-computed; no agent
+                 sign-off required. Retro is generated post-completion (templated)
+                 and not a gate. #}
+              {% set all_gates = gate_features %}
               <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
                 <!-- DoD checklist (visible for both active and completed sprints) -->
                 <div style="font-size:10px;display:flex;flex-direction:column;gap:2px;text-align:right"
-                     title="{% if sprint.status == 'active' %}Sprint completes when Features done + QA + Security all sign off{% else %}DoD gate state at completion{% endif %}">
+                     title="{% if sprint.status == 'active' %}Sprint auto-completes when all features are Pushed/Deferred/Rejected and no open PRs remain{% else %}DoD gate state at completion{% endif %}">
                   <span style="color:{% if gate_features %}var(--green){% else %}var(--text-muted){% endif %}">{% if gate_features %}✓{% else %}○{% endif %} Features done ({{ sf_terminal }}/{{ sf_count }})</span>
-                  <span style="color:{% if gate_qa %}var(--green){% else %}var(--text-muted){% endif %}"
-                        title="{{ dod.get('qa_passed_notes') or ('Sign-off pending' if not gate_qa else 'Signed') }}">{% if gate_qa %}✓{% else %}○{% endif %} QA signed off</span>
-                  <span style="color:{% if gate_security %}var(--green){% else %}var(--text-muted){% endif %}"
-                        title="{{ dod.get('security_clean_notes') or ('Sign-off pending' if not gate_security else 'Signed') }}">{% if gate_security %}✓{% else %}○{% endif %} Security signed off</span>
-                  <span style="color:{% if gate_retro %}var(--green){% else %}var(--text-muted){% endif %}"
-                        title="{% if gate_retro %}{{ sprint.retro_doc_path or 'Signed' }}{% else %}Retrospective runs after sprint completion{% endif %}">{% if gate_retro %}✓{% else %}○{% endif %} Retro written</span>
                 </div>
                 {% if sprint.status == 'active' %}
                   {% if all_gates %}
