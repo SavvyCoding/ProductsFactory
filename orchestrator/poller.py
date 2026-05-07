@@ -813,9 +813,29 @@ def main():
                 persona = "reviewer"
                 log.info(f"Reviewer-first: {product['name']} has Reviewing features with PRs")
             elif retro_product:
-                product = retro_product
-                persona = "retrospective"
-                log.info(f"Retro-first: {product['name']} has sprint needing retrospective")
+                # Phase 3 (2026-05-06): retrospective LLM persona replaced
+                # by an inline templated generator. Run it directly here —
+                # no agent container, no session record — and continue the
+                # loop. The generator is idempotent and self-signs the
+                # retro_done DoD gate.
+                try:
+                    from orchestrator.pipelines.retro_generator import generate_and_commit_retro
+                    sid = retro_product.get("_retro_sprint_id")
+                    if sid:
+                        log.info(
+                            f"Retro-first: {retro_product['name']} sprint #{sid} — "
+                            f"running templated retro generator (no LLM session)"
+                        )
+                        generate_and_commit_retro(retro_product, int(sid))
+                    else:
+                        log.warning(
+                            f"Retro-first: {retro_product['name']} has no active sprint id — skipping"
+                        )
+                except Exception as e:
+                    log.warning(f"Retro-first inline generator failed: {e}")
+                # Continue the cycle without launching a session.
+                time.sleep(_cfg.get("poll_interval", 60))
+                continue
             else:
                 # ⑦b Normal round-robin for designer/coder work
                 product = get_next_product(products)

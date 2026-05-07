@@ -110,7 +110,13 @@ def get_next_retro_product(products: list[dict]) -> dict | None:
     Check if any ready product has a sprint needing a retrospective:
     - Active sprint where all features are terminal and retro_doc_path is not set
     - OR a completed sprint with no retro_doc_path
-    Returns the product dict or None.
+    Returns the product dict (with `_retro_sprint_id` set on it) or None.
+
+    Phase 3 (2026-05-06): the caller used to launch a `retrospective`
+    LLM persona session against this product. Now it runs the inline
+    `retro_generator.generate_and_commit_retro(product, sprint_id)`
+    instead. We attach `_retro_sprint_id` so the caller doesn't need a
+    second round-trip to find the sprint id.
     """
     TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted"}
     ready = [p for p in products if p["status"] == "ready"]
@@ -127,6 +133,7 @@ def get_next_retro_product(products: list[dict]) -> dict | None:
                         sprint_features = [f for f in features if f.get("sprint_id") == sprint["id"]]
                         non_terminal = [f for f in sprint_features if f.get("status") not in TERMINAL]
                         if sprint_features and not non_terminal:
+                            product["_retro_sprint_id"] = sprint["id"]
                             return product
                     continue  # active sprint not yet done — retro not due
                 # No active sprint — check for completed sprint missing retro
@@ -137,6 +144,11 @@ def get_next_retro_product(products: list[dict]) -> dict | None:
                         if s.get("status") == "completed" and not s.get("retro_doc_path")
                     ]
                     if completed_no_retro:
+                        # Pick the oldest unsigned-off completed sprint —
+                        # generally only one is pending at a time, but if
+                        # multiple, the oldest needs the retro first.
+                        completed_no_retro.sort(key=lambda s: s.get("id") or 0)
+                        product["_retro_sprint_id"] = completed_no_retro[0]["id"]
                         return product
     except httpx.HTTPError as e:
         log.error(f"get_next_retro_product failed: {e}")
