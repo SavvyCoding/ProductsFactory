@@ -460,7 +460,12 @@ _CFG_DEFAULTS = {
     "supervisor_orphan_approved_threshold":      1,
     "supervisor_rapid_flap_enabled":             True,
     "supervisor_rapid_flap_window_hours":        1,
-    "supervisor_rapid_flap_min_transitions":     5,
+    # 10 = ~one full designer→coder→reviewer cycle (7 transitions) plus one
+    # rework iteration (~4 more). 5 was tripping on the *first* reviewer
+    # round-trip and auto-blocking features that just needed normal rework
+    # (observed 2026-05-07 on MySalesforce #251 + #252 after a single
+    # changes_requested). Genuine flap loops still cross 10 within an hour.
+    "supervisor_rapid_flap_min_transitions":     10,
 }
 
 
