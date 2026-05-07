@@ -265,29 +265,42 @@ def sweep_product(product: dict, sys_cfg: dict) -> dict:
 
             if merged_features:
                 # Observability row: gives the History tab an audit trail of
-                # what the sweep merged. status=ended so launch_session's
-                # "already has active session" guard doesn't see this as a
-                # phantom in-flight session and block real persona launches.
-                # ended_at left to website default if it has one; explicit
-                # exit_code=0 + features_pushed mark this as a completed run.
+                # what the sweep merged. Two API calls are required because
+                # SessionCreate (POST /api/sessions) only accepts the start-
+                # time fields (product_id, session_uid, persona, backend,
+                # container_id, status); end-time counters (features_attempted,
+                # features_pushed, exit_code, notes, ended_at) live in
+                # SessionEnd and have to go through the PATCH endpoint.
+                # Pre-2026-05-07 this was one POST that silently dropped the
+                # extra fields → UI rendered "running… 0/0 pushed" forever.
                 session_uid = str(uuid.uuid4())[:8]
                 notes = "Auto-merged PRs (sweep): " + ", ".join(
                     f"#{f['pr_number']} ({(f.get('name') or '')[:30]})"
                     for f in merged_features
                 )
+                from datetime import datetime as _dt, timezone as _tz
                 try:
-                    client.post("/api/sessions", json={
-                        "product_id":         product_id,
-                        "session_uid":        session_uid,
-                        "persona":            "auto-merge",
-                        "backend":            "poller",
-                        "container_id":       "poller",
-                        "status":             "ended",
-                        "exit_code":          0,
-                        "features_attempted": len(merged_features),
-                        "features_pushed":    len(merged_features),
-                        "notes":              notes,
+                    create_resp = client.post("/api/sessions", json={
+                        "product_id":   product_id,
+                        "session_uid":  session_uid,
+                        "persona":      "auto-merge",
+                        "backend":      "poller",
+                        "container_id": "poller",
+                        # status will be set to 'ended' on the PATCH below;
+                        # leave the create-time status at its default so the
+                        # row passes the FSM's "pending → ended" transition
+                        # cleanly.
                     })
+                    new_id = create_resp.json().get("id") if create_resp.status_code == 201 else None
+                    if new_id:
+                        client.patch(f"/api/sessions/{new_id}", json={
+                            "status":             "ended",
+                            "exit_code":          0,
+                            "ended_at":           _dt.now(_tz.utc).isoformat(),
+                            "features_attempted": len(merged_features),
+                            "features_pushed":    len(merged_features),
+                            "notes":              notes,
+                        })
                 except Exception:
                     pass  # session row is observability, not correctness
     except Exception:
