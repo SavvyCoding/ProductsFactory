@@ -1269,6 +1269,17 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             product["_sprint_branch"],
             product.get("name", str(working_dir)),
         )
+        # _prepare_workspace already ran chmod a+rwX, but the sprint checkout
+        # above re-creates files at the orchestrator's umask (typically 022 →
+        # mode 644 for files). Owned by uid 999 inside the agent container,
+        # mode 644 means the agent (uid 1001 = "other") gets read-only on
+        # tracked files like .eslintrc.cjs, package.json, etc. Re-run chmod
+        # AFTER the checkout so the agent can edit existing tracked files.
+        # Real incident 2026-05-08 on product 8 sprint 149: agent could read
+        # .eslintrc.cjs but its writes silently failed; coder spent turns
+        # `npm install`-ing trying to make ESLint work around uneditable
+        # configs.
+        _chmod_workspace_via_alpine(working_dir, product.get("name", "?"))
 
     # Write sprint-scoped features.md to working dir (replaces any stale full-backlog copy)
     _write_sprint_features_md(working_dir, assigned_features, active_sprint_name)
