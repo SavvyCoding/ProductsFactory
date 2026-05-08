@@ -63,6 +63,7 @@ import hmac
 import json
 import logging
 import os
+import re
 from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -1995,12 +1996,69 @@ async def api_approved_features(product_id: int, db: AsyncSession = Depends(get_
     return result.scalars().all()
 
 
+_AC_BULLET_PATTERN = re.compile(r"^\s*[-*]\s+\S", re.MULTILINE)
+
+
+def _validate_story_size(
+    description: str | None,
+    files_to_create: list | None = None,
+    *,
+    max_ac: int = 4,
+    max_files: int = 6,
+) -> str | None:
+    """Return an error message if the description / files violate the story
+    size cap; None if it fits.
+
+    A "story" (= a `features` row in code, see INVARIANTS.md vocabulary) must
+    be sized so one coder session can complete it. The cap counts:
+      - acceptance-criteria bullets in `description` (lines starting with
+        `- ` or `* `)
+      - structured `files_to_create` entries if the planner provides them
+
+    Caps are conservative; planner output is generally far below them. The
+    gate exists to catch the #224-shaped failure where one row is 13+
+    reviewer-rejection-cycles worth of work. A row violating the cap is
+    rejected at /api/features so the planner has to decompose further.
+
+    PM creates (changed_by="pm") bypass via the caller; this validator runs
+    on every POST regardless and returns the message — caller decides
+    whether to block.
+    """
+    if description:
+        ac_count = len(_AC_BULLET_PATTERN.findall(description))
+        if ac_count > max_ac:
+            return (
+                f"story too big: {ac_count} acceptance-criteria bullets in "
+                f"description (max {max_ac}). Split into smaller stories — "
+                f"see futureplan_v2.md Phase 1."
+            )
+    if files_to_create and isinstance(files_to_create, list):
+        file_count = len(files_to_create)
+        if file_count > max_files:
+            return (
+                f"story too big: {file_count} files in files_to_create "
+                f"(max {max_files}). Split into smaller stories — see "
+                f"futureplan_v2.md Phase 1."
+            )
+    return None
+
+
 @app.post("/api/features", response_model=schemas.FeatureOut, status_code=201)
 async def api_create_feature(body: schemas.FeatureCreate, db: AsyncSession = Depends(get_db)):
     """PM or Claude (AI-recommended) creates a new feature."""
     await _get_product_or_404(body.product_id, db)
     if body.sprint_id:
         await _check_sprint_capacity(body.sprint_id, 1, db)
+    # Story-size cap (see futureplan_v2.md, INVARIANTS.md Vocabulary).
+    # Bypass: PM-initiated creates set source="pm"; everything else (planner,
+    # recommender, refactorer, devops, analytics) goes through the gate.
+    if (body.source or "").lower() != "pm":
+        violation = _validate_story_size(
+            body.description,
+            getattr(body, "files_to_create", None),
+        )
+        if violation:
+            raise HTTPException(status_code=422, detail=violation)
     feature = Feature(**body.model_dump())
     db.add(feature)
     await db.flush()

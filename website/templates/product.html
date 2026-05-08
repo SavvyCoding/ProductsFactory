@@ -403,15 +403,15 @@
 
   {% set pending_features = features | selectattr('status', 'equalto', 'Pending') | list %}
 
-  <!-- Add Feature -->
+  <!-- Add Story -->
   <div class="card" style="margin-bottom:20px">
     <div class="settings-card-title">
       <span class="title-icon" style="background:var(--green-lt)">✦</span>
-      Add Feature
+      Add Story
     </div>
     <form method="post" action="/product/{{ product.id }}/features" class="feature-form">
       <div class="form-row">
-        <input type="text" name="name" id="feat-name" placeholder="Feature name (required)" required>
+        <input type="text" name="name" id="feat-name" placeholder="Story name (required)" required>
         <input type="number" name="priority" value="50" min="1" max="100" style="width:80px" title="Priority">
       </div>
       <textarea name="description" id="feat-desc" rows="3"
@@ -549,7 +549,7 @@
             <th style="width:80px"  class="fbt-sort" data-sort="type"      data-sort-type="text">Type<span class="fbt-sort-icon"></span></th>
             <th style="width:110px" class="fbt-sort" data-sort="status"    data-sort-type="text">Status<span class="fbt-sort-icon"></span></th>
             <th style="width:64px"  class="fbt-sort" data-sort="priority"  data-sort-type="num">Priority<span class="fbt-sort-icon"></span></th>
-            <th style="width:140px" class="fbt-sort" data-sort="sprint"    data-sort-type="text">Sprint<span class="fbt-sort-icon"></span></th>
+            <th style="width:140px" class="fbt-sort" data-sort="sprint"    data-sort-type="text">Feature<span class="fbt-sort-icon"></span></th>
             <th style="width:120px" class="fbt-sort" data-sort="review"    data-sort-type="text">Review<span class="fbt-sort-icon"></span></th>
             <th style="width:90px"  class="fbt-sort" data-sort="pr"        data-sort-type="num">PR<span class="fbt-sort-icon"></span></th>
             <th style="width:130px" class="fbt-sort" data-sort="updated"   data-sort-type="text">Updated<span class="fbt-sort-icon"></span></th>
@@ -861,7 +861,7 @@
             <div>
               <span style="font-size:13px;font-weight:600;color:var(--text)">{{ sprint.name }}</span>
               {% if sprint.status == 'active' %}<span style="font-size:10px;background:var(--green);color:#fff;padding:1px 6px;border-radius:8px;margin-left:6px;font-weight:600">ACTIVE</span>{% endif %}
-              {% if sprint.status == 'completed' %}<button class="sprint-report-btn" onclick="openSprintReport({{ sprint.id }}, '{{ sprint.name }}')" style="font-size:10px;background:var(--surface);color:var(--text-muted);padding:1px 6px;border-radius:8px;margin-left:6px;border:1px solid var(--border);cursor:pointer" title="View sprint report">DONE ▶</button>{% endif %}
+              {% if sprint.status == 'completed' %}<button class="sprint-report-btn" onclick="openSprintReport({{ sprint.id }}, '{{ sprint.name }}')" style="font-size:10px;background:var(--surface);color:var(--text-muted);padding:1px 6px;border-radius:8px;margin-left:6px;border:1px solid var(--border);cursor:pointer" title="View feature report">DONE ▶</button>{% endif %}
               {% if sprint.goal %}<div style="font-size:11px;color:var(--text-muted);margin-top:1px">{{ sprint.goal }}</div>{% endif %}
             </div>
             <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
@@ -878,13 +878,13 @@
               <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
                 <!-- DoD checklist (visible for both active and completed sprints) -->
                 <div style="font-size:10px;display:flex;flex-direction:column;gap:2px;text-align:right"
-                     title="{% if sprint.status == 'active' %}Sprint auto-completes when all features are Pushed/Deferred/Rejected and no open PRs remain{% else %}DoD gate state at completion{% endif %}">
-                  <span style="color:{% if gate_features %}var(--green){% else %}var(--text-muted){% endif %}">{% if gate_features %}✓{% else %}○{% endif %} Features done ({{ sf_terminal }}/{{ sf_count }})</span>
+                     title="{% if sprint.status == 'active' %}Feature auto-completes when all stories are Pushed/Deferred/Rejected and no open PRs remain{% else %}DoD gate state at completion{% endif %}">
+                  <span style="color:{% if gate_features %}var(--green){% else %}var(--text-muted){% endif %}">{% if gate_features %}✓{% else %}○{% endif %} Stories done ({{ sf_terminal }}/{{ sf_count }})</span>
                 </div>
                 {% if sprint.status == 'active' %}
                   {% if all_gates %}
                   <form method="post" action="/product/{{ product.id }}/sprints/{{ sprint.id }}/complete" style="display:inline">
-                    <button class="btn btn-sm btn-green" style="font-size:11px;padding:3px 10px">✓✓ Complete Sprint</button>
+                    <button class="btn btn-sm btn-green" style="font-size:11px;padding:3px 10px">✓✓ Complete Feature</button>
                   </form>
                   {% else %}
                   <form method="post" action="/product/{{ product.id }}/sprints/{{ sprint.id }}/complete" style="display:inline">
@@ -933,7 +933,7 @@
             {% endfor %}
           </div>
           {% else %}
-          <div style="font-size:11px;color:var(--text-muted);text-align:center;padding:6px 0">No features assigned</div>
+          <div style="font-size:11px;color:var(--text-muted);text-align:center;padding:6px 0">No stories assigned</div>
           {% endif %}
           {% if sprint.release_notes %}
           <details style="margin-top:8px">
@@ -1051,7 +1051,7 @@
         <th>Started</th>
         <th>Persona</th>
         <th>Duration</th>
-        <th>Features</th>
+        <th>Stories</th>
         <th>Tokens</th>
         <th>Cost</th>
         <th>Status</th>
@@ -1338,12 +1338,12 @@
   </div><!-- /pf-content -->
 </div><!-- /pf-layout-sidebar -->
 
-<!-- ── Feature Detail Slide-Out Panel ──────────────────────── -->
-<!-- Sprint Report Panel -->
+<!-- ── Story Detail Slide-Out Panel ──────────────────────── -->
+<!-- Feature Report Panel (domain) — backed by sprint-report DOM ids -->
 <div class="pf-panel-backdrop" id="sprint-report-backdrop" onclick="closeSprintReport()"></div>
 <div class="pf-panel" id="sprint-report-panel">
   <div class="pf-panel__header">
-    <span class="pf-panel__title" id="sr-title">Sprint Report</span>
+    <span class="pf-panel__title" id="sr-title">Feature Report</span>
     <button class="pf-panel__close" onclick="closeSprintReport()" aria-label="Close" title="Close">✕</button>
   </div>
   <div class="pf-panel__body" id="sr-body">
@@ -1354,7 +1354,7 @@
 <div class="pf-panel-backdrop" id="feature-panel-backdrop" onclick="closeFeaturePanel()"></div>
 <div class="pf-panel" id="feature-panel">
   <div class="pf-panel__header">
-    <span class="pf-panel__title" id="fp-title">Feature</span>
+    <span class="pf-panel__title" id="fp-title">Story</span>
     <button class="pf-panel__close" onclick="closeFeaturePanel()" aria-label="Close" title="Close">✕</button>
   </div>
   <div class="pf-panel__body" id="fp-body">
@@ -1434,8 +1434,8 @@ function renderSprintReport(data) {
   html += gateRow('Retrospective', g.retro_done);
   html += '</div>';
 
-  // Features
-  html += '<div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px">Features (' + data.features.length + ')</div>';
+  // Stories (= features in code)
+  html += '<div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px">Stories (' + data.features.length + ')</div>';
   html += '<div style="margin-bottom:16px">';
   data.features.forEach(function(f) {
     const typeIcon = f.feature_type === 'bug' ? '🐛 ' : f.feature_type === 'chore' ? '🔧 ' : '';
