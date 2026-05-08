@@ -2,6 +2,27 @@
 
 This document is the behavioral spec for the orchestrator. Every invariant listed here is something the current code enforces — sourced from reading `poller.py`, `docker_runner.py`, `supervisor.py`, `github_client.py`, and `deploy/orchestrator/tools.py`. If a future refactor (or rewrite) breaks any of these without an explicit decision to change the behavior, that's a regression.
 
+## Vocabulary — domain ↔ code mapping
+
+The user-facing PM dashboard, persona prompts to LLMs, and external observers
+use **Feature** and **Story** as the primary unit terms. The DB schema and
+internal code use the legacy names **sprint** and **feature**. This is a
+deliberate, documented gap — see `futureplan_v2.md` Phase 0:
+
+| Domain term (UI, prompts, PM-speak) | Code / DB term | Role |
+|---|---|---|
+| **Feature** | `sprints` row | The user-facing chunk of work ("Contact Management"). Ships as one PR. |
+| **Story** | `features` row | An implementation chunk ≤1 dev-day, fits one coder session. |
+| Phase / Epic | `phases` row | Optional grouping of Features. |
+
+Two consequences when reading code:
+1. Anywhere code refers to "the sprint", the domain meaning is "the Feature being shipped".
+2. Anywhere code refers to "a feature row", the domain meaning is "a Story within a Feature".
+
+Branch names (`sprint/N`), API URLs (`/api/sprints/...`), and the `_sprint_branch` / `_sprint_pr_*` product fields keep the legacy names — those are internal-only identifiers; renaming would churn webhooks and external integrations for no real win. Engineers should mentally translate when reading.
+
+---
+
 > **Two orchestrator implementations co-exist today**: `orchestrator/poller.py` (the legacy host-mode entry point invoked by `deploy/windows/start_poller.ps1`) and `deploy/orchestrator/{orchestrate,tools}.py` (the containerized entry point used by `pf-orchestrator`, currently the deployed path). The Phase 1-4 modules in `orchestrator/` (`auto_merge`, `dispatch`, `reconcile`) are wired into BOTH paths where applicable. The `dispatch.py` priority-list cascade is only used by the legacy path; `tools.py.determine_next_action` keeps its own decision tree. Consolidating the two entry points is on the future-work list.
 
 Each invariant is tagged with **why** (the failure mode it guards against) and **how** (the function or module that enforces it). Citations are by name, not line number — line numbers drift on every refactor, and a stale citation is worse than no citation. If a citation's function gets renamed or moved, that's exactly the kind of regression this document is supposed to catch.

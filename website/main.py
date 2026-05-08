@@ -63,6 +63,7 @@ import hmac
 import json
 import logging
 import os
+import re
 from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -96,6 +97,32 @@ app = FastAPI(title="ProductFactory PM", docs_url=None, redoc_url=None)
 
 app.mount("/static", StaticFiles(directory="website/static"), name="static")
 templates = Jinja2Templates(directory="website/templates")
+
+
+def _as_feature_name(name: str | None) -> str:
+    """Render a sprint.name in the new domain vocabulary.
+
+    Most legacy sprints have names like "Sprint 1" or "Sprint 2: Sprint 1"
+    from the auto-numbering planner that predates futureplan_v2. After the
+    relabel a `sprints` row IS the user-facing Feature, so we display the
+    "Sprint" prefix as "Feature". Names that don't follow the auto-pattern
+    (e.g. "Contact Management" produced by the new planner) pass through
+    unchanged.
+
+    Examples:
+      "Sprint 1"            → "Feature 1"
+      "Sprint 105: Sprint 1" → "Feature 105: Sprint 1"  (only first prefix)
+      "Contact Management"   → "Contact Management"      (no prefix)
+      None                   → ""
+    """
+    if not name:
+        return ""
+    if name.startswith("Sprint "):
+        return "Feature " + name[len("Sprint "):]
+    return name
+
+
+templates.env.filters["as_feature_name"] = _as_feature_name
 
 # ── Video file serving ────────────────────────────────────────────────────────
 # Products root on the host is mounted read-only at /workspace inside the container.
@@ -1995,12 +2022,69 @@ async def api_approved_features(product_id: int, db: AsyncSession = Depends(get_
     return result.scalars().all()
 
 
+_AC_BULLET_PATTERN = re.compile(r"^\s*[-*]\s+\S", re.MULTILINE)
+
+
+def _validate_story_size(
+    description: str | None,
+    files_to_create: list | None = None,
+    *,
+    max_ac: int = 4,
+    max_files: int = 6,
+) -> str | None:
+    """Return an error message if the description / files violate the story
+    size cap; None if it fits.
+
+    A "story" (= a `features` row in code, see INVARIANTS.md vocabulary) must
+    be sized so one coder session can complete it. The cap counts:
+      - acceptance-criteria bullets in `description` (lines starting with
+        `- ` or `* `)
+      - structured `files_to_create` entries if the planner provides them
+
+    Caps are conservative; planner output is generally far below them. The
+    gate exists to catch the #224-shaped failure where one row is 13+
+    reviewer-rejection-cycles worth of work. A row violating the cap is
+    rejected at /api/features so the planner has to decompose further.
+
+    PM creates (changed_by="pm") bypass via the caller; this validator runs
+    on every POST regardless and returns the message — caller decides
+    whether to block.
+    """
+    if description:
+        ac_count = len(_AC_BULLET_PATTERN.findall(description))
+        if ac_count > max_ac:
+            return (
+                f"story too big: {ac_count} acceptance-criteria bullets in "
+                f"description (max {max_ac}). Split into smaller stories — "
+                f"see futureplan_v2.md Phase 1."
+            )
+    if files_to_create and isinstance(files_to_create, list):
+        file_count = len(files_to_create)
+        if file_count > max_files:
+            return (
+                f"story too big: {file_count} files in files_to_create "
+                f"(max {max_files}). Split into smaller stories — see "
+                f"futureplan_v2.md Phase 1."
+            )
+    return None
+
+
 @app.post("/api/features", response_model=schemas.FeatureOut, status_code=201)
 async def api_create_feature(body: schemas.FeatureCreate, db: AsyncSession = Depends(get_db)):
     """PM or Claude (AI-recommended) creates a new feature."""
     await _get_product_or_404(body.product_id, db)
     if body.sprint_id:
         await _check_sprint_capacity(body.sprint_id, 1, db)
+    # Story-size cap (see futureplan_v2.md, INVARIANTS.md Vocabulary).
+    # Bypass: PM-initiated creates set source="pm"; everything else (planner,
+    # recommender, refactorer, devops, analytics) goes through the gate.
+    if (body.source or "").lower() != "pm":
+        violation = _validate_story_size(
+            body.description,
+            getattr(body, "files_to_create", None),
+        )
+        if violation:
+            raise HTTPException(status_code=422, detail=violation)
     feature = Feature(**body.model_dump())
     db.add(feature)
     await db.flush()
@@ -3082,30 +3166,45 @@ async def api_plan_sprints(
 
     try:
         raw = await _llm_call(
-            f"You are a senior product manager doing phasewise implementation planning for: {product.name}\n"
+            f"You are a senior product manager doing implementation planning for: {product.name}\n"
             f"Vision: {getattr(product, 'vision', None) or (product.config or {}).get('vision') or 'Not specified'}\n\n"
-            f"Approved features to plan ({len(features_list)} total):\n"
+            f"Backlog items (= Stories) to plan ({len(features_list)} total):\n"
             f"{json.dumps(features_list, indent=2)}\n\n"
-            "Organise these features into PHASES, where each phase has 1-3 SPRINTS.\n\n"
-            "Phase structure (use exactly these phase names or similar):\n"
+            "## Vocabulary (read once, then apply)\n"
+            "- A **Feature** = one user-facing chunk like 'Calculator UI' or 'Auth System'. "
+            "It will be stored as a `sprint` row (legacy column name) and ships as one PR.\n"
+            "- A **Story** = an implementation chunk that fits one coder session "
+            "(≤1 dev-day, ≤4 acceptance-criteria bullets, ≤6 files). "
+            "It's stored as a `feature` row (legacy column name).\n"
+            "- A **Phase** = high-level theme grouping multiple Features.\n\n"
+            "Your job: organise the backlog Stories into Features (sprints), grouped into Phases.\n\n"
+            "## Hard rules (enforce strictly)\n"
+            "1. **Each Feature (sprint) MUST be coherent** — all Stories inside it must serve the SAME user-want. "
+            "Example coherent Feature: 'Calculator Display' with stories {keypad UI, expression display, decimal handling}. "
+            "Example INCOHERENT (do not produce): 'Sprint 1' with stories {SvelteKit scaffold, GitHub CI, ESLint config, README, Dependabot} — these are 5 different concerns.\n"
+            "2. **Name each Feature by its user-want**, not 'Sprint 1' / 'Sprint 2'. "
+            "Names like 'Calculator UI Foundation', 'Arithmetic Engine', 'Mobile Responsive Layout' — each is a clear deliverable.\n"
+            f"3. Each Feature contains at most {max_per_sprint} Stories. If you find more than {max_per_sprint} coherent stories for one user-want, split them into two Features.\n"
+            "4. Every backlog Story must land in exactly one Feature.\n"
+            "5. Respect dependencies: foundational Features (data models, auth) go in Phase 1.\n"
+            "6. Only create Phases that have Features to put in them.\n\n"
+            "## Phase structure (use these names or close variants)\n"
             "- Phase 1: Foundation — infrastructure, auth, CI/CD, core data models, dev tooling\n"
-            "- Phase 2: Core Product — the main user-facing value, primary workflows\n"
+            "- Phase 2: Core Product — main user-facing value, primary workflows\n"
             "- Phase 3: Growth & Polish — integrations, analytics, UX improvements, API\n"
-            "- Phase 4: Scale & Ops — performance, observability, security hardening (if enough features)\n\n"
-            "Rules:\n"
-            "- Every feature must be in exactly one sprint\n"
-            "- Sprints within a phase are sequential (Sprint 1 → Sprint 2 → Sprint 3)\n"
-            f"- Each sprint should have at most {max_per_sprint} features — all features in a sprint are planned and implemented together in one session\n"
-            "- Respect dependencies: foundational work (auth, DB schema) goes in Phase 1\n"
-            "- Only create phases that have features to put in them\n\n"
-            "Return ONLY a JSON array of phases, no other text:\n"
+            "- Phase 4: Scale & Ops — performance, observability, security hardening (if enough)\n\n"
+            "Return ONLY a JSON array of phases, no other text. The `sprint_name` is the Feature name "
+            "(human-readable user-want), the `feature_ids` are the Story ids assigned to that Feature:\n"
             '[\n'
             '  {\n'
             '    "phase_name": "Phase 1: Foundation",\n'
             '    "phase_goal": "Set up infrastructure and core data models",\n'
             '    "sprints": [\n'
-            '      {"sprint_name": "Sprint 1", "sprint_goal": "...", "feature_ids": [1, 2, 3]},\n'
-            '      {"sprint_name": "Sprint 2", "sprint_goal": "...", "feature_ids": [4, 5]}\n'
+            '      {"sprint_name": "Calculator UI Foundation", "sprint_goal": "Users see a clean, '
+                  'responsive calculator interface that works on desktop and mobile", '
+                  '"feature_ids": [338, 340, 347]},\n'
+            '      {"sprint_name": "Arithmetic Engine", "sprint_goal": "Users can perform basic and '
+                  'compound arithmetic operations with correct precision", "feature_ids": [337, 341, 343, 351]}\n'
             '    ]\n'
             '  }\n'
             ']',

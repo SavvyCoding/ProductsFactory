@@ -246,14 +246,14 @@ def provision_sprint_pr(
             return {"branch": branch, "number": pr["number"], "url": pr["html_url"]}
 
         body = (
-            f"Sprint #{sprint_id}: {sprint_name}\n\n"
-            f"{sprint_goal or ''}\n\n## Planned features\n{bullets}"
+            f"Feature #{sprint_id}: {sprint_name}\n\n"
+            f"{sprint_goal or ''}\n\n## Planned stories\n{bullets}"
         )
         pr_resp = httpx.post(
             f"https://api.github.com/repos/{owner}/{repo}/pulls",
             headers=h, timeout=_TIMEOUT,
             json={
-                "title": f"Sprint {sprint_id}: {sprint_name}",
+                "title": f"Feature {sprint_id}: {sprint_name}",
                 "head": branch,
                 "base": default_branch,
                 "body": body,

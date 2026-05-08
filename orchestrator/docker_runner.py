@@ -362,7 +362,7 @@ def _write_sprint_features_md(working_dir: str, features: list[dict], sprint_nam
         log.warning(f"Could not write features.md to {working_dir}: {e}")
 
 
-def _fetch_recent_review_comments(feature_id: int, limit: int = 6) -> list[dict]:
+def _fetch_recent_review_comments(feature_id: int, limit: int = 25) -> list[dict]:
     """
     Pull the last `limit` reviewer/security_auditor/qa_tester comments for a
     feature from the PM API. Returns oldest-first within the slice so the
@@ -375,6 +375,15 @@ def _fetch_recent_review_comments(feature_id: int, limit: int = 6) -> list[dict]
     the prompt never read. Real example: reviewer 1975 left specific
     comments on feature 179 (`SRC/healthCheckService.js` lines 34/44/54/84/122,
     three skipped test cases by name) that coder 1976 never saw.
+
+    2026-05-07 limit raised 6 → 25: MySalesforce feature #224 hit the cap
+    after 5 fix_attempts with 13 reviewer comments — older comments
+    (auth-middleware-missing flagged in attempt 1) were truncated by the
+    time attempt 4 ran, so the coder kept addressing surface issues from
+    the latest review and let earlier systemic flags (auth, tests) slip.
+    Showing all prior comments forces the coder to carry forward
+    unresolved items across attempts. ~25 comments × ~250 chars ≈ 6KB,
+    well within prompt budget.
     """
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
@@ -417,6 +426,13 @@ def _format_reviewer_feedback(features: list[dict]) -> str:
         "security auditor flagged specific issues on the prior commit. "
         "Address each item below before re-pushing. Don't reimplement "
         "from scratch — keep the working parts and patch the listed gaps.",
+        "",
+        "**Comments are accumulated across ALL prior rework attempts**, "
+        "not just the most recent reviewer session. Earlier flags (e.g. "
+        "missing auth middleware, missing API endpoints) are listed even "
+        "if not repeated by the latest reviewer — they remain unresolved "
+        "until you explicitly address them. Treat the full list as a "
+        "checklist; do not assume an earlier issue was silently fixed.",
         "",
     ]
     for f in rework_features:
@@ -1253,6 +1269,17 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             product["_sprint_branch"],
             product.get("name", str(working_dir)),
         )
+        # _prepare_workspace already ran chmod a+rwX, but the sprint checkout
+        # above re-creates files at the orchestrator's umask (typically 022 →
+        # mode 644 for files). Owned by uid 999 inside the agent container,
+        # mode 644 means the agent (uid 1001 = "other") gets read-only on
+        # tracked files like .eslintrc.cjs, package.json, etc. Re-run chmod
+        # AFTER the checkout so the agent can edit existing tracked files.
+        # Real incident 2026-05-08 on product 8 sprint 149: agent could read
+        # .eslintrc.cjs but its writes silently failed; coder spent turns
+        # `npm install`-ing trying to make ESLint work around uneditable
+        # configs.
+        _chmod_workspace_via_alpine(working_dir, product.get("name", "?"))
 
     # Write sprint-scoped features.md to working dir (replaces any stale full-backlog copy)
     _write_sprint_features_md(working_dir, assigned_features, active_sprint_name)

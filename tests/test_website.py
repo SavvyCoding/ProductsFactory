@@ -428,6 +428,37 @@ class TestApiFeatures:
                         json={"product_id": p.id, "name": "x", "source": "robot"})
         assert r.status_code == 422
 
+    def test_story_size_cap_ac_bullets_under_limit(self, client, db):
+        """4 AC bullets is at the cap → accepted."""
+        p = make_product(db)
+        desc = "\n".join(f"- AC {i}" for i in range(4))
+        r = client.post("/api/features", json={
+            "product_id": p.id, "name": "story", "source": "ai",
+            "description": desc,
+        })
+        assert r.status_code == 201, r.text
+
+    def test_story_size_cap_ac_bullets_over_limit(self, client, db):
+        """5 AC bullets exceeds cap → 422 with explanatory message."""
+        p = make_product(db)
+        desc = "\n".join(f"- AC {i}" for i in range(5))
+        r = client.post("/api/features", json={
+            "product_id": p.id, "name": "story", "source": "ai",
+            "description": desc,
+        })
+        assert r.status_code == 422
+        assert "story too big" in r.text.lower()
+
+    def test_story_size_cap_pm_bypass(self, client, db):
+        """source=pm bypasses the cap (PM is the override authority)."""
+        p = make_product(db)
+        desc = "\n".join(f"- AC {i}" for i in range(20))
+        r = client.post("/api/features", json={
+            "product_id": p.id, "name": "story", "source": "pm",
+            "description": desc,
+        })
+        assert r.status_code == 201, r.text
+
     def test_update_feature_status(self, client, db):
         p = make_product(db)
         f = make_feature(db, p.id, status="Approved")
