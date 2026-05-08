@@ -98,6 +98,32 @@ app = FastAPI(title="ProductFactory PM", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory="website/static"), name="static")
 templates = Jinja2Templates(directory="website/templates")
 
+
+def _as_feature_name(name: str | None) -> str:
+    """Render a sprint.name in the new domain vocabulary.
+
+    Most legacy sprints have names like "Sprint 1" or "Sprint 2: Sprint 1"
+    from the auto-numbering planner that predates futureplan_v2. After the
+    relabel a `sprints` row IS the user-facing Feature, so we display the
+    "Sprint" prefix as "Feature". Names that don't follow the auto-pattern
+    (e.g. "Contact Management" produced by the new planner) pass through
+    unchanged.
+
+    Examples:
+      "Sprint 1"            → "Feature 1"
+      "Sprint 105: Sprint 1" → "Feature 105: Sprint 1"  (only first prefix)
+      "Contact Management"   → "Contact Management"      (no prefix)
+      None                   → ""
+    """
+    if not name:
+        return ""
+    if name.startswith("Sprint "):
+        return "Feature " + name[len("Sprint "):]
+    return name
+
+
+templates.env.filters["as_feature_name"] = _as_feature_name
+
 # ── Video file serving ────────────────────────────────────────────────────────
 # Products root on the host is mounted read-only at /workspace inside the container.
 # PRODUCTS_BASE_DIR env var holds the host-side path (e.g. C:/Users/you/Products).
