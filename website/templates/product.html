@@ -262,7 +262,7 @@
           {% set sf_terminal = features | selectattr('sprint_id', 'equalto', sprint_active.id) | selectattr('status','in',['Pushed','Deferred','Rejected']) | list | length %}
           {% set sprint_pct = ((sf_terminal / sf_count) * 100) | int if sf_count else 0 %}
           <div class="metric-value">{{ sf_terminal }}<span class="metric-suffix">/{{ sf_count }}</span></div>
-          <div class="metric-label">{{ sprint_active.name }} (active)</div>
+          <div class="metric-label">{{ sprint_active.name | as_feature_name }} (active)</div>
           <div class="metric-foot">
             <div class="metric-bar"><div class="metric-bar-fill metric-bar-fill--green" style="width:{{ sprint_pct }}%"></div></div>
             <span class="metric-foot-text">{{ sprint_pct }}% complete</span>
@@ -528,7 +528,7 @@
       <select id="fbf-sprint">
         <option value="">All features</option>
         <option value="__none__">— No feature —</option>
-        {% for s in sprints %}<option value="{{ s.id }}">{% if s.kind == 'blocked' %}🚫 {% endif %}{{ s.name }}{% if s.status == 'completed' %} (done){% endif %}</option>{% endfor %}
+        {% for s in sprints %}<option value="{{ s.id }}">{% if s.kind == 'blocked' %}🚫 {% endif %}{{ s.name | as_feature_name }}{% if s.status == 'completed' %} (done){% endif %}</option>{% endfor %}
       </select>
       <select id="fbf-review">
         <option value="">Any review</option>
@@ -592,8 +592,8 @@
             <td class="fbt-num">{{ f.priority or '—' }}</td>
             <td class="fbt-sprint">
               {% if f_sprint %}
-                {% if f_sprint.kind == 'blocked' %}<span title="Holding pen">🚫 {{ f_sprint.name }}</span>
-                {% else %}{{ f_sprint.name }}{% endif %}
+                {% if f_sprint.kind == 'blocked' %}<span title="Holding pen">🚫 {{ f_sprint.name | as_feature_name }}</span>
+                {% else %}{{ f_sprint.name | as_feature_name }}{% endif %}
               {% else %}<span class="fbt-muted">—</span>{% endif %}
             </td>
             <td>
@@ -859,9 +859,9 @@
         <div style="margin-left:12px;margin-bottom:10px;padding:10px;background:var(--surface);border-radius:8px;border:1px solid var(--border){% if sprint.status == 'active' %};border-color:var(--green);box-shadow:0 0 0 1px var(--green)33{% endif %}">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:{% if sf %}6px{% else %}0{% endif %}">
             <div>
-              <span style="font-size:13px;font-weight:600;color:var(--text)">{{ sprint.name }}</span>
+              <span style="font-size:13px;font-weight:600;color:var(--text)">{{ sprint.name | as_feature_name }}</span>
               {% if sprint.status == 'active' %}<span style="font-size:10px;background:var(--green);color:#fff;padding:1px 6px;border-radius:8px;margin-left:6px;font-weight:600">ACTIVE</span>{% endif %}
-              {% if sprint.status == 'completed' %}<button class="sprint-report-btn" onclick="openSprintReport({{ sprint.id }}, '{{ sprint.name }}')" style="font-size:10px;background:var(--surface);color:var(--text-muted);padding:1px 6px;border-radius:8px;margin-left:6px;border:1px solid var(--border);cursor:pointer" title="View feature report">DONE ▶</button>{% endif %}
+              {% if sprint.status == 'completed' %}<button class="sprint-report-btn" onclick="openSprintReport({{ sprint.id }}, '{{ sprint.name | as_feature_name }}')" style="font-size:10px;background:var(--surface);color:var(--text-muted);padding:1px 6px;border-radius:8px;margin-left:6px;border:1px solid var(--border);cursor:pointer" title="View feature report">DONE ▶</button>{% endif %}
               {% if sprint.goal %}<div style="font-size:11px;color:var(--text-muted);margin-top:1px">{{ sprint.goal }}</div>{% endif %}
             </div>
             <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
@@ -965,7 +965,7 @@
         <div style="margin-left:0;margin-bottom:8px;padding:10px;background:var(--bg);border-radius:8px;border:1px solid var(--border){% if sprint.status == 'active' %};border-color:var(--green);box-shadow:0 0 0 1px var(--green)33{% endif %}">
           <div style="display:flex;justify-content:space-between;align-items:center">
             <div>
-              <span style="font-size:13px;font-weight:600;color:var(--text)">{{ sprint.name }}</span>
+              <span style="font-size:13px;font-weight:600;color:var(--text)">{{ sprint.name | as_feature_name }}</span>
               {% if sprint.status == 'active' %}<span style="font-size:10px;background:var(--green);color:#fff;padding:1px 6px;border-radius:8px;margin-left:6px;font-weight:600">ACTIVE</span>{% endif %}
               {% if sprint.status == 'planned' %}<span style="font-size:10px;background:var(--blue);color:#fff;padding:1px 6px;border-radius:8px;margin-left:6px;font-weight:600">PLANNED</span>{% endif %}
               {% if sprint.status == 'completed' %}<span style="font-size:10px;background:var(--text-muted);color:#fff;padding:1px 6px;border-radius:8px;margin-left:6px;font-weight:600">COMPLETED</span>{% endif %}
@@ -1019,7 +1019,7 @@
     {% for pr in open_prs_list %}
     <div class="pr-row">
       <span class="pr-num">#{{ pr.number }}</span>
-      <span class="pr-title">{{ pr.title }}</span>
+      <span class="pr-title">{{ pr.title | as_feature_name }}</span>
       <span class="pr-branch">{{ pr.branch }}</span>
       <a href="{{ pr.url }}" target="_blank" class="btn btn-outline" style="padding:4px 10px;font-size:12px">View ↗</a>
       <form method="post" action="/product/{{ product.id }}/merge-pr/{{ pr.number }}" style="display:inline">

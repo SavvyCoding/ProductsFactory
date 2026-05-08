@@ -288,7 +288,7 @@
       <span class="ctx-pill ctx-pill--phase">{{ cur_phase.name }}</span>
       {% endif %}
       {% if cur_sprint %}
-      <span class="ctx-pill ctx-pill--sprint">{{ cur_sprint.name }}</span>
+      <span class="ctx-pill ctx-pill--sprint">{{ cur_sprint.name | as_feature_name }}</span>
       {% endif %}
     </div>
     {% endif %}
