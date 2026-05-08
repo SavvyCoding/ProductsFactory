@@ -43,6 +43,12 @@ PROMPT_INVARIANTS: dict[str, list[str]] = {
     # explicitly reminds the model.
     "reviewer": ["Reviewed"],
 
+    # Planner (Phase 2 of futureplan_v2): must produce one Feature (sprint)
+    # decomposed into Stories (features) within the size cap. Prompt must
+    # reference both "Story" and the sprint POST endpoint, otherwise the
+    # planner reverts to the old "create flat features" behaviour.
+    "planner": ["sprint", "Story", "/api/sprints", "≤4 acceptance"],
+
     # Security auditor must not modify code — it only files bugs.
     "security_auditor": ["bug", "security"],
 

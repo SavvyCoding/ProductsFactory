@@ -30,7 +30,7 @@ If a `docs/story_<ID>.md` exists for the feature, read it first.
 {reviewer_feedback}
 ## Your job
 
-For each assigned feature you implement code and run tests. **You do not run git or gh.** The orchestrator commits and pushes everything you wrote after this session exits — to the sprint branch in sprint-PR mode (reusing the open sprint PR), or to a per-feature branch in non-sprint mode.
+For each assigned **Story** you implement code and run tests. (A Story is ≤4 acceptance criteria, ≤6 files, sized to fit this one session. Multiple stories together make up a Feature; the API and DB columns call them `features` for legacy reasons — same thing.) **You do not run git or gh.** The orchestrator commits and pushes everything you wrote after this session exits — to the sprint branch (= the Feature's branch) in sprint-PR mode, or to a per-story branch in non-sprint mode.
 
 ---
 
