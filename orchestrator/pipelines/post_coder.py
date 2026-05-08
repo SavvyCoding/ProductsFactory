@@ -653,7 +653,12 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
 
     # 4. PR resolution. In sprint mode the PR already exists — just reuse it.
     # In rework mode the PR also already exists (the one we just force-pushed
-    # to); reuse its number+url. In per-feature mode, open a fresh PR via gh.
+    # to); reuse its number+url. In bare per-feature mode (sprint_pr_mode=False
+    # AND no rework PR), the per-feature `gh pr create` path was removed in
+    # Phase 6.2 — products in this state must be migrated to sprint_pr_mode
+    # OR have features Blocked. Falling through here previously left
+    # pr_number/pr_url unassigned and the downstream "direct PATCH for feature"
+    # block raised UnboundLocalError silently. Surface it loudly + bail.
     if sprint_pr_mode:
         pr_number = int(sprint_pr_num)
         pr_url = sprint_pr_url
@@ -663,10 +668,14 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         pr_url = rework_pr_url
         log.info(f"[post-coder] {pname}: reusing rework PR #{pr_number} — {pr_url}")
     else:
-        gh_token = _get_gh_token()
-        if not gh_token:
-            log.warning(f"[post-coder] {pname}: no GH_TOKEN — cannot open PR. Branch pushed; PM must open manually.")
-            return pushed_ids
+        log.warning(
+            f"[post-coder] {pname}: bare per-feature PR mode no longer supported — "
+            f"product needs sprint_pr_mode=True. Branch {branch} was pushed but no "
+            f"PR will be opened, and features will not be linked to a PR. PM must "
+            f"either enable sprint_pr_mode and re-run, or open a PR manually for "
+            f"branch {branch}. Returning early to avoid UnboundLocalError."
+        )
+        return pushed_ids
 
     # 4.5 Lint guards — auto-reject obviously-broken commits before they hit
     # the LLM reviewer. Per the 2026-05-07 audit, ~80% of reviewer rejections
