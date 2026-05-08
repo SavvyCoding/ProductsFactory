@@ -3166,30 +3166,45 @@ async def api_plan_sprints(
 
     try:
         raw = await _llm_call(
-            f"You are a senior product manager doing phasewise implementation planning for: {product.name}\n"
+            f"You are a senior product manager doing implementation planning for: {product.name}\n"
             f"Vision: {getattr(product, 'vision', None) or (product.config or {}).get('vision') or 'Not specified'}\n\n"
-            f"Approved features to plan ({len(features_list)} total):\n"
+            f"Backlog items (= Stories) to plan ({len(features_list)} total):\n"
             f"{json.dumps(features_list, indent=2)}\n\n"
-            "Organise these features into PHASES, where each phase has 1-3 SPRINTS.\n\n"
-            "Phase structure (use exactly these phase names or similar):\n"
+            "## Vocabulary (read once, then apply)\n"
+            "- A **Feature** = one user-facing chunk like 'Calculator UI' or 'Auth System'. "
+            "It will be stored as a `sprint` row (legacy column name) and ships as one PR.\n"
+            "- A **Story** = an implementation chunk that fits one coder session "
+            "(≤1 dev-day, ≤4 acceptance-criteria bullets, ≤6 files). "
+            "It's stored as a `feature` row (legacy column name).\n"
+            "- A **Phase** = high-level theme grouping multiple Features.\n\n"
+            "Your job: organise the backlog Stories into Features (sprints), grouped into Phases.\n\n"
+            "## Hard rules (enforce strictly)\n"
+            "1. **Each Feature (sprint) MUST be coherent** — all Stories inside it must serve the SAME user-want. "
+            "Example coherent Feature: 'Calculator Display' with stories {keypad UI, expression display, decimal handling}. "
+            "Example INCOHERENT (do not produce): 'Sprint 1' with stories {SvelteKit scaffold, GitHub CI, ESLint config, README, Dependabot} — these are 5 different concerns.\n"
+            "2. **Name each Feature by its user-want**, not 'Sprint 1' / 'Sprint 2'. "
+            "Names like 'Calculator UI Foundation', 'Arithmetic Engine', 'Mobile Responsive Layout' — each is a clear deliverable.\n"
+            f"3. Each Feature contains at most {max_per_sprint} Stories. If you find more than {max_per_sprint} coherent stories for one user-want, split them into two Features.\n"
+            "4. Every backlog Story must land in exactly one Feature.\n"
+            "5. Respect dependencies: foundational Features (data models, auth) go in Phase 1.\n"
+            "6. Only create Phases that have Features to put in them.\n\n"
+            "## Phase structure (use these names or close variants)\n"
             "- Phase 1: Foundation — infrastructure, auth, CI/CD, core data models, dev tooling\n"
-            "- Phase 2: Core Product — the main user-facing value, primary workflows\n"
+            "- Phase 2: Core Product — main user-facing value, primary workflows\n"
             "- Phase 3: Growth & Polish — integrations, analytics, UX improvements, API\n"
-            "- Phase 4: Scale & Ops — performance, observability, security hardening (if enough features)\n\n"
-            "Rules:\n"
-            "- Every feature must be in exactly one sprint\n"
-            "- Sprints within a phase are sequential (Sprint 1 → Sprint 2 → Sprint 3)\n"
-            f"- Each sprint should have at most {max_per_sprint} features — all features in a sprint are planned and implemented together in one session\n"
-            "- Respect dependencies: foundational work (auth, DB schema) goes in Phase 1\n"
-            "- Only create phases that have features to put in them\n\n"
-            "Return ONLY a JSON array of phases, no other text:\n"
+            "- Phase 4: Scale & Ops — performance, observability, security hardening (if enough)\n\n"
+            "Return ONLY a JSON array of phases, no other text. The `sprint_name` is the Feature name "
+            "(human-readable user-want), the `feature_ids` are the Story ids assigned to that Feature:\n"
             '[\n'
             '  {\n'
             '    "phase_name": "Phase 1: Foundation",\n'
             '    "phase_goal": "Set up infrastructure and core data models",\n'
             '    "sprints": [\n'
-            '      {"sprint_name": "Sprint 1", "sprint_goal": "...", "feature_ids": [1, 2, 3]},\n'
-            '      {"sprint_name": "Sprint 2", "sprint_goal": "...", "feature_ids": [4, 5]}\n'
+            '      {"sprint_name": "Calculator UI Foundation", "sprint_goal": "Users see a clean, '
+                  'responsive calculator interface that works on desktop and mobile", '
+                  '"feature_ids": [338, 340, 347]},\n'
+            '      {"sprint_name": "Arithmetic Engine", "sprint_goal": "Users can perform basic and '
+                  'compound arithmetic operations with correct precision", "feature_ids": [337, 341, 343, 351]}\n'
             '    ]\n'
             '  }\n'
             ']',
