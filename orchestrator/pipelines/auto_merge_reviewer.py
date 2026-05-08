@@ -51,6 +51,24 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
     repo_slug = _parse_repo_slug(github_repo)
     gh_headers = {"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"}
 
+    # In sprint-PR mode the per-cycle auto_merge.sweep_product is the
+    # authoritative merger — it has the "all sprint features must be
+    # merge-eligible" hold check that prevents partial-sprint merges.
+    # This per-reviewer-session pipeline skipped that check and merged the
+    # sprint PR on the first approved feature, leaving siblings stranded
+    # (observed 2026-05-08 on product 8 sprint 148: story 399 approved →
+    # PR #1 merged immediately → story 398 still Designed but its sprint
+    # had no live PR to push to). Defer to the sweep in sprint-PR mode.
+    sprint_pr_mode    = bool(product.get("_sprint_pr_mode"))
+    sprint_pr_number  = product.get("_sprint_pr_number")
+    if sprint_pr_mode and sprint_pr_number:
+        log.info(
+            f"[auto-merge] {product.get('name', '?')}: sprint_pr_mode active — "
+            f"deferring merge of PR #{sprint_pr_number} to auto_merge.sweep_product "
+            f"(which gates on all-sprint-features-merge-eligible)"
+        )
+        return features
+
     for entry in features:
         if not isinstance(entry, dict) or entry.get("review_outcome") != "approved":
             continue
