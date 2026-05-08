@@ -25,9 +25,9 @@
         {% set feat_count = features | length %}
         {% if feat_count %}<span class="pf-sidebar-badge">{{ feat_count }}</span>{% endif %}
       </a>
-      <a class="pf-sidebar-item {% if active_tab == 'sprints' %}active{% endif %}" onclick="switchTab('sprints', this)" href="javascript:void(0)" title="Sprints">
+      <a class="pf-sidebar-item {% if active_tab == 'sprints' %}active{% endif %}" onclick="switchTab('sprints', this)" href="javascript:void(0)" title="Features">
         <span class="pf-sidebar-icon">&#9654;</span>
-        <span class="pf-sidebar-label">Sprints</span>
+        <span class="pf-sidebar-label">Features</span>
         {% if active_sprint %}<span class="pf-sidebar-badge" style="background:var(--green-lt);color:var(--green)">Active</span>{% endif %}
       </a>
       <a class="pf-sidebar-item {% if active_tab == 'prs' %}active{% endif %}" onclick="switchTab('prs', this)" href="javascript:void(0)" title="Pull Requests">
@@ -526,8 +526,8 @@
         {% for t in distinct_types %}<option value="{{ t }}">{% if t == 'bug' %}🐛 Bug{% elif t == 'chore' %}🔧 Chore{% else %}✦ Feature{% endif %}</option>{% endfor %}
       </select>
       <select id="fbf-sprint">
-        <option value="">All sprints</option>
-        <option value="__none__">— No sprint —</option>
+        <option value="">All features</option>
+        <option value="__none__">— No feature —</option>
         {% for s in sprints %}<option value="{{ s.id }}">{% if s.kind == 'blocked' %}🚫 {% endif %}{{ s.name }}{% if s.status == 'completed' %} (done){% endif %}</option>{% endfor %}
       </select>
       <select id="fbf-review">
@@ -921,10 +921,10 @@
                 <form method="post" action="/product/{{ product.id }}/features/{{ f.id }}/status"
                       style="display:inline;margin:0;padding:0"
                       onclick="event.stopPropagation()"
-                      onsubmit="return confirm('Move feature #{{ f.id }} back to Pending? This clears the sprint assignment and resets fix_attempts and review_outcome. The design doc is kept.');">
+                      onsubmit="return confirm('Move story #{{ f.id }} back to Pending? This clears the feature assignment and resets fix_attempts and review_outcome. The design doc is kept.');">
                   <input type="hidden" name="status" value="Pending">
                   <button type="submit"
-                          title="Move back to Pending (remove from sprint)"
+                          title="Move back to Pending (remove from feature)"
                           style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:11px;padding:0 2px;line-height:1">↩</button>
                 </form>
                 {% endif %}
@@ -943,7 +943,7 @@
           {% endif %}
         </div>
         {% else %}
-        <div style="margin-left:12px;font-size:12px;color:var(--text-muted);padding:8px 0">No sprints in this phase yet.</div>
+        <div style="margin-left:12px;font-size:12px;color:var(--text-muted);padding:8px 0">No features in this phase yet.</div>
         {% endfor %}
 
       </div>
@@ -958,7 +958,7 @@
       {% if orphan_sprints %}
       <div class="card" style="margin-bottom:16px;border-left:4px solid var(--text-muted);background:var(--surface)">
         <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:6px;color:var(--text-muted)">No phase</div>
-        <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px">Sprints without a phase ({{ orphan_sprints | length }})</div>
+        <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px">Features without a phase ({{ orphan_sprints | length }})</div>
         {% for sprint in orphan_sprints %}
         {% set sf = features | selectattr('sprint_id', 'equalto', sprint.id) | list %}
         {% set sp = sf | selectattr('status', 'equalto', 'Pushed') | list %}
