@@ -91,6 +91,12 @@ class Feature(Base):
     design_doc_path: Mapped[Optional[str]] = mapped_column(Text)
     review_outcome: Mapped[Optional[str]]  = mapped_column(String(32))
     review_notes:   Mapped[Optional[str]]  = mapped_column(Text)
+    # Powers supervisor.detect_repeated_review_feedback: hash of the
+    # reviewer's last changes_requested feedback. Null = no prior cycle.
+    # The counter resets to 0 whenever the signature changes (coder
+    # addressed something) or the feature is approved.
+    last_changes_signature: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    repeated_changes_count: Mapped[int]            = mapped_column(Integer, nullable=False, default=0, server_default="0")
     created_at:     Mapped[datetime]       = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at:     Mapped[datetime]       = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

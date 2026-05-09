@@ -66,6 +66,31 @@ def _apply_session_entry(client: httpx.Client, entry: dict) -> bool:
     if status is not None and status not in _VALID_FEATURE_STATUSES:
         log.warning(f"[progress] Skipping feature #{fid} entry with unknown status '{status}' — agent bug?")
         return False
+
+    # ── Normalizer: hybrid Reviewed/Reviewing + changes_requested combos ────
+    # The reviewer prompt mandates `status=Implementing` when posting
+    # `review_outcome=changes_requested`. Models occasionally violate this
+    # and write `status=Reviewed` (or `status=Reviewing`) alongside
+    # `changes_requested` — an invalid combination that lands in the DB,
+    # passes _is_merge_eligible (so it blocks the sprint PR), but doesn't
+    # match the codeable filter (so no coder ever picks it up). The
+    # feature gets stranded forever — incident pattern observed on #374
+    # (2026-05-09 04:03) and #377 (2026-05-09 17:18).
+    #
+    # Auto-correct silently. The legitimate semantics of changes_requested
+    # is "send back to coder for rework", which means status MUST be
+    # Implementing. Log a warning so prompt drift is visible in operator
+    # logs, but don't fail the apply — bouncing the entry would re-trigger
+    # the silent-task_done loop the new reviewer prompt rule guards against.
+    if (status in ("Reviewed", "Reviewing")
+            and entry.get("review_outcome") == "changes_requested"):
+        log.warning(
+            f"[progress] Feature #{fid}: normalizing invalid combo "
+            f"status={status!r} + review_outcome='changes_requested' to "
+            f"status='Implementing' (reviewer prompt violation)."
+        )
+        entry = dict(entry, status="Implementing")
+        status = "Implementing"
     # Contract: Reviewing entries MUST carry pr_number (from the field or
     # embedded in pr_url). Without it the feature gets stuck (auto-merge has
     # nothing to merge). Previously we warned and let it through; now we

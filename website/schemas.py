@@ -136,6 +136,8 @@ class FeatureUpdate(BaseModel):
     design_doc_path: Optional[str]  = None
     review_outcome:  Optional[str]  = None
     review_notes:    Optional[str]  = None
+    last_changes_signature: Optional[str] = None  # supervisor.detect_repeated_review_feedback
+    repeated_changes_count: Optional[int] = None  # ditto
     session_uid:     Optional[str]  = None  # review authorship — stored in feature_reviews, not on feature
     sprint_id:       Optional[int]  = None  # reassign to a different sprint
     expected_version: Optional[int] = None  # optimistic lock — if provided, update is rejected on mismatch
@@ -183,6 +185,8 @@ class FeatureOut(BaseModel):
     design_doc_path: Optional[str] = None
     review_outcome:  Optional[str] = None
     review_notes:    Optional[str] = None
+    last_changes_signature: Optional[str] = None
+    repeated_changes_count: int = 0
     sprint_id:       Optional[int] = None
     story_points:    Optional[int] = None
     due_date:        Optional[date] = None
