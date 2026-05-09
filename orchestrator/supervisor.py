@@ -109,6 +109,18 @@ _DEFAULTS = {
     # a single changes_requested round-trip. Must match the website default
     # in website/main.py to keep cross-process behaviour consistent.
     "supervisor_rapid_flap_min_transitions":    10,
+    # detect_repeated_review_feedback: block when the reviewer's structured
+    # feedback fingerprint repeats N consecutive cycles. Threshold=2 means
+    # the third matching cycle blocks (signature seen, then seen again,
+    # then seen-and-block). Threshold=1 would block on the very first repeat.
+    "supervisor_repeated_feedback_enabled":     True,
+    "supervisor_repeated_feedback_threshold":   2,
+    # detect_invalid_status_combos: per-cycle sweep that auto-corrects
+    # features stuck in the hybrid Reviewed/Reviewing + changes_requested
+    # state (a reviewer-prompt-violation pattern). Demotes them to
+    # Implementing+changes_requested so the codeable filter picks them up.
+    # Belt-and-braces alongside the in-line normalizer in state_machine.py.
+    "supervisor_invalid_combos_enabled":        True,
 }
 
 
@@ -190,6 +202,396 @@ def _route_to_blocked_if_at_cap(
             f"[{detector}] route to Blocked sprint failed for #{feature_id}: {e}"
         )
     return True
+
+
+# ── Repeated-review-feedback signature ───────────────────────────────────────
+# A canonical fingerprint of a reviewer's changes_requested feedback. Two
+# reviewers complaining about the same thing in slightly different prose
+# should produce the same signature; if the coder addresses anything, the
+# signature should change.
+#
+# Strategy: pull the section heads (functional / tests / security) and the
+# first-noun key phrases out of each ❌ bullet, normalize, hash. Falls back
+# to a hash of `review_notes` when no per-section comments are available.
+
+import hashlib as _hashlib
+
+_SECTION_RE = re.compile(r"^[^a-z]*?(functional|tests?|security)\b", re.IGNORECASE)
+# The reviewer prompt mandates a trailing `[{session_uid}]` tag on every
+# comment for audit attribution. The session UID rotates per-session, so
+# we strip the tag before fingerprinting — otherwise two reviewers with
+# the SAME complaint would produce different signatures.
+_SESSION_TAG_RE = re.compile(r"\s*\[[^\]]+\]\s*$")
+
+
+def _signature_from_comments(comments: list[dict]) -> str | None:
+    """Build a stable signature from the reviewer's `❌ <section>: <body>`
+    comments for one feature. Returns None if no usable comments are found.
+
+    Implementation notes:
+    - Only consider comments authored by `reviewer` (case-insensitive).
+    - Only consider comments whose body starts with `❌` (the prompt-mandated
+      changes-requested marker). `✅` comments don't carry feedback to repeat.
+    - For each match, extract `(section, payload)` where:
+        section = functional|tests|security (lower-cased)
+        payload = the first ~60 chars of the body after the section colon,
+                  lowercased, alphanumerics+spaces only, single-spaced.
+    - Sort the resulting set so order doesn't affect the hash.
+    - Return sha1("|".join(sorted_set)) or None if the set is empty.
+    """
+    if not comments:
+        return None
+    keys: set[str] = set()
+    for c in comments:
+        if (c.get("author") or "").lower() != "reviewer":
+            continue
+        body = (c.get("body") or "").strip()
+        if not body or not body.startswith("❌"):
+            continue
+        m = _SECTION_RE.match(body)
+        if not m:
+            continue
+        section = m.group(1).lower().rstrip("s")  # tests -> test
+        # Strip the section prefix and the leading "❌" / colon / spaces.
+        tail = body[m.end():].lstrip(" :—-")
+        # Drop the trailing `[session_uid]` audit tag — it rotates per
+        # reviewer session and would otherwise pollute the signature.
+        tail = _SESSION_TAG_RE.sub("", tail).lower()
+        # Reduce to alnum+space and clamp length so trivial wording shifts
+        # ("at file:42" vs "in file:42") don't produce different hashes.
+        norm = re.sub(r"[^a-z0-9 ]+", " ", tail)
+        norm = re.sub(r"\s+", " ", norm).strip()[:60]
+        if norm:
+            keys.add(f"{section}:{norm}")
+    if not keys:
+        return None
+    return _hashlib.sha1("|".join(sorted(keys)).encode("utf-8")).hexdigest()
+
+
+def _signature_from_review_notes(review_notes: str | None) -> str | None:
+    """Fallback signature when no per-section comments are present —
+    happens when the reviewer wrote `review_notes` directly on the feature
+    instead of (or in addition to) posting comments. Coarser than the
+    comment-based signature but still catches identical-text repeats."""
+    if not review_notes:
+        return None
+    norm = re.sub(r"[^a-z0-9 ]+", " ", review_notes.lower())
+    norm = re.sub(r"\s+", " ", norm).strip()[:200]
+    if not norm:
+        return None
+    return _hashlib.sha1(norm.encode("utf-8")).hexdigest()
+
+
+# ── Detector: repeated review feedback (auto-block dead-end loops) ───────────
+# When a reviewer's changes_requested feedback fingerprint matches the
+# previous changes_requested cycle, the coder is going in circles. The
+# fix_attempts=5 cap would eventually catch this in ~3-4 hours (4 cycles
+# of ~30-60 min each on Ollama Cloud). This detector catches it earlier:
+# at threshold=2 (default), the third consecutive matching signature
+# blocks. The blocked feature gets pr_number=None so the sprint PR's
+# auto-merge sweep stops waiting on it.
+#
+# Hook point: post-reviewer pipeline (auto_merge_reviewer.py), called once
+# per feature whose session_result.json entry was changes_requested.
+
+def detect_repeated_review_feedback(
+    *,
+    feature_id: int,
+    product_id: int | None = None,
+    review_notes: str | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """Compute the latest reviewer-feedback signature for `feature_id` and
+    compare it to the previously-stored one. Bumps `repeated_changes_count`
+    if they match; blocks the feature when the count crosses the threshold.
+
+    Returns a dict describing what happened:
+      {"action": "no-op|stored|incremented|blocked",
+       "signature": <sha1 hex or None>,
+       "repeated": <int>,
+       "reason": "<explanation>"}
+
+    Best-effort — never raises. Honors dry-run + the per-detector enabled
+    flag in system_config. Idempotent on re-invocation: if the signature
+    is unchanged but already counted, this call is a no-op (count is only
+    incremented when storing a NEW comparison).
+    """
+    cfg = _get_supervisor_config()
+    if cfg.get("supervisor_dry_run_only"):
+        dry_run = True
+    if not cfg.get("supervisor_repeated_feedback_enabled"):
+        return {"action": "no-op", "signature": None, "repeated": 0,
+                "reason": "detector disabled in system_config"}
+
+    threshold = int(cfg.get("supervisor_repeated_feedback_threshold", 2))
+
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            feat_resp = client.get(f"/api/features/{feature_id}")
+            if feat_resp.status_code != 200:
+                return {"action": "no-op", "signature": None, "repeated": 0,
+                        "reason": f"feature fetch returned HTTP {feat_resp.status_code}"}
+            feat = feat_resp.json()
+            comments_resp = client.get(f"/api/features/{feature_id}/comments")
+            comments = comments_resp.json() if comments_resp.status_code == 200 else []
+
+            # Build the latest signature. Prefer per-section comments;
+            # fall back to review_notes hash if comments are absent.
+            sig = _signature_from_comments(comments)
+            if sig is None:
+                sig = _signature_from_review_notes(
+                    review_notes if review_notes is not None else feat.get("review_notes")
+                )
+            if sig is None:
+                return {"action": "no-op", "signature": None, "repeated": 0,
+                        "reason": "no usable feedback to fingerprint"}
+
+            prior_sig = feat.get("last_changes_signature")
+            prior_count = int(feat.get("repeated_changes_count") or 0)
+
+            if prior_sig is None:
+                # First changes_requested cycle — record the baseline only.
+                _record_action(
+                    detector="repeated_review_feedback",
+                    product_id=product_id or feat.get("product_id"),
+                    target_type="feature",
+                    target_id=feature_id,
+                    action="store_baseline_signature",
+                    reason=f"First changes_requested fingerprint stored: {sig[:12]}…",
+                    dry_run=dry_run,
+                )
+                if not dry_run:
+                    client.patch(
+                        f"/api/features/{feature_id}",
+                        json={
+                            "last_changes_signature": sig,
+                            "repeated_changes_count": 0,
+                            "changed_by": "supervisor.repeated_review_feedback",
+                        },
+                    )
+                return {"action": "stored", "signature": sig, "repeated": 0,
+                        "reason": "baseline stored"}
+
+            if sig != prior_sig:
+                # Coder addressed something — reset the counter and roll the signature.
+                _record_action(
+                    detector="repeated_review_feedback",
+                    product_id=product_id or feat.get("product_id"),
+                    target_type="feature",
+                    target_id=feature_id,
+                    action="reset_signature",
+                    reason=f"Signature changed ({prior_sig[:12]}… -> {sig[:12]}…); resetting counter",
+                    dry_run=dry_run,
+                )
+                if not dry_run:
+                    client.patch(
+                        f"/api/features/{feature_id}",
+                        json={
+                            "last_changes_signature": sig,
+                            "repeated_changes_count": 0,
+                            "changed_by": "supervisor.repeated_review_feedback",
+                        },
+                    )
+                return {"action": "stored", "signature": sig, "repeated": 0,
+                        "reason": "signature changed; counter reset"}
+
+            # Same signature as last time — increment.
+            new_count = prior_count + 1
+            if new_count < threshold:
+                _record_action(
+                    detector="repeated_review_feedback",
+                    product_id=product_id or feat.get("product_id"),
+                    target_type="feature",
+                    target_id=feature_id,
+                    action="increment_repeated_count",
+                    reason=f"Same fingerprint {new_count}× consecutively (threshold={threshold})",
+                    dry_run=dry_run,
+                )
+                if not dry_run:
+                    client.patch(
+                        f"/api/features/{feature_id}",
+                        json={
+                            "repeated_changes_count": new_count,
+                            "changed_by": "supervisor.repeated_review_feedback",
+                        },
+                    )
+                return {"action": "incremented", "signature": sig, "repeated": new_count,
+                        "reason": "below threshold"}
+
+            # Threshold met — block the feature and detach from the sprint PR.
+            note_excerpt = (review_notes or feat.get("review_notes") or "")[:200]
+            block_reason = (
+                f"Auto-blocked by supervisor.repeated_review_feedback: "
+                f"reviewer requested the same change {new_count + 1}× consecutively "
+                f"(threshold={threshold}). Last note: {note_excerpt}"
+            )
+            _record_action(
+                detector="repeated_review_feedback",
+                product_id=product_id or feat.get("product_id"),
+                target_type="feature",
+                target_id=feature_id,
+                action="block_repeated_feedback",
+                reason=block_reason,
+                dry_run=dry_run,
+            )
+            if dry_run:
+                return {"action": "blocked", "signature": sig, "repeated": new_count,
+                        "reason": "dry-run: would block + clear pr_number + route to Blocked sprint"}
+
+            # Block: status=Blocked, pr_number cleared, blocked_reason set.
+            client.patch(
+                f"/api/features/{feature_id}",
+                json={
+                    "status": "Blocked",
+                    "pr_number": None,
+                    "blocked_reason": block_reason,
+                    "repeated_changes_count": new_count,
+                    "changed_by": "supervisor.repeated_review_feedback",
+                },
+            )
+            # Route to per-product Blocked sprint via the same endpoint
+            # _route_to_blocked_if_at_cap uses. Idempotent — the website
+            # endpoint short-circuits if already there.
+            try:
+                pid = product_id or feat.get("product_id")
+                if pid:
+                    client.post(
+                        f"/api/products/{pid}/sprints/blocked/route",
+                        json={"feature_ids": [feature_id], "reason": block_reason},
+                    )
+            except Exception as e:
+                log.warning(
+                    f"[repeated_review_feedback] route-to-Blocked-sprint failed "
+                    f"for #{feature_id}: {e}"
+                )
+            log.warning(
+                f"[repeated_review_feedback] Feature #{feature_id} -> Blocked "
+                f"(same fingerprint {new_count + 1}× in a row)"
+            )
+            return {"action": "blocked", "signature": sig, "repeated": new_count,
+                    "reason": "threshold met; feature blocked"}
+    except Exception:
+        log.exception(
+            f"detect_repeated_review_feedback crashed for feature #{feature_id}"
+        )
+        return {"action": "no-op", "signature": None, "repeated": 0,
+                "reason": "exception (logged)"}
+
+
+# ── Detector: invalid status/review_outcome combos (per-cycle sweep) ─────────
+# Per-cycle reactive layer for the same reviewer-prompt-violation that the
+# state_machine normalizer guards against in real time. Catches:
+#   - features that landed in `Reviewed + changes_requested` or
+#     `Reviewing + changes_requested` BEFORE the in-line normalizer was
+#     deployed (historical drift)
+#   - features that bypass _apply_session_entry (PATCHes via the website
+#     UI, manual scripts, future code paths) and end up in the hybrid state
+#
+# The action: demote `status` to `Implementing` while preserving
+# `review_outcome=changes_requested`. The next dispatcher cycle then
+# matches the codeable filter and a coder picks it up. Idempotent — a
+# feature in valid state is a no-op.
+
+def detect_invalid_status_combos(
+    products: list[dict] | None = None,
+    *,
+    dry_run: bool = False,
+) -> dict:
+    """Sweep all `ready` products for features in invalid hybrid status
+    combos. Demotes them to `Implementing+changes_requested`.
+
+    Honors `supervisor_invalid_combos_enabled` (default True) and the
+    global `supervisor_dry_run_only` kill switch. Returns a summary dict:
+        {"checked": <int>, "fixed": <int>, "errors": <int>}
+    Best-effort — never raises. Safe to call from any per-cycle hook.
+    """
+    cfg = _get_supervisor_config()
+    if cfg.get("supervisor_dry_run_only"):
+        dry_run = True
+    if not cfg.get("supervisor_invalid_combos_enabled", True):
+        return {"checked": 0, "fixed": 0, "errors": 0,
+                "skipped": "disabled in system_config"}
+
+    summary = {"checked": 0, "fixed": 0, "errors": 0}
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            # If caller didn't pass products, fetch the active set.
+            if products is None:
+                resp = client.get("/api/products")
+                if resp.status_code != 200:
+                    return summary
+                products = [p for p in resp.json()
+                            if isinstance(p, dict) and p.get("status") == "ready"]
+
+            for product in products:
+                pid = product.get("id")
+                if not pid:
+                    continue
+                try:
+                    feats_resp = client.get(f"/api/products/{pid}/features")
+                    if feats_resp.status_code != 200:
+                        continue
+                    features = feats_resp.json()
+                except Exception:
+                    summary["errors"] += 1
+                    continue
+
+                for feat in features:
+                    if not isinstance(feat, dict):
+                        continue
+                    summary["checked"] += 1
+                    status = feat.get("status")
+                    outcome = feat.get("review_outcome")
+                    fid = feat.get("id")
+                    # The two invalid combos we know about:
+                    #   - Reviewed + changes_requested (#374 incident)
+                    #   - Reviewing + changes_requested (#377 incident)
+                    if (status in ("Reviewed", "Reviewing")
+                            and outcome == "changes_requested"
+                            and fid):
+                        reason = (
+                            f"Auto-correcting hybrid combo: status={status} + "
+                            f"review_outcome=changes_requested → status=Implementing. "
+                            f"Belongs in the codeable queue, not the reviewer queue."
+                        )
+                        _record_action(
+                            detector="invalid_status_combos",
+                            product_id=pid,
+                            target_type="feature",
+                            target_id=fid,
+                            action="normalize_to_implementing",
+                            reason=reason,
+                            dry_run=dry_run,
+                        )
+                        if not dry_run:
+                            try:
+                                client.patch(
+                                    f"/api/features/{fid}",
+                                    json={
+                                        "status": "Implementing",
+                                        "review_outcome": "changes_requested",
+                                        "changed_by": "supervisor.invalid_status_combos",
+                                    },
+                                )
+                                summary["fixed"] += 1
+                            except Exception:
+                                summary["errors"] += 1
+                                log.exception(
+                                    f"[invalid_status_combos] PATCH failed for "
+                                    f"feature #{fid}"
+                                )
+                        else:
+                            summary["fixed"] += 1   # would-have-fixed in dry-run
+            if summary["fixed"]:
+                log.info(
+                    f"[invalid_status_combos] checked={summary['checked']} "
+                    f"fixed={summary['fixed']} errors={summary['errors']} "
+                    f"dry_run={dry_run}"
+                )
+    except Exception:
+        log.exception("detect_invalid_status_combos sweep crashed")
+        summary["errors"] += 1
+    return summary
 
 
 # ── Detector B: coder false-success ──────────────────────────────────────────

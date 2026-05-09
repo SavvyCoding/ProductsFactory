@@ -799,6 +799,18 @@ def main():
             except Exception:
                 log.exception("auto-merge sweep failed (non-fatal)")
 
+            # ⑥d Invalid-combo sweep — auto-correct features stuck in the
+            # hybrid `Reviewed/Reviewing + changes_requested` state. The
+            # in-line normalizer in state_machine.py prevents NEW writes
+            # from creating this combo; this sweep rescues features that
+            # landed there before the normalizer was deployed, or via
+            # any code path that bypasses _apply_session_entry. Idempotent.
+            try:
+                from orchestrator.supervisor import detect_invalid_status_combos
+                detect_invalid_status_combos(products)
+            except Exception:
+                log.exception("invalid-combo sweep failed (non-fatal)")
+
             # ⑦a Reviewer-first: any product with a Reviewing feature + PR takes priority
             reviewer_product, reviewer_persona = get_next_reviewer_product(products)
             retro_product = get_next_retro_product(products)
