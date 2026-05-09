@@ -91,6 +91,14 @@ SESSION_TIMEOUT_SECONDS = _DEFAULT_SESSION_TIMEOUT_SECONDS
 # The PM generates this key and adds it as a GitHub deploy key.
 DEPLOY_KEY_FILENAME = os.environ.get("DEPLOY_KEY_FILENAME", "id_ed25519_productfactory")
 
+# pf-verify-env.sh in the agent image exits 42 when a mechanical preflight
+# check fails (chrome-headless-shell missing/no-exec-bit, pytest unimportable,
+# etc.). _finalize_session and detect_kill_recovery special-case this so the
+# affected features are NOT charged a fix_attempt — the failure is
+# environmental, not the agent's fault. Operator gets an alert with the
+# failing-check string. See deploy/docker/pf-verify-env.sh.
+EXIT_ENV_NOT_READY = 42
+
 # ── Ollama backend config ─────────────────────────────────────────────────────
 # Set AGENT_BACKEND=ollama to use local Ollama instead of the Claude CLI.
 # Ollama must be running on the Windows host (accessible as host.docker.internal:11434).
@@ -1023,6 +1031,50 @@ def _finalize_session(
     attempted = 0
     pushed = 0
     post_coder_pushed: list[int] = []
+
+    # pf-verify-env.sh failure → env-not-ready. The agent never started; no
+    # commits, no session_result.json, nothing to reconcile. Skip the whole
+    # post-pipeline (post-coder, kill_recovery, rollback) and just record
+    # the session as ended with notes + alert the operator. fix_attempts on
+    # the assigned features stays untouched because the failure is
+    # environmental, not the agent's fault.
+    if exit_code == EXIT_ENV_NOT_READY:
+        try:
+            log_tail = ""
+            try:
+                tail = subprocess.run(
+                    ["docker", "logs", "--tail", "5", f"pf-{product['id']}-{session_uid}"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                log_tail = (tail.stdout + tail.stderr).strip()
+            except Exception:
+                pass
+            send_alert(
+                "error",
+                f"{product.get('name', '?')}: pf-verify-env failed (exit 42) — "
+                f"agent never started; assigned features released without "
+                f"fix_attempt charge. Last lines:\n{log_tail[-500:]}",
+            )
+        except Exception:
+            log.exception("env-not-ready alert failed")
+        if session_id is not None:
+            try:
+                with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                    client.patch(f"/api/sessions/{session_id}", json={
+                        "status":     "ended",
+                        "ended_at":   datetime.now(timezone.utc).isoformat(),
+                        "exit_code":  EXIT_ENV_NOT_READY,
+                        "notes":      "env-not-ready (pf-verify-env exit 42)",
+                    })
+            except Exception as e:
+                log.warning(f"Could not update env-not-ready session record: {e}")
+        # Release the claim so the features can be re-picked after env fix,
+        # without bumping fix_attempts (rollback resets agent-state features
+        # to their prior status; it does not touch fix_attempts).
+        _rollback_stuck_features(product["id"], persona)
+        _cleanup_workspace_post_session(working_dir, product.get("name", str(working_dir)))
+        return EXIT_ENV_NOT_READY
+
     try:
         # 0. Path B post-* ceremony — orchestrator owns ALL git for personas
         # that produce files. Agent only edits files + writes session_result.json;
