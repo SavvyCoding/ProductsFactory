@@ -83,6 +83,20 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
 # Check latest version at: https://www.npmjs.com/package/@anthropic-ai/claude-code
 RUN npm install -g @anthropic-ai/claude-code@latest
 
+# ── Layer 6b: Playwright + browsers (baked-in) ────────────────────────────────
+# 2026-05-08 incident (#394): the per-session `npx playwright install` path
+# delivered chrome-headless-shell to the agent's home dir without a usable
+# exec bit, looking like EACCES at test time. The coder cannot repair this
+# from inside its session — five fix_attempts fought executablePath
+# workarounds before auto-block. Solution: pre-install at image build time
+# into a shared, world-readable location with the exec bit forced on.
+# pf-verify-env.sh validates the binary on every session start.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN mkdir -p /opt/ms-playwright && \
+    npx --yes playwright@latest install --with-deps chromium chromium-headless-shell && \
+    find /opt/ms-playwright -type d -exec chmod a+rx {} + && \
+    find /opt/ms-playwright -type f \( -name 'chrome' -o -name 'chrome-headless-shell' -o -name 'headless_shell' -o -name 'node' \) -exec chmod a+rx {} +
+
 # ── Layer 7: Go 1.22 ─────────────────────────────────────────────────────────
 ENV GOVERSION=1.22.4
 ENV GOROOT=/usr/local/go
@@ -155,6 +169,14 @@ COPY deploy/docker/agent-entrypoint.sh /usr/local/bin/agent-entrypoint.sh
 # Strip Windows \r from the entrypoint — see Dockerfile.orchestrator for rationale.
 RUN sed -i 's/\r$//' /usr/local/bin/agent-entrypoint.sh \
  && chmod +x /usr/local/bin/agent-entrypoint.sh
+
+# pf-verify-env.sh — Layer 2 mechanical preflight (chrome binary exec bit,
+# pytest importable, etc). Agent-entrypoint.sh runs this before exec'ing
+# the agent process; exit 42 short-circuits to env-not-ready handling in
+# the orchestrator without charging a fix_attempt.
+COPY deploy/docker/pf-verify-env.sh /usr/local/bin/pf-verify-env.sh
+RUN sed -i 's/\r$//' /usr/local/bin/pf-verify-env.sh \
+ && chmod +x /usr/local/bin/pf-verify-env.sh
 
 # ── Switch to non-root agent user ────────────────────────────────────────────
 USER agent

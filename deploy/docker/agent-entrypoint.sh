@@ -61,4 +61,22 @@ if [ -d /workspace/.git ] && [ -n "${GH_TOKEN:-}" ]; then
     fi
 fi
 
+# Layer 2 preflight — runs mechanical checks (binary exists, exec bit set,
+# interpreter resolves) and exits 42 if the env can't run the agent's tests.
+# The orchestrator's _finalize_session special-cases exit=42 to skip
+# fix_attempt bumps and alert the operator instead. See deploy/docker/
+# pf-verify-env.sh for the check list.
+if [ -x /usr/local/bin/pf-verify-env.sh ]; then
+    set +e
+    /usr/local/bin/pf-verify-env.sh
+    _verify_rc=$?
+    set -e
+    if [ "$_verify_rc" -ne 0 ]; then
+        # Always normalise to 42 so the orchestrator's exit-code switch is
+        # unambiguous, even if the script crashed before reaching its own
+        # explicit `exit 42`.
+        exit 42
+    fi
+fi
+
 exec "$@"
