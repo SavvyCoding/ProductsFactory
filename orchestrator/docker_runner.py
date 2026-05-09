@@ -1121,6 +1121,38 @@ def _finalize_session(
         if exit_code == 0 and persona == "reviewer" and product.get("_auto_merge_enabled"):
             _session_features = _auto_merge_approved(product, _session_features)
 
+        # 2b. Detect repeated reviewer feedback (auto-block dead-end loops).
+        # Runs ONLY for reviewer sessions, before reconcile flips the
+        # feature to Implementing. The detector hashes the reviewer's
+        # `❌ <section>:` comments and blocks the feature when the same
+        # fingerprint repeats N consecutive cycles — catching loops earlier
+        # than the fix_attempts=5 cap (~3-4 hours saved on Ollama Cloud).
+        # Best-effort — never raises.
+        if exit_code == 0 and persona == "reviewer":
+            try:
+                from orchestrator.supervisor import detect_repeated_review_feedback
+                for _entry in _session_features:
+                    if (isinstance(_entry, dict)
+                            and _entry.get("review_outcome") == "changes_requested"
+                            and _entry.get("id")):
+                        _result = detect_repeated_review_feedback(
+                            feature_id=_entry["id"],
+                            product_id=product["id"],
+                            review_notes=_entry.get("review_notes"),
+                        )
+                        # If the detector blocked the feature, mutate the
+                        # session entry so reconcile doesn't roll it back to
+                        # Implementing+changes_requested over our PATCH.
+                        if _result.get("action") == "blocked":
+                            _entry["status"] = "Blocked"
+                            _entry["pr_number"] = None
+                            _entry["review_outcome"] = "changes_requested"
+            except Exception:
+                log.exception(
+                    f"Supervisor detect_repeated_review_feedback failed "
+                    f"for {product.get('name')}"
+                )
+
         # 3. Apply status updates (deletes session_result.json at end).
         _reconcile_session_result(working_dir, product["id"], exit_code, features=_session_features, persona=persona)
 
