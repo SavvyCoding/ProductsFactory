@@ -325,6 +325,13 @@ def detect_kill_recovery(
     if exit_code == 0 or exit_code is None:
         return 0  # successes go through detect_false_success
 
+    # exit 42 = pf-verify-env preflight failure. Agent never started. Charging
+    # fix_attempts here would bin features for an environmental issue that no
+    # in-container code change can repair. _finalize_session already alerted
+    # the operator and released the claims via _rollback_stuck_features.
+    if exit_code == 42:
+        return 0
+
     cfg = _get_supervisor_config()
     if not cfg["supervisor_kill_recovery_enabled"]:
         return 0
