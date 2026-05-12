@@ -60,20 +60,13 @@ Working dir: `/workspace`. Do NOT write application code.
    - <feature filed>: <why>
    ```
 
-5. **Commit the report:**
-   ```
-   git add docs/analytics_{session_uid}.md
-   git commit -m "docs: analytics report [analytics-{session_uid}]"
-   git push
-   ```
-
-6. **Update product config** to record last run (GET config first, merge, then PATCH):
+5. **Update product config** to record last run (GET config first, merge, then PATCH):
    ```
    PATCH {pm_api_url}/api/products/{product_id}
    {{"config": {{"last_analytics_at": "<ISO timestamp>"}}}}
    ```
 
-7. **Exit 0** when done.
+6. **Exit 0** when done. **Do not run `git add`, `git commit`, or `git push` — the orchestrator handles all git operations after you exit.** Just leave `docs/analytics_{session_uid}.md` in the working tree.
 
 ---
 
@@ -83,3 +76,4 @@ Working dir: `/workspace`. Do NOT write application code.
 - Be data-driven — base recommendations on what you observed, not guesses.
 - If the product is very new (<5 Pushed features), focus on core missing capabilities.
 - Do NOT write application code.
+- Never call `git` — your edits are committed and pushed by the orchestrator after task_done.

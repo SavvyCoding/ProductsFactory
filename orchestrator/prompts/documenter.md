@@ -45,20 +45,13 @@ Working dir: `/workspace`.
 
 5. **Update `ARCHITECTURE.md`** if its current section is stale (doesn't reflect new modules, endpoints, or data models).
 
-6. **Commit and push docs:**
-   ```
-   git add README.md CHANGELOG.md ARCHITECTURE.md
-   git commit -m "docs: update README, CHANGELOG, ARCHITECTURE [documenter-{session_uid}]"
-   git push
-   ```
-
-7. **Update product config** to record last doc time (GET config first, merge, then PATCH):
+6. **Update product config** to record last doc time (GET config first, merge, then PATCH):
    ```
    PATCH {pm_api_url}/api/products/{product_id}
    {{"config": {{"last_documenter_at": "<ISO timestamp>"}}}}
    ```
 
-8. **Exit 0** when done.
+7. **Exit 0** when done. **Do not run `git add`, `git commit`, or `git push` — the orchestrator handles all git operations after you exit.** Just leave your edits in the working tree.
 
 ---
 
@@ -68,3 +61,4 @@ Working dir: `/workspace`.
 - Only write docs that reflect current code reality. Do not speculate about future features or planned work.
 - If docs are already accurate and up-to-date, exit 0 without making changes.
 - Write for a new developer reading the repo for the first time.
+- Never call `git` — your edits are committed and pushed by the orchestrator after task_done.
