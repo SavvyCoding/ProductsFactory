@@ -91,6 +91,58 @@ def _ensure_session_result_writable(working_dir: str, product_name: str = "?") -
         log.warning(f"[{product_name}] alpine session_result_writable helper failed (non-fatal)")
 
 
+def _chmod_ssh_dir_via_alpine() -> None:
+    """
+    Re-normalise the bind-mounted ~/.ssh perms after a host-side write.
+
+    Docker Desktop on Windows surfaces bind-mounted files as `root:root 777`
+    after ANY host-side write touches the SSH dir (manual ~/.ssh/config edit,
+    ssh-keygen via greenfield_scaffold, etc.). OpenSSH then refuses to use
+    the config or private keys with "Bad owner or permissions on .ssh/config",
+    and the orchestrator's git fetch/push starts failing silently.
+
+    bootstrap.sh applies the same chmod at container startup, but that's
+    one-shot. Any subsequent host-side write reverts the perms in the
+    bind-mount view, and the only way to recover is restart the container
+    or re-chmod from a privileged context. Real incident: 2026-05-12 19:17,
+    StockAnalysis coder session 2322 lost SSH access because a host-side
+    `~/.ssh/config` edit at 17:56 flipped the file back to root:root 777.
+
+    This helper spawns an alpine sidecar as root (via the host docker socket)
+    that re-applies the same fixup the bootstrap does. Idempotent. Called
+    once per cycle from run_cycle so any host-side writes since the prior
+    cycle are repaired before the next git op fires. No-op if SSH_DIR_HOST
+    isn't set (legacy host-poller mode).
+
+    The hardcoded UID 999 / GID 999 mirror the `orchestrator` user defined
+    in deploy/docker/Dockerfile.orchestrator (`useradd -u 999 ...`); if that
+    UID changes both must update.
+    """
+    host_ssh = os.environ.get("SSH_DIR_HOST")
+    if not host_ssh:
+        return
+    try:
+        subprocess.run(
+            ["docker", "run", "--rm", "-v", f"{host_ssh}:/ssh",
+             "alpine", "sh", "-c",
+             "chown -R 999:999 /ssh 2>/dev/null; "
+             "chmod 700 /ssh 2>/dev/null; "
+             "for f in /ssh/config /ssh/known_hosts; do "
+             "  [ -f \"$f\" ] && chmod 600 \"$f\"; "
+             "done; "
+             "for k in /ssh/id_ed25519_*; do "
+             "  [ -f \"$k\" ] || continue; "
+             "  case \"$k\" in "
+             "    *.pub) chmod 644 \"$k\";; "
+             "    *)     chmod 600 \"$k\";; "
+             "  esac; "
+             "done"],
+            capture_output=True, timeout=30,
+        )
+    except Exception:
+        log.warning("alpine ssh-perm helper failed (non-fatal)")
+
+
 def _rm_path_via_alpine(working_dir: str, relative_path: str, product_name: str = "?") -> bool:
     """
     Force-delete a single file inside the workspace via an alpine sidecar.
