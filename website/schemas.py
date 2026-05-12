@@ -52,6 +52,7 @@ class ProductUpdate(BaseModel):
     last_run_at:     Optional[datetime]  = None
     run_now:         Optional[bool]      = None
     run_trainer_now: Optional[bool]      = None
+    run_persona_now: Optional[str]       = None
     custom_prompt:   Optional[str]       = None
 
 
@@ -68,6 +69,7 @@ class ProductOut(BaseModel):
     last_run_at:        Optional[datetime]
     run_now:            bool = False
     run_trainer_now:    bool = False
+    run_persona_now:    Optional[str] = None
     custom_prompt:      Optional[str] = None
     quiet_hours_start:  Optional[int] = None
     quiet_hours_end:    Optional[int] = None

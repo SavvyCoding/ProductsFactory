@@ -1058,7 +1058,7 @@
         <div class="wf-step">
           <div class="wf-step-num">STEP 11</div>
           <div class="wf-step-title">Post-Coder Chain</div>
-          <div class="wf-step-desc">On coder clean exit: runs QA Tester → Security Auditor. Each is a separate <code>docker run</code> in sequence. Recommender runs post-sprint (not here). Failures don't block the chain.</div>
+          <div class="wf-step-desc">On coder clean exit: runs QA Tester → Security Auditor. Each is a separate <code>docker run</code> in sequence. Recommender and the other maintenance agents are PM-triggered (not here). Failures don't block the chain.</div>
           <code class="wf-step-code">_run_post_coder_chain(product, session_uid)</code>
         </div>
         <div class="wf-step">
@@ -1215,7 +1215,7 @@
 
     <!-- Scheduled Maintenance -->
     <div>
-      <div class="persona-group-label">Post-Sprint Automation — run once after each sprint completes (gated by last_{persona}_at vs sprint.completed_at)</div>
+      <div class="persona-group-label">Maintenance Agents — PM-triggered via product.run_persona_now (each run stamps last_{persona}_at in product.config)</div>
       <div class="persona-cards">
 
         <div class="persona-card">
@@ -1224,7 +1224,7 @@
             <div class="persona-emoji">📝</div>
             <div>
               <div class="persona-name">Documenter</div>
-              <div class="persona-trigger">After each sprint completion (last_documenter_at)</div>
+              <div class="persona-trigger">PM-triggered (run_persona_now=documenter)</div>
             </div>
           </div>
           <div class="persona-desc">Keeps README, CHANGELOG, and ARCHITECTURE.md in sync with what's actually been built. Writes for a new developer. Adds changelog entries for recently Pushed features.</div>
@@ -1240,7 +1240,7 @@
             <div class="persona-emoji">📊</div>
             <div>
               <div class="persona-name">Analytics</div>
-              <div class="persona-trigger">After each sprint completion (last_analytics_at)</div>
+              <div class="persona-trigger">PM-triggered (run_persona_now=analytics)</div>
             </div>
           </div>
           <div class="persona-desc">Analyses feature velocity, backlog health, codebase growth, and UX gaps. Generates a structured analytics report in docs/ and files high-value feature suggestions backed by data.</div>
@@ -1256,7 +1256,7 @@
             <div class="persona-emoji">🔧</div>
             <div>
               <div class="persona-name">Refactorer</div>
-              <div class="persona-trigger">After each sprint completion (last_refactorer_at)</div>
+              <div class="persona-trigger">PM-triggered (run_persona_now=refactorer)</div>
             </div>
           </div>
           <div class="persona-desc">Scans the codebase for tech debt: god classes, duplicated logic, N+1 queries, magic numbers, dead code, missing abstractions. Creates specific chore features — never modifies code directly.</div>
@@ -1272,7 +1272,7 @@
             <div class="persona-emoji">🏗️</div>
             <div>
               <div class="persona-name">DevOps</div>
-              <div class="persona-trigger">After each sprint completion (last_devops_at)</div>
+              <div class="persona-trigger">PM-triggered (run_persona_now=devops)</div>
             </div>
           </div>
           <div class="persona-desc">Reviews Dockerfile, docker-compose, GitHub Actions, and dependency manifests. Checks for pinned base images, non-root users, secret handling, CI coverage, and outdated major versions.</div>
@@ -1288,7 +1288,7 @@
             <div class="persona-emoji">💡</div>
             <div>
               <div class="persona-name">Recommender</div>
-              <div class="persona-trigger">After each sprint completion (last_recommender_at)</div>
+              <div class="persona-trigger">PM-triggered (run_persona_now=recommender)</div>
             </div>
           </div>
           <div class="persona-desc">Searches competitors via web, analyses what was just built in the sprint, and suggests new feature ideas aligned with market direction. Posts them as Pending with source="ai" for PM approval.</div>
@@ -1461,7 +1461,7 @@
 <section id="postcoder">
   <div class="section-label">Automation Chain</div>
   <h2>Post-Coder Pipeline</h2>
-  <p class="section-sub">After every successful coder session, two agents run automatically in sequence — QA Tester and Security Auditor operate at the PR level. Recommender runs post-sprint (not post-coder).</p>
+  <p class="section-sub">After every successful coder session, two agents run automatically in sequence — QA Tester and Security Auditor operate at the PR level. Maintenance agents (Recommender, Documenter, etc.) are PM-triggered separately.</p>
 
   <div class="chain-flow">
     <div class="chain-node">
@@ -1531,9 +1531,9 @@
 
 <!-- MAINTENANCE SCHEDULE -->
 <section id="maintenance">
-  <div class="section-label">Post-Sprint Automation</div>
-  <h2>Post-Sprint Sequence</h2>
-  <p class="section-sub">After each sprint completes, five personas run once in sequence — triggered by comparing <code style="font-family:'JetBrains Mono',monospace;color:var(--blue2)">last_{persona}_at</code> against <code style="font-family:'JetBrains Mono',monospace;color:var(--cyan)">sprint.completed_at</code>. No time intervals — sprint completion is the event.</p>
+  <div class="section-label">On-Demand Agents</div>
+  <h2>Maintenance Agents</h2>
+  <p class="section-sub">Five maintenance personas run on demand — the PM triggers them from the product page, the poller picks them up via <code style="font-family:'JetBrains Mono',monospace;color:var(--blue2)">product.run_persona_now</code> on the next cycle, and stamps <code style="font-family:'JetBrains Mono',monospace;color:var(--cyan)">last_{persona}_at</code> in <code style="font-family:'JetBrains Mono',monospace;color:var(--blue2)">product.config</code> after a successful run.</p>
 
   <div class="schedule-grid" style="grid-template-columns:repeat(5,1fr)">
 
@@ -1541,8 +1541,8 @@
       <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:16px">
         <span style="font-size:28px">📝</span>
         <div>
-          <div class="schedule-interval" style="color:#94a3b8;font-size:20px">1st</div>
-          <div class="schedule-unit">post-sprint</div>
+          <div class="schedule-interval" style="color:#94a3b8;font-size:20px">▶</div>
+          <div class="schedule-unit">on-demand</div>
         </div>
       </div>
       <div class="schedule-name">Documenter</div>
@@ -1555,8 +1555,8 @@
       <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:16px">
         <span style="font-size:28px">📊</span>
         <div>
-          <div class="schedule-interval" style="color:#34d399;font-size:20px">2nd</div>
-          <div class="schedule-unit">post-sprint</div>
+          <div class="schedule-interval" style="color:#34d399;font-size:20px">▶</div>
+          <div class="schedule-unit">on-demand</div>
         </div>
       </div>
       <div class="schedule-name">Analytics</div>
@@ -1569,8 +1569,8 @@
       <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:16px">
         <span style="font-size:28px">🔧</span>
         <div>
-          <div class="schedule-interval" style="color:#fbbf24;font-size:20px">3rd</div>
-          <div class="schedule-unit">post-sprint</div>
+          <div class="schedule-interval" style="color:#fbbf24;font-size:20px">▶</div>
+          <div class="schedule-unit">on-demand</div>
         </div>
       </div>
       <div class="schedule-name">Refactorer</div>
@@ -1583,8 +1583,8 @@
       <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:16px">
         <span style="font-size:28px">🏗️</span>
         <div>
-          <div class="schedule-interval" style="color:#a78bfa;font-size:20px">4th</div>
-          <div class="schedule-unit">post-sprint</div>
+          <div class="schedule-interval" style="color:#a78bfa;font-size:20px">▶</div>
+          <div class="schedule-unit">on-demand</div>
         </div>
       </div>
       <div class="schedule-name">DevOps</div>
@@ -1597,8 +1597,8 @@
       <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:16px">
         <span style="font-size:28px">💡</span>
         <div>
-          <div class="schedule-interval" style="color:#f472b6;font-size:20px">5th</div>
-          <div class="schedule-unit">post-sprint</div>
+          <div class="schedule-interval" style="color:#f472b6;font-size:20px">▶</div>
+          <div class="schedule-unit">on-demand</div>
         </div>
       </div>
       <div class="schedule-name">Recommender</div>
@@ -1644,36 +1644,6 @@
         </tr>
         <tr style="border-top:1px solid var(--border)">
           <td style="padding:10px 20px;font-size:12px;font-weight:700;color:var(--blue2)">3</td>
-          <td style="padding:10px 20px;font-size:12px;color:var(--slate)">📝 Documenter</td>
-          <td style="padding:10px 20px;font-size:12px;color:var(--text2)">last_documenter_at &lt; last sprint completed_at (or never ran)</td>
-          <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">_post_sprint_persona_due()</td>
-        </tr>
-        <tr style="border-top:1px solid var(--border)">
-          <td style="padding:10px 20px;font-size:12px;font-weight:700;color:var(--blue2)">4</td>
-          <td style="padding:10px 20px;font-size:12px;color:var(--cyan)">📊 Analytics</td>
-          <td style="padding:10px 20px;font-size:12px;color:var(--text2)">last_analytics_at &lt; last sprint completed_at (or never ran)</td>
-          <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">_post_sprint_persona_due()</td>
-        </tr>
-        <tr style="border-top:1px solid var(--border)">
-          <td style="padding:10px 20px;font-size:12px;font-weight:700;color:var(--blue2)">5</td>
-          <td style="padding:10px 20px;font-size:12px;color:var(--amber2)">🔧 Refactorer</td>
-          <td style="padding:10px 20px;font-size:12px;color:var(--text2)">last_refactorer_at &lt; last sprint completed_at (or never ran)</td>
-          <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">_post_sprint_persona_due()</td>
-        </tr>
-        <tr style="border-top:1px solid var(--border)">
-          <td style="padding:10px 20px;font-size:12px;font-weight:700;color:var(--blue2)">6</td>
-          <td style="padding:10px 20px;font-size:12px;color:var(--violet2)">🏗️ DevOps</td>
-          <td style="padding:10px 20px;font-size:12px;color:var(--text2)">last_devops_at &lt; last sprint completed_at (or never ran)</td>
-          <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">_post_sprint_persona_due()</td>
-        </tr>
-        <tr style="border-top:1px solid var(--border)">
-          <td style="padding:10px 20px;font-size:12px;font-weight:700;color:var(--blue2)">7</td>
-          <td style="padding:10px 20px;font-size:12px;color:var(--pink)">💡 Recommender</td>
-          <td style="padding:10px 20px;font-size:12px;color:var(--text2)">last_recommender_at &lt; last sprint completed_at (or never ran)</td>
-          <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">_post_sprint_persona_due()</td>
-        </tr>
-        <tr style="border-top:1px solid var(--border)">
-          <td style="padding:10px 20px;font-size:12px;font-weight:700;color:var(--blue2)">8</td>
           <td style="padding:10px 20px;font-size:12px;color:var(--green2)">📋 Planner</td>
           <td style="padding:10px 20px;font-size:12px;color:var(--text2)">No in-flight features exist for this product</td>
           <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">fallback — always runs if above fail</td>
@@ -1682,6 +1652,12 @@
           <td style="padding:10px 20px;font-size:12px;font-weight:700;color:var(--amber2)">on-demand</td>
           <td style="padding:10px 20px;font-size:12px;color:var(--amber2)">🎬 Product Trainer</td>
           <td style="padding:10px 20px;font-size:12px;color:var(--text2)">product.run_trainer_now = true (set from PM dashboard)</td>
+          <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">bypasses round-robin; flag cleared after launch</td>
+        </tr>
+        <tr style="border-top:1px solid var(--border);background:rgba(245,158,11,0.04)">
+          <td style="padding:10px 20px;font-size:12px;font-weight:700;color:var(--amber2)">on-demand</td>
+          <td style="padding:10px 20px;font-size:12px;color:var(--slate)">📝 Documenter / 📊 Analytics / 🔧 Refactorer / 🏗️ DevOps / 💡 Recommender</td>
+          <td style="padding:10px 20px;font-size:12px;color:var(--text2)">product.run_persona_now = &lt;name&gt; (set from PM dashboard)</td>
           <td style="padding:10px 20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text3)">bypasses round-robin; flag cleared after launch</td>
         </tr>
         <tr style="border-top:1px solid var(--border);background:rgba(6,182,212,0.04)">

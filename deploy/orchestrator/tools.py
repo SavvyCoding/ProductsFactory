@@ -149,8 +149,11 @@ def _bump_product_last_run(product_id: int) -> None:
 
 
 _PRODUCT_KEEP = {"id", "name", "status", "working_dir", "github_repo", "tech_stack",
-                 "run_now", "run_trainer_now", "quiet_hours_start", "quiet_hours_end",
+                 "run_now", "run_trainer_now", "run_persona_now",
+                 "quiet_hours_start", "quiet_hours_end",
                  "daily_session_cap", "last_run_at", "config", "type"}
+
+_ONDEMAND_PERSONAS = ("documenter", "analytics", "refactorer", "devops", "recommender")
 _FEATURE_KEEP = {"id", "product_id", "sprint_id", "name", "status", "feature_type",
                  "design_doc_path", "pr_number", "pr_url", "fix_attempts"}
 _SPRINT_KEEP  = {"id", "product_id", "phase_id", "name", "status", "goal",
@@ -533,6 +536,35 @@ def run_cycle(args: dict, **kwargs) -> str:
                 _run_supervisor_per_product_detectors(p)
             except Exception:
                 log.exception(f"supervisor per-product detectors failed for product {p.get('id')}")
+
+        # Priority 0: PM-triggered on-demand sessions. Bypasses round-robin
+        # and the determine_next_action decision tree — the PM clicked a
+        # button, run that persona for that product. Flag is cleared up
+        # front so a crashing launch doesn't re-fire on every cycle.
+        for p in ready:
+            persona = None
+            patch: dict = {}
+            queued = p.get("run_persona_now")
+            if queued and queued in _ONDEMAND_PERSONAS:
+                persona = queued
+                patch["run_persona_now"] = None
+            elif p.get("run_trainer_now"):
+                persona = "product_trainer"
+                patch["run_trainer_now"] = False
+            if not persona:
+                continue
+            pid = p["id"]
+            try:
+                _pm("PATCH", f"/api/products/{pid}", patch)
+            except Exception:
+                log.exception(f"[on-demand] could not clear flag on product {pid}")
+            log.info(f"[on-demand] launching {persona} for product {pid} ({p.get('name','?')})")
+            launch_result = json.loads(launch_session(
+                {"product_id": pid, "persona": persona}, **kwargs
+            ))
+            return _ok({"action": "launched", "product_id": pid, "persona": persona,
+                        "reason": f"on-demand {persona}",
+                        "launch": launch_result})
 
         # 5. Find next work
         # Priority 1: reviewer work across all products

@@ -138,6 +138,16 @@
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
           </button>
         </form>
+        <form method="post" action="/product/{{ product.id }}/run-persona" class="inline-form pf-run-persona-form" data-tooltip="{% if product.run_persona_now %}{{ product.run_persona_now }} queued{% else %}Run maintenance persona{% endif %}">
+          <select name="persona" class="pf-select-sm" {% if product.run_persona_now %}disabled{% endif %} required onchange="if(this.value) this.form.submit()">
+            <option value="">{% if product.run_persona_now %}{{ product.run_persona_now }} queued…{% else %}Run agent…{% endif %}</option>
+            <option value="documenter">📝 Documenter</option>
+            <option value="analytics">📊 Analytics</option>
+            <option value="refactorer">🔧 Refactorer</option>
+            <option value="devops">🏗️ DevOps</option>
+            <option value="recommender">💡 Recommender</option>
+          </select>
+        </form>
         {% if product.type == 'brownfield' and product.analysis_status != 'running' and product.analysis_status != 'done' %}
         <form method="post" action="/product/{{ product.id }}/trigger_analysis" class="inline-form">
           <button class="pf-icon-action" data-tooltip="Run analysis" aria-label="Run analysis">
@@ -383,6 +393,9 @@
   {% endif %}
   {% if product.run_trainer_now %}
   <div class="notice notice-blue" style="margin-bottom:14px">🎬 Showcase video generation queued for next poller cycle.</div>
+  {% endif %}
+  {% if product.run_persona_now %}
+  <div class="notice notice-blue" style="margin-bottom:14px">🤖 {{ product.run_persona_now }} session queued for next poller cycle.</div>
   {% endif %}
   {% if product.config and product.config.baseline_tests %}
   <div class="baseline-bar" style="margin-bottom:14px">

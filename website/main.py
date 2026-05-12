@@ -1249,6 +1249,27 @@ async def run_trainer(
     return RedirectResponse(f"/product/{product_id}", status_code=303)
 
 
+# On-demand maintenance personas. These used to be scheduled in a post-sprint
+# cadence (_post_sprint_persona_due), but the dispatcher never wired them up;
+# they're now PM-triggered from the product page, like product_trainer.
+ONDEMAND_PERSONAS = ("documenter", "analytics", "refactorer", "devops", "recommender")
+
+
+@app.post("/product/{product_id}/run-persona")
+async def run_persona(
+    product_id: int,
+    persona: str = Form(...),
+    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
+):
+    """Queue an on-demand maintenance persona for the next poller cycle."""
+    if persona not in ONDEMAND_PERSONAS:
+        raise HTTPException(status_code=400, detail=f"persona must be one of {ONDEMAND_PERSONAS}")
+    product = await _get_product_or_404(product_id, db)
+    product.run_persona_now = persona
+    await db.flush()
+    return RedirectResponse(f"/product/{product_id}", status_code=303)
+
+
 @app.post("/product/{product_id}/schedule")
 async def save_schedule(
     product_id: int,

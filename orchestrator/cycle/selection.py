@@ -18,8 +18,10 @@ Stays in poller.py: is_daily_cap_reached (depends on the mutable
 _daily_session_counts global that _reset_daily_counts_if_new_day rebinds —
 moving the reader without the state would silently desync them).
 
-Also exports _POST_SPRINT_PERSONAS, the cadence list the cycle uses to
-schedule one-shot maintenance personas after each sprint completes.
+Also exports _ONDEMAND_PERSONAS, the set of maintenance personas that
+are PM-triggered (via product.run_persona_now). The poller stamps
+last_{persona}_at in product.config when one of these runs, so the UI
+can show "ran 2h ago".
 
 Extracted from poller.py during Phase 4 of OrchestratorRefactor.
 """
@@ -35,10 +37,13 @@ log = logging.getLogger("poller")
 PM_API_URL = os.environ["PM_API_URL"]
 
 
-# Post-sprint personas — run once after each sprint completes, in this order.
-# Agents write last_{persona}_at on completion; the poller compares that timestamp
-# against the sprint's completed_at to decide if the persona is due again.
-_POST_SPRINT_PERSONAS = [
+# Maintenance personas — PM-triggered via product.run_persona_now (see
+# website/main.py:run_persona). Listed here so the poller knows to stamp
+# last_{persona}_at in product.config after a successful run, for UI display.
+# The post-sprint scheduled cadence that referenced this list was never wired
+# up by the Phase 5 dispatcher and has been removed; these personas are now
+# strictly on-demand.
+_ONDEMAND_PERSONAS = [
     "documenter",
     "analytics",
     "refactorer",
