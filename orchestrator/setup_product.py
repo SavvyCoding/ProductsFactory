@@ -83,6 +83,21 @@ def discover_and_populate(product: dict):
     except Exception as e:
         log.warning(f"Template install failed (non-fatal): {e}")
 
+    # Disable filemode tracking for brownfield repos too. Docker Desktop on
+    # Windows can't reliably persist Unix +x bits through bind-mounts, so
+    # _chmod_workspace_via_alpine leaves files at 0644 from git's perspective
+    # and post-coder's `git checkout -B sprint/X origin/sprint/X` then aborts
+    # on "local changes would be overwritten". Idempotent and per-repo, so
+    # safe to set every discovery cycle.
+    if (working_dir / ".git").exists():
+        try:
+            subprocess.run(
+                ["git", "config", "core.fileMode", "false"],
+                cwd=working_dir, capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
+
     product_type = updates.get("type") or product.get("type", "brownfield")
     updates["status"] = "discovered" if product_type == "greenfield" else "ready"
     _update_product(product["id"], updates)

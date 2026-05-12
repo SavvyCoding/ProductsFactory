@@ -53,6 +53,22 @@ if _env_file.exists():
             _k, _, _v = _line.partition("=")
             os.environ[_k.strip()] = _v.strip()
 
+# Kill the Windows credential dialog that fires on every host-side `git fetch`
+# against a product repo with an HTTPS remote and no embedded PAT. The fetch
+# failure is already logged + non-fatal in git_ops.sync_workspace, so silencing
+# the prompt just stops the dialog popups without changing behavior. setdefault
+# so .env can override.
+#   GIT_TERMINAL_PROMPT=0 — disables git's own terminal prompt
+#   GCM_INTERACTIVE=Never — disables Git Credential Manager's GUI dialog
+#                            (separate from GIT_TERMINAL_PROMPT, ships with
+#                            Git for Windows; this is what was popping up)
+#   GIT_ASKPASS=, SSH_ASKPASS= — belt-and-braces against any other askpass
+#                                helper that might be wired in
+os.environ.setdefault("GIT_TERMINAL_PROMPT", "0")
+os.environ.setdefault("GCM_INTERACTIVE", "Never")
+os.environ.setdefault("GIT_ASKPASS", "")
+os.environ.setdefault("SSH_ASKPASS", "")
+
 import time
 import logging
 import socket

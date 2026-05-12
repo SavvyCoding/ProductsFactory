@@ -75,7 +75,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse,
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import bcrypt as _bcrypt_lib
-from sqlalchemy import select, func, text, case, update
+from sqlalchemy import select, func, text, case, update, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -162,11 +162,72 @@ def _sanitize_for_prompt(text: str, max_len: int = _PROMPT_USER_INPUT_MAX) -> st
     return cleaned.replace("<", "&lt;").replace(">", "&gt;")
 
 
-async def _llm_call(prompt: str, max_tokens: int = 3000) -> str:
-    """Call Claude — tries CLI first (OAuth subscription), falls back to SDK (API key)."""
-    import subprocess, shutil
+async def _llm_call(prompt: str, db: AsyncSession, max_tokens: int = 3000) -> str:
+    """Call the configured LLM backend for PM-facing AI features.
 
-    # 1) Try claude CLI (uses OAuth tokens from ~/.claude)
+    Order of preference:
+      1. Ollama (cloud or local) using `system_config.ollama_host` and
+         `system_config.ollama_api_key`. Picks the model from
+         `ollama_model_map["recommender"]` if present, otherwise
+         `system_config.designer_model`, otherwise a sane default.
+         This is what 'use Ollama Key' means — the wizard's articulate-
+         vision / suggest-features / stack-recommendation features all
+         go through the same provider the rest of the system uses for
+         agent work, instead of requiring a separate Anthropic key.
+      2. Claude CLI (uses OAuth tokens from ~/.claude) if a `claude`
+         binary is on PATH.
+      3. Anthropic SDK if ANTHROPIC_API_KEY env var is set.
+      4. Else: 501.
+    """
+    import subprocess, shutil
+    import httpx as _httpx
+
+    sys_cfg = await _get_system_config(db)
+
+    # 1) Ollama (preferred — reuses the key the rest of the system uses)
+    ollama_host    = (sys_cfg.ollama_host    if sys_cfg else None) or os.environ.get("OLLAMA_HOST", "")
+    ollama_api_key = (sys_cfg.ollama_api_key if sys_cfg else None) or os.environ.get("OLLAMA_API_KEY", "")
+    if ollama_host:
+        # Resolve which model to use. Per-persona override > legacy designer_model > default.
+        model_map = (sys_cfg.ollama_model_map if sys_cfg else None) or {}
+        # 'recommender' is the persona used for PM-facing recommendations.
+        rec = model_map.get("recommender")
+        if isinstance(rec, list):
+            model = rec[0] if rec else None
+        elif isinstance(rec, str):
+            model = rec
+        else:
+            model = None
+        if not model:
+            model = (sys_cfg.designer_model if sys_cfg else None) or "glm-4.7"
+            # designer_model can be "a, b" — take the first.
+            if "," in model:
+                model = model.split(",", 1)[0].strip()
+        headers = {"Content-Type": "application/json"}
+        if ollama_api_key:
+            headers["Authorization"] = f"Bearer {ollama_api_key}"
+        try:
+            async with _httpx.AsyncClient(timeout=180) as client:
+                r = await client.post(
+                    ollama_host.rstrip("/") + "/api/chat",
+                    headers=headers,
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "stream": False,
+                        "options": {"num_predict": max_tokens},
+                    },
+                )
+                r.raise_for_status()
+                data = r.json()
+                msg = data.get("message") or {}
+                content = (msg.get("content") or "").strip()
+                if content:
+                    return content
+        except Exception as e:
+            log.warning(f"_llm_call: Ollama failed ({e!r}) — falling back")
+
+    # 2) Try claude CLI (uses OAuth tokens from ~/.claude)
     claude_bin = shutil.which("claude")
     if claude_bin:
         try:
@@ -182,12 +243,13 @@ async def _llm_call(prompt: str, max_tokens: int = 3000) -> str:
         except Exception:
             pass  # fall through to SDK
 
-    # 2) Fall back to Anthropic SDK with API key
+    # 3) Fall back to Anthropic SDK with API key
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         raise HTTPException(
             status_code=501,
-            detail="Neither Claude CLI nor ANTHROPIC_API_KEY is available",
+            detail="No LLM backend available — set system_config.ollama_host "
+                   "(+ ollama_api_key for Ollama Cloud) or ANTHROPIC_API_KEY.",
         )
     import anthropic
     client = anthropic.Anthropic(api_key=api_key)
@@ -1733,6 +1795,7 @@ async def _generate_sprint_release_notes(sprint_id: int, product_id: int, db: As
             "- A '## What's New' section with bullet points grouped by theme\n"
             "- Keep it short and user-facing — no internal jargon\n"
             "Return only the Markdown, nothing else.",
+            db=db,
             max_tokens=800,
         )
     except Exception:
@@ -2442,10 +2505,27 @@ async def api_reset_stuck(db: AsyncSession = Depends(get_db)):
     """
     sys_cfg = await _get_system_config(db)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=_cfg(sys_cfg, "stuck_feature_timeout_hours"))
+    # Implemented is a transient handoff state: the agent writes it to
+    # session_result.json on completion, post-coder PATCHes it to Reviewing
+    # within seconds. Anything sitting in Implemented for more than a few
+    # minutes is an orphaned handoff (post-coder crashed / session killed
+    # mid-push). Use a much tighter 5-min cutoff for it so recovery doesn't
+    # wait the full 45 min that legitimate Implementing/Designing/Reviewing
+    # work states need. (Without this split the same hole observed on #377
+    # twice in one day reopens for 30+ min on every kill.)
+    implemented_cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
     result = await db.execute(
         select(Feature).where(
-            Feature.status.in_(["Implementing", "Designing", "Reviewing"]),
-            Feature.updated_at < cutoff,
+            or_(
+                and_(
+                    Feature.status.in_(["Implementing", "Designing", "Reviewing"]),
+                    Feature.updated_at < cutoff,
+                ),
+                and_(
+                    Feature.status == "Implemented",
+                    Feature.updated_at < implemented_cutoff,
+                ),
+            )
         )
     )
     stuck = result.scalars().all()
@@ -2458,6 +2538,26 @@ async def api_reset_stuck(db: AsyncSession = Depends(get_db)):
             f.status = "Approved"
         elif f.status == "Reviewing":
             f.status = "Implementing"  # Coder will re-open or reviewer will re-pick
+        elif f.status == "Implemented":
+            # Handoff orphan: agent wrote "Implemented" to session_result.json but
+            # post-coder's "→ Reviewing" PATCH (post_coder.py:766) never ran —
+            # session was killed between the agent's final write and the GitHub
+            # push step. Without this branch the feature is unreachable: no
+            # persona's next-for-persona query matches Implemented, and
+            # auto-merge waits for Reviewed. Recovery depends on whether the PR
+            # was actually pushed before the kill:
+            #   • PR exists → bump to Reviewing (post-coder partially completed,
+            #     PR is real, just the status PATCH was missed)
+            #   • No PR → demote past Implementing back to a re-pickable state.
+            #     Implementing alone is NOT pickable: next-for-persona requires
+            #     Implementing+review_outcome=changes_requested for the coder
+            #     query, and these features have no review (the reviewer never
+            #     saw them). Mirror the Implementing branch above: Designed if
+            #     there's a design doc, else Approved.
+            if f.pr_number:
+                f.status = "Reviewing"
+            else:
+                f.status = "Designed" if f.design_doc_path else "Approved"
         if old_status != f.status:
             db.add(FeatureChangelog(
                 feature_id=f.id,
@@ -2565,6 +2665,7 @@ async def api_get_system_config(db: AsyncSession = Depends(get_db)):
 @app.post("/api/recommend/features")
 async def recommend_features(
     body: schemas.RecommendRequest,
+    db: AsyncSession = Depends(get_db),
     _: str = Depends(require_auth),
 ):
     """Call Claude to suggest initial features based on product vision."""
@@ -2593,6 +2694,7 @@ async def recommend_features(
             "feature_type (feature/bug/chore), priority (1-100 where 100=critical).\n\n"
             "Return ONLY a JSON array, no other text:\n"
             '[{"name": "...", "description": "...", "feature_type": "feature", "priority": 70}]',
+            db=db,
             max_tokens=4000,
         )
         if raw.startswith("```"):
@@ -2625,6 +2727,7 @@ async def wizard_catalog():
 @app.post("/api/wizard/recommend-stack")
 async def recommend_stack(
     body: schemas.RecommendStackRequest,
+    db: AsyncSession = Depends(get_db),
     _: str = Depends(require_auth),
 ):
     """Given a product vision, suggest the best tech stack from STACK_CATALOG.
@@ -2667,6 +2770,7 @@ async def recommend_stack(
             "Prefer mainstream choices (Python+FastAPI, Next.js, etc.) over exotic ones "
             "unless the vision strongly justifies otherwise. Pick a database that pairs "
             "naturally with the chosen stack and the data shape described in the vision.",
+            db=db,
             max_tokens=500,
         )
         if raw.startswith("```"):
@@ -2690,6 +2794,7 @@ async def recommend_stack(
 @app.post("/api/wizard/recommend-ui-template")
 async def recommend_ui_template(
     body: schemas.RecommendUITemplateRequest,
+    db: AsyncSession = Depends(get_db),
     _: str = Depends(require_auth),
 ):
     """Given vision + stack, suggest a UI template from UI_TEMPLATES."""
@@ -2716,6 +2821,7 @@ async def recommend_ui_template(
             "Return ONLY a JSON object: "
             '{"recommended": "<template_id>", "reasoning": "<1-2 sentences in plain English>"}'
             " — pick exactly one. The id must match an entry above.",
+            db=db,
             max_tokens=300,
         )
         if raw.startswith("```"):
@@ -2735,6 +2841,7 @@ async def recommend_ui_template(
 @app.post("/api/articulate/vision")
 async def articulate_vision(
     body: schemas.ArticulateRequest,
+    db: AsyncSession = Depends(get_db),
     _: str = Depends(require_auth),
 ):
     """Refine and articulate a rough product vision into a clear, structured statement."""
@@ -2754,6 +2861,7 @@ async def articulate_vision(
             "and what success looks like. "
             "Write in plain English — no bullet points, no headings, 3-5 sentences. "
             "Return only the articulated vision text, nothing else.",
+            db=db,
             max_tokens=600,
         )
         return {"vision": result}
@@ -3208,6 +3316,7 @@ async def api_plan_sprints(
             '    ]\n'
             '  }\n'
             ']',
+            db=db,
             max_tokens=3000,
         )
         if raw.startswith("```"):

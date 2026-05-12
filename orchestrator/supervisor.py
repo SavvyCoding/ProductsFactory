@@ -734,6 +734,21 @@ def detect_kill_recovery(
     if exit_code == 42:
         return 0
 
+    # Reviewer kills are not feature failures. The reviewer's decision
+    # (approve / request-changes) is captured via PM API PATCH or via
+    # session_result.json — both paths advance fix_attempts through the
+    # website's normal Reviewing→Implementing flap transition. When the
+    # reviewer SESSION dies (Ollama 500, operator kill, write_file rejection
+    # giving up with task_done blocked, max_turns hit), the feature itself
+    # is unchanged — a successor reviewer cycle takes another shot. Bumping
+    # fix_attempts here double-charged #379 three times today
+    # (sessions 2156/2161/the one prompting this fix at 2026-05-10 04:24)
+    # and pushed it through auto-Block at fa=5 for environmental reasons,
+    # not real review rejections. Coder/designer kills still bump — they're
+    # generally agent-side failures of the feature work itself.
+    if persona == "reviewer":
+        return 0
+
     cfg = _get_supervisor_config()
     if not cfg["supervisor_kill_recovery_enabled"]:
         return 0

@@ -16,6 +16,8 @@ Extracted from docker_runner.py during Phase 2 of OrchestratorRefactor.
 """
 
 import logging
+import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -87,6 +89,60 @@ def safe_run(
         )
 
 
+def _enforce_ssh_origin(working_dir: str, product_name: str) -> None:
+    """Re-point origin at the SSH alias when a deploy key exists for this repo.
+
+    Looks at the current origin URL, extracts owner/repo, derives the SSH
+    alias from the repo name (lowercased), and sets `origin` to
+    `git@github.com-<repo>:<owner>/<repo>.git` IF a matching deploy key
+    file (`$SSH_DIR/id_ed25519_<repo>`) exists. No-op otherwise (so
+    non-SSH products and missing-key cases are unaffected).
+
+    The alias matching mirrors the layout in `~/.ssh/config` written
+    during the SSH switch on 2026-05-09: one `Host github.com-<repo>`
+    block per product, each `IdentityFile ~/.ssh/id_ed25519_<repo>`.
+    """
+    wd = Path(working_dir)
+    try:
+        cur = safe_run(["git", "remote", "get-url", "origin"], cwd=wd, log_label=product_name)
+        cur_url = (cur.stdout or "").strip()
+        if not cur_url:
+            return
+        # Match either `https://github.com/X/Y.git` or `git@host:X/Y.git`
+        m = re.search(r"[:/]([^/:]+/[^/:]+?)(?:\.git)?$", cur_url)
+        if not m:
+            return
+        slug = m.group(1)
+        owner, _, repo_name = slug.partition("/")
+        repo_key = repo_name.lower()
+        ssh_dir = Path(os.environ.get("SSH_DIR", str(Path.home() / ".ssh")))
+        key_file = ssh_dir / f"id_ed25519_{repo_key}"
+        if not key_file.exists():
+            return  # No deploy key for this product — leave the remote as-is
+        ssh_alias = f"github.com-{repo_key}"
+        expected_url = f"git@{ssh_alias}:{slug}.git"
+        if cur_url == expected_url:
+            return
+        r = safe_run(
+            ["git", "remote", "set-url", "origin", expected_url],
+            cwd=wd, log_label=product_name,
+        )
+        if r.returncode == 0:
+            # Redact any PAT in cur_url before logging.
+            redacted = re.sub(r":[^:@/]+@", ":***@", cur_url)
+            log.info(
+                f"[{product_name}] origin re-pointed at SSH alias "
+                f"{ssh_alias} (was: {redacted})"
+            )
+        else:
+            log.warning(
+                f"[{product_name}] _enforce_ssh_origin set-url failed: "
+                f"{r.stderr.strip()[:200]}"
+            )
+    except Exception:
+        log.exception(f"[{product_name}] _enforce_ssh_origin crashed")
+
+
 def _reset_workspace(working_dir: str, product_name: str) -> None:
     """
     Sync the product workspace to the latest state on origin/main before each session.
@@ -107,6 +163,18 @@ def _reset_workspace(working_dir: str, product_name: str) -> None:
     # with "Unable to create index.lock: File exists" — silently breaking
     # the rest of this _reset_workspace cascade. See helper docstring.
     _remove_stale_git_lock(working_dir, product_name)
+
+    # Enforce SSH origin if a deploy key exists for this product. Without this,
+    # any external `git remote set-url origin https://...` (manual operator,
+    # `gh repo clone`, mis-configured tooling) reverts the remote and post-
+    # coder's `git pull` / `git push` then fail on `terminal prompts disabled`
+    # — silently. The Implemented features that follow loop forever as
+    # reset_stuck demotes them Implemented → Designed each cycle (real
+    # incident 2026-05-11: feature #392 burned 8+ coder cycles / ~3h of
+    # compute before the reverted remote was caught manually). Idempotent
+    # no-op when already on the SSH alias. Falls back to leaving the remote
+    # alone when no deploy key file exists (so non-SSH products keep working).
+    _enforce_ssh_origin(working_dir, product_name)
 
     # 1. Fetch latest from origin (updates remote-tracking refs, prunes deleted branches)
     # Longer timeout — fetch can legitimately take a while on slow networks.

@@ -308,10 +308,19 @@ def tool_read_file(path: str, max_lines: int = 500) -> str:
     p = _resolve_path(path)
     _log(f"read: {p}")
     try:
-        lines = p.read_text(encoding="utf-8").splitlines()
+        text = p.read_text(encoding="utf-8")
+        lines = text.splitlines()
         if len(lines) > max_lines:
-            return "\n".join(lines[:max_lines]) + f"\n[...{len(lines) - max_lines} more lines truncated]"
-        return "\n".join(lines)
+            text = "\n".join(lines[:max_lines]) + f"\n[...{len(lines) - max_lines} more lines truncated]"
+        else:
+            text = "\n".join(lines)
+        # Char cap defends against minified/single-line files that slip past the
+        # line cap (e.g. a 1-line bundle.js = 200KB → 50k tokens into history,
+        # re-sent every subsequent turn since agent_loop has no sliding window).
+        # Mirrors the bash output cap pattern: head + tail with a marker.
+        if len(text) > 10_000:
+            text = text[:5_000] + "\n[...read_file truncated, file too large...]\n" + text[-4_000:]
+        return text
     except FileNotFoundError:
         return f"ERROR: File not found: {p}"
     except Exception as e:
@@ -411,12 +420,24 @@ def dispatch_tool(name: str, args: dict) -> tuple[str, bool]:
     elif name == "write_file":
         if AGENT_PERSONA in _READONLY_PERSONAS:
             _log(f"REFUSING write_file for {AGENT_PERSONA} persona")
+            # Earlier guidance pointed at `gh pr review --request-changes` and
+            # vague "PATCH the feature" — but `gh` isn't on PATH and the
+            # PATCH command wasn't spelled out. Reviewers (sessions 2158/2161,
+            # 2026-05-10) hit this rejection, gave up with task_done(blocked),
+            # and left features stuck in Reviewing. Spell out both working
+            # paths so the model has somewhere to go from here.
             return (
-                f"REJECTED: persona={AGENT_PERSONA} is read-only — cannot write files. "
-                f"Your role is to review/test/audit and decide approve vs request-changes. "
-                f"If the code needs changes, post a review via gh pr review --request-changes "
-                f"and PATCH the feature to status=Implementing — do NOT modify files. Use "
-                f"task_done with summary starting 'blocked:' if you genuinely cannot proceed."
+                f"REJECTED: persona={AGENT_PERSONA} is read-only — write_file is blocked. "
+                f"To record your decision use ONE of these (NOT write_file, NOT gh):\n"
+                f"  (a) bash: echo '{{\"id\":<feat_id>,\"status\":\"Reviewed\"|\"Implementing\","
+                f"\"review_outcome\":\"approved\"|\"changes_requested\",\"pr_number\":<n>}}'"
+                f" >> /workspace/session_result.json\n"
+                f"  (b) bash: curl -sS -X PATCH $PM_API_URL/api/features/<feat_id> "
+                f"-H 'Content-Type: application/json' -d '{{\"status\":\"...\","
+                f"\"review_outcome\":\"...\",\"changed_by\":\"reviewer\"}}'\n"
+                f"Both work. Bash redirects to /workspace/session_result.json are "
+                f"the ONE allowed write for this persona. Use task_done with summary "
+                f"starting 'blocked:' only if you genuinely cannot proceed."
             ), False
         return tool_write_file(args.get("path", ""), args.get("content", "")), False
     elif name == "http_request":

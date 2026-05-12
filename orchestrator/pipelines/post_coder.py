@@ -83,6 +83,15 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
     violations: list[str] = []
 
     # --- Guard 1: raw error.message in HTTP-facing source files ---
+    # Switched from file-level `grep -l` to line-level `grep -n` so we can
+    # filter false positives on legit server-side logging. The original
+    # rule bounced `logError('failed', {message: error.message})` and
+    # similar patterns indefinitely (real incident 2026-05-12: feature
+    # #391 cycled coder→push→lint-guard-bounce 3 times in 4 hours,
+    # ~40 min/cycle, agent kept "fixing" hooks.server.ts but the matches
+    # were inside a logError call — safe server-side log, not HTTP
+    # response disclosure). Skip any match whose LINE contains a
+    # recognized log-call prefix; flag the rest.
     src_files = [
         f for f in files
         if any(f.startswith(p) for p in ("SRC/", "src/", "lib/", "app/", "pages/"))
@@ -90,14 +99,34 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
     ]
     if src_files:
         try:
-            r = _run(["grep", "-l", "-E",
+            r = _run(["grep", "-n", "-E",
                       r"(error|err)\.message|(error|err)\.stack"] + src_files,
                      timeout=15)
             if r.returncode == 0:
-                hits = [h for h in (r.stdout or "").splitlines() if h.strip()]
-                if hits:
-                    sample = ", ".join(hits[:3])
-                    more = "..." if len(hits) > 3 else ""
+                raw_hits = [h for h in (r.stdout or "").splitlines() if h.strip()]
+                # grep output is `filename:lineno:line_content`. Skip hits
+                # whose line is inside a log call — server-side logging of
+                # error.message is fine and conventional.
+                _LOG_MARKERS = (
+                    "logError", "logger.", "log.error", "log.warn",
+                    "log.info", "log.debug", "log.fatal",
+                    "console.error", "console.log", "console.warn",
+                    "console.info", "console.debug",
+                )
+                bad_files = set()
+                for h in raw_hits:
+                    # Split off "filename:lineno:" — the rest is the line.
+                    parts = h.split(":", 2)
+                    if len(parts) < 3:
+                        continue
+                    fname, _lineno, line = parts
+                    if any(m in line for m in _LOG_MARKERS):
+                        continue
+                    bad_files.add(fname)
+                if bad_files:
+                    files_sample = sorted(bad_files)
+                    sample = ", ".join(files_sample[:3])
+                    more = "..." if len(files_sample) > 3 else ""
                     violations.append(
                         f"raw error.message/stack in HTTP-facing files (info "
                         f"disclosure): {sample}{more}. Replace with a generic "
@@ -760,12 +789,22 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             for feat in assigned_features:
                 fid = feat["id"]
                 try:
+                    # Clear review_outcome on every Implementing→Reviewing
+                    # transition. This is a fresh push that needs fresh review;
+                    # last cycle's outcome no longer applies. Without this clear,
+                    # supervisor.detect_invalid_status_combos sees the stale
+                    # `Reviewing + changes_requested` combo and demotes the
+                    # feature back to Implementing within ~30s of every push,
+                    # blocking forward progress and bumping fix_attempts toward
+                    # auto-Block. Real incident 2026-05-10 01:21: feature #379
+                    # cycled coder→Reviewing→supervisor-demote 4 times in 50min.
                     r = client.patch(
                         f"/api/features/{fid}",
                         json={
                             "status": "Reviewing",
                             "pr_number": pr_number,
                             "pr_url": pr_url,
+                            "review_outcome": None,
                             "changed_by": "post-coder:fallback",
                         },
                     )
