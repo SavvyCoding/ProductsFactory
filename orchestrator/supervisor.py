@@ -31,6 +31,8 @@ from typing import Iterable
 
 import httpx
 
+from orchestrator.alerts import send_alert
+
 log = logging.getLogger("supervisor")
 
 PM_API_URL = os.environ.get("PM_API_URL", "http://pm-api:8080")
@@ -1271,3 +1273,376 @@ def detect_rapid_flap(
         except Exception:
             log.exception(f"rapid_flap: blocked-route call failed for product {product_id}")
     return routed
+
+
+# ── Detector: unproductive-coder auto-heal ───────────────────────────────────
+# When a coder session exits clean but the post-coder pipeline pushed nothing
+# (`post_coder_pushed == []` despite having assigned features), the product
+# has a *structural* problem that isn't going to fix itself — the next coder
+# will hit the same wall and burn another 30 minutes of LLM. The known
+# patterns are all deterministic plumbing issues:
+#   - SSH alias `Host github.com-<repo>` missing from ~/.ssh/config
+#     (greenfield_scaffold pre-2026-05-12 didn't append it automatically)
+#   - product.config.sprint_pr_mode missing (legacy products created
+#     before Phase 6.4 default; per-feature PR mode was removed)
+#   - active sprint has no branch_name/pr_number (provision step skipped
+#     or failed when sprint was activated)
+#
+# Each is detectable with a 5-line check and fixable deterministically.
+# So: pause the product the instant we see the symptom, run the checklist,
+# auto-apply the known fixes, retry the checks, then either resume (the
+# orchestrator picks up where it left off) or leave it paused with a
+# structured `auto_pause` block that the product list page surfaces
+# inline. Real incident 2026-05-12 motivating this detector: StockAnalysis
+# burned sessions 2320-2326 (4+ hours, ~2.5M tokens) on the SSH-Host-block
+# bug because nothing in the orchestrator noticed the pattern.
+
+def auto_heal_unproductive_coder(
+    *,
+    product: dict,
+    session_uid: str,
+    exit_code: int | None,
+    post_coder_pushed: list[int],
+    assigned_features: Iterable[dict],
+) -> dict:
+    """Fires after a coder session's post-coder pipeline returns.
+
+    Returns a structured outcome dict for observability:
+      {"triggered": bool, "resumed": bool, "fixes_applied": [...],
+       "remaining_issues": [...]}
+
+    Best-effort: never raises (catches at top level, logs).
+    """
+    out = {"triggered": False, "resumed": False,
+           "fixes_applied": [], "remaining_issues": []}
+
+    try:
+        # Trigger gate — only fires for the exact pattern we know how to fix.
+        if exit_code != 0:
+            return out
+        assigned_list = list(assigned_features) if assigned_features else []
+        if not assigned_list:
+            return out
+        if post_coder_pushed:
+            return out
+
+        pname = product.get("name", "?")
+        pid = product.get("id")
+        if not pid:
+            return out
+
+        out["triggered"] = True
+        log.warning(
+            f"[auto-heal] {pname}: coder session {session_uid} exit=0 with "
+            f"{len(assigned_list)} assigned feature(s) but post-coder pushed "
+            f"nothing — pausing for diagnosis"
+        )
+        _record_action(
+            detector="auto_heal",
+            product_id=pid,
+            target_type="product",
+            target_id=pid,
+            action="pause",
+            reason=(f"Coder session {session_uid} exited 0 with "
+                    f"{len(assigned_list)} assigned feature(s); post-coder "
+                    f"pipeline pushed 0 to origin. Pausing for diagnosis."),
+        )
+
+        # 1. Pause the product (status=paused, structured auto_pause block in config).
+        now_iso = datetime.now(timezone.utc).isoformat()
+        auto_pause = {
+            "reason": (f"Coder session {session_uid} exited 0 with "
+                       f"{len(assigned_list)} assigned feature(s) but the "
+                       f"post-coder pipeline pushed nothing to origin."),
+            "session_uid": session_uid,
+            "paused_at": now_iso,
+            "checks_run": [],
+            "fixes_applied": [],
+            "remaining_issues": [],
+        }
+        _save_auto_pause(pid, "paused", auto_pause)
+
+        # 2. Run the diagnostic checklist + apply fixes for failing checks.
+        # Re-fetch the latest product dict between phases so the checks see
+        # any fixes we just applied (e.g. sprint_pr_mode flag now present).
+        checks_run: list[dict] = []
+        fixes_applied: list[dict] = []
+
+        def _record_fix(f: dict) -> None:
+            # One audit row per applied fix so PMs see what auto-heal changed
+            # vs. just reading the consolidated log line.
+            _record_action(
+                detector="auto_heal",
+                product_id=pid,
+                target_type="product",
+                target_id=pid,
+                action=f"fix:{f['label']}",
+                reason=f.get("detail", ""),
+            )
+
+        # Check A: SSH Host alias in ~/.ssh/config.
+        c = _check_ssh_alias(product)
+        checks_run.append(c)
+        if not c["ok"]:
+            f = _fix_ssh_alias(product)
+            if f:
+                fixes_applied.append(f)
+                _record_fix(f)
+
+        # Check B: sprint_pr_mode flag on product.config.
+        c = _check_sprint_pr_mode(product)
+        checks_run.append(c)
+        if not c["ok"]:
+            f = _fix_sprint_pr_mode(pid)
+            if f:
+                fixes_applied.append(f)
+                _record_fix(f)
+
+        # Check C: active sprint provisioned (branch_name + pr_number set).
+        c = _check_sprint_provisioned(pid)
+        checks_run.append(c)
+        if not c["ok"]:
+            f = _fix_sprint_provisioned(pid)
+            if f:
+                fixes_applied.append(f)
+                _record_fix(f)
+
+        # 3. Re-verify after fixes — fresh fetch of product + sprint.
+        fresh_product = _fetch_product(pid) or product
+        remaining: list[dict] = []
+        for fn, kind in (
+            (_check_ssh_alias, "product"),
+            (_check_sprint_pr_mode, "product"),
+            (_check_sprint_provisioned, "pid"),
+        ):
+            recheck = fn(fresh_product) if kind == "product" else fn(pid)
+            if not recheck["ok"]:
+                remaining.append(recheck)
+
+        out["fixes_applied"] = fixes_applied
+        out["remaining_issues"] = remaining
+
+        auto_pause["checks_run"]       = checks_run
+        auto_pause["fixes_applied"]    = fixes_applied
+        auto_pause["remaining_issues"] = remaining
+
+        # 4. Resume on clean re-verify; otherwise leave paused + alert.
+        if not remaining:
+            _save_auto_pause(pid, "ready", None)
+            applied_labels = [f["label"] for f in fixes_applied] or ["(no fixes needed?)"]
+            log.info(
+                f"[auto-heal] {pname}: self-healed via {applied_labels} — "
+                f"resuming product"
+            )
+            _record_action(
+                detector="auto_heal",
+                product_id=pid,
+                target_type="product",
+                target_id=pid,
+                action="resume",
+                reason=(f"All diagnostic checks pass after applying "
+                        f"{applied_labels}. Product resumed."),
+            )
+            out["resumed"] = True
+            try:
+                send_alert(
+                    "info",
+                    f"{pname} auto-healed: applied {applied_labels} — product resumed.",
+                )
+            except Exception:
+                pass
+            return out
+
+        # Stuck — keep paused, persist transcript, escalate.
+        _save_auto_pause(pid, "paused", auto_pause)
+        labels = "; ".join(r["label"] + " (" + r.get("detail", "") + ")" for r in remaining)
+        log.warning(f"[auto-heal] {pname}: cannot self-heal — paused. Outstanding: {labels}")
+        _record_action(
+            detector="auto_heal",
+            product_id=pid,
+            target_type="product",
+            target_id=pid,
+            action="escalate",
+            reason=(f"Auto-heal could not self-fix. Outstanding issues: {labels}. "
+                    f"Product remains paused; PM action required."),
+        )
+        try:
+            send_alert(
+                "warning",
+                f"{pname} paused by auto-heal; cannot self-fix: {labels}. "
+                f"Check the product page banner.",
+            )
+        except Exception:
+            pass
+        return out
+
+    except Exception:
+        log.exception(f"auto_heal_unproductive_coder crashed for session {session_uid}")
+        return out
+
+
+# ── auto-heal helpers ────────────────────────────────────────────────────────
+
+def _save_auto_pause(pid: int, status: str, auto_pause: dict | None) -> None:
+    """PATCH the product: set status + merge auto_pause into config (or clear
+    it on resume). Best-effort — logs on failure but does not raise."""
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            # Fetch current config so we don't trample other keys.
+            r = client.get(f"/api/products/{pid}")
+            cfg = (r.json().get("config") or {}) if r.status_code == 200 else {}
+            cfg = dict(cfg)
+            if auto_pause is None:
+                cfg.pop("auto_pause", None)
+            else:
+                cfg["auto_pause"] = auto_pause
+            client.patch(f"/api/products/{pid}", json={"status": status, "config": cfg})
+    except Exception:
+        log.exception(f"auto-heal: could not PATCH product {pid} status={status}")
+
+
+def _fetch_product(pid: int) -> dict | None:
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            r = client.get(f"/api/products/{pid}")
+            return r.json() if r.status_code == 200 else None
+    except Exception:
+        return None
+
+
+def _github_repo_slug(product: dict) -> str | None:
+    """Derive the SSH alias slug from product.github_repo (basename, lowercase,
+    `-` and `.` → `_`). Matches greenfield_scaffold's _generate_deploy_key
+    naming so the slug + key file + Host block agree."""
+    gh = (product.get("github_repo") or "").rstrip("/")
+    if not gh:
+        return None
+    base = gh.rsplit("/", 1)[-1]
+    if base.endswith(".git"):
+        base = base[:-4]
+    if not base:
+        return None
+    return base.lower().replace("-", "_").replace(".", "_")
+
+
+def _check_ssh_alias(product: dict) -> dict:
+    """Is the `Host github.com-<slug>` block present in ~/.ssh/config?"""
+    slug = _github_repo_slug(product)
+    if not slug:
+        return {"label": "ssh_alias", "ok": True,
+                "detail": "no github_repo configured — n/a"}
+    ssh_dir = os.environ.get("SSH_DIR", "/home/orchestrator/.ssh")
+    cfg_path = os.path.join(ssh_dir, "config")
+    try:
+        with open(cfg_path, "r", encoding="utf-8", errors="replace") as f:
+            existing = f.read()
+    except FileNotFoundError:
+        return {"label": "ssh_alias", "ok": False,
+                "detail": f"~/.ssh/config does not exist"}
+    except Exception as e:
+        return {"label": "ssh_alias", "ok": False,
+                "detail": f"could not read ~/.ssh/config: {e}"}
+    needle = f"Host github.com-{slug}"
+    if needle in existing:
+        return {"label": "ssh_alias", "ok": True, "detail": f"{needle} present"}
+    return {"label": "ssh_alias", "ok": False,
+            "detail": f"missing `{needle}` block"}
+
+
+def _fix_ssh_alias(product: dict) -> dict | None:
+    slug = _github_repo_slug(product)
+    if not slug:
+        return None
+    try:
+        from pathlib import Path as _Path
+        from orchestrator.greenfield_scaffold import _ensure_ssh_host_block
+        ssh_dir = _Path(os.environ.get("SSH_DIR", "/home/orchestrator/.ssh"))
+        _ensure_ssh_host_block(ssh_dir, slug, product.get("name", "?"))
+        return {"label": "ssh_alias",
+                "detail": f"appended Host github.com-{slug} to ~/.ssh/config"}
+    except Exception as e:
+        log.exception(f"auto-heal: ssh_alias fix failed: {e}")
+        return None
+
+
+def _check_sprint_pr_mode(product: dict) -> dict:
+    cfg = product.get("config") or {}
+    if cfg.get("sprint_pr_mode"):
+        return {"label": "sprint_pr_mode", "ok": True, "detail": "true"}
+    return {"label": "sprint_pr_mode", "ok": False,
+            "detail": "missing or false on product.config"}
+
+
+def _fix_sprint_pr_mode(pid: int) -> dict | None:
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            r = client.get(f"/api/products/{pid}")
+            if r.status_code != 200:
+                return None
+            cfg = dict(r.json().get("config") or {})
+            cfg["sprint_pr_mode"] = True
+            client.patch(f"/api/products/{pid}", json={"config": cfg})
+        return {"label": "sprint_pr_mode",
+                "detail": "set product.config.sprint_pr_mode = true"}
+    except Exception as e:
+        log.exception(f"auto-heal: sprint_pr_mode fix failed: {e}")
+        return None
+
+
+def _check_sprint_provisioned(pid: int) -> dict:
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            r = client.get(f"/api/products/{pid}/sprints/active")
+            if r.status_code != 200 or not r.json():
+                return {"label": "sprint_provisioned", "ok": True,
+                        "detail": "no active sprint — n/a"}
+            sprint = r.json()
+            if sprint.get("branch_name") and sprint.get("pr_number"):
+                return {"label": "sprint_provisioned", "ok": True,
+                        "detail": f"sprint #{sprint['id']} -> {sprint['branch_name']} / PR #{sprint['pr_number']}"}
+            return {"label": "sprint_provisioned", "ok": False,
+                    "detail": f"sprint #{sprint.get('id')} has no branch_name/pr_number"}
+    except Exception as e:
+        return {"label": "sprint_provisioned", "ok": False,
+                "detail": f"check failed: {e}"}
+
+
+def _fix_sprint_provisioned(pid: int) -> dict | None:
+    """Provision the active sprint's branch + draft PR via the existing
+    orchestrator.sprint_pr.provision_sprint_pr helper, then PATCH the sprint
+    row with the returned branch/pr metadata."""
+    try:
+        from orchestrator.sprint_pr import provision_sprint_pr
+        with httpx.Client(base_url=PM_API_URL, timeout=15) as client:
+            prod = client.get(f"/api/products/{pid}")
+            if prod.status_code != 200:
+                return None
+            product = prod.json()
+            spr = client.get(f"/api/products/{pid}/sprints/active")
+            if spr.status_code != 200 or not spr.json():
+                return None
+            sprint = spr.json()
+            if sprint.get("branch_name"):
+                return None  # nothing to do
+            syscfg = client.get("/api/system-config")
+            token = (syscfg.json().get("github_pat") or "") if syscfg.status_code == 200 else ""
+            if not token:
+                return None
+            feats = client.get(f"/api/products/{pid}/features")
+            titles = [f.get("name") for f in (feats.json() or []) if f.get("sprint_id") == sprint["id"]]
+            result = provision_sprint_pr(
+                product.get("github_repo"), sprint["id"], sprint.get("name", ""),
+                sprint.get("goal"), titles, token,
+            )
+            if not result:
+                return None
+            client.patch(f"/api/sprints/{sprint['id']}", json={
+                "branch_name": result["branch"],
+                "pr_number":   result["number"],
+                "pr_url":      result["url"],
+            })
+        return {"label": "sprint_provisioned",
+                "detail": f"provisioned sprint #{sprint['id']} -> {result['branch']} / PR #{result['number']}"}
+    except Exception as e:
+        log.exception(f"auto-heal: sprint_provisioned fix failed: {e}")
+        return None
