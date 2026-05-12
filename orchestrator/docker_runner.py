@@ -120,10 +120,25 @@ def _get_deploy_key_path(product: dict, ssh_dir: Path | None = None) -> Path | N
     if not resolved_ssh_dir or not resolved_ssh_dir.exists():
         log.warning(f"SSH keys directory not configured or missing: {resolved_ssh_dir}")
         return None
+    # Try the github_repo basename slug first — this is the canonical filename
+    # written by greenfield_scaffold._generate_deploy_key (and aliased in
+    # ~/.ssh/config by the same scaffold step). Fall back to product.name slug
+    # for legacy products created before the SSH alias switch on 2026-05-09.
+    candidates: list[str] = []
+    gh = (product.get("github_repo") or "").rstrip("/")
+    if gh:
+        repo_basename = gh.rsplit("/", 1)[-1]
+        if repo_basename.endswith(".git"):
+            repo_basename = repo_basename[:-4]
+        if repo_basename:
+            candidates.append(repo_basename.lower().replace("-", "_").replace(".", "_"))
     name_slug = (product.get("name") or "").lower().replace(" ", "_").replace("-", "_")
-    per_product = resolved_ssh_dir / f"id_ed25519_{name_slug}"
-    if per_product.exists():
-        return per_product
+    if name_slug and name_slug not in candidates:
+        candidates.append(name_slug)
+    for slug in candidates:
+        per_product = resolved_ssh_dir / f"id_ed25519_{slug}"
+        if per_product.exists():
+            return per_product
     default_key = resolved_ssh_dir / DEPLOY_KEY_FILENAME
     if default_key.exists():
         return default_key

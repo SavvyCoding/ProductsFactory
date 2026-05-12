@@ -79,6 +79,11 @@ services:
       dockerfile: deploy/docker/Dockerfile.orchestrator
     image: productfactory-orchestrator
     container_name: pf-orchestrator
+    # Start as root so bootstrap.sh can chown/chmod the bind-mounted SSH dir
+    # (Docker Desktop surfaces Windows-host files as root:root 777, which
+    # OpenSSH rejects). bootstrap.sh re-execs as `orchestrator` immediately
+    # after fixing perms — the orchestration loop never runs as root.
+    user: "0"
     # Docker Desktop for Windows: socket is owned by root:root (GID 0).
     group_add:
       - "0"

@@ -199,13 +199,13 @@ def get_system_config() -> dict:
 
 # Phase 4b: round-robin and retro/reviewer selection helpers moved to
 # orchestrator/cycle/selection.py. Re-exported below alongside is_quiet_hours
-# and the _POST_SPRINT_PERSONAS cadence list.
+# and the _ONDEMAND_PERSONAS list (used for last_{persona}_at stamping).
 from orchestrator.cycle.selection import (
     get_next_product,
     get_next_reviewer_product,
     get_next_retro_product,
     is_quiet_hours,
-    _POST_SPRINT_PERSONAS,
+    _ONDEMAND_PERSONAS,
 )
 
 
@@ -257,32 +257,6 @@ from orchestrator.cycle.loop_detector import (
     _loop_detector,
     _heal_loop,
 )
-
-
-def _post_sprint_persona_due(product: dict, last_completed_sprint: dict | None) -> str | None:
-    """
-    Return the next post-sprint persona that hasn't run since the last sprint completed.
-    Compares each persona's last_{persona}_at timestamp against sprint.completed_at.
-    Returns None if no sprint has ever completed (planner handles cold-start features).
-    """
-    if not last_completed_sprint or not last_completed_sprint.get("completed_at"):
-        return None
-    try:
-        sprint_done_at = datetime.fromisoformat(last_completed_sprint["completed_at"])
-    except (ValueError, TypeError):
-        return None
-    config = product.get("config") or {}
-    for persona in _POST_SPRINT_PERSONAS:
-        last_run_str = config.get(f"last_{persona}_at")
-        if not last_run_str:
-            return persona  # Never run — due
-        try:
-            last_run = datetime.fromisoformat(last_run_str)
-            if last_run < sprint_done_at:
-                return persona  # Ran before this sprint completed — due again
-        except (ValueError, TypeError):
-            return persona
-    return None
 
 
 def _auto_create_sprint_for_unsprinted(product: dict, client: httpx.Client) -> bool:
@@ -422,6 +396,15 @@ def clear_run_trainer_now(product_id: int):
             client.patch(f"/api/products/{product_id}", json={"run_trainer_now": False})
     except Exception as e:
         log.warning(f"Failed to clear run_trainer_now: {e}")
+
+
+def clear_run_persona_now(product_id: int):
+    """Clear the run_persona_now flag after picking up the on-demand persona."""
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            client.patch(f"/api/products/{product_id}", json={"run_persona_now": None})
+    except Exception as e:
+        log.warning(f"Failed to clear run_persona_now: {e}")
 
 
 _LOCK_PID  = os.getpid()
@@ -836,6 +819,14 @@ def main():
                 persona = "product_trainer"
                 clear_run_trainer_now(product["id"])
                 log.info(f"On-demand Product Trainer for: {product['name']} (id={product['id']})")
+            elif any(p.get("run_persona_now") for p in products if p["status"] == "ready"):
+                # ⑦a3 On-demand maintenance persona (documenter / analytics /
+                # refactorer / devops / recommender). PM-triggered from the
+                # product page; flag cleared after pickup so it's a one-shot.
+                product = next(p for p in products if p["status"] == "ready" and p.get("run_persona_now"))
+                persona = product["run_persona_now"]
+                clear_run_persona_now(product["id"])
+                log.info(f"On-demand {persona} for: {product['name']} (id={product['id']})")
             elif reviewer_product:
                 product = reviewer_product
                 persona = "reviewer"
@@ -995,12 +986,12 @@ def main():
                     _daily_session_counts[product["id"]] = _daily_session_counts.get(product["id"], 0) + 1
 
             # ⑬ Update last_run_at ONLY on clean exit AND if work was done.
-            # Also stamp last_{persona}_at for post-sprint personas that don't
-            # self-report (recommender is poller-launched, not agent-written).
+            # Also stamp last_{persona}_at for on-demand maintenance personas
+            # so the UI can show "ran 2h ago" without scraping session logs.
             if exit_code == 0 and not zero_progress:
                 now_iso = datetime.now(timezone.utc).isoformat()
                 patches: dict = {"last_run_at": now_iso}
-                if persona in _POST_SPRINT_PERSONAS:
+                if persona in _ONDEMAND_PERSONAS:
                     try:
                         with httpx.Client(base_url=PM_API_URL, timeout=10) as _cfg_client:
                             _cfg_resp = _cfg_client.get(f"/api/products/{product['id']}")

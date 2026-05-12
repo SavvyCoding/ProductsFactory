@@ -907,6 +907,35 @@
 
 .inline-form { display: inline-flex; }
 
+/* On-demand persona dropdown in the product header — matches pf-icon-action height. */
+.pf-select-sm {
+  height: 36px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-canvas-default);
+  color: var(--color-fg-muted);
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    background   var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color        var(--motion-fast) var(--ease-out);
+}
+.pf-select-sm:hover:not(:disabled) {
+  background: var(--color-canvas-subtle);
+  border-color: var(--color-border-muted);
+  color: var(--color-fg-default);
+}
+.pf-select-sm:focus-visible {
+  outline: 2px solid var(--color-accent-fg);
+  outline-offset: 2px;
+}
+.pf-select-sm:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 
 /* ============================================================
    Misc utilities used by product page
