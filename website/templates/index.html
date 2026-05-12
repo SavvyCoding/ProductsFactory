@@ -325,6 +325,27 @@
       <div class="product-status-pill status-pill--{{ p.status }}">{{ p.status }}</div>
     </div>
 
+    {# Auto-heal pause banner: supervisor paused this product because a coder
+       session ended successfully but post-coder pushed nothing, and the
+       diagnostic checklist could not self-fix all the issues. The reason
+       text quotes whichever checks remained failing. #}
+    {% set _ap = (p.config or {}).get('auto_pause') %}
+    {% if _ap and p.status == 'paused' %}
+    <div class="product-auto-pause">
+      <span class="product-auto-pause__icon">⚠</span>
+      <span class="product-auto-pause__body">
+        <strong>Paused by auto-heal.</strong>
+        {% set _rem = _ap.get('remaining_issues') %}
+        {% if _rem %}
+          Outstanding:
+          {% for r in _rem %}{{ r.label }}{% if r.detail %} ({{ r.detail }}){% endif %}{% if not loop.last %}; {% endif %}{% endfor %}.
+        {% else %}
+          {{ _ap.get('reason', '') }}
+        {% endif %}
+      </span>
+    </div>
+    {% endif %}
+
     {% if p.tech_stack %}
     <div class="product-stack-chips">
       {% for tech in p.tech_stack %}

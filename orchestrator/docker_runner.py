@@ -1114,6 +1114,22 @@ def _finalize_session(
                 )
             except Exception:
                 log.exception(f"Post-coder pipeline failed for {product.get('name')}")
+            # Auto-heal: coder exited 0 but post-coder pushed nothing.
+            # Pauses the product, runs the diagnostic checklist, applies known
+            # fixes, then either resumes (status=ready) or escalates with a
+            # banner on the product list page. See supervisor docstring +
+            # `auto_heal_unproductive_coder` for the recognised patterns.
+            try:
+                from orchestrator.supervisor import auto_heal_unproductive_coder
+                auto_heal_unproductive_coder(
+                    product=product,
+                    session_uid=session_uid,
+                    exit_code=exit_code,
+                    post_coder_pushed=post_coder_pushed,
+                    assigned_features=product.get("_assigned_features", []),
+                )
+            except Exception:
+                log.exception(f"auto_heal_unproductive_coder failed for {product.get('name')}")
         elif exit_code == 0 and persona == "designer":
             try:
                 _run_post_doc_pipeline(product, session_uid, working_dir,
