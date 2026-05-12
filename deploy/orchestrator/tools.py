@@ -377,6 +377,20 @@ def run_cycle(args: dict, **kwargs) -> str:
         if not hb.get("ok") or hb.get("status") == 409:
             return _ok({"action": "409_stop", "reason": "Lock stolen"})
 
+        # 1b. Re-normalise the bind-mounted ~/.ssh perms. Windows Docker
+        # bind-mounts surface any host-side write as `root:root 777`, which
+        # OpenSSH rejects ("Bad owner or permissions"). bootstrap.sh fixes
+        # this at container startup but cannot react to subsequent host
+        # writes. Running an alpine sidecar once per cycle catches any
+        # manual ~/.ssh/config edits or scaffolding writes before the
+        # next git fetch/push fires. Best-effort, non-fatal — see helper
+        # docstring for the underlying incident.
+        try:
+            from orchestrator.integrations.docker_cli import _chmod_ssh_dir_via_alpine  # type: ignore
+            _chmod_ssh_dir_via_alpine()
+        except Exception:
+            log.exception("ssh-perm helper failed (non-fatal)")
+
         # 2. WATCHDOG — DB-authoritative. Asks PM API for sessions past their
         # expected_deadline or without a recent heartbeat, then kills their
         # docker containers and closes the DB records. No mtime parsing, no

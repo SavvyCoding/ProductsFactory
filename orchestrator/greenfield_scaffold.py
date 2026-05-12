@@ -72,6 +72,16 @@ def scaffold_greenfield(product: dict, system_config: dict, pm_api_url: str, ssh
         log.info(f"Scaffold [{product_name}]: generating deploy key → {key_path}")
         public_key = _generate_deploy_key(key_path)
 
+        # ②b Append a `Host github.com-<key_slug>` block to ~/.ssh/config
+        # so the orchestrator's host-side git ops can use the alias
+        # `git@github.com-<key_slug>:owner/repo.git`. Without this block,
+        # SSH treats the alias as a literal DNS name and the post-coder
+        # push fails with "Could not resolve hostname github.com-<slug>".
+        # Real incident 2026-05-12: StockAnalysis scaffolded with a key
+        # but no Host block; first 4 coder sessions exit=0 but no PR
+        # opens, features bounce back to Designed, orchestrator loops.
+        _ensure_ssh_host_block(ssh_dir, key_slug, product_name)
+
         # ③ Upload public key to GitHub (use actual_owner in case we fell back to user account)
         log.info(f"Scaffold [{product_name}]: uploading deploy key to GitHub ({actual_owner}/{github_repo_name})")
         _add_deploy_key(actual_owner, github_repo_name, pat, public_key,
@@ -232,6 +242,66 @@ def _add_deploy_key(org: str, repo_name: str, pat: str, public_key: str, label: 
 
 
 # ── SSH key generation ────────────────────────────────────────────────────────
+
+def _ensure_ssh_host_block(ssh_dir: Path, key_slug: str, product_name: str) -> None:
+    """
+    Append `Host github.com-<key_slug>` to ~/.ssh/config so the deploy key
+    is selected when the orchestrator pushes via the alias URL. Idempotent.
+
+    Until 2026-05-12 the SSH config was edited by hand after every greenfield
+    scaffold (the file's own header comment said so). When a product was
+    created without the manual step, its first coder session would commit
+    locally but the push failed because `github.com-<slug>` doesn't resolve
+    as a DNS name.
+
+    Also calls the alpine sidecar to chmod the dir/files back to OpenSSH-
+    acceptable perms — Windows Docker bind-mounts flip the file metadata
+    to root:root 777 on any host-side write, which sshd rejects with
+    "Bad owner or permissions". The same helper runs once per cycle as a
+    safety net; calling it here avoids the operator hitting a 60s window
+    where the new alias is set but unusable.
+    """
+    config_path = ssh_dir / "config"
+    alias = f"github.com-{key_slug}"
+
+    if config_path.exists():
+        try:
+            existing = config_path.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            log.warning(f"Scaffold [{product_name}]: could not read ~/.ssh/config: {e}")
+            existing = ""
+        if f"Host {alias}" in existing:
+            log.info(f"Scaffold [{product_name}]: SSH alias {alias} already in ~/.ssh/config")
+            return
+    else:
+        existing = ""
+
+    header_was_present = bool(existing.strip())
+    block_lines = [
+        "" if header_was_present else
+        "# ProductFactory per-product GitHub deploy key routing.\n",
+        f"\nHost {alias}\n",
+        "    HostName github.com\n",
+        "    User git\n",
+        f"    IdentityFile ~/.ssh/id_ed25519_{key_slug}\n",
+        "    IdentitiesOnly yes\n",
+    ]
+    try:
+        with config_path.open("a", encoding="utf-8") as f:
+            f.writelines(block_lines)
+        log.info(f"Scaffold [{product_name}]: appended SSH alias {alias} to ~/.ssh/config")
+    except Exception as e:
+        log.warning(f"Scaffold [{product_name}]: failed to write ~/.ssh/config: {e}")
+        return
+
+    # Normalise perms after the write — see the helper's docstring for
+    # the Windows-bind-mount root:root 777 artifact this defends against.
+    try:
+        from orchestrator.integrations.docker_cli import _chmod_ssh_dir_via_alpine
+        _chmod_ssh_dir_via_alpine()
+    except Exception as e:
+        log.warning(f"Scaffold [{product_name}]: ssh-perm helper failed (non-fatal): {e}")
+
 
 def _generate_deploy_key(key_path: Path) -> str:
     """
