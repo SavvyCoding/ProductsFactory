@@ -212,9 +212,20 @@ async def _llm_call(prompt: str, db: AsyncSession, max_tokens: int = 3000) -> st
                     ollama_host.rstrip("/") + "/api/chat",
                     headers=headers,
                     json={
+                        # `think: false` disables thinking-mode for reasoning
+                        # models (kimi-k2.6, glm-4.7, gpt-oss-thinking variants).
+                        # Without this, the model's internal CoT consumes the
+                        # entire num_predict budget and returns content="" — the
+                        # call appears to succeed (HTTP 200) but we get an
+                        # empty answer and silently fall through to step 2/3.
+                        # PM-facing wizard prompts return small structured JSON
+                        # and don't benefit from thinking; the agent personas
+                        # use a separate code path (orchestrator/ollama_agent.py)
+                        # where thinking is still enabled.
                         "model": model,
                         "messages": [{"role": "user", "content": prompt}],
                         "stream": False,
+                        "think": False,
                         "options": {"num_predict": max_tokens},
                     },
                 )
@@ -224,6 +235,15 @@ async def _llm_call(prompt: str, db: AsyncSession, max_tokens: int = 3000) -> st
                 content = (msg.get("content") or "").strip()
                 if content:
                     return content
+                # Empty content despite HTTP 200 — log so the failure is
+                # visible. Most common cause: a thinking model's CoT ate the
+                # num_predict budget (done_reason="length", content=""); the
+                # `think: False` above should prevent this, but the warning
+                # remains in case the flag is ignored by a future model.
+                log.warning(
+                    f"_llm_call: Ollama {model} returned empty content "
+                    f"(done_reason={data.get('done_reason')}) — falling back"
+                )
         except Exception as e:
             log.warning(f"_llm_call: Ollama failed ({e!r}) — falling back")
 

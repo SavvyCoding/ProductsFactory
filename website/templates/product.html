@@ -19,9 +19,9 @@
         <span class="pf-sidebar-icon">&#9776;</span>
         <span class="pf-sidebar-label">Summary</span>
       </a>
-      <a class="pf-sidebar-item {% if active_tab == 'board' %}active{% endif %}" onclick="switchTab('board', this)" href="javascript:void(0)" title="Feature Backlog">
+      <a class="pf-sidebar-item {% if active_tab == 'board' %}active{% endif %}" onclick="switchTab('board', this)" href="javascript:void(0)" title="Backlog">
         <span class="pf-sidebar-icon">&#9638;</span>
-        <span class="pf-sidebar-label">Feature Backlog</span>
+        <span class="pf-sidebar-label">Backlog</span>
         {% set feat_count = features | length %}
         {% if feat_count %}<span class="pf-sidebar-badge">{{ feat_count }}</span>{% endif %}
       </a>

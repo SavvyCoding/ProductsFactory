@@ -285,13 +285,48 @@
 }
 
 .suggestion-card {
-  padding: 10px 12px;
+  position: relative;  /* anchor for absolute-positioned .suggestion-edit-btn */
+  padding: 10px 28px 10px 12px;  /* extra right padding so name doesn't run under the edit button */
   background: var(--color-canvas-default);
   border: 1px solid var(--color-border-default);
   border-radius: var(--radius-md);
   cursor: pointer;
   transition: border-color 0.12s, background 0.12s;
 }
+
+.suggestion-edit-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;  /* sit above .suggestion-card so clicks aren't swallowed by it */
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-canvas-default);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-sm);
+  color: var(--color-fg-muted);
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+.suggestion-edit-btn:hover,
+.suggestion-edit-btn:focus-visible {
+  background: var(--color-accent-emphasis);
+  border-color: var(--color-accent-emphasis);
+  color: var(--color-canvas-default);
+}
+.suggestion-edit-btn .icon { width: 14px; height: 14px; }
+.suggestion-card.selected .suggestion-edit-btn {
+  /* Selected cards have a tinted background; give the button a matching
+     surface so it stays legible against it. */
+  background: var(--color-canvas-default);
+}
+
+/* Sit above the wizard modal (z-index 500). */
+.suggestion-editor-overlay { z-index: 700; }
 
 .suggestion-card:hover {
   border-color: var(--color-accent-muted);

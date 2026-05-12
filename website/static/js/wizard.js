@@ -58,7 +58,7 @@ function resetStepIndicators() {
 }
 function setStepIndicator(activeIdx) {
   // Mark steps 1..activeIdx-1 as 'done', activeIdx as 'active', rest plain.
-  for (let i = 1; i <= 5; i++) {
+  for (let i = 1; i <= 6; i++) {
     const el = document.getElementById('ws-' + i);
     if (!el) continue;
     el.classList.remove('active', 'done');
@@ -79,7 +79,7 @@ function wizardNext() {
   if (wizardType === 'brownfield') {
     // Brownfield: skip ahead — only Type → Path. Hide the step indicators
     // we won't use so the visual count matches the actual flow.
-    ['ws-2','ws-3','ws-4','ws-5'].forEach(id => document.getElementById(id).classList.add('hidden'));
+    ['ws-2','ws-3','ws-4','ws-5','ws-6'].forEach(id => document.getElementById(id).classList.add('hidden'));
     showPanel('wp-2-brownfield');
     return;
   }
@@ -119,11 +119,9 @@ async function wizardToUI() {
   const isWeb = !!(stackOpt && stackOpt.has_web_ui);
   setUIStepVisible(isWeb);
   if (!isWeb) {
-    // Skip UI step entirely
+    // Skip UI step entirely — go straight to backlog generator
     selectedUITemplate = "";
-    setStepIndicator(5);
-    wizardStep = 5;
-    showPanel('wp-5-details');
+    wizardToBacklog();
     return;
   }
   setStepIndicator(4);
@@ -134,12 +132,19 @@ async function wizardToUI() {
   fetchUIRecommendation(vision, selectedStack);
 }
 
-// ── STEP 4 → 5 (greenfield) ─────────────────────────────────────────────────
-function wizardToDetails() {
+// ── STEP 4 (or skipped) → 5 BACKLOG (greenfield) ─────────────────────────────
+function wizardToBacklog() {
   if (!selectedUITemplate) selectedUITemplate = "agent_choose";
   setStepIndicator(5);
   wizardStep = 5;
-  showPanel('wp-5-details');
+  showPanel('wp-5-backlog');
+}
+
+// ── STEP 5 → 6 (greenfield) ─────────────────────────────────────────────────
+function wizardToDetailsFromBacklog() {
+  setStepIndicator(6);
+  wizardStep = 6;
+  showPanel('wp-6-details');
 }
 
 // ── BACK (greenfield + brownfield) ──────────────────────────────────────────
@@ -147,12 +152,17 @@ function wizardBack() {
   // Brownfield: only Type → Path, so back from path goes to step 1.
   if (wizardType === 'brownfield') {
     showPanel('wp-1');
-    ['ws-2','ws-3','ws-4','ws-5'].forEach(id => document.getElementById(id).classList.remove('hidden'));
+    ['ws-2','ws-3','ws-4','ws-5','ws-6'].forEach(id => document.getElementById(id).classList.remove('hidden'));
     return;
   }
   // Greenfield: walk backwards through the steps.
-  if (wizardStep === 5) {
-    // Back from Details → either UI (if web) or Stack
+  if (wizardStep === 6) {
+    // Back from Details → Backlog
+    setStepIndicator(5);
+    wizardStep = 5;
+    showPanel('wp-5-backlog');
+  } else if (wizardStep === 5) {
+    // Back from Backlog → UI (if web) or Stack
     const stackOpt = catalog && catalog.stacks.flatMap(g => g.options).find(o => o.id === selectedStack);
     const isWeb = !!(stackOpt && stackOpt.has_web_ui);
     if (isWeb) { setStepIndicator(4); wizardStep = 4; showPanel('wp-4-ui'); }
@@ -198,7 +208,7 @@ function renderStackPicker() {
         ${group.options.map(opt => `
           <div class="stack-option ${selectedStack === opt.id ? 'selected' : ''} ${stackRecommendation && stackRecommendation.recommended === opt.id ? 'recommended-badge' : ''}"
                data-stack-id="${escAttrSafe(opt.id)}"
-               onclick="selectStack(${escAttr(JSON.stringify(opt.id))})">
+               onclick="selectStack(${escAttr(opt.id)})">
             <div class="stack-option-label">${escHtml(opt.label)}</div>
             <div class="stack-option-desc">${escHtml(opt.description)}</div>
           </div>`).join('')}
@@ -216,7 +226,7 @@ function renderDbPicker() {
     <div class="db-option ${selectedDb === opt.id ? 'selected' : ''}"
          data-db-id="${escAttrSafe(opt.id)}"
          title="${escAttrSafe(opt.description)}"
-         onclick="selectDb(${escAttr(JSON.stringify(opt.id))})">
+         onclick="selectDb(${escAttr(opt.id)})">
       ${escHtml(opt.label)}
     </div>`).join('');
 }
@@ -272,7 +282,7 @@ function renderStackRecommendation() {
     <div class="recommendation-title">${escHtml(opt.label)}${dbOpt ? ' + ' + escHtml(dbOpt.label) : ''}</div>
     <div class="recommendation-reason">${escHtml(stackRecommendation.reasoning || '')}</div>
     <div class="recommendation-actions">
-      <button class="pf-btn pf-btn--primary" onclick="selectStack(${escAttr(JSON.stringify(opt.id))}); ${dbOpt ? 'selectDb(' + escAttr(JSON.stringify(dbOpt.id)) + ');' : ''} showToast('success', 'Recommendation applied.')">Use this</button>
+      <button class="pf-btn pf-btn--primary" onclick="selectStack(${escAttr(opt.id)}); ${dbOpt ? 'selectDb(' + escAttr(dbOpt.id) + ');' : ''} showToast('success', 'Recommendation applied.')">Use this</button>
       <button class="pf-btn pf-btn--secondary" onclick="document.getElementById('stack-picker').scrollIntoView({behavior:'smooth'})">Browse all options</button>
     </div>
   `;
@@ -288,7 +298,7 @@ function renderUITemplateGallery() {
   root.innerHTML = catalog.ui_templates.map(tpl => `
     <div class="ui-template-card ${selectedUITemplate === tpl.id ? 'selected' : ''} ${uiRecommendation && uiRecommendation.recommended === tpl.id ? 'recommended-badge' : ''}"
          data-ui-id="${escAttrSafe(tpl.id)}"
-         onclick="selectUITemplate(${escAttr(JSON.stringify(tpl.id))})">
+         onclick="selectUITemplate(${escAttr(tpl.id)})">
       <div class="ui-template-name">${escHtml(tpl.label)}</div>
       <div class="ui-template-desc">${escHtml(tpl.description)}</div>
     </div>`).join('');
@@ -322,7 +332,7 @@ async function fetchUIRecommendation(vision, stackId) {
       <div class="recommendation-title">${escHtml(tpl.label)}</div>
       <div class="recommendation-reason">${escHtml(uiRecommendation.reasoning || '')}</div>
       <div class="recommendation-actions">
-        <button class="pf-btn pf-btn--primary" onclick="selectUITemplate(${escAttr(JSON.stringify(tpl.id))}); showToast('success', 'Recommendation applied.')">Use this</button>
+        <button class="pf-btn pf-btn--primary" onclick="selectUITemplate(${escAttr(tpl.id)}); showToast('success', 'Recommendation applied.')">Use this</button>
       </div>`;
     if (selectedUITemplate === 'agent_choose') selectUITemplate(tpl.id);
     renderUITemplateGallery();
@@ -400,6 +410,11 @@ async function articulateVision() {
 
 // ── AI FEATURE SUGGESTIONS ──────────────────────────────────────────────────
 let selectedSuggestions = [];
+// Full backlog returned by /api/recommend/features for the current vision,
+// kept by index so suggestion-card onclicks can pass `idx` instead of
+// embedding the whole feature object in an HTML attribute (the inline JSON
+// breaks attribute quoting — see wizard `selectStack` for the same fix).
+let suggestedFeatures = [];
 
 async function suggestFeatures() {
   const vision = document.getElementById('gf-vision').value.trim();
@@ -421,10 +436,16 @@ async function suggestFeatures() {
     if (!resp.ok) throw new Error(resp.status === 501 ? 'ANTHROPIC_API_KEY not configured' : 'Server error');
     const data = await resp.json();
     panel.classList.remove('hidden');
+    suggestedFeatures = data.features;
     selectedSuggestions = [...data.features];
     updateSuggestionsJson();
     grid.innerHTML = data.features.map((f, i) => `
-      <div class="suggestion-card selected" id="sc-${i}" onclick="toggleSuggestion(${i}, ${escAttr(JSON.stringify(f))})">
+      <div class="suggestion-card selected" id="sc-${i}" onclick="toggleSuggestion(${i})">
+        <button type="button" class="suggestion-edit-btn" title="Edit feature"
+                aria-label="Edit feature"
+                onclick="event.stopPropagation(); openSuggestionEditor(${i})">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4z"/></svg>
+        </button>
         <div class="suggestion-name">${escHtml(f.name)}</div>
         <div class="suggestion-desc">${escHtml(f.description || '')}</div>
         <span class="suggestion-tag">✓ Selected</span>
@@ -441,7 +462,9 @@ async function suggestFeatures() {
   }
 }
 
-function toggleSuggestion(idx, feature) {
+function toggleSuggestion(idx) {
+  const feature = suggestedFeatures[idx];
+  if (!feature) return;
   const card = document.getElementById('sc-' + idx);
   const pos  = selectedSuggestions.findIndex(f => f.name === feature.name);
   if (pos >= 0) {
@@ -460,6 +483,78 @@ function toggleSuggestion(idx, feature) {
 
 function updateSuggestionsJson() {
   document.getElementById('gf-suggestions-json').value = JSON.stringify(selectedSuggestions);
+}
+
+// ── PER-FEATURE EDITOR (backlog step) ──────────────────────────────────────
+// Card edit button → modal → save (in-place update of suggestedFeatures +
+// selectedSuggestions) OR remove (deselect from backlog). Keyed by `idx`
+// into suggestedFeatures so we keep all the mutation logic in one place.
+function openSuggestionEditor(idx) {
+  const f = suggestedFeatures[idx];
+  if (!f) return;
+  document.getElementById('se-idx').value      = idx;
+  document.getElementById('se-name').value     = f.name || '';
+  document.getElementById('se-desc').value     = f.description || '';
+  document.getElementById('se-type').value     = f.feature_type || 'feature';
+  document.getElementById('se-priority').value = (f.priority != null) ? f.priority : 50;
+  document.getElementById('suggestion-editor').classList.add('open');
+  document.getElementById('se-name').focus();
+}
+
+function closeSuggestionEditor() {
+  document.getElementById('suggestion-editor').classList.remove('open');
+}
+
+function saveSuggestionEditor() {
+  const idx = parseInt(document.getElementById('se-idx').value, 10);
+  const f   = suggestedFeatures[idx];
+  if (!f) { closeSuggestionEditor(); return; }
+  const name = document.getElementById('se-name').value.trim();
+  if (!name) { showToast('warn', 'Name is required.'); return; }
+  const desc = document.getElementById('se-desc').value.trim();
+  const type = document.getElementById('se-type').value;
+  let prio   = parseInt(document.getElementById('se-priority').value, 10);
+  if (isNaN(prio) || prio < 1)   prio = 1;
+  if (prio > 100)                prio = 100;
+
+  // Update master list AND the selectedSuggestions entry in place so
+  // findIndex-by-name in toggleSuggestion keeps matching after a rename.
+  const oldName = f.name;
+  f.name = name; f.description = desc; f.feature_type = type; f.priority = prio;
+  const selPos = selectedSuggestions.findIndex(s => s.name === oldName);
+  if (selPos >= 0) selectedSuggestions[selPos] = f;
+  updateSuggestionsJson();
+
+  // Re-render the card content (preserve selected/edit-button structure).
+  const card = document.getElementById('sc-' + idx);
+  if (card) {
+    card.querySelector('.suggestion-name').textContent = name;
+    card.querySelector('.suggestion-desc').textContent = desc;
+  }
+  closeSuggestionEditor();
+  showToast('success', 'Feature updated.');
+}
+
+function removeSuggestionFromEditor() {
+  const idx = parseInt(document.getElementById('se-idx').value, 10);
+  const f   = suggestedFeatures[idx];
+  if (!f) { closeSuggestionEditor(); return; }
+  const selPos = selectedSuggestions.findIndex(s => s.name === f.name);
+  if (selPos >= 0) {
+    selectedSuggestions.splice(selPos, 1);
+    updateSuggestionsJson();
+  }
+  // Mark card as deselected (mirrors toggleSuggestion's deselect branch).
+  const card = document.getElementById('sc-' + idx);
+  if (card) {
+    card.classList.remove('selected');
+    const tag = card.querySelector('.suggestion-tag');
+    if (tag) tag.textContent = 'Click to select';
+  }
+  document.getElementById('suggest-status').textContent =
+    selectedSuggestions.length ? `${selectedSuggestions.length} selected` : '';
+  closeSuggestionEditor();
+  showToast('info', `Removed "${f.name}" from backlog.`);
 }
 
 // ── SEARCH & FILTER (unchanged) ─────────────────────────────────────────────

@@ -202,6 +202,15 @@ from orchestrator.pipelines.post_doc import (
 # Phase 2b of OrchestratorRefactor: coder post-session pipeline (the ~500 LOC
 # git+GitHub fallback) moved into orchestrator/pipelines/post_coder.py.
 from orchestrator.pipelines.post_coder import _run_post_coder_pipeline
+# On-demand maintenance personas (documenter, analytics, recommender, devops,
+# refactorer): orchestrator owns git add/commit/push for any file edits the
+# agent left in the working tree. Without this, the agent's uncommitted work
+# is discarded by the next _cleanup_workspace_post_session reset.
+from orchestrator.pipelines.post_maintenance import _run_post_maintenance_pipeline
+
+_MAINTENANCE_PERSONAS = frozenset({
+    "documenter", "analytics", "recommender", "devops", "refactorer",
+})
 
 
 # _get_gh_token moved to orchestrator/integrations/github.py and re-exported
@@ -1110,6 +1119,11 @@ def _finalize_session(
                 _run_post_doc_pipeline(product, session_uid, working_dir,
                                        product.get("_assigned_features", []),
                                        persona)
+            except Exception:
+                log.exception(f"Post-{persona} pipeline failed for {product.get('name')}")
+        elif exit_code == 0 and persona in _MAINTENANCE_PERSONAS:
+            try:
+                _run_post_maintenance_pipeline(product, session_uid, working_dir, persona)
             except Exception:
                 log.exception(f"Post-{persona} pipeline failed for {product.get('name')}")
 
