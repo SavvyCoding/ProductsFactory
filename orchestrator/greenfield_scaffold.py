@@ -86,6 +86,19 @@ def scaffold_greenfield(product: dict, system_config: dict, pm_api_url: str, ssh
                 ["git", "init", "-b", "main"],
                 cwd=working_dir, check=True, capture_output=True,
             )
+        # Disable filemode tracking. Docker Desktop on Windows can't reliably
+        # persist Unix +x bits through bind-mounts, so the alpine chmod sidecar
+        # (`_chmod_workspace_via_alpine` runs `chmod -R a+rwX`) leaves files at
+        # 0644 from git's perspective even when they were 0755 on disk before.
+        # Without this, every coder session's post-coder pipeline trips on
+        # `git checkout -B sprint/X origin/sprint/X failed: Your local changes
+        # to the following files would be overwritten by checkout` for any
+        # script with +x, blocking commits + pushes for the entire product.
+        # Idempotent — safe to re-run.
+        subprocess.run(
+            ["git", "config", "core.fileMode", "false"],
+            cwd=working_dir, capture_output=True,
+        )
         # `remote add` fails if origin already exists — use set-url as a fallback so the
         # scaffold re-runs cleanly.
         add = subprocess.run(

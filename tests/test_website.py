@@ -563,6 +563,56 @@ class TestResetStuck:
         db.refresh(f)
         assert f.status == "Implementing"
 
+    def test_resets_stale_implemented_with_pr_to_reviewing(self, client, db):
+        # post-coder failure: agent wrote Implemented but the PATCH to Reviewing
+        # never ran. PR was already pushed, so promote forward.
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Implemented", pr_number=42)
+        db.execute(
+            __import__("sqlalchemy").text(
+                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
+            ),
+            {"id": f.id}
+        )
+        db.flush()
+        r = client.post("/api/features/reset_stuck")
+        assert r.json()["reset_count"] == 1
+        db.refresh(f)
+        assert f.status == "Reviewing"
+
+    def test_resets_stale_implemented_no_pr_to_designed_when_design_doc(self, client, db):
+        # Agent wrote Implemented, no PR pushed, design doc exists → Designed
+        # (re-pickable by coder via Designed branch of next-for-persona).
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Implemented", design_doc_path="docs/story_1.md")
+        db.execute(
+            __import__("sqlalchemy").text(
+                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
+            ),
+            {"id": f.id}
+        )
+        db.flush()
+        r = client.post("/api/features/reset_stuck")
+        assert r.json()["reset_count"] == 1
+        db.refresh(f)
+        assert f.status == "Designed"
+
+    def test_resets_stale_implemented_no_pr_to_approved_when_no_design_doc(self, client, db):
+        # Agent wrote Implemented, no PR, no design doc → Approved (designer retries).
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Implemented")
+        db.execute(
+            __import__("sqlalchemy").text(
+                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
+            ),
+            {"id": f.id}
+        )
+        db.flush()
+        r = client.post("/api/features/reset_stuck")
+        assert r.json()["reset_count"] == 1
+        db.refresh(f)
+        assert f.status == "Approved"
+
     def test_does_not_reset_recent_implementing(self, client, db):
         p = make_product(db)
         make_feature(db, p.id, status="Implementing")  # updated_at = now

@@ -73,6 +73,8 @@ For each assigned feature (in order, up to {max_features_per_run}):
 
    ⚠️ **When tests time out or fail, never guess the cause** — quote the actual error/log line in your comment. Specifically, do NOT claim "Playwright browsers not installed" without first running `ls $PLAYWRIGHT_BROWSERS_PATH` (browsers are baked into the agent image at `/opt/ms-playwright/` — if you see chromium-1217/ there, the install is fine). False root-cause diagnoses send the coder on wild fixes.
 
+   ⚠️ **Don't loop probing for files that don't exist.** If a file/folder/pattern you expected isn't there (no `*.css` in a Svelte project where styles live in `<style>` blocks; no `tests/integration/` dir; etc.), accept it and review what does exist. One follow-up search to confirm absence is fine — three or more variants of `find … -name "*.css"` is the wandering pattern we're trying to avoid. The codebase isn't required to match your priors; review what you can see.
+
    **(c) Security review** — scan the diff for:
    - Information disclosure: raw `error.message` / `err.message` / stack traces in HTTP response bodies.
    - SQL injection: untemplated string-concat into SQL queries.

@@ -1301,6 +1301,27 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     )
     effective_ollama_timeout = int(sys_cfg.get("ollama_timeout") or os.environ.get("OLLAMA_TIMEOUT", "600"))
     effective_max_turns      = int(sys_cfg.get("max_turns")      or os.environ.get("MAX_TURNS",      "80"))
+    # Reviewer is read-only and bounded: review N feature commits, post comments,
+    # exit. Healthy reviewer sessions complete in <30 turns; the global 80-200
+    # turn cap is for the coder/designer who actually iterate. Without this cap
+    # reviewers occasionally wander for 60+ minutes doing repeat find/grep
+    # variants on the codebase (session 2154 / d3f200e2, 2026-05-10: 63 min,
+    # turn 75/200, repeated `find /workspace/src -name "*.css"` searches). The
+    # reverted-once theory that this cap caused the 10s JSON-in-content fail in
+    # session 2145 was disproved — sessions 2150/2152 worked fine at the default
+    # 200 with the cap removed; the 2145 failure was just model variance.
+    if persona == "reviewer":
+        effective_max_turns = min(effective_max_turns, 200)
+    # Designer's job is bounded (read story + architecture, write design doc,
+    # exit). Successful designer sessions today complete in 5-30 turns; the
+    # global 80-200 turn cap lets them keep accumulating file reads into
+    # conversation history (no sliding window in agent_loop) until the
+    # prompt blows past the model's max context — Ollama 400
+    # "prompt too long; exceeded max context length" on session 2277
+    # at turn 28 with 245k input tokens. Cap at 40 to fail fast instead of
+    # burning hundreds of thousands of tokens reaching the same wall.
+    if persona == "designer":
+        effective_max_turns = min(effective_max_turns, 40)
     effective_bash_timeout   = int(sys_cfg.get("bash_timeout")   or os.environ.get("BASH_TIMEOUT",   "180"))
     _raw_ssh_dir = sys_cfg.get("ssh_keys_dir") or str(SSH_DIR)
     effective_ssh_dir = Path(_raw_ssh_dir) if _raw_ssh_dir else None
