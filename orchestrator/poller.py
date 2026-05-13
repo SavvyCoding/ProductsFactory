@@ -203,7 +203,6 @@ def get_system_config() -> dict:
 from orchestrator.cycle.selection import (
     get_next_product,
     get_next_reviewer_product,
-    get_next_retro_product,
     is_quiet_hours,
     _ONDEMAND_PERSONAS,
 )
@@ -812,7 +811,6 @@ def main():
 
             # ⑦a Reviewer-first: any product with a Reviewing feature + PR takes priority
             reviewer_product, reviewer_persona = get_next_reviewer_product(products)
-            retro_product = get_next_retro_product(products)
             if any(p.get("run_trainer_now") for p in products if p["status"] == "ready"):
                 # ⑦a2 On-demand trainer: a PM requested a showcase video
                 product = next(p for p in products if p["status"] == "ready" and p.get("run_trainer_now"))
@@ -831,30 +829,6 @@ def main():
                 product = reviewer_product
                 persona = "reviewer"
                 log.info(f"Reviewer-first: {product['name']} has Reviewing features with PRs")
-            elif retro_product:
-                # Phase 3 (2026-05-06): retrospective LLM persona replaced
-                # by an inline templated generator. Run it directly here —
-                # no agent container, no session record — and continue the
-                # loop. The generator is idempotent and self-signs the
-                # retro_done DoD gate.
-                try:
-                    from orchestrator.pipelines.retro_generator import generate_and_commit_retro
-                    sid = retro_product.get("_retro_sprint_id")
-                    if sid:
-                        log.info(
-                            f"Retro-first: {retro_product['name']} sprint #{sid} — "
-                            f"running templated retro generator (no LLM session)"
-                        )
-                        generate_and_commit_retro(retro_product, int(sid))
-                    else:
-                        log.warning(
-                            f"Retro-first: {retro_product['name']} has no active sprint id — skipping"
-                        )
-                except Exception as e:
-                    log.warning(f"Retro-first inline generator failed: {e}")
-                # Continue the cycle without launching a session.
-                time.sleep(_cfg.get("poll_interval", 60))
-                continue
             else:
                 # ⑦b Normal round-robin for designer/coder work
                 product = get_next_product(products)

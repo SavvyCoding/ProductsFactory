@@ -112,13 +112,8 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
       coder     → greenfield.md or brownfield.md (existing coder path)
       None      → legacy routing (analysis_run / brownfield / greenfield)
     """
-    # Phase 3 (2026-05-06): "retrospective" persona was replaced by an
-    # inline templated generator (orchestrator/pipelines/retro_generator.py).
-    # No prompt is rendered for it anymore — persona dispatch returns
-    # action="run_inline" instead of "launch_session". The branch below
-    # is a defensive alias for any caller that still requests a
-    # retrospective prompt build; it returns the planner template since
-    # the standalone retrospective.md file is deleted.
+    # "retrospective" persona is gone — defensive alias for any legacy
+    # caller that still asks for it; returns the planner template.
     if persona == "retrospective":
         template_name = "planner"
     elif persona == "designer":

@@ -118,22 +118,9 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
             except Exception:
                 cd, dod = {}, {}
 
-            # Phase 3 simplification (2026-05-06): retrospective LLM persona
-            # replaced by `retro_generator.generate_and_commit_retro()` —
-            # a deterministic template that pulls sprint metadata + features
-            # + reviewer comments and emits docs/retro_sprint_<id>.md inline,
-            # signs retro_done via the PM API. No LLM session needed; the
-            # retro is mechanical text. Returns a `run_inline` action so
-            # the dispatcher knows to call the generator function directly
-            # rather than launch an agent container.
             sprint_status_now = active_sprint.get("status")
-            retro_done_path   = active_sprint.get("retro_doc_path")
             if cd.get("action") == "auto_completed" or sprint_status_now == "completed":
-                if not retro_done_path:
-                    return {"action": "run_inline", "task": "retro_generator",
-                            "product_id": product_id, "sprint_id": sid,
-                            "reason": f"sprint {sid} completed — generating retro_sprint_{sid}.md inline"}
-                return {"action": "exit", "reason": f"sprint {sid} fully signed off + retro done"}
+                return {"action": "exit", "reason": f"sprint {sid} fully signed off"}
 
             return {"action": "exit",
                     "reason": f"sprint {sid}: structural gates pending; check-dod returned {cd.get('action','?')}"}
@@ -236,11 +223,6 @@ def determine_persona(product: dict) -> Optional[str]:
     httpx.Client (plain — no PF-internal signing because the legacy poller
     runs on the host with the website assumed unsigned).
 
-    Phase 3 (2026-05-06): if the dispatcher returns ``action == "run_inline"``
-    (currently used for the templated retro generator), this adapter handles
-    it inline — no agent container, no session record — and returns ``None``
-    so the poller's main loop treats the cycle as "no launch needed."
-
     Replaces the dispatch.py cascade that the poller path used pre-Phase 5.
     """
     pid = product.get("id")
@@ -254,22 +236,4 @@ def determine_persona(product: dict) -> Optional[str]:
         return None
     if result.get("action") == "launch_session":
         return result.get("persona")
-    if result.get("action") == "run_inline":
-        task = result.get("task")
-        if task == "retro_generator":
-            sprint_id = result.get("sprint_id")
-            log.info(
-                f"[run_inline] product={pid} retro_generator for sprint {sprint_id}: "
-                f"{result.get('reason','')}"
-            )
-            try:
-                from orchestrator.pipelines.retro_generator import generate_and_commit_retro
-                generate_and_commit_retro(product, int(sprint_id))
-            except Exception as e:
-                log.warning(
-                    f"[run_inline] retro_generator failed for product {pid}, "
-                    f"sprint {sprint_id}: {e}"
-                )
-        else:
-            log.warning(f"[run_inline] unknown task={task!r} — skipping")
     return None
