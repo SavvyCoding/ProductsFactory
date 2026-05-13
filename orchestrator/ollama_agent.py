@@ -470,6 +470,37 @@ def dispatch_tool(name: str, args: dict) -> tuple[str, bool]:
                     "This will be allowed.\n"
                     "Continue working — do NOT call task_done(success) again until files are changed."
                 ), False
+        # Product-trainer gate: the trainer's deliverable is the showcase
+        # narration + video at /workspace/output/. Session 2306 (2026-05-12)
+        # declared task_done(success) after a `write_file: /workspace/output/
+        # narration.md (2576 chars)` log line — but the host filesystem had
+        # no `output/` directory at all. Verified via empirical reproduction
+        # that an agent-shaped container CAN write to /workspace/output/, so
+        # the most likely failure mode is that an Ollama timeout (or other
+        # error) interrupted the write and the model ignored the tool's
+        # ERROR response, declaring success on hallucinated work. Require
+        # the deliverable file to actually exist before accepting success.
+        if AGENT_PERSONA == "product_trainer":
+            narration_path = Path(WORKSPACE_DIR) / "output" / "narration.md"
+            if not narration_path.exists():
+                sl = summary.lower()
+                self_reports_failure = any(
+                    kw in sl for kw in ("blocked:", "incomplete:", "cannot ", "unable to", "cannot proceed", "skipping", "no work", "fewer than")
+                )
+                if not self_reports_failure:
+                    _log(f"REFUSING task_done — product_trainer deliverable {narration_path} missing")
+                    return (
+                        f"REJECTED: You called task_done(success) but the expected deliverable "
+                        f"{narration_path} does not exist on disk. The product_trainer's contract "
+                        f"is to produce that narration.md and (optionally) a "
+                        f"`product_video_<ts>.mp4` in /workspace/output/. You MUST do one of:\n"
+                        f"  (a) Actually write /workspace/output/narration.md via write_file or "
+                        f"`bash` heredoc, then verify with `ls /workspace/output/` before calling "
+                        f"task_done again.\n"
+                        f"  (b) If you cannot produce it (e.g. fewer than 2 shipped features), "
+                        f"call task_done with summary starting 'skipping:', 'blocked:', or "
+                        f"'incomplete:' — that is allowed."
+                    ), False
         # Reviewer gate: a reviewer that ends without writing review decisions
         # to session_result.json leaves the assigned features stuck in Reviewing
         # forever — auto-merge has no entries to act on. Force the model to
