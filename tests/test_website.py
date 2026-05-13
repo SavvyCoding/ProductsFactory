@@ -25,6 +25,7 @@ os.environ.setdefault("PM_PASSWORD", "testpassword")
 from website.main import app
 from website.models import Base, Product, Feature, Session as DBSession, Alert
 from website.database import get_db
+from website.auth import _reset_rate_limit_state_for_tests
 
 # ── Test DB setup (sync engine, overrides async dependency) ──────────────────
 
@@ -109,11 +110,27 @@ class _AsyncSessionFacade:
 def client(db):
     """TestClient with DB dependency overridden to use the rolled-back sync
     session, wrapped in an async facade so the website's ``await db.execute()``
-    style code can run unchanged against it."""
+    style code can run unchanged against it.
+
+    Lifecycle mirrors website.database.get_db: commit (= flush, in tests) on
+    request success, rollback on exception. Without this, attribute mutations
+    made inside an endpoint (e.g. ``product.status = "paused"``) never reach
+    the connection's transaction and subsequent ``db.refresh()`` reads return
+    the pre-mutation value.
+
+    Also clears the in-memory auth rate-limiter — without this, a few
+    intentional-401 tests trip AUTH_MAX_FAILS and every later test in the
+    session sees 429 Too Many Requests."""
+    _reset_rate_limit_state_for_tests()
     facade = _AsyncSessionFacade(db)
 
     async def override_get_db():
-        yield facade
+        try:
+            yield facade
+            await facade.commit()
+        except Exception:
+            await facade.rollback()
+            raise
 
     app.dependency_overrides[get_db] = override_get_db
     with TestClient(app, raise_server_exceptions=True) as c:
