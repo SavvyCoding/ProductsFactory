@@ -13,14 +13,19 @@ import os
 import pytest
 from datetime import datetime, timezone, timedelta
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-# Patch DATABASE_URL before importing app so engine initialises correctly
+# Patch DATABASE_URL before importing app so engine initialises correctly.
+# Force-override PM_USERNAME/PM_PASSWORD: CI sets them to ci_admin/ci_test_password,
+# but every test in this file uses AUTH=("admin", "testpassword"). website.auth
+# reads these env vars at module import, so we must set them before the
+# website.* imports below.
 os.environ.setdefault("DATABASE_URL", os.environ.get("TEST_DATABASE_URL", ""))
-os.environ.setdefault("PM_USERNAME", "admin")
-os.environ.setdefault("PM_PASSWORD", "testpassword")
+os.environ["PM_USERNAME"] = "admin"
+os.environ["PM_PASSWORD"] = "testpassword"
 
 from website.main import app
 from website.models import Base, Product, Feature, Session as DBSession, Alert
@@ -128,6 +133,14 @@ def client(db):
         try:
             yield facade
             await facade.commit()
+        except HTTPException:
+            # HTTPException is FastAPI's normal way of returning 4xx — not a
+            # transactional error. The real get_db rolls back on it, but in
+            # tests rolling back would detach the test-held setup objects
+            # (e.g. ``p = make_product(db); client.post(...) -> 404;
+            # db.refresh(p)`` would then raise "not persistent within this
+            # Session"). Treat HTTPException as a normal exit.
+            raise
         except Exception:
             await facade.rollback()
             raise
