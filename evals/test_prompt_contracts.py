@@ -51,11 +51,10 @@ def test_all_personas_produce_nonempty_prompt() -> None:
     # 2026-05-06 persona simplification (futureplan.md):
     #   Phase 1: product_planner merged into designer
     #   Phase 2: qa_tester + security_auditor merged into reviewer
-    #   Phase 3: retrospective replaced by inline templated generator
-    #            (orchestrator/pipelines/retro_generator.py) — no LLM
-    #            session, no prompt file. Dispatch returns
-    #            action=run_inline instead of launch_session.
-    # The standalone .md files for those merged/replaced personas are
+    #   Phase 3 + 2026-05-12: retrospective removed entirely — no prompt
+    #            file, no inline generator, no dispatch branch. Sprints
+    #            complete without auto-generated retro docs.
+    # The standalone .md files for those merged/removed personas are
     # deleted; persona dispatch routes any lingering callers to the
     # survivor (or to planner.md as a defensive fallback for retrospective).
     all_personas = [
