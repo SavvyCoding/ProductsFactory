@@ -57,11 +57,63 @@ def db(test_engine):
     connection.close()
 
 
+class _AsyncSessionFacade:
+    """
+    Test-only async wrapper over a sync sqlalchemy.orm.Session.
+
+    The website code is built on AsyncSession (asyncpg) and awaits methods like
+    ``execute``, ``get``, ``flush``, ``commit``, ``rollback``, ``refresh``,
+    ``delete``. The test harness drives the app through the sync ``TestClient``
+    on a single rolled-back transaction, so we keep a real sync ``Session``
+    underneath and expose the async surface as zero-cost coroutine adapters.
+
+    ``add`` / ``add_all`` are sync on AsyncSession too — passed through verbatim.
+    """
+
+    def __init__(self, sync_session):
+        self._s = sync_session
+
+    async def execute(self, *a, **kw):
+        return self._s.execute(*a, **kw)
+
+    async def get(self, *a, **kw):
+        return self._s.get(*a, **kw)
+
+    async def flush(self, *a, **kw):
+        return self._s.flush(*a, **kw)
+
+    async def commit(self):
+        # Tests run inside a single outer transaction that is rolled back at
+        # teardown; a real commit would end that transaction and leak rows
+        # into the test database. Treat commit as flush — the website's
+        # in-request consistency still holds, and isolation is preserved.
+        return self._s.flush()
+
+    async def rollback(self):
+        return self._s.rollback()
+
+    async def refresh(self, *a, **kw):
+        return self._s.refresh(*a, **kw)
+
+    async def delete(self, instance):
+        return self._s.delete(instance)
+
+    def add(self, instance):
+        return self._s.add(instance)
+
+    def add_all(self, instances):
+        return self._s.add_all(instances)
+
+
 @pytest.fixture
 def client(db):
-    """TestClient with DB dependency overridden to use the rolled-back sync session."""
+    """TestClient with DB dependency overridden to use the rolled-back sync
+    session, wrapped in an async facade so the website's ``await db.execute()``
+    style code can run unchanged against it."""
+    facade = _AsyncSessionFacade(db)
+
     async def override_get_db():
-        yield db
+        yield facade
 
     app.dependency_overrides[get_db] = override_get_db
     with TestClient(app, raise_server_exceptions=True) as c:
@@ -75,7 +127,8 @@ AUTH = ("admin", "testpassword")
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def make_product(db, working_dir="/projects/test-app", **kwargs) -> Product:
-    p = Product(working_dir=working_dir, status="ready", **kwargs)
+    kwargs.setdefault("status", "ready")
+    p = Product(working_dir=working_dir, **kwargs)
     db.add(p)
     db.flush()
     return p
