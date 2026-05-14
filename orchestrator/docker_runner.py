@@ -1485,12 +1485,12 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             log.info(f"Container already running for product {product_id} ({running}) — waiting")
             return 99  # Sentinel: already running, not an error
 
-    # Mount only the deploy key, not the whole .ssh directory.
-    # This preserves the known_hosts baked into the image.
-    deploy_key = _get_deploy_key_path(product, effective_ssh_dir)
-    ssh_mount = []
-    if deploy_key:
-        ssh_mount = ["-v", f"{host_path(deploy_key)}:/home/agent/.ssh/id_ed25519:ro"]
+    # SSH deploy-key mount removed: git auth is now a GitHub App installation
+    # token delivered via the GITHUB_TOKEN env var + HTTPS origin (see
+    # orchestrator/integrations/git_ops.py:_enforce_https_origin). The agent
+    # container needs nothing in ~/.ssh besides the known_hosts already baked
+    # into the image. Variable kept for downstream concatenation only.
+    ssh_mount: list[str] = []
 
     # GH_TOKEN — staged to a 0600 temp file and bind-mounted at /run/secrets/gh_token.
     # The agent_cmd wrapper (below) sources it into GH_TOKEN at runtime, so `gh` CLI

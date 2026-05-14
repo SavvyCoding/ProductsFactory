@@ -6,7 +6,7 @@ Add columns here + create an Alembic migration to apply to live DB.
 from datetime import datetime, date
 from typing import Optional, List
 from sqlalchemy import (
-    Integer, String, Text, DateTime, Boolean, ARRAY, Date,
+    BigInteger, Integer, String, Text, DateTime, Boolean, ARRAY, Date,
     ForeignKey, func, CheckConstraint, event, Numeric, Float, UniqueConstraint
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -195,7 +195,10 @@ class SystemConfig(Base):
     id:                    Mapped[int]           = mapped_column(Integer, primary_key=True, default=1)
     products_root_dir:     Mapped[Optional[str]] = mapped_column(Text)
     github_org:            Mapped[Optional[str]] = mapped_column(Text)
-    github_pat:            Mapped[Optional[str]] = mapped_column(Text)
+    github_pat:            Mapped[Optional[str]] = mapped_column(Text)  # deprecated, scheduled for removal once App-token path is verified end-to-end
+    github_app_id:                 Mapped[Optional[int]] = mapped_column(BigInteger)
+    github_app_private_key:        Mapped[Optional[str]] = mapped_column(Text)
+    github_app_installation_id:    Mapped[Optional[int]] = mapped_column(BigInteger)
     github_ssh_key_name:   Mapped[str]           = mapped_column(Text, nullable=False, default="productfactory-deploy")
     slack_webhook_url:     Mapped[Optional[str]] = mapped_column(Text)
     github_webhook_secret: Mapped[Optional[str]] = mapped_column(Text)

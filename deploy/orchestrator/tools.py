@@ -90,6 +90,34 @@ def _pm_client() -> httpx.Client:
     return _SigningClient(base_url=PM_API_URL, timeout=REQUEST_TIMEOUT, auth=auth)
 
 
+def _get_github_token() -> str:
+    """Return a bearer token for GitHub API calls.
+
+    Prefers a fresh GitHub App installation token (rotated hourly via the
+    App's PEM + Installation ID — see ``orchestrator.integrations.github_app``).
+    Falls back to ``system_config.github_pat`` only when the App is not
+    fully configured.
+
+    This is the canonical helper for ``orchestrator_runtime.py`` (the deployed
+    copy of this file). All call sites that previously read ``github_pat``
+    directly from ``/api/system-config`` now route through here so a single
+    PAT revocation no longer 401s the poller's PR-list and merge calls.
+    """
+    try:
+        from orchestrator.integrations.github_app import get_installation_token
+        app_token = get_installation_token()
+        if app_token:
+            return app_token
+    except Exception:
+        pass
+    try:
+        with _pm_client() as client:
+            sc = client.get("/api/system-config").json() or {}
+            return sc.get("github_pat") or ""
+    except Exception:
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # Generic PM API passthrough
 # ---------------------------------------------------------------------------
@@ -1019,14 +1047,8 @@ def _run_supervisor_pr_detectors(product: dict) -> None:
         return
     slug = m.group(1)
 
-    # Pull GH PAT once
-    pat = ""
-    try:
-        with _pm_client() as client:
-            sc = client.get("/api/system-config").json() or {}
-            pat = sc.get("github_pat") or ""
-    except Exception:
-        pass
+    # Bearer token — App installation first, PAT only as transition fallback.
+    pat = _get_github_token()
     headers = {"Accept": "application/vnd.github+json"}
     if pat:
         headers["Authorization"] = f"Bearer {pat}"
@@ -1098,9 +1120,11 @@ def _github_context(product_id: int) -> tuple[str, str] | None:
     try:
         with _pm_client() as client:
             product = client.get(f"/api/products/{product_id}").json()
-            sys_cfg = client.get("/api/system-config").json()
         repo_url = product.get("github_repo") or ""
-        pat = sys_cfg.get("github_pat") or ""
+        # App installation token (PAT fallback for transition release).
+        # Minted per call by _get_github_token; the App module caches with
+        # auto-refresh, so this is still effectively free.
+        pat = _get_github_token()
         if not repo_url or not pat:
             return None
         slug = repo_url.rstrip("/").split("github.com/")[-1].replace(".git", "")

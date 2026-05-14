@@ -529,7 +529,8 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         # pop conflict we resolve in favor of the agent ("theirs" in stash terms)
         # since the post-coder force-push will overwrite the sprint branch tree
         # anyway.
-        _run(["git", "fetch", "origin"])
+        from orchestrator.integrations.git_ops import git_fetch_authenticated
+        git_fetch_authenticated(["origin"], cwd=working_dir, product_name=pname, timeout=120)
         # Stash with -u so UNTRACKED files survive the branch switch too. The
         # agent's brand-new source files (e.g. SRC/healthz.ts, app/api/.../route.ts)
         # are untracked at this point; without -u, `git checkout sprint/79`
@@ -557,7 +558,10 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             if stashed:
                 _run(["git", "stash", "pop"])  # best-effort restore
             return pushed_ids
-        pull_r = _run(["git", "pull", "--ff-only", "origin", branch])
+        from orchestrator.integrations.git_ops import git_pull_authenticated
+        pull_r = git_pull_authenticated(
+            ["--ff-only", "origin", branch], cwd=working_dir, product_name=pname, timeout=120,
+        )
         if pull_r.returncode != 0:
             log.warning(f"[post-coder] {pname}: git pull --ff-only on {branch} failed — {_fmt_err(pull_r)}")
             # Don't return: a non-fast-forward state is rare and we still want
@@ -665,16 +669,20 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         log.warning(f"[post-coder] {pname}: git commit failed — {_fmt_err(commit_result)}")
         return pushed_ids
 
+    # push_args lists everything AFTER "push" — git_push_authenticated owns
+    # the "git push" prefix and adds a one-shot credential helper so the App
+    # installation token is never written to .git/config or visible in `ps`.
     if sprint_pr_mode:
-        push_args = ["git", "push", "--no-verify", "origin", branch]
+        push_args = ["--no-verify", "origin", branch]
     elif rework_pr_mode:
         # Replace the prior (rejected) commits on the remote PR branch with our
         # fresh main-based commits. --force-with-lease aborts if the remote was
         # touched by anyone else since our last fetch.
-        push_args = ["git", "push", "--no-verify", "--force-with-lease", "origin", branch]
+        push_args = ["--no-verify", "--force-with-lease", "origin", branch]
     else:
-        push_args = ["git", "push", "--no-verify", "-u", "origin", branch]
-    push_result = _run(push_args, timeout=180)
+        push_args = ["--no-verify", "-u", "origin", branch]
+    from orchestrator.integrations.git_ops import git_push_authenticated
+    push_result = git_push_authenticated(push_args, cwd=working_dir, product_name=pname, timeout=180)
     if push_result.returncode != 0:
         log.warning(f"[post-coder] {pname}: git push failed: {push_result.stderr.strip()[:300]}")
         return pushed_ids

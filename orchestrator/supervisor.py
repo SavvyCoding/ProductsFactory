@@ -1380,11 +1380,14 @@ def auto_heal_unproductive_coder(
                 reason=f.get("detail", ""),
             )
 
-        # Check A: SSH Host alias in ~/.ssh/config.
-        c = _check_ssh_alias(product)
+        # Check A: GitHub App installation token mints successfully.
+        # Replaces the legacy SSH-config-alias check — that one only
+        # verified local config and missed every real auth failure
+        # (deploy key revoked, App removed, PEM rotated, etc.).
+        c = _check_app_token(product)
         checks_run.append(c)
         if not c["ok"]:
-            f = _fix_ssh_alias(product)
+            f = _fix_app_token(product)
             if f:
                 fixes_applied.append(f)
                 _record_fix(f)
@@ -1411,7 +1414,7 @@ def auto_heal_unproductive_coder(
         fresh_product = _fetch_product(pid) or product
         remaining: list[dict] = []
         for fn, kind in (
-            (_check_ssh_alias, "product"),
+            (_check_app_token, "product"),
             (_check_sprint_pr_mode, "product"),
             (_check_sprint_provisioned, "pid"),
         ):
@@ -1525,44 +1528,38 @@ def _github_repo_slug(product: dict) -> str | None:
     return base.lower().replace("-", "_").replace(".", "_")
 
 
-def _check_ssh_alias(product: dict) -> dict:
-    """Is the `Host github.com-<slug>` block present in ~/.ssh/config?"""
-    slug = _github_repo_slug(product)
-    if not slug:
-        return {"label": "ssh_alias", "ok": True,
-                "detail": "no github_repo configured — n/a"}
-    ssh_dir = os.environ.get("SSH_DIR", "/home/orchestrator/.ssh")
-    cfg_path = os.path.join(ssh_dir, "config")
-    try:
-        with open(cfg_path, "r", encoding="utf-8", errors="replace") as f:
-            existing = f.read()
-    except FileNotFoundError:
-        return {"label": "ssh_alias", "ok": False,
-                "detail": f"~/.ssh/config does not exist"}
-    except Exception as e:
-        return {"label": "ssh_alias", "ok": False,
-                "detail": f"could not read ~/.ssh/config: {e}"}
-    needle = f"Host github.com-{slug}"
-    if needle in existing:
-        return {"label": "ssh_alias", "ok": True, "detail": f"{needle} present"}
-    return {"label": "ssh_alias", "ok": False,
-            "detail": f"missing `{needle}` block"}
+def _check_app_token(product: dict) -> dict:
+    """Mint a GitHub App installation token bypassing cache to verify
+    git auth is actually working end-to-end.
+
+    Replaces the legacy `_check_ssh_alias` which only verified that an
+    entry existed in `~/.ssh/config` — that check missed the failure
+    mode that actually fires in production (deploy key never accepted
+    by GitHub, App revoked, expired PEM, etc.). A successful mint
+    proves: App ID + PEM + installation ID are all valid AND the
+    installation hasn't been revoked AND GitHub is reachable.
+
+    Product-scoped only so the auto-heal record can attribute the fix
+    to the product that triggered the cycle; the underlying credential
+    is global.
+    """
+    from orchestrator.integrations import github_app
+    ok, msg = github_app.probe()
+    return {"label": "app_token", "ok": ok, "detail": msg}
 
 
-def _fix_ssh_alias(product: dict) -> dict | None:
-    slug = _github_repo_slug(product)
-    if not slug:
-        return None
-    try:
-        from pathlib import Path as _Path
-        from orchestrator.greenfield_scaffold import _ensure_ssh_host_block
-        ssh_dir = _Path(os.environ.get("SSH_DIR", "/home/orchestrator/.ssh"))
-        _ensure_ssh_host_block(ssh_dir, slug, product.get("name", "?"))
-        return {"label": "ssh_alias",
-                "detail": f"appended Host github.com-{slug} to ~/.ssh/config"}
-    except Exception as e:
-        log.exception(f"auto-heal: ssh_alias fix failed: {e}")
-        return None
+def _fix_app_token(product: dict) -> dict | None:
+    """No automatic remediation — the App's credentials are a human-managed
+    secret. Surface guidance in the action record so PMs know exactly what
+    to rotate / reinstall instead of staring at an opaque heal failure.
+    """
+    log.warning(
+        "auto-heal: GitHub App token mint failed — operator action required. "
+        "Verify in system_config: github_app_id, github_app_private_key (PEM), "
+        "github_app_installation_id. The App must be installed on the org and "
+        "not revoked."
+    )
+    return None
 
 
 def _check_sprint_pr_mode(product: dict) -> dict:
@@ -1624,8 +1621,10 @@ def _fix_sprint_provisioned(pid: int) -> dict | None:
             sprint = spr.json()
             if sprint.get("branch_name"):
                 return None  # nothing to do
-            syscfg = client.get("/api/system-config")
-            token = (syscfg.json().get("github_pat") or "") if syscfg.status_code == 200 else ""
+            # Prefer App installation token; legacy PAT acts as fallback
+            # until the github_pat column is dropped in a follow-up release.
+            from orchestrator.github_client import _get_auth_token
+            token = _get_auth_token()
             if not token:
                 return None
             feats = client.get(f"/api/products/{pid}/features")
