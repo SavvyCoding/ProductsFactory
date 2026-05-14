@@ -13,18 +13,24 @@ import os
 import pytest
 from datetime import datetime, timezone, timedelta
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-# Patch DATABASE_URL before importing app so engine initialises correctly
+# Patch DATABASE_URL before importing app so engine initialises correctly.
+# Force-override PM_USERNAME/PM_PASSWORD: CI sets them to ci_admin/ci_test_password,
+# but every test in this file uses AUTH=("admin", "testpassword"). website.auth
+# reads these env vars at module import, so we must set them before the
+# website.* imports below.
 os.environ.setdefault("DATABASE_URL", os.environ.get("TEST_DATABASE_URL", ""))
-os.environ.setdefault("PM_USERNAME", "admin")
-os.environ.setdefault("PM_PASSWORD", "testpassword")
+os.environ["PM_USERNAME"] = "admin"
+os.environ["PM_PASSWORD"] = "testpassword"
 
 from website.main import app
 from website.models import Base, Product, Feature, Session as DBSession, Alert
 from website.database import get_db
+from website.auth import _reset_rate_limit_state_for_tests
 
 # ── Test DB setup (sync engine, overrides async dependency) ──────────────────
 
@@ -57,11 +63,87 @@ def db(test_engine):
     connection.close()
 
 
+class _AsyncSessionFacade:
+    """
+    Test-only async wrapper over a sync sqlalchemy.orm.Session.
+
+    The website code is built on AsyncSession (asyncpg) and awaits methods like
+    ``execute``, ``get``, ``flush``, ``commit``, ``rollback``, ``refresh``,
+    ``delete``. The test harness drives the app through the sync ``TestClient``
+    on a single rolled-back transaction, so we keep a real sync ``Session``
+    underneath and expose the async surface as zero-cost coroutine adapters.
+
+    ``add`` / ``add_all`` are sync on AsyncSession too — passed through verbatim.
+    """
+
+    def __init__(self, sync_session):
+        self._s = sync_session
+
+    async def execute(self, *a, **kw):
+        return self._s.execute(*a, **kw)
+
+    async def get(self, *a, **kw):
+        return self._s.get(*a, **kw)
+
+    async def flush(self, *a, **kw):
+        return self._s.flush(*a, **kw)
+
+    async def commit(self):
+        # Tests run inside a single outer transaction that is rolled back at
+        # teardown; a real commit would end that transaction and leak rows
+        # into the test database. Treat commit as flush — the website's
+        # in-request consistency still holds, and isolation is preserved.
+        return self._s.flush()
+
+    async def rollback(self):
+        return self._s.rollback()
+
+    async def refresh(self, *a, **kw):
+        return self._s.refresh(*a, **kw)
+
+    async def delete(self, instance):
+        return self._s.delete(instance)
+
+    def add(self, instance):
+        return self._s.add(instance)
+
+    def add_all(self, instances):
+        return self._s.add_all(instances)
+
+
 @pytest.fixture
 def client(db):
-    """TestClient with DB dependency overridden to use the rolled-back sync session."""
+    """TestClient with DB dependency overridden to use the rolled-back sync
+    session, wrapped in an async facade so the website's ``await db.execute()``
+    style code can run unchanged against it.
+
+    Lifecycle mirrors website.database.get_db: commit (= flush, in tests) on
+    request success, rollback on exception. Without this, attribute mutations
+    made inside an endpoint (e.g. ``product.status = "paused"``) never reach
+    the connection's transaction and subsequent ``db.refresh()`` reads return
+    the pre-mutation value.
+
+    Also clears the in-memory auth rate-limiter — without this, a few
+    intentional-401 tests trip AUTH_MAX_FAILS and every later test in the
+    session sees 429 Too Many Requests."""
+    _reset_rate_limit_state_for_tests()
+    facade = _AsyncSessionFacade(db)
+
     async def override_get_db():
-        yield db
+        try:
+            yield facade
+            await facade.commit()
+        except HTTPException:
+            # HTTPException is FastAPI's normal way of returning 4xx — not a
+            # transactional error. The real get_db rolls back on it, but in
+            # tests rolling back would detach the test-held setup objects
+            # (e.g. ``p = make_product(db); client.post(...) -> 404;
+            # db.refresh(p)`` would then raise "not persistent within this
+            # Session"). Treat HTTPException as a normal exit.
+            raise
+        except Exception:
+            await facade.rollback()
+            raise
 
     app.dependency_overrides[get_db] = override_get_db
     with TestClient(app, raise_server_exceptions=True) as c:
@@ -75,7 +157,8 @@ AUTH = ("admin", "testpassword")
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def make_product(db, working_dir="/projects/test-app", **kwargs) -> Product:
-    p = Product(working_dir=working_dir, status="ready", **kwargs)
+    kwargs.setdefault("status", "ready")
+    p = Product(working_dir=working_dir, **kwargs)
     db.add(p)
     db.flush()
     return p
