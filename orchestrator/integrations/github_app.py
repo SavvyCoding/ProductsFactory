@@ -115,13 +115,18 @@ def _mint_via_api(app_jwt: str, installation_id: int) -> _CachedToken:
     return _CachedToken(token=body["token"], expires_at=expires_dt.timestamp())
 
 
-def get_installation_token() -> str | None:
-    """Return a valid installation token, minting fresh if needed.
+def get_installation_token_from_config(
+    app_id: int | None,
+    pem: str | None,
+    installation_id: int | None,
+) -> str | None:
+    """Mint or return-cached an installation token from explicit config.
 
-    Returns None if the App isn't fully configured — caller decides
-    whether to fall back to the legacy PAT path.
+    Used by code paths that already have the App config loaded (e.g. the
+    website running inside pm-api, where the HTTP self-loopback in
+    ``_fetch_app_config`` would be wasteful). Shares the same module-level
+    cache as ``get_installation_token``.
     """
-    app_id, pem, installation_id = _fetch_app_config()
     if not (app_id and pem and installation_id):
         return None
 
@@ -141,6 +146,21 @@ def get_installation_token() -> str | None:
     with _cache_lock:
         _cache[installation_id] = fresh
     return fresh.token
+
+
+def get_installation_token() -> str | None:
+    """Return a valid installation token, minting fresh if needed.
+
+    Reads App config via ``/api/system-config`` — appropriate for callers
+    outside the pm-api process (orchestrator, agent containers).
+    For pm-api itself, use ``get_installation_token_from_config`` to skip
+    the loopback.
+
+    Returns None if the App isn't fully configured — caller decides
+    whether to fall back to the legacy PAT path.
+    """
+    app_id, pem, installation_id = _fetch_app_config()
+    return get_installation_token_from_config(app_id, pem, installation_id)
 
 
 def probe() -> tuple[bool, str]:
