@@ -82,16 +82,16 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
 
     violations: list[str] = []
 
-    # --- Guard 1: raw error.message in HTTP-facing source files ---
-    # Switched from file-level `grep -l` to line-level `grep -n` so we can
-    # filter false positives on legit server-side logging. The original
-    # rule bounced `logError('failed', {message: error.message})` and
-    # similar patterns indefinitely (real incident 2026-05-12: feature
-    # #391 cycled coder→push→lint-guard-bounce 3 times in 4 hours,
-    # ~40 min/cycle, agent kept "fixing" hooks.server.ts but the matches
-    # were inside a logError call — safe server-side log, not HTTP
-    # response disclosure). Skip any match whose LINE contains a
-    # recognized log-call prefix; flag the rest.
+    # --- Guard 1: raw error.message in HTTP responses ---
+    # Inverted predicate (2026-05-14): only flag a line if it BOTH references
+    # error.message/stack AND contains an explicit HTTP-response marker.
+    # Previous version (file-level grep, then line-level skip of recognized
+    # log calls) over-fired on every legitimate try/catch in Next.js / Express
+    # codebases — 17 lint-guard bounces on 11 features in 24h, all on the
+    # same pattern. Real disclosure looks like `res.json({error: error.message})`
+    # or `return Response.json({error: e.message})`; matching THAT directly
+    # is both tighter and more accurate than enumerating every safe call
+    # the agent might write.
     src_files = [
         f for f in files
         if any(f.startswith(p) for p in ("SRC/", "src/", "lib/", "app/", "pages/"))
@@ -104,33 +104,45 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
                      timeout=15)
             if r.returncode == 0:
                 raw_hits = [h for h in (r.stdout or "").splitlines() if h.strip()]
-                # grep output is `filename:lineno:line_content`. Skip hits
-                # whose line is inside a log call — server-side logging of
-                # error.message is fine and conventional.
-                _LOG_MARKERS = (
-                    "logError", "logger.", "log.error", "log.warn",
-                    "log.info", "log.debug", "log.fatal",
-                    "console.error", "console.log", "console.warn",
-                    "console.info", "console.debug",
+                # Lines that are themselves an HTTP response — Express/Next.js
+                # Pages API, Fetch-style App Router, Fastify, Koa, Flask,
+                # FastAPI. If error.message appears on a line with one of
+                # these markers, that's the actual leak vector. Anything else
+                # (logger calls, error chaining, throw new Error(...) wrapping,
+                # variable assignment) is fine.
+                _RESPONSE_MARKERS = (
+                    # Express / Next.js Pages API
+                    "res.send", "res.json", "res.status",
+                    "res.write", "res.end",
+                    # Fetch / Next.js App Router
+                    "Response.json(", "new Response(",
+                    "NextResponse.json(", "new NextResponse(",
+                    # Fastify
+                    "reply.send", "reply.code(",
+                    # Koa
+                    "ctx.body", "ctx.response",
+                    # Python — Flask / FastAPI
+                    "jsonify(", "JSONResponse(",
+                    "raise HTTPException",
                 )
                 bad_files = set()
                 for h in raw_hits:
-                    # Split off "filename:lineno:" — the rest is the line.
+                    # grep output: `filename:lineno:line_content`.
                     parts = h.split(":", 2)
                     if len(parts) < 3:
                         continue
                     fname, _lineno, line = parts
-                    if any(m in line for m in _LOG_MARKERS):
-                        continue
+                    if not any(m in line for m in _RESPONSE_MARKERS):
+                        continue  # not in an HTTP response — safe
                     bad_files.add(fname)
                 if bad_files:
                     files_sample = sorted(bad_files)
                     sample = ", ".join(files_sample[:3])
                     more = "..." if len(files_sample) > 3 else ""
                     violations.append(
-                        f"raw error.message/stack in HTTP-facing files (info "
-                        f"disclosure): {sample}{more}. Replace with a generic "
-                        f"message and log raw error server-side."
+                        f"raw error.message/stack inside an HTTP response (info "
+                        f"disclosure): {sample}{more}. Return a generic message "
+                        f"to the client; log the raw error server-side."
                     )
         except Exception:
             pass  # grep failure is non-fatal
