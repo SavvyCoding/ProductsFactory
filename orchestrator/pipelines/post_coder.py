@@ -191,6 +191,62 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
         except Exception:
             pass
 
+    # --- Guard 4: placeholder / stub / TODO in changed implementation files ---
+    # Reviewer comments on feature #405 (Interactive Stock Chart Engine, 2026-05-14)
+    # flagged that 5 indicator functions were "placeholders and not integrated."
+    # Pattern across the day: coder declares done on scaffolding rather than
+    # complete implementations. Catching that here, BEFORE the reviewer burns
+    # a session, is much cheaper than letting it through.
+    #
+    # Detects: TODO/FIXME/XXX/HACK markers; explicit "not implemented" /
+    # "placeholder" / "stub" strings inside thrown Errors or as comment markers;
+    # raise NotImplementedError. Skips test files (Guard 2 owns those) and
+    # legitimate JSX `placeholder="..."` attributes.
+    if src_files:
+        impl_files = [f for f in src_files if "test" not in f.lower()]
+        if impl_files:
+            try:
+                r = _run([
+                    "grep", "-n", "-iE",
+                    r"\b(TODO|FIXME|XXX|HACK)\b"
+                    r"|throw new Error\([\"'][^\"']*((not |un)?implemented|todo|placeholder|stub|coming soon)[^\"']*[\"']\)"
+                    r"|raise NotImplementedError"
+                    r"|NotImplementedError\(\)"
+                    r"|//\s*(placeholder|not implemented|stub)"
+                    r"|#\s*(placeholder|not implemented|stub)",
+                ] + impl_files, timeout=15)
+                if r.returncode == 0:
+                    raw_hits = [h for h in (r.stdout or "").splitlines() if h.strip()]
+                    # Skip JSX/HTML `placeholder="..."` attributes (common UX
+                    # text, not a stub marker).
+                    _ATTR_SKIPS = (
+                        'placeholder="', "placeholder='",
+                        "placeholder={",
+                    )
+                    bad_files = set()
+                    for h in raw_hits:
+                        parts = h.split(":", 2)
+                        if len(parts) < 3:
+                            continue
+                        fname, _lineno, line = parts
+                        if any(a in line for a in _ATTR_SKIPS):
+                            continue
+                        bad_files.add(fname)
+                    if bad_files:
+                        files_sample = sorted(bad_files)
+                        sample = ", ".join(files_sample[:3])
+                        more = "..." if len(files_sample) > 3 else ""
+                        violations.append(
+                            f"placeholder / TODO / NotImplementedError in "
+                            f"implementation files: {sample}{more}. Every "
+                            f"acceptance criterion in the design doc must be "
+                            f"backed by code that actually does the thing, "
+                            f"not a stub or comment marker. Remove the "
+                            f"markers and implement the real behavior."
+                        )
+            except Exception:
+                pass
+
     return violations
 
 
