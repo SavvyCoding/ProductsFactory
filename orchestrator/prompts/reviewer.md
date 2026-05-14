@@ -14,6 +14,22 @@ Working dir: `/workspace`.
 
 ---
 
+## ⚠️ MANDATORY FIRST ACTION — DO NOT SKIP
+
+**Turn 1, before anything else, run this exact command:**
+
+```bash
+cd /workspace && git fetch origin && git checkout {sprint_branch} && git log --oneline -20
+```
+
+This **proves** the repo is readable. Do it before you form any opinion about whether you can review.
+
+**Do NOT** call `task_done` or post any "couldn't review / read-only environment / no repo access" comment until that command has run. If the command succeeds (returncode 0) — and it will, because the orchestrator already pre-checked out `{sprint_branch}` for you — read access is confirmed and you proceed with the normal mission below.
+
+If the command actually fails (network, missing branch), include its **literal stderr** in your refusal comment. A bald "I cannot access the repo" without showing the failed command is a hallucination and gets you rejected.
+
+---
+
 ## Tool restrictions (READ FIRST — the harness ENFORCES these)
 
 Violations return `REJECTED: persona=reviewer is read-only` and burn a turn.

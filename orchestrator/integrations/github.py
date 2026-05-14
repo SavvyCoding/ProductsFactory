@@ -17,6 +17,8 @@ import re
 
 import httpx
 
+from orchestrator.integrations import github_app
+
 log = logging.getLogger("poller.docker")
 
 PM_API_URL = os.environ["PM_API_URL"]
@@ -29,7 +31,20 @@ def _parse_repo_slug(github_repo: str) -> str:
 
 
 def _get_gh_token() -> str | None:
-    """Fetch GitHub PAT from system config for GH_TOKEN injection into agent containers."""
+    """Return a token usable as GH_TOKEN for git pushes and GitHub API calls.
+
+    Preference order:
+      1. Fresh GitHub App installation token (the new path).
+      2. system_config.github_pat (legacy fallback during transition).
+
+    Returns None only if both paths are unconfigured. Per-call rather than
+    cached at this layer — the App module owns its own caching with proper
+    expiry handling; the PAT branch is rarely hit and cheap to re-read.
+    """
+    app_token = github_app.get_installation_token()
+    if app_token:
+        return app_token
+
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
             resp = client.get("/api/system-config")

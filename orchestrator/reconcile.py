@@ -100,11 +100,10 @@ def reconcile_sprint_pr_state(product: dict) -> None:
             if not sprint_id or not sprint_pr:
                 return  # Sprint not in sprint-PR mode
 
-            sc = client.get("/api/system-config")
-            if not sc.is_success or "application/json" not in sc.headers.get("content-type", ""):
-                return
-            scd = sc.json()
-            gh_token = scd.get("github_pat") if isinstance(scd, dict) else None
+        # Use App installation token (or PAT fallback) — single chokepoint
+        # so a token rotation here matches every other GitHub API caller.
+        from orchestrator.github_client import _get_auth_token
+        gh_token = _get_auth_token()
         if not gh_token:
             return
     except Exception:

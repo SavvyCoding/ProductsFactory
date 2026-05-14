@@ -65,22 +65,33 @@
         </div>
 
         <div class="form-group">
-          <label for="a-pat">GitHub Personal Access Token</label>
-          <div class="pat-field">
-            <input type="password" id="a-pat" name="github_pat"
-                   value="{{ config.github_pat or '' }}"
-                   placeholder="ghp_…" autocomplete="new-password">
-            <button type="button" class="btn btn-sm btn-outline" onclick="toggleField('a-pat',this)">Show</button>
-          </div>
-          <p class="field-hint">Required scopes: <code>repo</code> · <code>admin:public_key</code></p>
+          <label for="a-app-id">GitHub App ID</label>
+          <input type="number" id="a-app-id" name="github_app_id"
+                 value="{{ config.github_app_id or '' }}"
+                 placeholder="3708112" autocomplete="off" min="1">
+          <p class="field-hint">Numeric ID shown on the App's settings page (Developer settings → GitHub Apps).</p>
         </div>
 
         <div class="form-group">
-          <label for="a-key">Deploy key label</label>
-          <input type="text" id="a-key" name="github_ssh_key_name"
-                 value="{{ config.github_ssh_key_name or 'productfactory-deploy' }}"
-                 placeholder="productfactory-deploy">
-          <p class="field-hint">Label shown on GitHub under repo Settings → Deploy keys.</p>
+          <label for="a-inst-id">Installation ID</label>
+          <input type="number" id="a-inst-id" name="github_app_installation_id"
+                 value="{{ config.github_app_installation_id or '' }}"
+                 placeholder="132195390" autocomplete="off" min="1">
+          <p class="field-hint">Numeric ID from the install URL, e.g. <code>github.com/organizations/{org}/settings/installations/<strong>132195390</strong></code>.</p>
+        </div>
+
+        <div class="form-group">
+          <label for="a-pem">GitHub App private key (PEM)</label>
+          <div class="pat-field">
+            <textarea id="a-pem" name="github_app_private_key"
+                      rows="6"
+                      placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;…&#10;-----END RSA PRIVATE KEY-----"
+                      autocomplete="off"
+                      spellcheck="false"
+                      style="font-family: var(--font-mono, monospace); font-size: 12px; width: 100%; resize: vertical;"
+                      >{{ config.github_app_private_key or '' }}</textarea>
+          </div>
+          <p class="field-hint">Paste the full PEM contents including the <code>BEGIN</code> / <code>END</code> lines. Used to sign JWTs that mint short-lived installation tokens (60-min, auto-rotated).</p>
         </div>
 
       </div>

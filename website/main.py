@@ -596,13 +596,16 @@ def _cfg(config: SystemConfig | None, key: str):
 
 def _config_as_dict(config: SystemConfig | None) -> dict:
     base = {
-        "products_root_dir":     (config.products_root_dir  if config else "") or "",
-        "github_org":            (config.github_org          if config else "") or "",
-        "github_pat":            (config.github_pat          if config else "") or "",
-        "github_ssh_key_name":   (config.github_ssh_key_name if config else "") or "productfactory-deploy",
-        "slack_webhook_url":     (config.slack_webhook_url   if config else "") or "",
-        "github_webhook_secret": (config.github_webhook_secret if config else "") or "",
-        "max_sessions_per_day":  (config.max_sessions_per_day  if config else "") or "",
+        "products_root_dir":          (config.products_root_dir          if config else "") or "",
+        "github_org":                 (config.github_org                 if config else "") or "",
+        "github_pat":                 (config.github_pat                 if config else "") or "",
+        "github_app_id":              (config.github_app_id              if config else None),
+        "github_app_private_key":     (config.github_app_private_key     if config else "") or "",
+        "github_app_installation_id": (config.github_app_installation_id if config else None),
+        "github_ssh_key_name":        (config.github_ssh_key_name        if config else "") or "productfactory-deploy",
+        "slack_webhook_url":          (config.slack_webhook_url          if config else "") or "",
+        "github_webhook_secret":      (config.github_webhook_secret      if config else "") or "",
+        "max_sessions_per_day":       (config.max_sessions_per_day       if config else "") or "",
     }
     # Merge all operational settings with their effective values (DB → env → default)
     for key in _CFG_DEFAULTS:
@@ -1059,11 +1062,21 @@ async def trigger_analysis(
 async def admin_save_settings(
     products_root_dir: str = Form(""),
     github_org: str = Form(""),
-    github_pat: str = Form(""),
-    github_ssh_key_name: str = Form("productfactory-deploy"),
+    github_app_id: str = Form(""),
+    github_app_installation_id: str = Form(""),
+    github_app_private_key: str = Form(""),
     db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
 ):
-    """Save system configuration (upsert single row id=1)."""
+    """Save system configuration (upsert single row id=1).
+
+    GitHub App fields replaced the legacy PAT + SSH-deploy-key inputs in the
+    UI on 2026-05-14. The PAT column stays in the DB as a deprecation cushion
+    but is no longer editable from this form — operators who need to roll
+    back can `UPDATE system_config SET github_pat = '...'` via psql.
+
+    PEM textarea preserves embedded newlines and BEGIN/END markers; whitespace
+    around the block is trimmed but interior content is left intact.
+    """
     config = await db.get(SystemConfig, 1)
     if not config:
         config = SystemConfig(id=1)
@@ -1071,10 +1084,27 @@ async def admin_save_settings(
 
     config.products_root_dir = products_root_dir.strip() or None
     config.github_org = github_org.strip() or None
-    # Only update PAT if a non-empty value was submitted
-    if github_pat.strip():
-        config.github_pat = github_pat.strip()
-    config.github_ssh_key_name = github_ssh_key_name.strip() or "productfactory-deploy"
+
+    # Numeric IDs — accept blank as "unset", otherwise coerce. Reject
+    # non-numeric input loudly rather than silently dropping it.
+    def _opt_int(name: str, raw: str) -> Optional[int]:
+        s = raw.strip()
+        if not s:
+            return None
+        try:
+            return int(s)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"{name} must be a positive integer")
+
+    config.github_app_id              = _opt_int("github_app_id", github_app_id)
+    config.github_app_installation_id = _opt_int("github_app_installation_id", github_app_installation_id)
+
+    # PEM: only update on non-empty submission so a save with the textarea
+    # untouched doesn't blank an existing key. Trim only outer whitespace.
+    pem = github_app_private_key.strip()
+    if pem:
+        config.github_app_private_key = pem
+
     await db.flush()
     return RedirectResponse("/admin?saved=true", status_code=303)
 
