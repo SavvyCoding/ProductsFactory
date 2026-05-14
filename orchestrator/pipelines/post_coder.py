@@ -665,16 +665,20 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         log.warning(f"[post-coder] {pname}: git commit failed — {_fmt_err(commit_result)}")
         return pushed_ids
 
+    # push_args lists everything AFTER "push" — git_push_authenticated owns
+    # the "git push" prefix and adds a one-shot credential helper so the App
+    # installation token is never written to .git/config or visible in `ps`.
     if sprint_pr_mode:
-        push_args = ["git", "push", "--no-verify", "origin", branch]
+        push_args = ["--no-verify", "origin", branch]
     elif rework_pr_mode:
         # Replace the prior (rejected) commits on the remote PR branch with our
         # fresh main-based commits. --force-with-lease aborts if the remote was
         # touched by anyone else since our last fetch.
-        push_args = ["git", "push", "--no-verify", "--force-with-lease", "origin", branch]
+        push_args = ["--no-verify", "--force-with-lease", "origin", branch]
     else:
-        push_args = ["git", "push", "--no-verify", "-u", "origin", branch]
-    push_result = _run(push_args, timeout=180)
+        push_args = ["--no-verify", "-u", "origin", branch]
+    from orchestrator.integrations.git_ops import git_push_authenticated
+    push_result = git_push_authenticated(push_args, cwd=working_dir, product_name=pname, timeout=180)
     if push_result.returncode != 0:
         log.warning(f"[post-coder] {pname}: git push failed: {push_result.stderr.strip()[:300]}")
         return pushed_ids

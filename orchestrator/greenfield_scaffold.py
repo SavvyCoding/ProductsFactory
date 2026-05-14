@@ -2,20 +2,32 @@
 Greenfield scaffolding — called by the poller for products in 'greenfield_pending' status.
 
 Steps:
-  1. Create a private GitHub repo via the REST API
-  2. Generate an Ed25519 SSH deploy key pair (ssh-keygen)
-  3. Upload the public key to GitHub
-  4. Create the local working_dir folder
-  5. git init -b main + git remote add origin
-  6. Write README.md and product_config.json
-  7. Create AI-suggested features as 'Pending' in DB
-  8. Update Product status → 'registered' (triggers normal discovery on next cycle)
+  1. Create a private GitHub repo via POST /orgs/{org}/repos using the
+     GitHub App's installation token (no PAT).
+  2. Create the local working_dir folder.
+  3. git init -b main + add origin (HTTPS URL, no token).
+  4. Write README.md and product_config.json.
+  5. Commit and push the initial scaffold via git_push_authenticated —
+     the App installation token is supplied via a one-shot credential
+     helper, never persisted to .git/config.
+  6. Create AI-suggested features as 'Pending' in DB.
+  7. Update Product status → 'registered' (triggers normal discovery
+     on next cycle).
+
+Migration note (2026-05-14):
+  Pre-migration this module also generated per-product Ed25519 SSH
+  deploy keys, uploaded them to GitHub, and appended Host blocks to
+  ~/.ssh/config. All of that is gone — the App's installation token
+  handles every authenticated operation. The ``ssh_dir`` argument is
+  retained on the function signature only to keep the legacy poller
+  callsite unchanged for one release; it is unused.
 """
 
 import json
 import logging
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 import httpx
 
@@ -24,93 +36,71 @@ from orchestrator.paths import container_path
 log = logging.getLogger("poller.scaffold")
 
 
-def scaffold_greenfield(product: dict, system_config: dict, pm_api_url: str, ssh_dir: Path):
+def scaffold_greenfield(
+    product: dict,
+    system_config: dict,
+    pm_api_url: str,
+    ssh_dir: Optional[Path] = None,  # deprecated, ignored
+):
     """
     Entry point — called by the poller when product['status'] == 'greenfield_pending'.
     Updates product status to 'registered' on success, 'error' on failure.
     """
     cfg = product.get("config") or {}
-    github_repo_name  = cfg.get("github_repo_name", "")
-    vision            = cfg.get("vision", "")
-    preferred_stack   = cfg.get("preferred_stack", "python")
+    github_repo_name   = cfg.get("github_repo_name", "")
+    vision             = cfg.get("vision", "")
+    preferred_stack    = cfg.get("preferred_stack", "python")
     suggested_features = cfg.get("suggested_features", [])
-    product_name      = product.get("name") or github_repo_name
+    product_name       = product.get("name") or github_repo_name
 
-    org             = system_config.get("github_org", "")
-    pat             = system_config.get("github_pat", "")
-    ssh_key_name    = system_config.get("github_ssh_key_name", "productfactory-deploy")
+    org = system_config.get("github_org", "")
     # working_dir in the DB is the HOST path (so docker run -v can use it).
     # When we run inside the orchestrator container we must translate to the
     # container-side mount point for local FS ops (mkdir / git init / file
     # writes); container_path is a no-op in legacy host-poller mode.
-    working_dir     = Path(container_path(product["working_dir"]))
+    working_dir = Path(container_path(product["working_dir"]))
 
-    if not org or not pat or not github_repo_name:
-        log.error(f"Scaffold: missing config for product {product['id']} — marking error")
+    # The App token is fetched per call from system_config via the central
+    # helper; keep this here to bail loudly when the App isn't configured
+    # rather than silently calling GitHub with no credentials.
+    from orchestrator.integrations.github import _get_gh_token
+    token = _get_gh_token()
+    if not org or not token or not github_repo_name:
+        log.error(
+            f"Scaffold: missing config for product {product['id']} "
+            f"(org={'ok' if org else 'MISSING'} "
+            f"token={'ok' if token else 'MISSING'} "
+            f"repo_name={'ok' if github_repo_name else 'MISSING'}) — marking error"
+        )
         _patch_product(pm_api_url, product["id"], {"status": "error"})
         return
 
     try:
-        # ① Create GitHub repo
+        # ① Create GitHub repo in the dedicated org.
         log.info(f"Scaffold [{product_name}]: creating GitHub repo {org}/{github_repo_name}")
-        ssh_url, actual_owner = _create_github_repo(org, github_repo_name, pat)
-        # Use plain HTTPS for the remote URL — auth is handled at runtime by
-        # git's credential helper, which the agent container's entrypoint
-        # configures from $GH_TOKEN. Storing a PAT inside the URL leaks it
-        # the moment any tool runs `git remote -v` — and that output flows
-        # into the LLM's conversation context, then to Ollama Cloud.
+        actual_owner = _create_github_repo(org, github_repo_name, token)
         https_url = f"https://github.com/{actual_owner}/{github_repo_name}.git"
-        # Helper URL with embedded PAT — only used by the orchestrator's
-        # initial scaffold push so it can authenticate without going through
-        # an entrypoint that doesn't run for direct subprocess calls.
-        # Never persisted in .git/config.
-        push_url = f"https://x-access-token:{pat}@github.com/{actual_owner}/{github_repo_name}.git"
 
-        # ② Generate deploy key on host
-        key_slug = github_repo_name.lower().replace("-", "_").replace(".", "_")
-        key_path = ssh_dir / f"id_ed25519_{key_slug}"
-        log.info(f"Scaffold [{product_name}]: generating deploy key → {key_path}")
-        public_key = _generate_deploy_key(key_path)
-
-        # ②b Append a `Host github.com-<key_slug>` block to ~/.ssh/config
-        # so the orchestrator's host-side git ops can use the alias
-        # `git@github.com-<key_slug>:owner/repo.git`. Without this block,
-        # SSH treats the alias as a literal DNS name and the post-coder
-        # push fails with "Could not resolve hostname github.com-<slug>".
-        # Real incident 2026-05-12: StockAnalysis scaffolded with a key
-        # but no Host block; first 4 coder sessions exit=0 but no PR
-        # opens, features bounce back to Designed, orchestrator loops.
-        _ensure_ssh_host_block(ssh_dir, key_slug, product_name)
-
-        # ③ Upload public key to GitHub (use actual_owner in case we fell back to user account)
-        log.info(f"Scaffold [{product_name}]: uploading deploy key to GitHub ({actual_owner}/{github_repo_name})")
-        _add_deploy_key(actual_owner, github_repo_name, pat, public_key,
-                        f"{ssh_key_name}-{key_slug}")
-
-        # ④ Create local folder (idempotent — safe to re-run after a partial prior scaffold)
+        # ② Create local folder (idempotent — safe to re-run).
         working_dir.mkdir(parents=True, exist_ok=True)
 
-        # ⑤ git init + remote (skip init if the repo already exists; update remote url if needed)
+        # ③ git init + remote.
         if not (working_dir / ".git").exists():
             subprocess.run(
                 ["git", "init", "-b", "main"],
                 cwd=working_dir, check=True, capture_output=True,
             )
         # Disable filemode tracking. Docker Desktop on Windows can't reliably
-        # persist Unix +x bits through bind-mounts, so the alpine chmod sidecar
-        # (`_chmod_workspace_via_alpine` runs `chmod -R a+rwX`) leaves files at
-        # 0644 from git's perspective even when they were 0755 on disk before.
-        # Without this, every coder session's post-coder pipeline trips on
-        # `git checkout -B sprint/X origin/sprint/X failed: Your local changes
-        # to the following files would be overwritten by checkout` for any
-        # script with +x, blocking commits + pushes for the entire product.
-        # Idempotent — safe to re-run.
+        # persist Unix +x bits through bind-mounts; without this, agent
+        # sessions trip on "Your local changes would be overwritten" for
+        # scripts that toggle 0644↔0755 between commits. (Will revisit once
+        # the workspace migrates to named volumes on Linux backend.)
         subprocess.run(
             ["git", "config", "core.fileMode", "false"],
             cwd=working_dir, capture_output=True,
         )
-        # `remote add` fails if origin already exists — use set-url as a fallback so the
-        # scaffold re-runs cleanly.
+        # `remote add` fails if origin already exists — use set-url as a fallback
+        # so the scaffold re-runs cleanly.
         add = subprocess.run(
             ["git", "remote", "add", "origin", https_url],
             cwd=working_dir, capture_output=True,
@@ -121,17 +111,15 @@ def scaffold_greenfield(product: dict, system_config: dict, pm_api_url: str, ssh
                 cwd=working_dir, check=True, capture_output=True,
             )
 
-        # ⑥ Write scaffold files
+        # ④ Write scaffold files.
         _write_readme(working_dir, product_name)
         _write_product_config(working_dir, vision, preferred_stack, org, github_repo_name)
 
-        # ⑥a Initial commit + push so `main` exists on GitHub. Without this,
-        # the first coder session pushes its feature branch BEFORE main has a
-        # ref upstream — `gh pr create` then fails with "No commits between
-        # main and …, Base ref must be a branch" and features sit in
-        # Implementing indefinitely. Pushing main here closes the race.
+        # ⑤ Initial commit + push so `main` exists on GitHub. Without this,
+        # the first coder session pushes its feature branch BEFORE main has
+        # a ref upstream — `gh pr create` then fails with "No commits between
+        # main and …".
         try:
-            # Need a committer identity for `git commit` to succeed.
             subprocess.run(["git", "config", "user.email", "orchestrator@productfactory.local"],
                            cwd=working_dir, capture_output=True)
             subprocess.run(["git", "config", "user.name", "ProductFactory Orchestrator"],
@@ -142,39 +130,37 @@ def scaffold_greenfield(product: dict, system_config: dict, pm_api_url: str, ssh
                 ["git", "commit", "-m", "chore: initial scaffold"],
                 cwd=working_dir, capture_output=True, text=True,
             )
-            # If nothing to commit (re-running scaffold over an existing repo) skip push.
             if commit.returncode == 0:
-                # Push with the PAT-embedded URL inline so it isn't persisted
-                # to .git/config. Sets upstream tracking using the plain
-                # origin URL (`-u origin main` would re-write the URL).
-                push = subprocess.run(
-                    ["git", "push", push_url, "main:main"],
-                    cwd=working_dir, capture_output=True, text=True, timeout=60,
+                # Push via the App-token credential helper — token never lands
+                # in .git/config or in the URL.
+                from orchestrator.integrations.git_ops import git_push_authenticated
+                push = git_push_authenticated(
+                    ["-u", "origin", "main"],
+                    cwd=working_dir, product_name=product_name, timeout=60,
                 )
-                # Set upstream tracking explicitly so subsequent `git push`
-                # without args still works.
                 if push.returncode == 0:
-                    subprocess.run(
-                        ["git", "branch", "--set-upstream-to=origin/main", "main"],
-                        cwd=working_dir, capture_output=True,
-                    )
-                if push.returncode != 0:
-                    log.warning(f"Scaffold [{product_name}]: initial push failed: {push.stderr.strip()[:300]}")
-                else:
                     log.info(f"Scaffold [{product_name}]: pushed initial main commit")
+                else:
+                    log.warning(
+                        f"Scaffold [{product_name}]: initial push failed: "
+                        f"{(push.stderr or '').strip()[:300]}"
+                    )
             else:
-                log.info(f"Scaffold [{product_name}]: no initial commit needed ({commit.stdout.strip()[:120]})")
+                log.info(
+                    f"Scaffold [{product_name}]: no initial commit needed "
+                    f"({commit.stdout.strip()[:120]})"
+                )
         except Exception as ce:
             log.warning(f"Scaffold [{product_name}]: initial commit/push step failed (non-fatal): {ce}")
 
-        # ⑦ Create AI-suggested features as Pending
+        # ⑥ Create AI-suggested features as Pending.
         for i, feat in enumerate(suggested_features or []):
             name = (feat.get("name") or "").strip()
             desc = (feat.get("description") or "").strip()
             if name:
                 _post_feature(pm_api_url, product["id"], name, desc, priority=50 + i)
 
-        # ⑧ Update product → registered (poller discovery takes over next cycle)
+        # ⑦ Update product → registered (poller discovery takes over next cycle).
         _patch_product(pm_api_url, product["id"], {
             "status": "registered",
             "github_repo": f"https://github.com/{actual_owner}/{github_repo_name}",
@@ -192,139 +178,38 @@ def scaffold_greenfield(product: dict, system_config: dict, pm_api_url: str, ssh
 
 # ── GitHub API helpers ────────────────────────────────────────────────────────
 
-def _create_github_repo(org: str, repo_name: str, pat: str) -> tuple[str, str]:
-    """
-    Create a private GitHub repo under the org (falls back to personal account).
-    Returns (ssh_clone_url, actual_owner).
+def _create_github_repo(org: str, repo_name: str, token: str) -> str:
+    """Create a private repo in the dedicated org. Returns the actual owner login.
+
+    Authenticates with the GitHub App installation token. Requires the App
+    to have ``Administration: write`` on the org and to be installed there.
+    No user-account fallback — under the dedicated-org model, repos always
+    live in the org so a failure here is a real configuration problem
+    that should bubble up as an 'error' product status.
+
+    Idempotent: a pre-existing repo with the same name returns its owner
+    without raising (so re-running a partially-completed scaffold is safe).
     """
     headers = {
-        "Authorization": f"token {pat}",
-        "Accept": "application/vnd.github.v3+json",
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
     }
     payload = {"name": repo_name, "private": True, "auto_init": False}
 
     with httpx.Client(timeout=30) as client:
-        # Try org endpoint first
         resp = client.post(
             f"https://api.github.com/orgs/{org}/repos",
             headers=headers, json=payload,
         )
-        if resp.status_code in (404, 403, 422) and "already exists" not in resp.text:
-            # Org not found / no access → fall back to personal account
-            log.warning(f"Org repo creation failed ({resp.status_code}) — falling back to user repos")
-            resp = client.post(
-                "https://api.github.com/user/repos",
-                headers=headers, json=payload,
-            )
         if resp.status_code == 422 and "already exists" in resp.text:
             log.warning(f"Repo {org}/{repo_name} already exists on GitHub — reusing it")
-            return f"git@github.com:{org}/{repo_name}.git", org
+            return org
         resp.raise_for_status()
         data = resp.json()
         actual_owner = data["owner"]["login"]
         log.info(f"Created GitHub repo: {actual_owner}/{repo_name}")
-        return data["ssh_url"], actual_owner
-
-
-def _add_deploy_key(org: str, repo_name: str, pat: str, public_key: str, label: str):
-    """Upload an SSH public key as a deploy key to a GitHub repo."""
-    headers = {
-        "Authorization": f"token {pat}",
-        "Accept": "application/vnd.github.v3+json",
-    }
-    with httpx.Client(timeout=30) as client:
-        resp = client.post(
-            f"https://api.github.com/repos/{org}/{repo_name}/keys",
-            headers=headers,
-            json={"title": label, "key": public_key, "read_only": False},
-        )
-        resp.raise_for_status()
-
-
-# ── SSH key generation ────────────────────────────────────────────────────────
-
-def _ensure_ssh_host_block(ssh_dir: Path, key_slug: str, product_name: str) -> None:
-    """
-    Append `Host github.com-<key_slug>` to ~/.ssh/config so the deploy key
-    is selected when the orchestrator pushes via the alias URL. Idempotent.
-
-    Until 2026-05-12 the SSH config was edited by hand after every greenfield
-    scaffold (the file's own header comment said so). When a product was
-    created without the manual step, its first coder session would commit
-    locally but the push failed because `github.com-<slug>` doesn't resolve
-    as a DNS name.
-
-    Also calls the alpine sidecar to chmod the dir/files back to OpenSSH-
-    acceptable perms — Windows Docker bind-mounts flip the file metadata
-    to root:root 777 on any host-side write, which sshd rejects with
-    "Bad owner or permissions". The same helper runs once per cycle as a
-    safety net; calling it here avoids the operator hitting a 60s window
-    where the new alias is set but unusable.
-    """
-    config_path = ssh_dir / "config"
-    alias = f"github.com-{key_slug}"
-
-    if config_path.exists():
-        try:
-            existing = config_path.read_text(encoding="utf-8", errors="replace")
-        except Exception as e:
-            log.warning(f"Scaffold [{product_name}]: could not read ~/.ssh/config: {e}")
-            existing = ""
-        if f"Host {alias}" in existing:
-            log.info(f"Scaffold [{product_name}]: SSH alias {alias} already in ~/.ssh/config")
-            return
-    else:
-        existing = ""
-
-    header_was_present = bool(existing.strip())
-    block_lines = [
-        "" if header_was_present else
-        "# ProductFactory per-product GitHub deploy key routing.\n",
-        f"\nHost {alias}\n",
-        "    HostName github.com\n",
-        "    User git\n",
-        f"    IdentityFile ~/.ssh/id_ed25519_{key_slug}\n",
-        "    IdentitiesOnly yes\n",
-    ]
-    try:
-        with config_path.open("a", encoding="utf-8") as f:
-            f.writelines(block_lines)
-        log.info(f"Scaffold [{product_name}]: appended SSH alias {alias} to ~/.ssh/config")
-    except Exception as e:
-        log.warning(f"Scaffold [{product_name}]: failed to write ~/.ssh/config: {e}")
-        return
-
-    # Normalise perms after the write — see the helper's docstring for
-    # the Windows-bind-mount root:root 777 artifact this defends against.
-    try:
-        from orchestrator.integrations.docker_cli import _chmod_ssh_dir_via_alpine
-        _chmod_ssh_dir_via_alpine()
-    except Exception as e:
-        log.warning(f"Scaffold [{product_name}]: ssh-perm helper failed (non-fatal): {e}")
-
-
-def _generate_deploy_key(key_path: Path) -> str:
-    """
-    Generate an Ed25519 SSH key pair using ssh-keygen.
-    Returns the public key string (one-line OpenSSH format).
-    """
-    pub_path = Path(str(key_path) + ".pub")
-    for p in (key_path, pub_path):
-        if p.exists():
-            p.unlink()
-
-    subprocess.run(
-        [
-            "ssh-keygen",
-            "-t", "ed25519",
-            "-f", str(key_path),
-            "-N", "",                     # no passphrase
-            "-C", "productfactory-agent",
-        ],
-        check=True, capture_output=True,
-    )
-    key_path.chmod(0o600)
-    return pub_path.read_text(encoding="utf-8").strip()
+        return actual_owner
 
 
 # ── Scaffold file writers ─────────────────────────────────────────────────────

@@ -75,8 +75,20 @@ def _gh_get(url: str, headers: dict, params: dict | None = None, timeout: int = 
 
 PM_API_URL = os.environ["PM_API_URL"]
 
-def _get_pat() -> str:
-    """Fetch GitHub PAT fresh from system_config each call — no caching so DB changes apply immediately."""
+def _get_auth_token() -> str:
+    """Return the bearer token for GitHub API calls.
+
+    Prefers a fresh GitHub App installation token; falls back to the
+    legacy system_config.github_pat during the transition release. The
+    App-token path owns its own short-lived cache (see github_app.py);
+    the PAT branch is re-read on every call so DB rotations apply
+    immediately and require no orchestrator restart.
+    """
+    from orchestrator.integrations import github_app
+    app_token = github_app.get_installation_token()
+    if app_token:
+        return app_token
+
     try:
         resp = httpx.get(f"{PM_API_URL}/api/system-config", timeout=5)
         resp.raise_for_status()
@@ -102,9 +114,9 @@ def _parse_repo_slug(product: dict) -> tuple[str, str] | None:
 
 def _github_headers() -> dict:
     headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-    pat = _get_pat()
-    if pat:
-        headers["Authorization"] = f"Bearer {pat}"
+    tok = _get_auth_token()
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
     return headers
 
 

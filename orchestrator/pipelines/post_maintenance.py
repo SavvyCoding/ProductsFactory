@@ -108,7 +108,11 @@ def _run_post_maintenance_pipeline(product: dict, session_uid: str,
                     f"{commit_r.stderr.strip()[:200]}")
         return
 
-    push_r = _run(["git", "push", "--no-verify", "origin", "main"], timeout=180)
+    from orchestrator.integrations.git_ops import git_push_authenticated
+    push_r = git_push_authenticated(
+        ["--no-verify", "origin", "main"],
+        cwd=working_dir, product_name=pname, timeout=180,
+    )
     if push_r.returncode != 0:
         log.warning(f"[post-{persona}] {pname}: git push origin main failed — "
                     f"{push_r.stderr.strip()[:200]}")

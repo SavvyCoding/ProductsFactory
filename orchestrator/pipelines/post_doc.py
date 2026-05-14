@@ -138,7 +138,11 @@ def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
         _rollback_doc_features(product, assigned_features)
         return
 
-    push_r = _run(["git", "push", "--no-verify", "origin", target_branch], timeout=180)
+    from orchestrator.integrations.git_ops import git_push_authenticated
+    push_r = git_push_authenticated(
+        ["--no-verify", "origin", target_branch],
+        cwd=working_dir, product_name=pname, timeout=180,
+    )
     if push_r.returncode != 0:
         log.warning(f"[post-{persona}] {pname}: git push origin {target_branch} failed — {push_r.stderr.strip()[:200]}")
         # Local commit exists; the next _reset_workspace will discard it.

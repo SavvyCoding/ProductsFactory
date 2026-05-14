@@ -128,7 +128,11 @@ def sweep_product(product: dict, sys_cfg: dict) -> dict:
     if not sys_cfg.get("auto_merge_enabled"):
         return counters
 
-    pat = sys_cfg.get("github_pat") or ""
+    # Prefer GitHub App installation token; fall back to PAT for the
+    # transition release. _get_auth_token() reads from system_config each
+    # call, so a rotation/revoke is picked up without restart.
+    from orchestrator.github_client import _get_auth_token
+    pat = _get_auth_token()
     repo_slug = _parse_repo_slug(product.get("github_repo") or "")
     if not pat or not repo_slug:
         counters["skipped"] = 1

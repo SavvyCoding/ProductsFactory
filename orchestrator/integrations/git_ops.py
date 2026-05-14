@@ -59,6 +59,51 @@ def _remove_stale_git_lock(working_dir: str, product_name: str, max_age_seconds:
         log.warning(f"[{product_name}] could not check/remove .git/index.lock: {e}")
 
 
+def git_push_authenticated(
+    push_args: list[str],
+    *,
+    cwd: str | Path,
+    product_name: str,
+    timeout: int = 180,
+) -> subprocess.CompletedProcess:
+    """``git push`` wrapped with a GitHub App installation token.
+
+    ``push_args`` is everything that goes AFTER ``push`` — for example
+    ``["origin", "main"]`` or ``["--no-verify", "--force-with-lease", "origin", "branch"]``.
+
+    Auth flow:
+      - Fetch a fresh installation token via the App module (falls back to
+        the legacy PAT if the App isn't fully configured).
+      - Set ``GITHUB_TOKEN`` in the subprocess env only — never on the parent.
+      - Pass a one-shot ``credential.helper`` via ``git -c`` that reads the
+        env var. The helper string never contains the token, so the token
+        does NOT appear in ``ps``, in ``docker inspect``, or in ``.git/config``.
+
+    Returns ``CompletedProcess`` with the same shape as ``safe_run`` so
+    callers can branch on returncode uniformly.
+    """
+    from orchestrator.integrations.github import _get_gh_token  # late: avoids circular import
+    token = _get_gh_token() or ""
+    if not token:
+        log.warning(f"[{product_name}] git_push_authenticated: no token available — push will fail")
+
+    helper = '!f() { echo "username=x-access-token"; echo "password=$GITHUB_TOKEN"; }; f'
+    cmd = ["git", "-c", f"credential.helper={helper}", "push", *push_args]
+    env = {**os.environ, "GITHUB_TOKEN": token}
+
+    try:
+        return subprocess.run(
+            cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout, env=env,
+        )
+    except subprocess.TimeoutExpired as te:
+        log.warning(f"[{product_name}] git push timed out after {timeout}s")
+        return subprocess.CompletedProcess(
+            cmd, returncode=124,
+            stdout=(te.stdout.decode() if isinstance(te.stdout, bytes) else (te.stdout or "")),
+            stderr=f"timed out after {timeout}s",
+        )
+
+
 def safe_run(
     cmd: list[str],
     *,
@@ -89,18 +134,27 @@ def safe_run(
         )
 
 
-def _enforce_ssh_origin(working_dir: str, product_name: str) -> None:
-    """Re-point origin at the SSH alias when a deploy key exists for this repo.
+def _enforce_https_origin(working_dir: str, product_name: str) -> None:
+    """Re-point origin at the canonical ``https://github.com/<slug>.git`` URL.
 
-    Looks at the current origin URL, extracts owner/repo, derives the SSH
-    alias from the repo name (lowercased), and sets `origin` to
-    `git@github.com-<repo>:<owner>/<repo>.git` IF a matching deploy key
-    file (`$SSH_DIR/id_ed25519_<repo>`) exists. No-op otherwise (so
-    non-SSH products and missing-key cases are unaffected).
+    Successor to ``_enforce_ssh_origin``. Under the GitHub App auth model,
+    pushes authenticate via a short-lived installation token delivered at
+    runtime — there's no per-product SSH key to mount, no host SSH config
+    aliases, no chmod sidecar.
 
-    The alias matching mirrors the layout in `~/.ssh/config` written
-    during the SSH switch on 2026-05-09: one `Host github.com-<repo>`
-    block per product, each `IdentityFile ~/.ssh/id_ed25519_<repo>`.
+    Two contracts this function preserves:
+
+      1. **Token is never written to ``.git/config``.** The token is
+         supplied per-invocation via the ``GITHUB_TOKEN`` env var, read by
+         a one-shot ``credential.helper`` invoked by ``git push``. If the
+         workspace folder is ever exfiltrated, no credential leaks with it.
+
+      2. **Idempotent + tolerant of pre-existing legacy URLs.** Any prior
+         SSH origin (``git@github.com-foo:owner/repo.git``) is rewritten
+         to the HTTPS form. Any HTTPS origin that already has a token
+         embedded inline (legacy ``https://x-access-token:...@github.com/...``
+         created before this function existed) is normalized back to the
+         token-less form.
     """
     wd = Path(working_dir)
     try:
@@ -108,19 +162,11 @@ def _enforce_ssh_origin(working_dir: str, product_name: str) -> None:
         cur_url = (cur.stdout or "").strip()
         if not cur_url:
             return
-        # Match either `https://github.com/X/Y.git` or `git@host:X/Y.git`
         m = re.search(r"[:/]([^/:]+/[^/:]+?)(?:\.git)?$", cur_url)
         if not m:
             return
         slug = m.group(1)
-        owner, _, repo_name = slug.partition("/")
-        repo_key = repo_name.lower()
-        ssh_dir = Path(os.environ.get("SSH_DIR", str(Path.home() / ".ssh")))
-        key_file = ssh_dir / f"id_ed25519_{repo_key}"
-        if not key_file.exists():
-            return  # No deploy key for this product — leave the remote as-is
-        ssh_alias = f"github.com-{repo_key}"
-        expected_url = f"git@{ssh_alias}:{slug}.git"
+        expected_url = f"https://github.com/{slug}.git"
         if cur_url == expected_url:
             return
         r = safe_run(
@@ -128,19 +174,19 @@ def _enforce_ssh_origin(working_dir: str, product_name: str) -> None:
             cwd=wd, log_label=product_name,
         )
         if r.returncode == 0:
-            # Redact any PAT in cur_url before logging.
+            # Redact any inline token in the prior URL before logging.
             redacted = re.sub(r":[^:@/]+@", ":***@", cur_url)
             log.info(
-                f"[{product_name}] origin re-pointed at SSH alias "
-                f"{ssh_alias} (was: {redacted})"
+                f"[{product_name}] origin re-pointed at HTTPS "
+                f"({expected_url}) (was: {redacted})"
             )
         else:
             log.warning(
-                f"[{product_name}] _enforce_ssh_origin set-url failed: "
+                f"[{product_name}] _enforce_https_origin set-url failed: "
                 f"{r.stderr.strip()[:200]}"
             )
     except Exception:
-        log.exception(f"[{product_name}] _enforce_ssh_origin crashed")
+        log.exception(f"[{product_name}] _enforce_https_origin crashed")
 
 
 def _reset_workspace(working_dir: str, product_name: str) -> None:
@@ -164,17 +210,14 @@ def _reset_workspace(working_dir: str, product_name: str) -> None:
     # the rest of this _reset_workspace cascade. See helper docstring.
     _remove_stale_git_lock(working_dir, product_name)
 
-    # Enforce SSH origin if a deploy key exists for this product. Without this,
-    # any external `git remote set-url origin https://...` (manual operator,
-    # `gh repo clone`, mis-configured tooling) reverts the remote and post-
-    # coder's `git pull` / `git push` then fail on `terminal prompts disabled`
-    # — silently. The Implemented features that follow loop forever as
-    # reset_stuck demotes them Implemented → Designed each cycle (real
-    # incident 2026-05-11: feature #392 burned 8+ coder cycles / ~3h of
-    # compute before the reverted remote was caught manually). Idempotent
-    # no-op when already on the SSH alias. Falls back to leaving the remote
-    # alone when no deploy key file exists (so non-SSH products keep working).
-    _enforce_ssh_origin(working_dir, product_name)
+    # Enforce HTTPS origin under the GitHub App auth model. Catches any
+    # workspace that ended up with a stale SSH origin (from legacy products
+    # migrated mid-flight, or `gh repo clone` defaults) and rewrites it back
+    # to the canonical token-less HTTPS URL. The actual token is supplied
+    # at push time via the GITHUB_TOKEN env var + a one-shot credential
+    # helper — not persisted to .git/config — so this rewrite leaks no secret
+    # even if the workspace is later exfiltrated.
+    _enforce_https_origin(working_dir, product_name)
 
     # 1. Fetch latest from origin (updates remote-tracking refs, prunes deleted branches)
     # Longer timeout — fetch can legitimately take a while on slow networks.

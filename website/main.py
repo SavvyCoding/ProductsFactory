@@ -596,13 +596,16 @@ def _cfg(config: SystemConfig | None, key: str):
 
 def _config_as_dict(config: SystemConfig | None) -> dict:
     base = {
-        "products_root_dir":     (config.products_root_dir  if config else "") or "",
-        "github_org":            (config.github_org          if config else "") or "",
-        "github_pat":            (config.github_pat          if config else "") or "",
-        "github_ssh_key_name":   (config.github_ssh_key_name if config else "") or "productfactory-deploy",
-        "slack_webhook_url":     (config.slack_webhook_url   if config else "") or "",
-        "github_webhook_secret": (config.github_webhook_secret if config else "") or "",
-        "max_sessions_per_day":  (config.max_sessions_per_day  if config else "") or "",
+        "products_root_dir":          (config.products_root_dir          if config else "") or "",
+        "github_org":                 (config.github_org                 if config else "") or "",
+        "github_pat":                 (config.github_pat                 if config else "") or "",
+        "github_app_id":              (config.github_app_id              if config else None),
+        "github_app_private_key":     (config.github_app_private_key     if config else "") or "",
+        "github_app_installation_id": (config.github_app_installation_id if config else None),
+        "github_ssh_key_name":        (config.github_ssh_key_name        if config else "") or "productfactory-deploy",
+        "slack_webhook_url":          (config.slack_webhook_url          if config else "") or "",
+        "github_webhook_secret":      (config.github_webhook_secret      if config else "") or "",
+        "max_sessions_per_day":       (config.max_sessions_per_day       if config else "") or "",
     }
     # Merge all operational settings with their effective values (DB → env → default)
     for key in _CFG_DEFAULTS:
