@@ -85,6 +85,26 @@ class AgentLoop:
                 self.log(f"ERROR: backend call failed: {e}")
                 return 1
 
+            # Hallucination guard — catches the pattern where the assistant
+            # emits a fake tool result (e.g. {"stdout": "...", "returncode": 0})
+            # inside its own content as if it had already run a tool. Without
+            # this, appending the message to history lets the model "continue"
+            # the conversation against imagined results, burning many pseudo-
+            # turns. Only fires when there's no real tool call to dispatch —
+            # if the model called a real tool and just *also* monologued
+            # weirdly, the dispatch path handles it.
+            from orchestrator.ollama_agent import _detect_hallucinated_tool_results
+            content = message.get("content") or ""
+            native_tool_calls = message.get("tool_calls") or []
+            if not native_tool_calls:
+                halluc_reason = _detect_hallucinated_tool_results(content)
+                if halluc_reason:
+                    self.log(
+                        f"Hallucinated tool result detected — exit=2 "
+                        f"(incomplete). Reason: {halluc_reason}"
+                    )
+                    return 2
+
             messages.append(message)
 
             # Surface assistant reasoning for log readers.

@@ -3688,10 +3688,27 @@ async def api_end_session(
     session_id: int, body: schemas.SessionEnd,
     db: AsyncSession = Depends(get_db),
 ):
+    """Finalize a session.
+
+    Mirrors the idempotency guard on /kill: once a session is in a terminal
+    state set by the watchdog (`killed` / `orphaned`), reject incoming
+    status + exit_code overwrites. Without this, a racing docker_runner
+    finalize call after the watchdog had set `killed` would clobber back
+    to `ended`/`exit_code=0`, producing the misleading rows where
+    `kill_reason` is populated alongside a clean-exit status (the 2406 /
+    2418 pattern). Non-status fields (tokens, features_pushed, notes)
+    still merge in — they're useful even on a killed session.
+    """
     session = await db.get(DBSession, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     body_fields = body.model_dump(exclude_unset=True)
+
+    # Terminal-state guard.
+    if session.status in ("killed", "orphaned") and "status" in body_fields:
+        body_fields.pop("status", None)
+        body_fields.pop("exit_code", None)
+
     was_open = session.ended_at is None
     for field, value in body_fields.items():
         setattr(session, field, value)

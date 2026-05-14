@@ -782,6 +782,34 @@ def _stage_claude_credentials(sys_cfg: dict, persona: str | None) -> tuple[list[
     return claude_mount, _tmp_claude_dir, claude_model
 
 
+def _select_end_status(*, exit_code: int, terminal_marker_seen: bool) -> str:
+    """Pick the FSM status to write at session finalization.
+
+    Three-way classifier — pulled out of ``_stream_session`` so it can be
+    unit-tested without spinning up a docker process.
+
+      exit_code != 0           → "killed"   (process aborted / timeout fired
+                                              / watchdog killed it / hit
+                                              non-zero internal exit)
+      exit_code == 0 + marker  → "ended"    (agent declared completion via
+                                              ``task_done`` or printed the
+                                              final ``[metrics]`` line)
+      exit_code == 0, no mark  → "lost"     (container exited cleanly but the
+                                              agent never declared done —
+                                              caught the SIGTERM/OOM/daemon-
+                                              kill case that previously
+                                              produced misleading status=ended
+                                              rows alongside a populated
+                                              kill_reason, e.g. sessions
+                                              2406 / 2418)
+    """
+    if exit_code != 0:
+        return "killed"
+    if terminal_marker_seen:
+        return "ended"
+    return "lost"
+
+
 def _stream_session(
     product: dict,
     persona: str | None,
@@ -820,7 +848,13 @@ def _stream_session(
     Extracted from run_claude_in_docker during Phase 3 of OrchestratorRefactor.
     """
     exit_code = 1
-    session_meta: dict = {}
+    # `terminal_marker_seen` is flipped by _stream_logs when the agent emits
+    # its canonical end-of-session log line ("Session completed via task_done"
+    # from agent_loop.py, or "[metrics] session_id=..." from ollama_agent.py).
+    # Used at finalize time to distinguish a real clean exit from a container
+    # that vanished mid-turn but happened to record exit_code=0 — see the
+    # status-selection block lower in this function.
+    session_meta: dict = {"terminal_marker_seen": False}
     try:
         process = subprocess.Popen(
             cmd,
@@ -921,6 +955,17 @@ def _stream_session(
                     log.info(f"[agent] {formatted}")
                 else:
                     log.debug(f"[agent] {formatted}")
+                # Capture the canonical "agent finished cleanly" signal at
+                # streaming time so finalize can distinguish ended vs lost
+                # without re-scanning the log (race-prone — the buffer may
+                # not have flushed yet). Two markers, either is sufficient:
+                #   - "Session completed via task_done"  (agent_loop.py:152)
+                #   - "[metrics] session_id="             (ollama_agent.py:967)
+                if not session_meta["terminal_marker_seen"] and (
+                    "Session completed via task_done" in formatted
+                    or "[metrics] session_id=" in formatted
+                ):
+                    session_meta["terminal_marker_seen"] = True
                 buffer.append(formatted)
                 if len(buffer) >= 10:
                     _post_log_lines(product["id"], buffer)
@@ -1241,9 +1286,21 @@ def _finalize_session(
         # 4. Always record session end — guaranteed even if reconciliation raises.
         if session_id is not None:
             try:
-                # FSM transition: exit_code=0 → ended, non-zero → killed (watchdog
-                # may have already set status=killed if it was the one that fired).
-                end_status = "ended" if exit_code == 0 else "killed"
+                # FSM transition — see _select_end_status for the 3-way logic.
+                # The PATCH endpoint (website/main.py:api_end_session) refuses
+                # status downgrades from terminal states (killed/orphaned), so
+                # a racing watchdog that already set killed wins over this call.
+                end_status = _select_end_status(
+                    exit_code=exit_code,
+                    terminal_marker_seen=bool(session_meta.get("terminal_marker_seen")),
+                )
+                if end_status == "lost":
+                    log.warning(
+                        f"[{product.get('name')}] session {session_id} exit=0 "
+                        f"but agent never emitted task_done / [metrics] — "
+                        f"recording as `lost` (container ended without the "
+                        f"agent finalizing)."
+                    )
                 with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
                     patch_body = {
                         "status":            end_status,
@@ -1254,8 +1311,12 @@ def _finalize_session(
                     }
                     # Merge captured cost/token totals from the claude result
                     # event (None values dropped — they'd overwrite anything
-                    # an earlier reconcile already set).
-                    patch_body.update({k: v for k, v in session_meta.items() if v is not None})
+                    # an earlier reconcile already set). `terminal_marker_seen`
+                    # is an internal flag and must not be PATCHed.
+                    patch_body.update({
+                        k: v for k, v in session_meta.items()
+                        if v is not None and k != "terminal_marker_seen"
+                    })
                     client.patch(f"/api/sessions/{session_id}", json=patch_body)
             except Exception as e:
                 log.warning(f"Could not update session record: {e}")
