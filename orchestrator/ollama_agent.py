@@ -970,16 +970,68 @@ def _patch_session_metrics(input_tokens: int, output_tokens: int, call_count: in
         _log(f"[metrics] PATCH failed: {e}")
 
 
+def _detect_hallucinated_tool_results(content: str) -> str | None:
+    """Detect orphan tool-result-shaped JSON in assistant content.
+
+    Real tool results arrive at the model as ``role:"tool"`` messages
+    injected by the harness after a real dispatch — they should NEVER
+    appear in the assistant's own content. When they do, the model is
+    pretending to have run a tool and "continues" the conversation
+    against imaginary results. Session 2449 burned dozens of pseudo-
+    turns on this pattern before being killed for unrelated reasons;
+    bounding it early stops the token cascade.
+
+    Returns a short reason string when hallucination is detected, or
+    ``None`` otherwise.
+
+    Conservative criteria:
+      1. Content contains both ``"stdout"`` and ``"returncode"`` keys
+         in close proximity (≤500 chars apart), AND
+      2. After stripping legitimate ``<tool_call>`` wrappers (which the
+         shape-repair pass in ``_try_parse_tool_calls_from_content``
+         handles separately), the orphan keys are still present.
+
+    Reasoning prose that *mentions* stdout/returncode, fenced code
+    blocks that contain them as Python identifiers, and well-formed
+    ``<tool_call>`` blocks all pass through cleanly.
+    """
+    import re
+    if "stdout" not in content or "returncode" not in content:
+        return None
+    # Strip well-formed <tool_call>...</tool_call> blocks first; if the
+    # only stdout/returncode mentions live there, the shape-repair pass
+    # will handle them and this is NOT a hallucination.
+    stripped = re.sub(r'<tool_call>[\s\S]*?</tool_call>', '', content)
+    if "stdout" not in stripped or "returncode" not in stripped:
+        return None
+    # Look for the two keys in close proximity, either order.
+    if re.search(
+        r'"stdout"\s*:[\s\S]{0,500}"returncode"\s*:'
+        r'|"returncode"\s*:[\s\S]{0,200}"stdout"\s*:',
+        stripped,
+    ):
+        return 'orphan {"stdout":..., "returncode":...} in assistant content'
+    return None
+
+
 def _try_parse_tool_calls_from_content(content: str) -> list[dict]:
     """
     Fallback: try to extract JSON tool calls from model content text.
-    Some older or quantized models output tool calls as embedded JSON rather
-    than using the structured tool_calls field.
+    Some quantized / non-OpenAI-fine-tuned models output tool calls as
+    embedded JSON in content instead of via the structured tool_calls field.
 
-    Looks for patterns like:
-        {"name": "bash", "arguments": {"command": "..."}}
-    or:
-        <tool_call>{"name": "bash", "arguments": {"command": "..."}}</tool_call>
+    Recognized shapes (tried in order):
+        Pattern 1: <tool_call>{"name": "bash", "arguments": {...}}</tool_call>
+        Pattern 2: {"name": "bash", "arguments": {...}}
+        Pattern 3: {"tool": "bash", "tool_input": {...}}             — Anthropic style
+        Pattern 4: {"command": "...", "cwd": "..."}                   — bash inner-args
+                   (gpt-oss:120b emits this in place of a real tool call;
+                    session 2438 was killed because the nudge counter didn't
+                    accept it. Strict shape match: keys ⊆ {command, cwd,
+                    timeout}, and "command" required.)
+
+    When a non-trivial shape is repaired, logs a "repaired N call(s) from
+    {shape}" line so new variants are easy to spot in production.
     """
     import re
 
@@ -1023,6 +1075,58 @@ def _try_parse_tool_calls_from_content(content: str) -> list[dict]:
                 pass
         if results:
             return results
+
+    # Pattern 3: {"tool": "X", "tool_input": {...}} — one level of nesting
+    # allowed for the inner tool_input value.
+    results: list[dict] = []
+    for m in re.finditer(
+        r'(\{(?:[^{}]|\{[^{}]*\})*?"tool"\s*:\s*"(\w+)"(?:[^{}]|\{[^{}]*\})*?\})',
+        content,
+    ):
+        try:
+            obj = json.loads(m.group(1))
+            if isinstance(obj, dict) and "tool" in obj and "tool_input" in obj:
+                results.append({
+                    "id": f"fallback_{len(results)}",
+                    "type": "function",
+                    "function": {
+                        "name": obj["tool"],
+                        "arguments": json.dumps(obj["tool_input"]),
+                    },
+                })
+        except json.JSONDecodeError:
+            pass
+    if results:
+        _log(f"_try_parse_tool_calls_from_content: repaired {len(results)} call(s) "
+             f"from {{tool, tool_input}} shape")
+        return results
+
+    # Pattern 4: bare {"command": "...", "cwd": "..."} bash inner-args.
+    # Strict subset check on keys to avoid false-positives — accept only
+    # if every top-level key is in {command, cwd, timeout} and "command"
+    # is present. Wraps as a bash tool call.
+    _bash_args_allowed = {"command", "cwd", "timeout"}
+    for m in re.finditer(r'\{[^{}]*\}', content):
+        try:
+            obj = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict) or "command" not in obj:
+            continue
+        if not set(obj.keys()).issubset(_bash_args_allowed):
+            continue
+        results.append({
+            "id": f"fallback_{len(results)}",
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "arguments": json.dumps(obj),
+            },
+        })
+    if results:
+        _log(f"_try_parse_tool_calls_from_content: repaired {len(results)} call(s) "
+             f"from {{command, cwd}} shape (gpt-oss:120b inner-args)")
+        return results
 
     return []
 

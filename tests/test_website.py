@@ -831,6 +831,38 @@ class TestApiSessions:
         r = client.patch("/api/sessions/99999", json={"exit_code": 0})
         assert r.status_code == 404
 
+    def test_terminal_state_guard_refuses_status_downgrade(self, client, db):
+        """Once a session is killed/orphaned, the generic PATCH must not
+        clobber status + exit_code back to ended/0 — that was the 2406 /
+        2418 misleading-row bug. Non-status fields (e.g. features_pushed)
+        still merge through so reconciliation can record activity even on
+        a killed session.
+        """
+        # Create a session, mark it killed via the dedicated kill endpoint.
+        p = make_product(db)
+        create_r = client.post("/api/sessions",
+                               json={"product_id": p.id, "session_uid": "uid-guard"})
+        session_id = create_r.json()["id"]
+        kill_r = client.post(
+            f"/api/sessions/{session_id}/kill",
+            json={"reason": "container exited (docker ps does not list it)"},
+        )
+        assert kill_r.status_code == 200
+
+        # Now simulate the racing docker_runner finalize that tries to
+        # write status=ended + exit_code=0 + features_pushed=2.
+        patch_r = client.patch(
+            f"/api/sessions/{session_id}",
+            json={"status": "ended", "exit_code": 0, "features_pushed": 2},
+        )
+        assert patch_r.status_code == 200
+        body = patch_r.json()
+        # Status and exit_code must be preserved at the killed values…
+        assert body["status"] == "killed"
+        assert body["exit_code"] == -1
+        # …but features_pushed must still be merged in.
+        assert body["features_pushed"] == 2
+
 
 class TestFeatureReviews:
     def test_review_recorded_on_feature_patch(self, client, db):
