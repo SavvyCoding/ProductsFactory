@@ -375,6 +375,33 @@ async def _get_system_config(db: AsyncSession) -> SystemConfig | None:
     return await db.get(SystemConfig, 1)
 
 
+def _github_token_from_config(sys_cfg: SystemConfig | None) -> str | None:
+    """Return a bearer token for GitHub API calls (App installation token,
+    PAT fallback during the transition release).
+
+    Counterpart to ``orchestrator.github_client._get_auth_token`` but reads
+    the App config directly off the SystemConfig row instead of via an HTTP
+    self-loopback to ``/api/system-config`` — we're already inside pm-api,
+    no need to call ourselves.
+
+    Returns None only when both the App and the legacy PAT are unconfigured.
+    """
+    if sys_cfg is None:
+        return None
+    try:
+        from orchestrator.integrations.github_app import get_installation_token_from_config
+        tok = get_installation_token_from_config(
+            sys_cfg.github_app_id,
+            sys_cfg.github_app_private_key,
+            sys_cfg.github_app_installation_id,
+        )
+        if tok:
+            return tok
+    except Exception as e:
+        log.warning("App token mint failed (%s) — falling back to legacy PAT", e)
+    return sys_cfg.github_pat or None
+
+
 async def _sprint_cap(db: AsyncSession) -> int:
     """Resolve the system-wide max_features_per_sprint with a default of 5."""
     cfg = await _get_system_config(db)
@@ -747,7 +774,7 @@ async def product_detail(
     sessions = sess_result.scalars().all()
     alert_count = await _unread_alert_count(db)
     _sys_cfg = await _get_system_config(db)
-    _gh_pat = _sys_cfg.github_pat if _sys_cfg else None
+    _gh_pat = _github_token_from_config(_sys_cfg)
     open_prs_list = list_open_prs(product.github_repo or "", token=_gh_pat) if product.github_repo else []
     open_prs = len(open_prs_list)
 
@@ -806,7 +833,7 @@ async def architecture_view(
     product = await _get_product_or_404(product_id, db)
     alert_count = await _unread_alert_count(db)
     _sys_cfg = await _get_system_config(db)
-    _gh_pat = _sys_cfg.github_pat if _sys_cfg else None
+    _gh_pat = _github_token_from_config(_sys_cfg)
     raw_md = fetch_architecture_md(product.github_repo or "", token=_gh_pat) if product.github_repo else None
     html_content = _md(raw_md) if raw_md else None
     return templates.TemplateResponse("progress.html", {
@@ -829,7 +856,7 @@ async def progress_view(
     product = await _get_product_or_404(product_id, db)
     alert_count = await _unread_alert_count(db)
     _sys_cfg = await _get_system_config(db)
-    _gh_pat = _sys_cfg.github_pat if _sys_cfg else None
+    _gh_pat = _github_token_from_config(_sys_cfg)
     raw_md = fetch_progress_md(product.github_repo or "", token=_gh_pat) if product.github_repo else None
     html_content = _md(raw_md) if raw_md else None
 
@@ -897,10 +924,21 @@ async def register_greenfield_form(
     from website.catalogs import STACK_BY_ID, DATABASE_BY_ID, UI_TEMPLATE_BY_ID
 
     config = await _get_system_config(db)
-    if not config or not config.products_root_dir or not config.github_org or not config.github_pat:
+    # Accept either the App credentials (preferred, post-#9 migration) OR
+    # the legacy PAT during transition. Refuse only when BOTH are missing.
+    _has_app = bool(
+        config and config.github_app_id and config.github_app_private_key
+        and config.github_app_installation_id
+    )
+    _has_pat = bool(config and config.github_pat)
+    if not config or not config.products_root_dir or not config.github_org or not (_has_app or _has_pat):
         raise HTTPException(
             status_code=422,
-            detail="Admin configuration incomplete. Set products root dir, GitHub org, and PAT first.",
+            detail=(
+                "Admin configuration incomplete. Required: products root dir, "
+                "GitHub org, and either a GitHub App (App ID + PEM + Installation ID) "
+                "or the legacy PAT."
+            ),
         )
 
     working_dir = str(Path(config.products_root_dir) / github_repo_name)
@@ -1700,7 +1738,7 @@ async def _attempt_merge_completed_sprint_pr(sprint: Sprint, db: AsyncSession) -
     if not product or not product.github_repo:
         return True
     sys_cfg = await _get_system_config(db)
-    token = sys_cfg.github_pat if sys_cfg else None
+    token = _github_token_from_config(sys_cfg)
     if not token:
         return True
 
@@ -1746,7 +1784,7 @@ async def _maybe_provision_sprint_pr(sprint: Sprint, db: AsyncSession) -> None:
     if not cfg.get("sprint_pr_mode"):
         return
     sys_cfg = await _get_system_config(db)
-    token = sys_cfg.github_pat if sys_cfg else None
+    token = _github_token_from_config(sys_cfg)
     if not token:
         return
     feat_rows = await db.execute(
@@ -1912,11 +1950,13 @@ async def merge_pr_action(
     """Merge a GitHub PR via the API."""
     product = await _get_product_or_404(product_id, db)
     config = await _get_system_config(db)
-    token = config.github_pat if config else None
+    token = _github_token_from_config(config)
     if not token:
-        raise HTTPException(422, "GitHub PAT not configured — set it in Admin → Settings")
-    if not token:
-        raise HTTPException(422, "GitHub PAT not configured — set it in Admin")
+        raise HTTPException(
+            422,
+            "GitHub auth not configured — set the App credentials "
+            "(or the legacy PAT) in Admin → Settings",
+        )
     ok, err = merge_pr(product.github_repo or "", pr_number, token)
     if not ok:
         # Not mergeable = conflicts; close PR on GitHub, re-queue feature to Implementing
