@@ -62,7 +62,8 @@ def _run_post_maintenance_pipeline(product: dict, session_uid: str,
     # writes. Same stash-then-checkout-then-pop pattern as post_doc, with
     # conflict resolution favouring the agent's content (their writes are
     # the new docs / analytics report; origin/main is the baseline).
-    _run(["git", "fetch", "origin"])
+    from orchestrator.integrations.git_ops import git_fetch_authenticated
+    git_fetch_authenticated(["origin"], cwd=working_dir, product_name=pname, timeout=120)
     stash_r = _run(["git", "stash", "push", "-u", "-m",
                     f"post-{persona}-{session_uid}"], timeout=300)
     stashed = (stash_r.returncode == 0

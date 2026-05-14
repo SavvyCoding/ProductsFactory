@@ -59,17 +59,20 @@ def _remove_stale_git_lock(working_dir: str, product_name: str, max_age_seconds:
         log.warning(f"[{product_name}] could not check/remove .git/index.lock: {e}")
 
 
-def git_push_authenticated(
-    push_args: list[str],
+def _git_with_token(
+    verb: str,
+    args: list[str],
     *,
     cwd: str | Path,
     product_name: str,
-    timeout: int = 180,
+    timeout: int,
 ) -> subprocess.CompletedProcess:
-    """``git push`` wrapped with a GitHub App installation token.
+    """Run ``git <verb> <args...>`` with a GitHub App installation token.
 
-    ``push_args`` is everything that goes AFTER ``push`` — for example
-    ``["origin", "main"]`` or ``["--no-verify", "--force-with-lease", "origin", "branch"]``.
+    Shared body for git CLI operations that go over the network (push,
+    fetch, pull). Under HTTPS auth, every one of those needs credentials —
+    the SSH path used to auto-supply them via the deploy key; now we wire
+    them through the App.
 
     Auth flow:
       - Fetch a fresh installation token via the App module (falls back to
@@ -85,10 +88,10 @@ def git_push_authenticated(
     from orchestrator.integrations.github import _get_gh_token  # late: avoids circular import
     token = _get_gh_token() or ""
     if not token:
-        log.warning(f"[{product_name}] git_push_authenticated: no token available — push will fail")
+        log.warning(f"[{product_name}] git {verb}: no token available — operation will fail under HTTPS auth")
 
     helper = '!f() { echo "username=x-access-token"; echo "password=$GITHUB_TOKEN"; }; f'
-    cmd = ["git", "-c", f"credential.helper={helper}", "push", *push_args]
+    cmd = ["git", "-c", f"credential.helper={helper}", verb, *args]
     env = {**os.environ, "GITHUB_TOKEN": token}
 
     try:
@@ -96,12 +99,51 @@ def git_push_authenticated(
             cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout, env=env,
         )
     except subprocess.TimeoutExpired as te:
-        log.warning(f"[{product_name}] git push timed out after {timeout}s")
+        log.warning(f"[{product_name}] git {verb} timed out after {timeout}s")
         return subprocess.CompletedProcess(
             cmd, returncode=124,
             stdout=(te.stdout.decode() if isinstance(te.stdout, bytes) else (te.stdout or "")),
             stderr=f"timed out after {timeout}s",
         )
+
+
+def git_push_authenticated(
+    push_args: list[str],
+    *,
+    cwd: str | Path,
+    product_name: str,
+    timeout: int = 180,
+) -> subprocess.CompletedProcess:
+    """``git push <push_args...>`` with App-token auth. See ``_git_with_token``."""
+    return _git_with_token("push", push_args, cwd=cwd, product_name=product_name, timeout=timeout)
+
+
+def git_fetch_authenticated(
+    fetch_args: list[str],
+    *,
+    cwd: str | Path,
+    product_name: str,
+    timeout: int = 120,
+) -> subprocess.CompletedProcess:
+    """``git fetch <fetch_args...>`` with App-token auth. See ``_git_with_token``.
+
+    Before the App migration, the orchestrator's host-side fetches relied on
+    the SSH deploy key being auto-used; under HTTPS that path silently failed
+    with ``could not read Username for 'https://github.com'``. Wire fetch
+    callsites through this helper to restore the cred path.
+    """
+    return _git_with_token("fetch", fetch_args, cwd=cwd, product_name=product_name, timeout=timeout)
+
+
+def git_pull_authenticated(
+    pull_args: list[str],
+    *,
+    cwd: str | Path,
+    product_name: str,
+    timeout: int = 120,
+) -> subprocess.CompletedProcess:
+    """``git pull <pull_args...>`` with App-token auth. See ``_git_with_token``."""
+    return _git_with_token("pull", pull_args, cwd=cwd, product_name=product_name, timeout=timeout)
 
 
 def safe_run(
@@ -221,7 +263,10 @@ def _reset_workspace(working_dir: str, product_name: str) -> None:
 
     # 1. Fetch latest from origin (updates remote-tracking refs, prunes deleted branches)
     # Longer timeout — fetch can legitimately take a while on slow networks.
-    r = safe_run(["git", "fetch", "origin", "--prune"], cwd=wd, timeout=120, log_label=product_name)
+    # git_fetch_authenticated supplies the App token via credential.helper —
+    # bare safe_run(["git", "fetch", ...]) used to work because the SSH key was
+    # auto-used; under HTTPS auth fetch needs explicit creds.
+    r = git_fetch_authenticated(["origin", "--prune"], cwd=wd, product_name=product_name, timeout=120)
     if r.returncode != 0:
         log.warning(f"[{product_name}] git fetch failed: {r.stderr.strip()[:200]}")
 
@@ -288,8 +333,9 @@ def _checkout_sprint_branch(working_dir: str, sprint_branch: str, product_name: 
     # Fetch first so the remote ref is current. _reset_workspace already
     # fetched, but it was for origin/main with --prune; the sprint ref may
     # not have existed at fetch time if just provisioned.
-    # Note: legacy call site did NOT log on timeout — preserve by leaving log_label=None.
-    r = safe_run(["git", "fetch", "origin", sprint_branch], cwd=wd, timeout=60)
+    r = git_fetch_authenticated(
+        ["origin", sprint_branch], cwd=wd, product_name=product_name, timeout=60,
+    )
     if r.returncode != 0:
         log.warning(
             f"[{product_name}] sprint pre-checkout: fetch origin {sprint_branch} failed: "

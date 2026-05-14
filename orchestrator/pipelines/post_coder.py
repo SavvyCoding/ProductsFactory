@@ -529,7 +529,8 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         # pop conflict we resolve in favor of the agent ("theirs" in stash terms)
         # since the post-coder force-push will overwrite the sprint branch tree
         # anyway.
-        _run(["git", "fetch", "origin"])
+        from orchestrator.integrations.git_ops import git_fetch_authenticated
+        git_fetch_authenticated(["origin"], cwd=working_dir, product_name=pname, timeout=120)
         # Stash with -u so UNTRACKED files survive the branch switch too. The
         # agent's brand-new source files (e.g. SRC/healthz.ts, app/api/.../route.ts)
         # are untracked at this point; without -u, `git checkout sprint/79`
@@ -557,7 +558,10 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             if stashed:
                 _run(["git", "stash", "pop"])  # best-effort restore
             return pushed_ids
-        pull_r = _run(["git", "pull", "--ff-only", "origin", branch])
+        from orchestrator.integrations.git_ops import git_pull_authenticated
+        pull_r = git_pull_authenticated(
+            ["--ff-only", "origin", branch], cwd=working_dir, product_name=pname, timeout=120,
+        )
         if pull_r.returncode != 0:
             log.warning(f"[post-coder] {pname}: git pull --ff-only on {branch} failed — {_fmt_err(pull_r)}")
             # Don't return: a non-fast-forward state is rare and we still want
