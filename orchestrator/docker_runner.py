@@ -1418,16 +1418,15 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # 200 with the cap removed; the 2145 failure was just model variance.
     if persona == "reviewer":
         effective_max_turns = min(effective_max_turns, 200)
-    # Designer's job is bounded (read story + architecture, write design doc,
-    # exit). Successful designer sessions today complete in 5-30 turns; the
-    # global 80-200 turn cap lets them keep accumulating file reads into
-    # conversation history (no sliding window in agent_loop) until the
-    # prompt blows past the model's max context — Ollama 400
-    # "prompt too long; exceeded max context length" on session 2277
-    # at turn 28 with 245k input tokens. Cap at 40 to fail fast instead of
-    # burning hundreds of thousands of tokens reaching the same wall.
+    # Designer cap parity with reviewer at 200 (raised 2026-05-14 from 40).
+    # The 40 cap defended against Ollama 400 "prompt too long" context overflow
+    # observed on session 2277 (28 turns, 245k input tokens). That defence is
+    # now downstream — agent_loop's hallucination guard + the nudge counter
+    # bound the most pathological burn paths, and per-feature design sessions
+    # genuinely need more than 40 turns when iterating on rework feedback.
+    # Re-validate if Ollama context-overflow 400s reappear on designers.
     if persona == "designer":
-        effective_max_turns = min(effective_max_turns, 40)
+        effective_max_turns = min(effective_max_turns, 200)
     effective_bash_timeout   = int(sys_cfg.get("bash_timeout")   or os.environ.get("BASH_TIMEOUT",   "180"))
     _raw_ssh_dir = sys_cfg.get("ssh_keys_dir") or str(SSH_DIR)
     effective_ssh_dir = Path(_raw_ssh_dir) if _raw_ssh_dir else None
