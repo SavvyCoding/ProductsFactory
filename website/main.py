@@ -1833,8 +1833,33 @@ async def _activate_next_sprint(completed: Sprint, product_id: int, db: AsyncSes
                 phase.status = "completed"
                 await db.flush()
 
-    # Move to next phase's first planned sprint
+    # Move to next phase's first planned sprint — but ONLY if every
+    # feature in the current phase has reached a terminal state. Features
+    # left Pending/Approved/Designing/Designed/Implementing/Implemented/
+    # Reviewing/Testing/Committed/Reviewed are unfinished work the PM
+    # never resolved (most commonly: sprints PM-overridden to complete
+    # with non-terminal features still attached, or unsprinted Approved
+    # features in this phase). Skipping past them silently buries work;
+    # holding the phase forces a PM resolution (re-sprint in current phase,
+    # Reject, Defer, or move to Blocked).
     if completed.phase_id:
+        unfinished_in_phase = await db.execute(
+            select(func.count()).select_from(Feature).join(
+                Sprint, Feature.sprint_id == Sprint.id
+            ).where(
+                Sprint.phase_id == completed.phase_id,
+                Feature.status.notin_(_TERMINAL_FEATURE_STATUSES + ("Blocked",)),
+            )
+        )
+        unfinished_count = unfinished_in_phase.scalar() or 0
+        if unfinished_count > 0:
+            log.info(
+                f"[phase-gate] Holding phase {completed.phase_id}: "
+                f"{unfinished_count} feature(s) still non-terminal. "
+                f"Next phase will NOT activate until they reach a terminal status."
+            )
+            return
+
         phase = await db.get(Phase, completed.phase_id)
         if phase:
             next_phase_result = await db.execute(

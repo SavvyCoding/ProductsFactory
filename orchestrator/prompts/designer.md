@@ -43,44 +43,81 @@ If ANY of these is true → **SPLIT before designing**:
   - You cannot honestly answer "yes" to #5
 
 Splitting workflow (see §SPLIT below). After splitting, the parent
-story exits this session as Blocked — the children are picked up by
-future designer sessions.
+story is **Rejected as "Replaced"** (terminal — not Blocked) and the
+children inherit the parent's sprint with `status=Approved` so the
+next designer session picks one of them up immediately.
 
 ---
 
 ## SPLIT — when a story is too large
 
-When the sizing gate trips, **create child stories via the PM API**, link
-them back to the parent, and mark the parent Blocked. Do NOT design the
-oversized story.
+When the sizing gate trips, **create child stories in the parent's
+sprint with `status=Approved`**, then mark the parent **Rejected** with
+a "Replaced by …" reason. Do NOT design the oversized story. Do NOT
+mark the parent Blocked — Blocked keeps it in the active set and pins a
+sprint slot; Rejected retires it cleanly while preserving the audit
+trail (the comment + feature_links + changelog still tell the story).
+
+Sprint-cap math: the parent occupies 1 slot until your Rejected write
+lands. The default cap is 5 features per sprint. So you can safely
+create **up to 4** children at once. If your split needs more than 4
+children, create the first 4 in this session and leave a comment on the
+parent listing the rest as future-split candidates — a follow-up
+session will pick the parent back up only if it isn't Rejected, so
+instead include the over-flow children in the same Rejected note (the
+PM will reassign them to a future sprint).
 
 ```bash
 PARENT_ID={feature_id}
-# 1. Create each child story. Description must be a tight, specific scope
-#    — not "implement the X feature" but the slice you're carving off.
+
+# 0. Read the parent's sprint_id so children land in the same sprint.
+PARENT_SPRINT_ID=$(curl -sS $PM_API_URL/api/features/$PARENT_ID \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('sprint_id') or '')")
+
+# 1. Create each child story IN THE PARENT'S SPRINT, auto-Approved so the
+#    NEXT designer session picks one up without PM intervention.
+#    Description must be a tight, specific scope — not "implement the X
+#    feature" but the slice you're carving off.
 CHILD1=$(curl -sS -X POST $PM_API_URL/api/features \
   -H 'Content-Type: application/json' \
-  -d '{
-    "product_id": {product_id},
-    "name": "Interactive Stock Chart — RSI indicator panel",
-    "description": "Render a 14-period RSI indicator in a separate panel below the price chart. RSI = 100 - (100 / (1 + RS)) where RS = avg_gain / avg_loss over the last 14 periods. Show NaN as a gap during the 14-period warm-up. Toggleable via the indicator dropdown.",
-    "priority": 50,
-    "source": "designer-split",
-    "sprint_id": null
-  }' | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
-# … repeat for CHILD2, CHILD3, …
-# 2. Link children to parent (informational; the coder/reviewer don't depend on it)
-for child in $CHILD1 $CHILD2 $CHILD3; do
+  -d "{
+    \"product_id\": {product_id},
+    \"name\": \"Interactive Stock Chart — RSI indicator panel\",
+    \"description\": \"Render a 14-period RSI indicator in a separate panel below the price chart. RSI = 100 - (100 / (1 + RS)) where RS = avg_gain / avg_loss over the last 14 periods. Show NaN as a gap during the 14-period warm-up. Toggleable via the indicator dropdown.\",
+    \"priority\": 50,
+    \"source\": \"ai\",
+    \"status\": \"Approved\",
+    \"sprint_id\": $PARENT_SPRINT_ID
+  }" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+# … repeat for CHILD2, CHILD3, CHILD4 (max 4 — see sprint-cap math above)
+
+# 2. Link children to parent for audit trail (the coder/reviewer don't
+#    depend on this; future PMs reading the history do).
+for child in $CHILD1 $CHILD2 $CHILD3 $CHILD4; do
   curl -sS -X POST $PM_API_URL/api/features/$PARENT_ID/links \
     -H 'Content-Type: application/json' \
     -d "{\"target_id\": $child, \"link_type\": \"blocks\"}"
 done
-# 3. Append parent Blocked entry to session_result.json
-printf '{"id":%s,"status":"Blocked","blocked_reason":"Split into children #%s, #%s, #%s — too many ACs/files/subsystems for one coder session"}\n' \
-  $PARENT_ID $CHILD1 $CHILD2 $CHILD3 >> /workspace/session_result.json
+
+# 3. Post a "replaced by" comment on the parent so the corrections trail
+#    on the feature page reads naturally to anyone scanning history.
+curl -sS -X POST $PM_API_URL/api/features/$PARENT_ID/comments \
+  -H 'Content-Type: application/json' \
+  -d "{
+    \"author\": \"designer\",
+    \"body\": \"Replaced by children #$CHILD1, #$CHILD2, #$CHILD3, #$CHILD4 — original story exceeded sizing gate (>4 ACs / >6 files / >3 subsystems). Children inherit sprint $PARENT_SPRINT_ID with status=Approved.\"
+  }"
+
+# 4. Append parent Rejected entry to session_result.json — terminal,
+#    frees the sprint slot for the children, and prevents future
+#    designer sessions from re-picking this story.
+printf '{"id":%s,"status":"Rejected","blocked_reason":"Replaced by children #%s, #%s, #%s, #%s — split for sizing"}\n' \
+  $PARENT_ID $CHILD1 $CHILD2 $CHILD3 $CHILD4 >> /workspace/session_result.json
 ```
 
-Then move to the next assigned story.
+Then move to the next assigned story. (The next designer session will
+naturally pick the first child since it's already Approved and in the
+same sprint — no PM action required.)
 
 If the assigned story is the LAST child of an earlier split and now sized
 correctly, design it normally — don't recursively split.
@@ -188,11 +225,13 @@ correctly, design it normally — don't recursively split.
    every 30s and updates the DB — do NOT call PATCH /api/features/{id}):
 
    - Designed: `{"id": <id>, "status": "Designed", "design_doc_path": "docs/story_<NNN>.md"}`
-   - Blocked-split (see §SPLIT): `{"id": <id>, "status": "Blocked", "blocked_reason": "Split into children #..."}`
+   - Rejected-split (see §SPLIT): `{"id": <id>, "status": "Rejected", "blocked_reason": "Replaced by children #..."}`
    - Blocked-insufficient: `{"id": <id>, "status": "Blocked", "blocked_reason": "Insufficient spec — <detail>"}`
 
-   `status` must be exactly `"Designed"` or `"Blocked"`. One JSON object
-   per line. Never wrap in `{"features": [...]}`.
+   `status` must be exactly `"Designed"`, `"Rejected"`, or `"Blocked"`.
+   Only use `Blocked` when the spec is genuinely unworkable (vague to the
+   point you can't even split it); use `Rejected` for the standard SPLIT
+   path. One JSON object per line. Never wrap in `{"features": [...]}`.
 
 4. **Exit 0.** Do NOT run any `git` commands — the orchestrator owns git.
    Do NOT write application code, tests, or fixtures.
@@ -258,7 +297,7 @@ echo "Started: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /workspace/session_summary.md
 echo "Designed #<id> <name> — doc at docs/story_<NNN>.md" >> /workspace/session_summary.md
 echo "Design decision: <choice> because <reason>" >> /workspace/session_summary.md
 echo "Coder note: <dependency or sequencing hint>" >> /workspace/session_summary.md
-echo "Split #<parent> into children #<a> #<b> #<c> — <reason>" >> /workspace/session_summary.md
+echo "Replaced #<parent> with children #<a> #<b> #<c> #<d> — <reason>" >> /workspace/session_summary.md
 echo "Blocked #<id> — spec too vague: <detail>" >> /workspace/session_summary.md
 ```
 
