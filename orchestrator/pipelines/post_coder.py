@@ -524,31 +524,24 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                 if pr_resp.status_code == 200:
                     pr_data = pr_resp.json()
                     if isinstance(pr_data, dict) and pr_data.get("state") == "open":
-                        # Sanity-guard: the sprint integration PR is not a
-                        # rework target — if every feature happens to point
-                        # at it (legacy state from the pre-two-tier model),
-                        # ignore it and cut a fresh session branch below.
-                        if sprint_pr_mode and candidate == int(sprint_pr_num or 0):
-                            log.info(
-                                f"[post-coder] {pname}: features all point at the "
-                                f"sprint PR #{candidate} (legacy state) — opening "
-                                f"a fresh session PR instead of treating it as rework"
+                        # Under the 1-PR model there is no sprint integration
+                        # PR, so any open PR shared across the assigned
+                        # features is by definition a session PR from a
+                        # prior coder cycle — always rework.
+                        rework_pr_mode = True
+                        rework_pr_number = candidate
+                        rework_branch_name = (pr_data.get("head") or {}).get("ref") or ""
+                        rework_pr_url = pr_data.get("html_url") or ""
+                        log.info(
+                            f"[post-coder] {pname}: rework mode — features {feat_ids} "
+                            f"all point at open PR #{candidate} (branch={rework_branch_name!r}); "
+                            f"force-pushing instead of opening a new PR"
+                        )
+                        if not rework_branch_name:
+                            log.warning(
+                                f"[post-coder] {pname}: rework PR #{candidate} has no head.ref — opening a fresh session PR"
                             )
-                        else:
-                            rework_pr_mode = True
-                            rework_pr_number = candidate
-                            rework_branch_name = (pr_data.get("head") or {}).get("ref") or ""
-                            rework_pr_url = pr_data.get("html_url") or ""
-                            log.info(
-                                f"[post-coder] {pname}: rework mode — features {feat_ids} "
-                                f"all point at open PR #{candidate} (branch={rework_branch_name!r}); "
-                                f"force-pushing instead of opening a new PR"
-                            )
-                            if not rework_branch_name:
-                                log.warning(
-                                    f"[post-coder] {pname}: rework PR #{candidate} has no head.ref — opening a fresh session PR"
-                                )
-                                rework_pr_mode = False
+                            rework_pr_mode = False
             except Exception as e:
                 log.warning(f"[post-coder] {pname}: rework lookup for PR #{candidate} failed: {e} — opening a fresh session PR")
 
