@@ -1415,9 +1415,14 @@ function renderSprintReport(data) {
   const body = document.getElementById('sr-body');
   if (!body) return;
   const s = data.sprint;
-  const g = data.gates;
+  const g = data.gates || {};
 
   function gateRow(label, gate) {
+    // Defensive: the API was simplified (Phase 4) to return only the
+    // gates that still apply; older templates referenced now-retired
+    // keys (qa_passed, security_clean) and crashed on undefined. Skip
+    // rendering when the gate is missing instead of throwing.
+    if (!gate) return '';
     const icon = gate.passed ? '✅' : '❌';
     const detail = gate.notes || gate.detail || '';
     return '<div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">' +
@@ -1441,9 +1446,12 @@ function renderSprintReport(data) {
   // Gates
   html += '<div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px">Definition of Done</div>';
   html += '<div style="margin-bottom:16px">';
+  // qa_passed + security_clean were retired in Phase 4 (the qa_tester +
+  // security_auditor sub-sections folded into the reviewer's tri-section
+  // review). The API no longer returns them. gateRow() above skips
+  // missing gates, so leaving stale calls here would render nothing,
+  // but explicit removal keeps the template aligned with the backend.
   html += gateRow('Features Done', g.all_features_done);
-  html += gateRow('QA Tester Sign-off', g.qa_passed);
-  html += gateRow('Security Auditor Sign-off', g.security_clean);
   html += gateRow('Retrospective', g.retro_done);
   html += '</div>';
 
