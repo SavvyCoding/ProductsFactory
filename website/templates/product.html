@@ -268,8 +268,14 @@
         <div class="metric-icon">▦</div>
         <div class="metric-body">
           {% if sprint_active %}
-          {% set sf_count = features | selectattr('sprint_id', 'equalto', sprint_active.id) | list | length %}
-          {% set sf_terminal = features | selectattr('sprint_id', 'equalto', sprint_active.id) | selectattr('status','in',['Pushed','Deferred','Rejected']) | list | length %}
+          {# Rejected/Reverted stories are out-of-scope work — exclude
+             from progress so the bar reflects what's actually planned
+             to ship. They still count toward the DoD gate (terminal) so
+             a sprint with all stories Pushed-or-Rejected still
+             auto-completes. Display-only: sprint_id stays on the row. #}
+          {% set sf_planned = features | selectattr('sprint_id', 'equalto', sprint_active.id) | rejectattr('status', 'in', ['Rejected','Reverted']) | list %}
+          {% set sf_count = sf_planned | length %}
+          {% set sf_terminal = sf_planned | selectattr('status','in',['Pushed','Deferred']) | list | length %}
           {% set sprint_pct = ((sf_terminal / sf_count) * 100) | int if sf_count else 0 %}
           <div class="metric-value">{{ sf_terminal }}<span class="metric-suffix">/{{ sf_count }}</span></div>
           <div class="metric-label">{{ sprint_active.name | as_feature_name }} (active)</div>
@@ -880,9 +886,16 @@
             <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
               <span style="font-size:11px;color:var(--text-muted)">{{ sp | length }}/{{ sf | length }}</span>
               {% if sprint.status in ('active', 'completed') %}
-              {% set sf_count = features | selectattr('sprint_id', 'equalto', sprint.id) | list | length %}
-              {% set sf_terminal = features | selectattr('sprint_id', 'equalto', sprint.id) | selectattr('status', 'in', ['Pushed','Deferred','Rejected']) | list | length %}
-              {% set gate_features = (sf_count == 0 or sf_terminal == sf_count) %}
+              {# Exclude Rejected/Reverted from progress display — they're
+                 out-of-scope. Gate math below uses raw sprint membership
+                 so a sprint where every story is Pushed-or-Rejected still
+                 completes. #}
+              {% set sf_planned_card = features | selectattr('sprint_id', 'equalto', sprint.id) | rejectattr('status', 'in', ['Rejected','Reverted']) | list %}
+              {% set sf_count = sf_planned_card | length %}
+              {% set sf_terminal = sf_planned_card | selectattr('status', 'in', ['Pushed','Deferred']) | list | length %}
+              {% set sf_total_raw = features | selectattr('sprint_id', 'equalto', sprint.id) | list | length %}
+              {% set sf_terminal_raw = features | selectattr('sprint_id', 'equalto', sprint.id) | selectattr('status', 'in', ['Pushed','Deferred','Rejected']) | list | length %}
+              {% set gate_features = (sf_total_raw == 0 or sf_terminal_raw == sf_total_raw) %}
               {# Active completion gates (Phase 4 dropped qa_passed + security_clean):
                  all_features_done + no_open_prs. Both are auto-computed; no agent
                  sign-off required. Retro is generated post-completion (templated)
@@ -909,16 +922,22 @@
               {% endif %}
             </div>
           </div>
-          {% if sf %}
+          {# `sf_display` hides Rejected/Reverted from the per-sprint
+             feature list — those stories are out-of-scope and live in
+             the "All Features" backlog + "Rejected / Reverted" archived
+             block. Progress bar uses the same filtered set. #}
+          {% set sf_display = sf | rejectattr('status', 'in', ['Rejected','Reverted']) | list %}
+          {% set sp_display = sf_display | selectattr('status', 'equalto', 'Pushed') | list %}
+          {% if sf_display %}
           <!-- Progress bar -->
-          {% if sf | length > 0 %}
+          {% if sf_display | length > 0 %}
           <div style="background:var(--border);border-radius:3px;height:3px;overflow:hidden;margin-bottom:6px">
-            <div style="background:var(--green);height:100%;width:{{ ((sp | length / sf | length) * 100) | int }}%"></div>
+            <div style="background:var(--green);height:100%;width:{{ ((sp_display | length / sf_display | length) * 100) | int }}%"></div>
           </div>
           {% endif %}
           <!-- Feature list -->
           <div style="display:flex;flex-direction:column;gap:4px">
-            {% for f in sf %}
+            {% for f in sf_display %}
             <div class="phase-card sprint-feature-row" data-feature-id="{{ f.id }}" style="display:flex;justify-content:space-between;align-items:center;padding:4px 6px;border-radius:4px;cursor:pointer;{% if f.status == 'Pushed' %}opacity:.8{% endif %}">
               <div style="font-size:12px;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">
                 {% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
@@ -946,7 +965,13 @@
             {% endfor %}
           </div>
           {% else %}
+          {# Distinguish "no stories ever" from "all stories rejected" so
+             the PM knows whether the sprint is empty or just dead. #}
+          {% if sf %}
+          <div style="font-size:11px;color:var(--text-muted);text-align:center;padding:6px 0">All {{ sf | length }} stor{% if sf | length == 1 %}y was{% else %}ies were{% endif %} Rejected/Reverted — see archived</div>
+          {% else %}
           <div style="font-size:11px;color:var(--text-muted);text-align:center;padding:6px 0">No stories assigned</div>
+          {% endif %}
           {% endif %}
           {% if sprint.release_notes %}
           <details style="margin-top:8px">
