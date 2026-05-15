@@ -1169,6 +1169,31 @@ def _finalize_session(
         _cleanup_workspace_post_session(working_dir, product.get("name", str(working_dir)))
         return EXIT_ENV_NOT_READY
 
+    # FSM transition: running → wrapping. The agent container has exited
+    # (cleanly or otherwise); the orchestrator-side post-* pipeline is
+    # about to run for 30s-2min. The watchdog reads `/api/sessions/active`
+    # which filters on status in (pending, starting, running) — moving to
+    # `wrapping` removes us from that set, so the watchdog stops trying to
+    # kill the session on "container exited (docker ps does not list it)"
+    # mid-finalize. The final PATCH in the finally block below transitions
+    # wrapping → ended/lost/killed with the real end status + token totals.
+    #
+    # Best-effort: if the PATCH fails (PM API hiccup), proceed to post-*
+    # anyway — the watchdog race only fires on rare timing, never blocks
+    # progress.
+    if session_id is not None:
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                client.patch(f"/api/sessions/{session_id}", json={
+                    "status": "wrapping",
+                })
+        except Exception as e:
+            log.warning(
+                f"[{product.get('name', '?')}] session {session_id} "
+                f"wrapping-state PATCH failed: {e} — proceeding to post-* "
+                f"(watchdog may mis-fire during this window)"
+            )
+
     try:
         # 0. Path B post-* ceremony — orchestrator owns ALL git for personas
         # that produce files. Agent only edits files + writes session_result.json;

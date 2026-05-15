@@ -3508,9 +3508,16 @@ async def api_session_heartbeat(session_id: int, db: AsyncSession = Depends(get_
 @app.get("/api/sessions/watchdog/targets")
 async def api_watchdog_targets(db: AsyncSession = Depends(get_db)):
     """
-    Returns sessions the watchdog should kill. Two conditions:
-      1. Past expected_deadline (hard timeout)
-      2. status=running but no heartbeat in 15m (after 15m grace period since started_at)
+    Returns sessions the watchdog should kill. Three conditions:
+      1. status in (pending/starting/running) past expected_deadline
+         (hard timeout)
+      2. status=running with no heartbeat in 15m (after 15m grace
+         period since started_at)
+      3. status=wrapping for >10m. Wrapping = "agent container exited,
+         orchestrator-side post-* pipeline is running"; normal duration
+         is 30s-2min. >10m means post-* crashed silently (e.g. PM API
+         unreachable mid-PATCH), and the session row would otherwise sit
+         forever because /api/sessions/active filters wrapping out.
 
     Caller (watchdog) is responsible for actually killing the container
     (via docker kill) and POSTing back to /kill to close the DB record.
@@ -3518,16 +3525,30 @@ async def api_watchdog_targets(db: AsyncSession = Depends(get_db)):
     from datetime import timedelta
     now = datetime.now(timezone.utc)
     heartbeat_grace = timedelta(minutes=15)
+    wrapping_grace = timedelta(minutes=10)
 
+    # Watchdog cares about sessions that are still "live" from the FSM's
+    # perspective — running for the heartbeat/deadline cases, and
+    # wrapping for the stale-finalize case. Already-terminal sessions
+    # (ended/lost/killed/orphaned) are skipped.
     q = select(DBSession).where(
-        DBSession.status.in_(["pending", "starting", "running"]),
+        DBSession.status.in_(["pending", "starting", "running", "wrapping"]),
         DBSession.ended_at.is_(None),
     )
     result = await db.execute(q)
     kill_list = []
     for s in result.scalars().all():
         reason = None
-        if s.expected_deadline and now > s.expected_deadline:
+        if s.status == "wrapping":
+            # Use heartbeat_at if available (last sign of life), else
+            # started_at as a floor. Most wrapping sessions finalize in
+            # <2min; 10min indicates post-* is hung.
+            anchor = s.heartbeat_at or s.started_at
+            if anchor and (now - anchor) > wrapping_grace:
+                reason = (f"stale wrapping for "
+                          f"{int((now - anchor).total_seconds() / 60)}m "
+                          f"(post-* pipeline hung)")
+        elif s.expected_deadline and now > s.expected_deadline:
             reason = f"timeout (deadline {s.expected_deadline.isoformat()})"
         elif s.started_at and (now - s.started_at) > heartbeat_grace:
             last_hb = s.heartbeat_at or s.started_at
