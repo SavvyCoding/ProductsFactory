@@ -56,25 +56,23 @@ elif [ "$LOCK_STATUS" != "200" ] && [ "$LOCK_STATUS" != "201" ]; then
     echo "[bootstrap] Unexpected lock response: $LOCK_STATUS — continuing (PM API may still be starting)."
 fi
 
-# Configure git credential helper using the GitHub PAT so the orchestrator's
-# git operations (post-coder push, scaffold push, pat-rotate sweeps) succeed
-# without the PAT being baked into remote URLs. Pulls fresh from PM API in
-# case the operator rotated it after .env was loaded.
-PAT=$(curl -s "$PM_API_URL/api/system-config" 2>/dev/null \
-        | python3 -c "import sys,json; print((json.load(sys.stdin) or {}).get('github_pat') or '')" 2>/dev/null \
-        || echo "")
-if [ -n "$PAT" ]; then
-    git config --global credential.helper store
-    cat > ~/.git-credentials <<EOF
-https://x-access-token:${PAT}@github.com
-EOF
-    chmod 600 ~/.git-credentials
-    git config --global user.email "orchestrator@productfactory.local" 2>/dev/null || true
-    git config --global user.name  "ProductFactory Orchestrator" 2>/dev/null || true
-    echo "[bootstrap] Git credential helper configured."
-else
-    echo "[bootstrap] No GitHub PAT available — git push operations may fail until set."
-fi
+# Git auth is GitHub App installation tokens, minted per-session via
+# orchestrator.integrations.git_ops::_git_with_token. That helper uses a
+# one-shot `git -c credential.helper=<inline>` so the token is never
+# persisted to disk. Bootstrap must NOT configure a global credential.helper
+# (e.g. `store`): when both a global and a one-shot helper are configured,
+# git invokes them in order and the FIRST one to return credentials wins.
+# A persistent helper backed by a stale/revoked PAT would intercept every
+# request before the one-shot's App token had a chance to run.
+#
+# Belt-and-braces: remove any global credential.helper inherited from prior
+# starts (image layer cache, leftover ~/.gitconfig from a bind-mounted home).
+git config --global --unset-all credential.helper 2>/dev/null || true
+# Defensive: zero out any leftover ~/.git-credentials so even if some other
+# code path adds a `store` helper, it has nothing to return.
+: > ~/.git-credentials 2>/dev/null || true
+chmod 600 ~/.git-credentials 2>/dev/null || true
+echo "[bootstrap] Git auth: GitHub App per-session tokens (no global credential helper)."
 
 echo "[bootstrap] Starting orchestration loop..."
 exec python3 /app/orchestrate.py

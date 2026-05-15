@@ -90,8 +90,21 @@ def _git_with_token(
     if not token:
         log.warning(f"[{product_name}] git {verb}: no token available — operation will fail under HTTPS auth")
 
+    # `credential.helper=` (empty) clears every helper inherited from
+    # /etc/gitconfig and ~/.gitconfig — defends against a stale `store`
+    # helper (or any other persistent helper) intercepting the request
+    # before our one-shot runs. Without the clear, git would call helpers
+    # in order and the first to return credentials wins; a `store` helper
+    # backed by a revoked PAT would silently lose us the auth flow.
+    # Then our one-shot helper is the ONLY helper git knows about for
+    # this command.
     helper = '!f() { echo "username=x-access-token"; echo "password=$GITHUB_TOKEN"; }; f'
-    cmd = ["git", "-c", f"credential.helper={helper}", verb, *args]
+    cmd = [
+        "git",
+        "-c", "credential.helper=",
+        "-c", f"credential.helper={helper}",
+        verb, *args,
+    ]
     env = {**os.environ, "GITHUB_TOKEN": token}
 
     try:

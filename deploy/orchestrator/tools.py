@@ -892,18 +892,10 @@ def reconcile_prs(args: dict, **kwargs) -> str:
             _run_supervisor_pr_detectors(product)
         except Exception:
             log.exception("supervisor PR detectors failed")
-        # Phase 6.5 invariant: in sprint-PR mode there's exactly 1 open PR per
-        # product (the sprint PR). > 1 alerts the operator (once per product
-        # per process run) — the legacy MAX_OPEN_PRS gate that paused the
-        # coder is gone. Best-effort.
-        if product.get("github_repo"):
-            try:
-                from orchestrator.sprint_pr import check_open_pr_invariant
-                from orchestrator.github_client import count_open_prs
-                from orchestrator.alerts import send_alert
-                check_open_pr_invariant(product, count_open_prs(product), alerter=send_alert)
-            except Exception:
-                log.exception("open-PR invariant check failed")
+        # Open-PR-count invariant retired with the two-tier (session-PR)
+        # model: a healthy product now has 1 sprint integration PR + N
+        # session PRs open in parallel, so the >1 alert would fire every
+        # cycle. The reconcile sweep above already detects orphan PRs.
         return _ok({"reconciled": product_id})
     except Exception as e:
         log.exception("reconcile_prs failed")
@@ -1102,6 +1094,8 @@ def _run_supervisor_pr_detectors(product: dict) -> None:
     if not isinstance(features, list):
         features = []
 
+    # 1-PR model: every open PR is a session PR; no sprint integration
+    # PR exists to exclude. Both detectors operate uniformly.
     detect_dirty_prs(
         product_id=product["id"], github_repo=repo_url,
         open_prs_with_state=enriched, features=features, github_token=pat,

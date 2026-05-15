@@ -222,6 +222,12 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
         "{sprint_branch}": str(product.get("_sprint_branch", "")),
         "{sprint_pr_number}": str(product.get("_sprint_pr_number", "")),
         "{sprint_pr_url}": str(product.get("_sprint_pr_url", "")),
+        # Session-PR context (two-tier model). Populated for the reviewer
+        # only — coder/designer don't use them. Empty string falls through
+        # cleanly when the substitution isn't relevant (e.g. designer).
+        "{session_branch}": str(product.get("_session_branch", "") or ""),
+        "{session_pr_number}": str(product.get("_session_pr_number", "") or ""),
+        "{session_pr_url}": str(product.get("_session_pr_url", "") or ""),
         "{assigned_features}": product.get("_assigned_features_md", ""),
         "{assigned_feature_count}": str(len(product.get("_assigned_features", []))),
         # Reviewer/security_auditor comments for features in a rework cycle.

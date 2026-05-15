@@ -318,15 +318,35 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                                   and f.get("review_outcome") == "changes_requested")]
                 features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
             elif persona == "reviewer":
-                # Reviewer follows the PR — scope to active sprint but fall back to any sprint
-                # so open PRs are not left hanging if sprint rolled over mid-review.
+                # Reviewer follows the SESSION PR (two-tier model): every
+                # reviewer session reviews exactly one open session PR's
+                # worth of features. Group by `pr_number` and pick the
+                # oldest session PR (lowest pr_number — GitHub assigns
+                # them monotonically per repo) so older work doesn't
+                # starve waiting on newer session PRs.
+                # Scope to active sprint first, fall back to any sprint so
+                # open PRs aren't left hanging if a sprint rolled over
+                # mid-review.
                 candidates = [f for f in all_features
                               if f.get("status") == "Reviewing"
                               and f.get("pr_number")
                               and f.get("sprint_id") is not None]
-                features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
-                if not features:
-                    features = candidates
+                in_active = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
+                pool = in_active or candidates
+                if pool:
+                    from collections import defaultdict as _dd
+                    by_pr: dict = _dd(list)
+                    for _f in pool:
+                        by_pr[_f["pr_number"]].append(_f)
+                    oldest_pr = min(by_pr.keys())
+                    features = by_pr[oldest_pr]
+                    log.info(
+                        f"[assign] reviewer scoped to session PR #{oldest_pr} "
+                        f"({len(features)} feature(s)); {len(by_pr)} open "
+                        f"session PR group(s) total"
+                    )
+                else:
+                    features = []
             elif persona == "designer":
                 # product_planner was merged into designer 2026-05-06 (Phase 1
                 # of futureplan.md). They shared this same filter and wrote
@@ -348,6 +368,11 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                 "design_doc_path": f.get("design_doc_path"),
                 "pr_number": f.get("pr_number"),
                 "pr_url": f.get("pr_url"),
+                # Session branch name written by post_coder when the
+                # session PR was opened. Reviewer dispatch + the two-tier
+                # session-context block in docker_runner read this to
+                # find the branch under review without an extra GitHub call.
+                "branch_name": f.get("branch_name"),
                 "fix_attempts": f.get("fix_attempts", 0),
                 "blocked_reason": f.get("blocked_reason"),
                 # `review_outcome` lets the prompt-builder distinguish a fresh
@@ -1450,45 +1475,67 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     )
     product["_active_sprint"] = active_sprint or {}
 
-    # Sprint-PR-mode context: when the product opts in via config.sprint_pr_mode
-    # AND the active sprint has been provisioned with a branch + PR (see
-    # orchestrator.sprint_pr.provision_sprint_pr), agents push to that branch
-    # instead of cutting fresh `coder/<uid>` branches and opening parallel PRs.
-    # Off by default — the per-feature branch flow remains the fallback.
+    # 1-PR model: `sprint_pr_mode` now toggles "open a session PR per coder
+    # run" (head=coder/<uid>, base=main). Sprints have no branch or PR.
+    # Off by default for legacy products → the bare-branch fallback in
+    # post_coder warns + bails.
     _cfg_flags = (product.get("config") or {})
-    product["_sprint_pr_mode"] = bool(
-        _cfg_flags.get("sprint_pr_mode")
-        and active_sprint
-        and active_sprint.get("branch_name")
-    )
-    product["_sprint_branch"] = (active_sprint or {}).get("branch_name") or ""
-    product["_sprint_pr_number"] = (active_sprint or {}).get("pr_number") or ""
-    product["_sprint_pr_url"] = (active_sprint or {}).get("pr_url") or ""
+    product["_sprint_pr_mode"] = bool(_cfg_flags.get("sprint_pr_mode"))
+    # `_sprint_branch` / `_sprint_pr_*` are kept as empty strings for
+    # backwards-compat with prompt templates that still reference them
+    # (they render as empty in the prompt under 1-PR; the new
+    # session-context block below is the live signal).
+    product["_sprint_branch"] = ""
+    product["_sprint_pr_number"] = ""
+    product["_sprint_pr_url"] = ""
 
-    # Pre-checkout the sprint branch so the agent's very first tool call —
-    # regardless of whether it follows the prompt's MANDATORY-FIRST-ACTION
-    # block — runs against `sprint/<id>` rather than `main`. Without this,
-    # tiny models reliably skip the checkout and fall through to grepping
-    # files on main; the post-coder pipeline can transfer dirty changes
-    # but it's wasted turns and confusing transcripts.
-    # Only fires when sprint_pr_mode is on AND the sprint already has a
-    # provisioned branch (i.e. _sprint_pr_mode==True is the same gate).
-    if product.get("_sprint_pr_mode"):
-        _checkout_sprint_branch(
+    # Session-PR context (1-PR model). Reviewer assignments are already
+    # grouped by `pr_number` in _fetch_assigned_features, so the set of
+    # session pr_numbers across assigned_features should be singleton. The
+    # session branch comes from the feature row's `branch_name` (set by
+    # post_coder when the session PR was opened). Coder/designer don't
+    # need session context here — coder cuts its own fresh session branch
+    # in post_coder; designer commits docs straight to main.
+    _session_pr_set = {
+        f.get("pr_number") for f in assigned_features
+        if isinstance(f.get("pr_number"), int)
+    }
+    _session_branch_set = {
+        f.get("branch_name") for f in assigned_features
+        if f.get("branch_name")
+    }
+    if persona == "reviewer" and len(_session_pr_set) == 1:
+        product["_session_pr_number"] = next(iter(_session_pr_set))
+        product["_session_branch"] = (
+            next(iter(_session_branch_set)) if len(_session_branch_set) == 1 else ""
+        )
+        product["_session_pr_url"] = next(
+            (f.get("pr_url", "") for f in assigned_features if f.get("pr_url")), ""
+        )
+    else:
+        product["_session_pr_number"] = None
+        product["_session_branch"] = ""
+        product["_session_pr_url"] = ""
+
+    # Reviewer pre-checkout: land the agent on the session branch under
+    # review so its first `git log`/`git show` runs against the right
+    # tree. Coder + designer stay on whatever branch `_reset_workspace`
+    # left them on (main/master) — the 1-PR model doesn't have a sprint
+    # integration branch to switch to, and post_coder cuts the session
+    # branch off main itself.
+    if persona == "reviewer" and product.get("_session_branch"):
+        _checkout_sprint_branch(  # noqa — helper name is legacy; it checks out any branch
             working_dir,
-            product["_sprint_branch"],
+            product["_session_branch"],
             product.get("name", str(working_dir)),
         )
-        # _prepare_workspace already ran chmod a+rwX, but the sprint checkout
-        # above re-creates files at the orchestrator's umask (typically 022 →
-        # mode 644 for files). Owned by uid 999 inside the agent container,
-        # mode 644 means the agent (uid 1001 = "other") gets read-only on
-        # tracked files like .eslintrc.cjs, package.json, etc. Re-run chmod
-        # AFTER the checkout so the agent can edit existing tracked files.
-        # Real incident 2026-05-08 on product 8 sprint 149: agent could read
-        # .eslintrc.cjs but its writes silently failed; coder spent turns
-        # `npm install`-ing trying to make ESLint work around uneditable
-        # configs.
+        # _prepare_workspace already ran chmod a+rwX, but the checkout
+        # above re-creates files at the orchestrator's umask (typically
+        # 022 → mode 644). Owned by uid 999 inside the agent container,
+        # mode 644 means the agent (uid 1001 = "other") gets read-only
+        # on tracked files like .eslintrc.cjs, package.json, etc. Re-run
+        # chmod AFTER the checkout. (Reviewer is read-only on workspace,
+        # so this is defensive — kept symmetric with the prior code path.)
         _chmod_workspace_via_alpine(working_dir, product.get("name", "?"))
 
     # Write sprint-scoped features.md to working dir (replaces any stale full-backlog copy)
