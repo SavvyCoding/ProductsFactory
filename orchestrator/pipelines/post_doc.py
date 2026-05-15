@@ -57,33 +57,21 @@ def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
         return
     log.info(f"[post-{persona}] {pname}: {len(changed)} changed file(s) — sample {changed[:3]}")
 
-    # Sync and commit to the right branch:
-    #   - sprint_pr_mode on  → commit to sprint_branch (the unit of merge for
-    #     the sprint PR). Coder runs on sprint_branch and must be able to read
-    #     the design docs from its working tree.
-    #   - sprint_pr_mode off → commit to main (legacy per-feature-PR flow).
+    # 1-PR model: designer commits design docs directly to the default
+    # branch (main/master). There's no sprint integration branch any more.
+    # The coder's post_coder pipeline picks up the docs because each
+    # coder session cuts its session branch off the latest main tip, so
+    # docs/story_NNN.md is always in the agent's working tree from turn 1.
     #
     # The agent's tracked changes (`features.md`) and untracked writes
-    # (`docs/story_NNN.md`, `session_result_NNN.json`) would block a plain
-    # `git checkout TARGET` with "your local changes would be overwritten"
-    # / "untracked files would be overwritten".
-    # Real incident 2026-05-06 18:42: post-product_planner aborted at the
-    # checkout for feature 164, _rollback_doc_features kicked the feature
-    # back to Approved, next cycle re-ran the planner, exact same failure
-    # — infinite loop, no story file ever made it to origin/main.
-    # Real incident 2026-05-07 03:30: docs landed on origin/main (target
-    # was hardcoded "main") but coder runs on sprint_branch, branched from
-    # origin/main at provision time and never picked up subsequent main-side
-    # docs. Result: every coder session saw an empty docs/, found no story
-    # for its assigned feature, stranded with no progress. Fix: target
-    # sprint_branch when sprint_pr_mode is on.
-    # Pattern mirrors post_coder: stash -u (covers both tracked + untracked,
-    # respects .gitignore so node_modules stays out), then checkout -B
-    # to force-reset local TARGET against origin, then stash pop with
-    # conflict resolution favoring the agent's content.
-    sprint_pr_mode = bool(product.get("_sprint_pr_mode"))
-    sprint_branch = product.get("_sprint_branch") or ""
-    target_branch = sprint_branch if (sprint_pr_mode and sprint_branch) else "main"
+    # (`docs/story_NNN.md`, `session_result_NNN.json`) would block a
+    # plain `git checkout main` with "your local changes would be
+    # overwritten" / "untracked files would be overwritten" — same hazard
+    # the pattern below defends against. Stash -u (tracked + untracked,
+    # respects .gitignore), checkout -B, stash pop with conflict-resolve
+    # in agent's favor.
+    _hb = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    target_branch = (_hb.stdout or "").strip() or "main"
 
     from orchestrator.integrations.git_ops import git_fetch_authenticated
     git_fetch_authenticated(["origin"], cwd=working_dir, product_name=pname, timeout=120)

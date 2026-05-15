@@ -884,6 +884,10 @@ def detect_dirty_prs(
 
     Each entry in `open_prs_with_state` must include: number, mergeable_state,
     created_at, last_commit_at (ISO strings).
+
+    Under the 1-PR model every open PR is a session PR (`coder/<uid>` →
+    `main`); the detector is free to close any dirty one.
+
     Returns number of PRs closed (or that would be closed in dry-run).
     """
     cfg = _get_supervisor_config()
@@ -1085,6 +1089,10 @@ def detect_overlapping_prs(
     github_token: str | None,
 ) -> int:
     """Each entry in `open_prs` should have number, title, created_at.
+
+    Under the 1-PR model every open PR is a session PR (`coder/<uid>` →
+    `main`); the subset-overlap check applies uniformly.
+
     Returns number of PRs closed (or that would close in dry-run).
     """
     cfg = _get_supervisor_config()
@@ -1093,7 +1101,7 @@ def detect_overlapping_prs(
     dry_run = cfg["supervisor_dry_run_only"]
     closed = 0
 
-    # Parse feature-ID set from each PR title; sort newest-first
+    # Parse feature-ID set from each PR title; sort newest-first.
     parsed = []
     for pr in open_prs:
         ids = set(int(m) for m in _PR_FEAT_RE.findall(pr.get("title", "")))
@@ -1401,14 +1409,8 @@ def auto_heal_unproductive_coder(
                 fixes_applied.append(f)
                 _record_fix(f)
 
-        # Check C: active sprint provisioned (branch_name + pr_number set).
-        c = _check_sprint_provisioned(pid)
-        checks_run.append(c)
-        if not c["ok"]:
-            f = _fix_sprint_provisioned(pid)
-            if f:
-                fixes_applied.append(f)
-                _record_fix(f)
+        # (1-PR model: no sprint integration branch/PR to provision —
+        # _check_sprint_provisioned was retired with the model change.)
 
         # 3. Re-verify after fixes — fresh fetch of product + sprint.
         fresh_product = _fetch_product(pid) or product
@@ -1416,7 +1418,6 @@ def auto_heal_unproductive_coder(
         for fn, kind in (
             (_check_app_token, "product"),
             (_check_sprint_pr_mode, "product"),
-            (_check_sprint_provisioned, "pid"),
         ):
             recheck = fn(fresh_product) if kind == "product" else fn(pid)
             if not recheck["ok"]:
@@ -1586,62 +1587,7 @@ def _fix_sprint_pr_mode(pid: int) -> dict | None:
         return None
 
 
-def _check_sprint_provisioned(pid: int) -> dict:
-    try:
-        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-            r = client.get(f"/api/products/{pid}/sprints/active")
-            if r.status_code != 200 or not r.json():
-                return {"label": "sprint_provisioned", "ok": True,
-                        "detail": "no active sprint — n/a"}
-            sprint = r.json()
-            if sprint.get("branch_name") and sprint.get("pr_number"):
-                return {"label": "sprint_provisioned", "ok": True,
-                        "detail": f"sprint #{sprint['id']} -> {sprint['branch_name']} / PR #{sprint['pr_number']}"}
-            return {"label": "sprint_provisioned", "ok": False,
-                    "detail": f"sprint #{sprint.get('id')} has no branch_name/pr_number"}
-    except Exception as e:
-        return {"label": "sprint_provisioned", "ok": False,
-                "detail": f"check failed: {e}"}
-
-
-def _fix_sprint_provisioned(pid: int) -> dict | None:
-    """Provision the active sprint's branch + draft PR via the existing
-    orchestrator.sprint_pr.provision_sprint_pr helper, then PATCH the sprint
-    row with the returned branch/pr metadata."""
-    try:
-        from orchestrator.sprint_pr import provision_sprint_pr
-        with httpx.Client(base_url=PM_API_URL, timeout=15) as client:
-            prod = client.get(f"/api/products/{pid}")
-            if prod.status_code != 200:
-                return None
-            product = prod.json()
-            spr = client.get(f"/api/products/{pid}/sprints/active")
-            if spr.status_code != 200 or not spr.json():
-                return None
-            sprint = spr.json()
-            if sprint.get("branch_name"):
-                return None  # nothing to do
-            # Prefer App installation token; legacy PAT acts as fallback
-            # until the github_pat column is dropped in a follow-up release.
-            from orchestrator.github_client import _get_auth_token
-            token = _get_auth_token()
-            if not token:
-                return None
-            feats = client.get(f"/api/products/{pid}/features")
-            titles = [f.get("name") for f in (feats.json() or []) if f.get("sprint_id") == sprint["id"]]
-            result = provision_sprint_pr(
-                product.get("github_repo"), sprint["id"], sprint.get("name", ""),
-                sprint.get("goal"), titles, token,
-            )
-            if not result:
-                return None
-            client.patch(f"/api/sprints/{sprint['id']}", json={
-                "branch_name": result["branch"],
-                "pr_number":   result["number"],
-                "pr_url":      result["url"],
-            })
-        return {"label": "sprint_provisioned",
-                "detail": f"provisioned sprint #{sprint['id']} -> {result['branch']} / PR #{result['number']}"}
-    except Exception as e:
-        log.exception(f"auto-heal: sprint_provisioned fix failed: {e}")
-        return None
+# _check_sprint_provisioned + _fix_sprint_provisioned were retired with
+# the 1-PR model (2026-05-15). Sprints no longer have their own branch
+# or PR; features ship via session PRs opened by post_coder per coder
+# run, so there's nothing for auto-heal to provision at the sprint level.

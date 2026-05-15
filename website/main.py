@@ -88,7 +88,10 @@ from website.models import (
 from website.auth import require_auth, verify_internal_signature
 from website import schemas
 from website.github import fetch_progress_md, fetch_architecture_md, count_open_prs, list_open_prs, merge_pr, close_pr
-from orchestrator.sprint_pr import provision_sprint_pr, merge_sprint_pr
+# 1-PR model: sprint integration branch / sprint PR were retired
+# 2026-05-15. Sprint completion no longer merges a PR — it just marks the
+# sprint completed and generates release notes from features already
+# Pushed via their session PRs.
 from website.schemas import PM_ALLOWED_TRANSITIONS
 
 log = logging.getLogger("website.main")
@@ -1399,7 +1402,7 @@ async def create_sprint_form(
     )
     db.add(sprint)
     await db.flush()
-    await _maybe_provision_sprint_pr(sprint, db)
+    # 1-PR model: no sprint integration branch/PR to provision.
     return RedirectResponse(f"/product/{product_id}?tab=sprints", status_code=303)
 
 
@@ -1669,38 +1672,24 @@ async def _evaluate_dod(sprint_id: int, product_id: int, db: AsyncSession) -> di
 
 
 async def _do_complete_sprint(sprint: Sprint, product_id: int, db: AsyncSession) -> None:
-    """Merge sprint PR, mark sprint completed, generate release notes, activate next.
+    """Mark sprint completed, generate release notes, activate next sprint.
 
-    Atomicity contract (#5): the sprint is NOT marked `completed` until the
-    sprint PR has actually merged. Pre-#5 we flipped status='completed' first
-    and then attempted the merge — when the merge returned 405 (conflicts,
-    failing CI, draft, branch protection), the sprint was left in a
-    "completed but not shipped" state with no path to recovery. Today's order
-    is the inverse: merge first, then commit the completion atomically.
-
-    The sprint PR merge is a hard gate on activation: if it fails the sprint
-    stays `active` and a critical Alert is filed for the PM. Never ships
-    broken code to keep the orchestrator moving.
+    1-PR model: sprints are planning buckets, not delivery vehicles —
+    individual features ship through their own session PRs (`coder/<uid>` →
+    `main`) merged by `auto_merge_reviewer`/`sweep_product`. By the time
+    this function runs the sprint's `all_features_done` gate has already
+    passed, meaning every feature in the sprint is Pushed/Deferred/
+    Rejected. Nothing for us to merge — just close out the sprint and
+    activate the next one.
     """
     from datetime import datetime as _dt, timezone as _tz
 
-    # 1. Merge the sprint PR FIRST. Skips no-op cases (no PR, Blocked sprint,
-    #    no PAT) cleanly; only halts on real merge failures (405 / 5xx /
-    #    transport). On halt the Alert path inside the helper has already
-    #    fired — caller can keep going if it has other products to process.
-    if not await _attempt_merge_completed_sprint_pr(sprint, db):
-        log.warning(
-            f"sprint #{sprint.id} merge failed — leaving status='active' for PM "
-            f"resolution; next sprint NOT activated"
-        )
-        return
-
-    # 2. Merge succeeded (or was a no-op). NOW mark completed.
+    # 1. Mark completed.
     sprint.status = "completed"
     sprint.completed_at = _dt.now(_tz.utc)
     await db.flush()
 
-    # 3. Generate release notes against the just-shipped feature set. Best-
+    # 2. Generate release notes against the just-shipped feature set. Best-
     #    effort: a release-notes failure shouldn't undo the completion.
     try:
         notes = await _generate_sprint_release_notes(sprint.id, product_id, db)
@@ -1710,95 +1699,13 @@ async def _do_complete_sprint(sprint: Sprint, product_id: int, db: AsyncSession)
     except Exception:
         log.warning(f"sprint #{sprint.id} release-notes generation failed (non-fatal)")
 
-    # 4. Activate the next sprint in the same phase, or next phase's first sprint.
+    # 3. Activate the next sprint in the same phase, or next phase's first sprint.
     await _activate_next_sprint(sprint, product_id, db)
 
 
-async def _attempt_merge_completed_sprint_pr(sprint: Sprint, db: AsyncSession) -> bool:
-    """Attempt to merge the just-completed sprint's PR.
-
-    Returns True if it's safe for the caller to proceed with next-sprint
-    activation:
-      - sprint has no PR (per-feature mode product, or never provisioned) → True
-      - product has no GitHub repo / no PAT → True (nothing we can do)
-      - Blocked sprints never had a PR → True
-      - merge returned 200/201/422 → True (merged or already merged)
-    Returns False (and files a critical Alert) when:
-      - merge returned 405 (conflicts, failing CI, branch protection)
-      - merge returned any other non-success or transport error
-
-    The caller MUST skip `_activate_next_sprint` when this returns False so
-    the next sprint never branches off code that didn't actually ship.
-    """
-    if not sprint.pr_number:
-        return True
-    if getattr(sprint, "kind", "normal") == "blocked":
-        return True
-    product = await db.get(Product, sprint.product_id)
-    if not product or not product.github_repo:
-        return True
-    sys_cfg = await _get_system_config(db)
-    token = _github_token_from_config(sys_cfg)
-    if not token:
-        return True
-
-    code, body = merge_sprint_pr(product.github_repo, sprint.pr_number, token)
-    if code in (200, 201, 422):
-        log.info(
-            f"sprint #{sprint.id} PR #{sprint.pr_number} merged (HTTP {code}) — "
-            f"activation can proceed"
-        )
-        return True
-
-    msg = (
-        f"Sprint #{sprint.id} ({sprint.name}) PR #{sprint.pr_number} merge "
-        f"FAILED (HTTP {code}): {body[:200]}. Next sprint activation halted — "
-        f"resolve the PR conflict / failing CI manually and re-trigger "
-        f"activation."
-    )
-    log.error(msg)
-    db.add(Alert(product_id=sprint.product_id, level="critical", message=msg))
-    await db.flush()
-    return False
-
-
-async def _maybe_provision_sprint_pr(sprint: Sprint, db: AsyncSession) -> None:
-    """
-    Thin shim around `orchestrator.sprint_pr.provision_sprint_pr` — the
-    orchestrator owns the GitHub side; this function just gates on product
-    config + collects the inputs the orchestrator needs and persists the
-    returned branch/pr_number/pr_url onto the sprint.
-
-    Gated on `product.config.sprint_pr_mode = true`. No-op otherwise.
-    Idempotent: if branch_name is already set, skip. The Blocked sprint kind
-    is also skipped — it's a holding pen, not a delivery vehicle.
-    """
-    if sprint.branch_name:
-        return
-    if getattr(sprint, "kind", "normal") == "blocked":
-        return
-    product = await db.get(Product, sprint.product_id)
-    if not product or not product.github_repo:
-        return
-    cfg = product.config or {}
-    if not cfg.get("sprint_pr_mode"):
-        return
-    sys_cfg = await _get_system_config(db)
-    token = _github_token_from_config(sys_cfg)
-    if not token:
-        return
-    feat_rows = await db.execute(
-        select(Feature.name).where(Feature.sprint_id == sprint.id).order_by(Feature.id)
-    )
-    titles = [n for (n,) in feat_rows.all()]
-    result = provision_sprint_pr(
-        product.github_repo, sprint.id, sprint.name, sprint.goal, titles, token,
-    )
-    if result:
-        sprint.branch_name = result["branch"]
-        sprint.pr_number = result["number"]
-        sprint.pr_url = result["url"]
-        await db.flush()
+# _attempt_merge_completed_sprint_pr and _maybe_provision_sprint_pr were
+# retired with the 1-PR model (2026-05-15). Sprints no longer have their
+# own branch / PR; features ship via session PRs (coder/<uid> → main).
 
 
 async def _activate_next_sprint(completed: Sprint, product_id: int, db: AsyncSession) -> None:
@@ -1817,7 +1724,6 @@ async def _activate_next_sprint(completed: Sprint, product_id: int, db: AsyncSes
         if nxt:
             nxt.status = "active"
             await db.flush()
-            await _maybe_provision_sprint_pr(nxt, db)
             return
 
         # No more sprints in this phase — check if phase should be completed
@@ -1883,7 +1789,6 @@ async def _activate_next_sprint(completed: Sprint, product_id: int, db: AsyncSes
                 if first:
                     first.status = "active"
                     await db.flush()
-                    await _maybe_provision_sprint_pr(first, db)
 
 
 @app.post("/product/{product_id}/sprints/{sprint_id}/complete")
@@ -3519,8 +3424,7 @@ async def api_plan_sprints(
                     features_assigned += 1
 
             await db.flush()
-            if sprint.status == "active":
-                await _maybe_provision_sprint_pr(sprint, db)
+            # 1-PR model: no sprint integration branch / PR to provision.
 
     return {"phases_created": phases_created, "sprints_created": sprints_created, "features_assigned": features_assigned}
 

@@ -14,11 +14,13 @@ If the list is empty, exit cleanly (final assistant message, no tool calls).
 
 ---
 
-## Sprint PR mode
+## Branching
 
-`sprint_pr_mode={sprint_pr_mode}`  `sprint_branch={sprint_branch}`  `sprint_pr=#{sprint_pr_number}` ({sprint_pr_url})
+You're on the default branch (`main` or `master`) of {product_name}.
 
-The orchestrator already checked out the right branch (sprint branch when `sprint_pr_mode=True`, fresh main otherwise). After you exit, it stages everything you wrote, fabricates the `[feature-<id>]` commit tag from `session_result.json`, pushes, and updates the DB. **You do NOT run `git` or `gh`** — never `checkout`, `fetch`, `pull`, `branch`, `commit`, `push`, or `gh pr create`. Just edit files.
+After you exit, the orchestrator cuts a fresh **session branch** (`coder/<session_uid>`) from the default branch's tip, stages your edits onto it, commits with `[feature-<id>]` tags per assigned story, pushes, and opens a **Session PR** (head=`coder/<session_uid>`, base=default). The reviewer reviews the Session PR. Approving it squash-merges your session's work directly to the default branch.
+
+**You do NOT run `git` or `gh`** — never `checkout`, `fetch`, `pull`, `branch`, `commit`, `push`, or `gh pr create`. Just edit files.
 
 ---
 

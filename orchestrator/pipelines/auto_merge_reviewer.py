@@ -51,23 +51,14 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
     repo_slug = _parse_repo_slug(github_repo)
     gh_headers = {"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"}
 
-    # In sprint-PR mode the per-cycle auto_merge.sweep_product is the
-    # authoritative merger — it has the "all sprint features must be
-    # merge-eligible" hold check that prevents partial-sprint merges.
-    # This per-reviewer-session pipeline skipped that check and merged the
-    # sprint PR on the first approved feature, leaving siblings stranded
-    # (observed 2026-05-08 on product 8 sprint 148: story 399 approved →
-    # PR #1 merged immediately → story 398 still Designed but its sprint
-    # had no live PR to push to). Defer to the sweep in sprint-PR mode.
-    sprint_pr_mode    = bool(product.get("_sprint_pr_mode"))
-    sprint_pr_number  = product.get("_sprint_pr_number")
-    if sprint_pr_mode and sprint_pr_number:
-        log.info(
-            f"[auto-merge] {product.get('name', '?')}: sprint_pr_mode active — "
-            f"deferring merge of PR #{sprint_pr_number} to auto_merge.sweep_product "
-            f"(which gates on all-sprint-features-merge-eligible)"
-        )
-        return features
+    # Two-tier (session-PR) model note: features carry the **session** PR's
+    # number, not the sprint integration PR. Merging an approved session PR
+    # into the sprint branch accumulates that session's work onto the
+    # sprint integration branch — it ships to main only when the sprint
+    # completes (existing _do_complete_sprint path). So the per-reviewer-
+    # session merge below is safe to run for every product: there is no
+    # "shared PR across the sprint" risk that the old sprint-PR-mode short-
+    # circuit defended against.
 
     for entry in features:
         if not isinstance(entry, dict) or entry.get("review_outcome") != "approved":
