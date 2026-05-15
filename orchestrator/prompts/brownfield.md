@@ -16,9 +16,9 @@ If the list is empty, exit cleanly (final assistant message, no tool calls).
 
 ## Branching
 
-`sprint_branch={sprint_branch}`  `sprint_pr=#{sprint_pr_number}` ({sprint_pr_url})
+You're on the default branch (`main` or `master`) of {product_name}.
 
-The orchestrator pre-checked out the sprint integration branch (`{sprint_branch}`) for you. After you exit, it cuts a fresh **session branch** (`coder/<session_uid>`) from the sprint branch's tip, stages your edits onto it, commits with `[feature-<id>]` tags per assigned story, pushes, and opens a **Session PR** targeting the sprint branch. The reviewer reviews the Session PR. Approving it merges your session's work into the sprint branch; the sprint branch ships to `main` when the sprint completes.
+After you exit, the orchestrator cuts a fresh **session branch** (`coder/<session_uid>`) from the default branch's tip, stages your edits onto it, commits with `[feature-<id>]` tags per assigned story, pushes, and opens a **Session PR** (head=`coder/<session_uid>`, base=default). The reviewer reviews the Session PR. Approving it squash-merges your session's work directly to the default branch.
 
 **You do NOT run `git` or `gh`** — never `checkout`, `fetch`, `pull`, `branch`, `commit`, `push`, or `gh pr create`. Just edit files.
 

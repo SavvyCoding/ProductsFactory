@@ -4,13 +4,10 @@ Walks every `ready` product once per cycle and squash-merges any feature
 that is Reviewed + has a pr_number + review_outcome=approved. See
 INVARIANTS.md VII.1.
 
-Two-tier (session-PR) model: each approved feature's pr_number is the
-**session** PR (base=sprint integration branch). Merging a session PR
-accumulates that session's work onto the sprint integration branch; the
-sprint PR ships to main only when the sprint completes (existing
-_do_complete_sprint path). There is no shared-PR-across-sprint hazard
-the way pre-two-tier sprint-PR mode had, so the sweep merges every
-approved session PR independently.
+1-PR model: every approved feature's pr_number is its **session** PR
+(`coder/<uid>` → `main`). The sweep squash-merges the session PR
+directly to main. Sprints are planning buckets only — there is no sprint
+PR to coordinate with.
 
 Idempotent. If a feature was already merged in a prior cycle (status
 already Pushed, or PR already merged on GitHub), the sweep is a no-op
@@ -129,25 +126,6 @@ def sweep_product(product: dict, sys_cfg: dict) -> dict:
             if not isinstance(feats, list):
                 return counters
 
-            # Build sprint_id → sprint(with pr_number) map. Under the two-
-            # tier model the sprint PR is the integration branch — never a
-            # target for the sweep — so we use this map only to skip
-            # accidental matches (a stale feature still pointing at the
-            # sprint PR, legacy state from pre-two-tier products).
-            sprint_pr_numbers: set[int] = set()
-            try:
-                sprints_resp = client.get(f"/api/products/{product_id}/sprints")
-                if sprints_resp.status_code == 200:
-                    sprints_payload = sprints_resp.json() or []
-                    if isinstance(sprints_payload, list):
-                        sprint_pr_numbers = {
-                            s["pr_number"]
-                            for s in sprints_payload
-                            if s.get("pr_number")
-                        }
-            except Exception:
-                pass
-
             candidates = [
                 f for f in feats
                 if f.get("status") == "Reviewed"
@@ -166,24 +144,12 @@ def sweep_product(product: dict, sys_cfg: dict) -> dict:
 
                 # Same PR shared across multiple features: once we
                 # successfully merge it, flip every other feature pointing
-                # at it. (Normal case under two-tier: one session PR covers
-                # 1-N features all moving to Pushed together.)
+                # at it. Common case under the 1-PR model: one session PR
+                # covers 1-N features that all move to Pushed together.
                 if pr_num in merged_pr_nums:
                     client.patch(f"/api/features/{fid}", json=_patch_pushed)
                     counters["merged"] += 1
                     merged_features.append(f)
-                    continue
-
-                # Skip the sprint integration PR — it ships to main only at
-                # sprint completion (existing _do_complete_sprint path), and
-                # any feature pointing at it is legacy/stale state.
-                if pr_num in sprint_pr_numbers:
-                    log.info(
-                        f"[auto-merge sweep] product={product_id} feature=#{fid} "
-                        f"points at sprint integration PR #{pr_num} (legacy state) — "
-                        f"skipping; sprint completion will merge it to main"
-                    )
-                    counters["skipped"] += 1
                     continue
 
                 code, body = _try_merge_pr(repo_slug, pr_num, pat)

@@ -7,10 +7,9 @@ Tech stack: {tech_stack}
 Auto Merge: {auto_merge_enabled}
 Session branch: {session_branch}   (the branch under review)
 Session PR: #{session_pr_number}   ({session_pr_url})
-Sprint integration branch: {sprint_branch}   (PR base; review diff against this)
 Working dir: `/workspace`.
 
-> **Vocabulary (two-tier model):** a **Story** is a `feature` row in the DB. Each coder session ships one **Session PR** (head = `{session_branch}`, base = `{sprint_branch}`) covering up to `max_features_per_run` Stories. Approving the Session PR merges it into the sprint integration branch; the sprint branch ships to `main` only when the sprint completes.
+> **Vocabulary (1-PR model):** a **Story** is a `feature` row in the DB. Each coder session ships one **Session PR** (head = `{session_branch}`, base = `main`) covering up to `max_features_per_run` Stories. Approving the Session PR squash-merges it directly into `main`. Sprints are planning buckets, not branches.
 > **Tools:** use **Bash** + `curl` for PM API calls — WebFetch can't reach `pm-api:8080`.
 
 ---
@@ -60,7 +59,7 @@ Violations return `REJECTED: persona=reviewer is read-only` and burn a turn.
 
 If empty: do nothing, exit 0 immediately.
 
-All features above are on the **same session PR `#{session_pr_number}`** (head=`{session_branch}`, base=`{sprint_branch}`). The coder commits each story with `[feature-<id>]` in the commit message — review each feature's commits individually, decide per-feature.
+All features above are on the **same session PR `#{session_pr_number}`** (head=`{session_branch}`, base=`main`). The coder commits each story with `[feature-<id>]` in the commit message — review each feature's commits individually, decide per-feature.
 
 ---
 
@@ -75,7 +74,7 @@ For each assigned feature (in order, up to {max_features_per_run}):
 
 1. **Find this feature's commits** on the session PR (tagged `[feature-<id>]`):
    ```bash
-   git log origin/{sprint_branch}..{session_branch} --grep="\[feature-<id>\]" --pretty=format:"%H %s"
+   git log origin/main..{session_branch} --grep="\[feature-<id>\]" --pretty=format:"%H %s"
    ```
 
 2. **Read the design doc:** `cat /workspace/docs/story_<id>.md` (legacy `docs/feature_<id>_design.md` may also exist — try both).
@@ -167,4 +166,4 @@ To flag a gotcha future agents should know (library quirk, recurring antipattern
 
 ## Reviewer stance
 
-You are **strict but fair**. The bar for approval is: correct, tested, secure, consistent with the architecture. When `auto_merge_enabled=True` the orchestrator merges this **Session PR into the sprint integration branch** immediately after your review session ends — i.e. your approval ships the session's stories into the sprint branch. (The sprint branch itself ships to `main` only when the entire sprint completes — that's a separate downstream step.) Only approve if you genuinely believe each feature should ship. Don't merge the PR yourself — the orchestrator owns auto-merge.
+You are **strict but fair**. The bar for approval is: correct, tested, secure, consistent with the architecture. When `auto_merge_enabled=True` the orchestrator squash-merges this **Session PR directly to `main`** immediately after your review session ends — your approval ships the session's stories. Only approve if you genuinely believe each feature should ship. Don't merge the PR yourself — the orchestrator owns auto-merge.

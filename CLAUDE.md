@@ -65,21 +65,20 @@ python scripts/build_pf_video.py
 
 ## Architecture
 
-### Two-tier merge flow (session PR → sprint integration branch → main)
+### 1-PR merge flow (session PR → main)
 
-When `product.config.sprint_pr_mode = true` (default for new products), code lands on `main` through a two-tier merge:
+When `product.config.sprint_pr_mode = true` (default for new products) — the flag name is legacy; under this model it just means "open a session PR per coder run":
 
-1. **Sprint activation** opens the sprint **integration branch** (`sprint/<id>`) and a long-lived sprint PR (`sprint/<id>` → `main`) via `orchestrator/sprint_pr.py::provision_sprint_pr`. Sprint metadata (`branch_name`, `pr_number`, `pr_url`) is persisted on the sprint row.
-2. **Coder session**: agent edits files; `orchestrator/pipelines/post_coder.py` cuts a fresh `coder/<session_uid>` branch off the sprint integration branch's tip (stash → checkout `-B` → stash-pop; **stash-pop conflicts block the assigned features** with a clear reason rather than force-resolving), commits with `[feature-N]` tags, pushes, and opens a **session PR** (`coder/<uid>` → `sprint/<id>`). The feature row's `pr_number`/`pr_url`/`branch_name` point at the session PR/branch.
-3. **Reviewer session**: scoped to a single open session PR (`docker_runner._fetch_assigned_features` groups Reviewing features by `pr_number` and picks the oldest). Reviewer reviews `git log origin/{sprint_branch}..{session_branch}` and writes per-feature decisions to `session_result.json`.
-4. **Auto-merge** (per-reviewer-session in `auto_merge_reviewer.py` + per-cycle sweep in `auto_merge.py`) merges every Reviewed+approved session PR into the sprint integration branch. Sprint integration PRs are explicitly skipped — they're never auto-merge targets.
-5. **Sprint completion**: when DoD's `all_features_done` gate passes, `_do_complete_sprint` calls `merge_sprint_pr` to squash-merge `sprint/<id>` → `main`. That's the single revert point on main per sprint.
+1. **Coder session**: agent edits files on the default branch; `orchestrator/pipelines/post_coder.py` cuts a fresh `coder/<session_uid>` branch off the default branch's tip (stash → checkout `-B` → stash-pop; **stash-pop conflicts block the assigned features** with a clear reason rather than force-resolving), commits with `[feature-N]` tags, pushes, and opens a **session PR** (`coder/<uid>` → `main`). The feature row's `pr_number`/`pr_url`/`branch_name` point at the session PR/branch.
+2. **Reviewer session**: scoped to a single open session PR (`docker_runner._fetch_assigned_features` groups Reviewing features by `pr_number` and picks the oldest). Reviewer reviews `git log origin/main..{session_branch}` and writes per-feature decisions to `session_result.json`.
+3. **Auto-merge** (per-reviewer-session in `auto_merge_reviewer.py` + per-cycle sweep in `auto_merge.py`) squash-merges every Reviewed+approved session PR directly to `main`.
+4. **Sprint completion**: planning bucket only. When DoD's `all_features_done` gate passes (all features in the sprint are Pushed/Deferred/Rejected), `_do_complete_sprint` marks the sprint completed, generates release notes from features already Pushed, and activates the next sprint. No PR is merged at sprint completion — features have already shipped to `main` individually through their session PRs.
 
-Stale sprint state self-heals: if `post_coder.py` finds the cached sprint PR is closed/merged/404'd at session start, it calls `provision_sprint_pr` to mint a fresh sprint branch + PR and PATCHes the sprint row. Re-provisioning is idempotent (existing branch reused, existing open PR returned).
+Pre-checkout (`docker_runner.py`): reviewer lands on the session branch under review; coder/designer stay on the default branch (`_reset_workspace` left them on `main`/`master`). Designer commits design docs straight to `main` (`post_doc.py`).
 
-Pre-checkout (`docker_runner.py` calls `_checkout_sprint_branch`) is persona-aware: the reviewer lands on the session branch under review; coder/designer land on the sprint integration branch.
+Rework path: when reviewer rejects features in a session PR, `post_coder.py` detects on the next coder cycle that the rejected features share an open PR (the original session PR) and force-pushes fresh commits to its branch, preserving the reviewer's comment thread.
 
-The legacy "PRs target main directly" / "exactly one open PR per product" invariants are retired: a healthy product now has 1 sprint integration PR + N session PRs open in parallel during a sprint. Supervisor's overlap-PR and dirty-PR detectors take `sprint_pr_numbers` to exclude integration PRs from cleanup.
+Retired with the 1-PR model (2026-05-15): the sprint integration branch (`sprint/<id>`) and sprint PR; `provision_sprint_pr` / `merge_sprint_pr`; `_maybe_provision_sprint_pr` / `_attempt_merge_completed_sprint_pr`; `reconcile_sprint_pr_state`; supervisor's `_check_sprint_provisioned` / `_fix_sprint_provisioned`; `check_open_pr_invariant`.
 
 ### Greenfield Scaffolding
 
@@ -123,7 +122,7 @@ When all gates pass (`POST /api/sprints/{id}/check-dod`): sprint marked `complet
 - `quiet_hours_start` / `quiet_hours_end` — Hour of day (0–23) to suppress sessions
 - `daily_session_cap` — Max sessions per day for this product
 - `max_features_per_run` — Per-product override for the global `MAX_FEATURES_PER_RUN`
-- `sprint_pr_mode` — When true, sprint activation calls `orchestrator.sprint_pr.provision_sprint_pr` to cut a `sprint/<id>` integration branch + PR on GitHub and populate `sprints.branch_name/pr_number/pr_url`. Under the **two-tier (session-PR) model** introduced on the `feat/pr-per-session` branch (see ARCHITECTURE → Two-tier merge flow below): every coder session cuts a `coder/<session_uid>` branch off the sprint integration branch and opens its own **session PR** (head=`coder/<uid>`, base=`sprint/<id>`); the reviewer reviews the session PR, and the per-reviewer / per-cycle auto-merge merges approved session PRs into the sprint integration branch. The sprint integration branch ships to `main` only when the sprint completes (`_do_complete_sprint` calls `merge_sprint_pr`, squash-merging the sprint PR). With `sprint_pr_mode=false` and an active sprint, the coder pipeline marks features Blocked rather than opening fresh per-feature PRs (the per-feature `gh pr create` path was removed in Phase 6.2). **Default true for new products** as of Phase 6.4 (set via `_seed_product_config` in `website/main.py`); existing products keep their setting and must be migrated explicitly via PATCH on `product.config`.
+- `sprint_pr_mode` — Legacy flag name; under the **1-PR (session-PR) model** introduced on the `feat/pr-per-session` branch (see ARCHITECTURE → 1-PR merge flow above), this flag toggles "open a session PR per coder run". When true, every coder session cuts a `coder/<session_uid>` branch off the default branch and opens its own session PR (head=`coder/<uid>`, base=`main`); the reviewer reviews the session PR, and the per-reviewer / per-cycle auto-merge squash-merges approved session PRs directly to `main`. Sprints are planning buckets — no sprint branch, no sprint PR. With `sprint_pr_mode=false`, the coder pipeline bare-branches without opening a PR (dead path; the per-feature `gh pr create` was removed in Phase 6.2, and the bare-branch path warns + bails). **Default true for new products** as of Phase 6.4 (set via `_seed_product_config` in `website/main.py`); existing products keep their setting and must be migrated explicitly via PATCH on `product.config`.
 
 Additionally, a `product_config.json` file in the product working directory (read by `setup_product.py` on discovery) can seed:
 - `preferred_stack` — Selects which `templates/stacks/` variant to install

@@ -1094,28 +1094,15 @@ def _run_supervisor_pr_detectors(product: dict) -> None:
     if not isinstance(features, list):
         features = []
 
-    # Sprint integration PR numbers — passed through so dirty/overlap
-    # detectors never touch them. Sprint completion owns those.
-    sprint_pr_numbers: set = set()
-    try:
-        with _pm_client() as client:
-            sp_resp = client.get(f"/api/products/{product['id']}/sprints")
-            if sp_resp.is_success:
-                for s in (sp_resp.json() or []):
-                    if isinstance(s, dict) and s.get("pr_number"):
-                        sprint_pr_numbers.add(int(s["pr_number"]))
-    except Exception:
-        pass
-
+    # 1-PR model: every open PR is a session PR; no sprint integration
+    # PR exists to exclude. Both detectors operate uniformly.
     detect_dirty_prs(
         product_id=product["id"], github_repo=repo_url,
         open_prs_with_state=enriched, features=features, github_token=pat,
-        sprint_pr_numbers=sprint_pr_numbers,
     )
     detect_overlapping_prs(
         product_id=product["id"], github_repo=repo_url,
         open_prs=enriched, github_token=pat,
-        sprint_pr_numbers=sprint_pr_numbers,
     )
 
 

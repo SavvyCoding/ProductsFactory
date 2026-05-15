@@ -1475,29 +1475,27 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     )
     product["_active_sprint"] = active_sprint or {}
 
-    # Sprint-PR-mode context: when the product opts in via config.sprint_pr_mode
-    # AND the active sprint has been provisioned with a branch + PR (see
-    # orchestrator.sprint_pr.provision_sprint_pr), agents push to that branch
-    # instead of cutting fresh `coder/<uid>` branches and opening parallel PRs.
-    # Off by default — the per-feature branch flow remains the fallback.
+    # 1-PR model: `sprint_pr_mode` now toggles "open a session PR per coder
+    # run" (head=coder/<uid>, base=main). Sprints have no branch or PR.
+    # Off by default for legacy products → the bare-branch fallback in
+    # post_coder warns + bails.
     _cfg_flags = (product.get("config") or {})
-    product["_sprint_pr_mode"] = bool(
-        _cfg_flags.get("sprint_pr_mode")
-        and active_sprint
-        and active_sprint.get("branch_name")
-    )
-    product["_sprint_branch"] = (active_sprint or {}).get("branch_name") or ""
-    product["_sprint_pr_number"] = (active_sprint or {}).get("pr_number") or ""
-    product["_sprint_pr_url"] = (active_sprint or {}).get("pr_url") or ""
+    product["_sprint_pr_mode"] = bool(_cfg_flags.get("sprint_pr_mode"))
+    # `_sprint_branch` / `_sprint_pr_*` are kept as empty strings for
+    # backwards-compat with prompt templates that still reference them
+    # (they render as empty in the prompt under 1-PR; the new
+    # session-context block below is the live signal).
+    product["_sprint_branch"] = ""
+    product["_sprint_pr_number"] = ""
+    product["_sprint_pr_url"] = ""
 
-    # Session-PR context (two-tier model). Reviewer assignments are
-    # already grouped by `pr_number` in _fetch_assigned_features, so the
-    # set of session pr_numbers across assigned_features should be
-    # singleton. The session branch comes from the feature row's
-    # `branch_name` (set by post_coder when the session PR was opened).
-    # Coder/designer don't need session context here — coder cuts its own
-    # fresh session branch in post_coder, designer commits to the sprint
-    # branch.
+    # Session-PR context (1-PR model). Reviewer assignments are already
+    # grouped by `pr_number` in _fetch_assigned_features, so the set of
+    # session pr_numbers across assigned_features should be singleton. The
+    # session branch comes from the feature row's `branch_name` (set by
+    # post_coder when the session PR was opened). Coder/designer don't
+    # need session context here — coder cuts its own fresh session branch
+    # in post_coder; designer commits docs straight to main.
     _session_pr_set = {
         f.get("pr_number") for f in assigned_features
         if isinstance(f.get("pr_number"), int)
@@ -1519,37 +1517,25 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         product["_session_branch"] = ""
         product["_session_pr_url"] = ""
 
-    # Pre-checkout the right branch so the agent's first tool call runs
-    # against the branch under review (reviewer) or the sprint integration
-    # branch (designer/coder). Without this, tiny models reliably skip the
-    # checkout and grep on main; the post-coder pipeline can transfer
-    # dirty changes but it's wasted turns and confusing transcripts.
-    # Branch resolution per persona:
-    #   - reviewer: the session branch the assigned session PR points at
-    #   - designer/coder: the sprint integration branch (designer commits
-    #     docs to it directly; coder edits land here and post_coder cuts
-    #     a fresh coder/<uid> off this tip)
-    if product.get("_sprint_pr_mode"):
-        _pre_co_branch = (
-            product["_session_branch"]
-            if (persona == "reviewer" and product.get("_session_branch"))
-            else product["_sprint_branch"]
-        )
-        _checkout_sprint_branch(
+    # Reviewer pre-checkout: land the agent on the session branch under
+    # review so its first `git log`/`git show` runs against the right
+    # tree. Coder + designer stay on whatever branch `_reset_workspace`
+    # left them on (main/master) — the 1-PR model doesn't have a sprint
+    # integration branch to switch to, and post_coder cuts the session
+    # branch off main itself.
+    if persona == "reviewer" and product.get("_session_branch"):
+        _checkout_sprint_branch(  # noqa — helper name is legacy; it checks out any branch
             working_dir,
-            _pre_co_branch,
+            product["_session_branch"],
             product.get("name", str(working_dir)),
         )
-        # _prepare_workspace already ran chmod a+rwX, but the sprint checkout
-        # above re-creates files at the orchestrator's umask (typically 022 →
-        # mode 644 for files). Owned by uid 999 inside the agent container,
-        # mode 644 means the agent (uid 1001 = "other") gets read-only on
-        # tracked files like .eslintrc.cjs, package.json, etc. Re-run chmod
-        # AFTER the checkout so the agent can edit existing tracked files.
-        # Real incident 2026-05-08 on product 8 sprint 149: agent could read
-        # .eslintrc.cjs but its writes silently failed; coder spent turns
-        # `npm install`-ing trying to make ESLint work around uneditable
-        # configs.
+        # _prepare_workspace already ran chmod a+rwX, but the checkout
+        # above re-creates files at the orchestrator's umask (typically
+        # 022 → mode 644). Owned by uid 999 inside the agent container,
+        # mode 644 means the agent (uid 1001 = "other") gets read-only
+        # on tracked files like .eslintrc.cjs, package.json, etc. Re-run
+        # chmod AFTER the checkout. (Reviewer is read-only on workspace,
+        # so this is defensive — kept symmetric with the prior code path.)
         _chmod_workspace_via_alpine(working_dir, product.get("name", "?"))
 
     # Write sprint-scoped features.md to working dir (replaces any stale full-backlog copy)
