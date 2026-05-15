@@ -508,42 +508,66 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                     if isinstance(f.get("pr_number"), int)}
     if len(existing_prs) == 1:
         candidate = next(iter(existing_prs))
-        gh_token_for_lookup = _get_gh_token()
-        github_repo = product.get("github_repo", "")
-        if gh_token_for_lookup and github_repo and candidate:
-            try:
-                repo_slug = _parse_repo_slug(github_repo)
-                pr_resp = httpx.get(
-                    f"https://api.github.com/repos/{repo_slug}/pulls/{candidate}",
-                    headers={
-                        "Authorization": f"Bearer {gh_token_for_lookup}",
-                        "Accept": "application/vnd.github+json",
-                    },
-                    timeout=10,
-                )
-                if pr_resp.status_code == 200:
-                    pr_data = pr_resp.json()
-                    if isinstance(pr_data, dict) and pr_data.get("state") == "open":
-                        # Under the 1-PR model there is no sprint integration
-                        # PR, so any open PR shared across the assigned
-                        # features is by definition a session PR from a
-                        # prior coder cycle — always rework.
-                        rework_pr_mode = True
-                        rework_pr_number = candidate
-                        rework_branch_name = (pr_data.get("head") or {}).get("ref") or ""
-                        rework_pr_url = pr_data.get("html_url") or ""
-                        log.info(
-                            f"[post-coder] {pname}: rework mode — features {feat_ids} "
-                            f"all point at open PR #{candidate} (branch={rework_branch_name!r}); "
-                            f"force-pushing instead of opening a new PR"
-                        )
-                        if not rework_branch_name:
-                            log.warning(
-                                f"[post-coder] {pname}: rework PR #{candidate} has no head.ref — opening a fresh session PR"
+        # Safety-net: if `candidate` happens to match a sprint's cached
+        # `pr_number` (legacy state from pre-1-PR products — sprint 175 on
+        # StockAnalysis is the canonical example, with pr_number=15 still
+        # in its DB row pointing at a now-merged PR), refuse rework even
+        # if the PR happened to be re-opened. We never want to force-push
+        # to a sprint integration branch. Best-effort lookup; on failure
+        # we proceed without the guard rather than block all rework.
+        sprint_pr_numbers: set[int] = set()
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=10) as _sp_client:
+                _sp_resp = _sp_client.get(f"/api/products/{product['id']}/sprints")
+                if _sp_resp.status_code == 200 and isinstance(_sp_resp.json(), list):
+                    sprint_pr_numbers = {
+                        int(s["pr_number"]) for s in _sp_resp.json()
+                        if isinstance(s, dict) and s.get("pr_number")
+                    }
+        except Exception:
+            pass
+        if candidate in sprint_pr_numbers:
+            log.info(
+                f"[post-coder] {pname}: features point at PR #{candidate} which "
+                f"matches a sprint integration PR (legacy state) — not eligible "
+                f"for rework; will open a fresh session PR"
+            )
+        else:
+            gh_token_for_lookup = _get_gh_token()
+            github_repo = product.get("github_repo", "")
+            if gh_token_for_lookup and github_repo and candidate:
+                try:
+                    repo_slug = _parse_repo_slug(github_repo)
+                    pr_resp = httpx.get(
+                        f"https://api.github.com/repos/{repo_slug}/pulls/{candidate}",
+                        headers={
+                            "Authorization": f"Bearer {gh_token_for_lookup}",
+                            "Accept": "application/vnd.github+json",
+                        },
+                        timeout=10,
+                    )
+                    if pr_resp.status_code == 200:
+                        pr_data = pr_resp.json()
+                        if isinstance(pr_data, dict) and pr_data.get("state") == "open":
+                            # Under the 1-PR model an open PR shared across the
+                            # assigned features is by definition a session PR
+                            # from a prior coder cycle — always rework.
+                            rework_pr_mode = True
+                            rework_pr_number = candidate
+                            rework_branch_name = (pr_data.get("head") or {}).get("ref") or ""
+                            rework_pr_url = pr_data.get("html_url") or ""
+                            log.info(
+                                f"[post-coder] {pname}: rework mode — features {feat_ids} "
+                                f"all point at open PR #{candidate} (branch={rework_branch_name!r}); "
+                                f"force-pushing instead of opening a new PR"
                             )
-                            rework_pr_mode = False
-            except Exception as e:
-                log.warning(f"[post-coder] {pname}: rework lookup for PR #{candidate} failed: {e} — opening a fresh session PR")
+                            if not rework_branch_name:
+                                log.warning(
+                                    f"[post-coder] {pname}: rework PR #{candidate} has no head.ref — opening a fresh session PR"
+                                )
+                                rework_pr_mode = False
+                except Exception as e:
+                    log.warning(f"[post-coder] {pname}: rework lookup for PR #{candidate} failed: {e} — opening a fresh session PR")
 
     # Branch resolution. Three modes, evaluated in priority order:
     #   1. rework_pr_mode — features share an open session PR, force-push to
