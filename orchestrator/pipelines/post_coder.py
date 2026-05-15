@@ -493,19 +493,28 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             sprint_pr_mode = False
     if sprint_pr_mode:
         # Verify the cached sprint PR is still open on GitHub before pushing.
-        # The sprint metadata (`product._sprint_pr_*`) is read from the DB at
-        # session-start, but a PR can be closed/merged between then and now —
-        # by a human, by auto_merge.sweep, or by an external script. Pushing
-        # to a closed PR's head branch leaves commits on a branch with no
-        # active PR; the website thinks features are Reviewing but reconcile
-        # bounces them back to Implementing because the PR is closed.
+        # Under the two-tier (session-PR) model the sprint PR is the
+        # integration branch — session PRs target it as their base. If it
+        # was closed (manually, by auto_merge.sweep, or by an external
+        # script) or merged before the sprint actually completed, we
+        # re-provision via the existing sprint_pr.provision_sprint_pr
+        # helper instead of falling back to a per-feature mode that no
+        # longer exists. provision_sprint_pr is idempotent — if the branch
+        # still exists on GitHub it reuses it; if an open PR already exists
+        # for that head it returns it unchanged. The fresh metadata is
+        # PATCHed onto the sprint row so subsequent sessions see the new
+        # branch/PR via _fetch_assigned_features's sprint lookup.
         # Real incident 2026-05-06: PR #1 on DigitalSign was closed
         # 2026-05-05 18:38 UTC; orchestrator kept pushing to sprint/79 for
         # ~9h with the website reporting "0 features in Reviewing" while
         # the agent burned cycles producing commits no PR pointed at.
+        # Under the legacy fallback the workaround was to drop to
+        # per-feature mode; that path is gone, so re-provisioning is the
+        # only correct response.
         gh_token_chk = _get_gh_token()
         github_repo_chk = product.get("github_repo", "")
         if gh_token_chk and github_repo_chk:
+            needs_reprovision = False
             try:
                 repo_slug_chk = _parse_repo_slug(github_repo_chk)
                 pr_chk = httpx.get(
@@ -519,21 +528,20 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                     if state != "open":
                         log.warning(
                             f"[post-coder] {pname}: sprint PR #{sprint_pr_num} is "
-                            f"{state!r} on GitHub (not open) — falling back to "
-                            f"per-feature mode. Sprint metadata is stale; "
-                            f"reconcile.reconcile_sprint_pr_state will null it "
-                            f"out next cycle."
+                            f"{state!r} on GitHub (not open) — re-provisioning "
+                            f"sprint branch + PR (two-tier model: sprint PR is "
+                            f"the integration target for session PRs)"
                         )
-                        sprint_pr_mode = False
+                        needs_reprovision = True
                 elif pr_chk.status_code == 404:
                     log.warning(
                         f"[post-coder] {pname}: sprint PR #{sprint_pr_num} not "
-                        f"found on GitHub (404) — falling back to per-feature mode"
+                        f"found on GitHub (404) — re-provisioning"
                     )
-                    sprint_pr_mode = False
+                    needs_reprovision = True
                 else:
-                    # Transient GitHub error — proceed in sprint_pr_mode and
-                    # let the push attempt itself surface any real failure.
+                    # Transient GitHub error — proceed optimistically and let
+                    # the push attempt surface any real failure.
                     log.warning(
                         f"[post-coder] {pname}: GitHub returned {pr_chk.status_code} "
                         f"checking PR #{sprint_pr_num} — proceeding optimistically"
@@ -543,32 +551,130 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                     f"[post-coder] {pname}: sprint PR state check failed: {e} "
                     f"— proceeding optimistically with cached metadata"
                 )
+                needs_reprovision = False
 
+            if needs_reprovision:
+                # Re-provision: get fresh sprint branch + PR, PATCH the
+                # sprint row so future sessions pick it up via the active-
+                # sprint lookup, and refresh the local vars used for the
+                # session-branch cut and the session PR's base= target.
+                try:
+                    from orchestrator.sprint_pr import provision_sprint_pr
+                    active_sprint = product.get("_active_sprint") or {}
+                    sprint_id_local = active_sprint.get("id")
+                    sprint_name_local = active_sprint.get("name") or f"Sprint {sprint_id_local}"
+                    sprint_goal_local = active_sprint.get("goal")
+                    # Best-effort feature titles for the manifest; failure
+                    # to fetch is non-fatal (provision tolerates an empty
+                    # list).
+                    titles: list[str] = []
+                    try:
+                        with httpx.Client(base_url=PM_API_URL, timeout=10) as c2:
+                            fr = c2.get(f"/api/products/{product['id']}/features")
+                            if fr.status_code == 200:
+                                titles = [
+                                    f.get("name", "") for f in (fr.json() or [])
+                                    if f.get("sprint_id") == sprint_id_local
+                                ]
+                    except Exception:
+                        pass
+                    new_meta = provision_sprint_pr(
+                        github_repo_chk, sprint_id_local, sprint_name_local,
+                        sprint_goal_local, titles, gh_token_chk,
+                    )
+                    if new_meta:
+                        sprint_branch = new_meta["branch"]
+                        sprint_pr_num = new_meta["number"]
+                        sprint_pr_url = new_meta["url"]
+                        # PATCH sprint row so dispatch + downstream pick up
+                        # the fresh metadata.
+                        try:
+                            with httpx.Client(base_url=PM_API_URL, timeout=10) as c3:
+                                c3.patch(
+                                    f"/api/sprints/{sprint_id_local}",
+                                    json={
+                                        "branch_name": sprint_branch,
+                                        "pr_number":   sprint_pr_num,
+                                        "pr_url":      sprint_pr_url,
+                                    },
+                                )
+                        except Exception as e:
+                            log.warning(
+                                f"[post-coder] {pname}: PATCH /api/sprints/"
+                                f"{sprint_id_local} failed after re-provision: {e}"
+                            )
+                        log.info(
+                            f"[post-coder] {pname}: re-provisioned sprint to "
+                            f"branch={sprint_branch} PR=#{sprint_pr_num}"
+                        )
+                    else:
+                        log.error(
+                            f"[post-coder] {pname}: re-provision failed — "
+                            f"cannot continue session, blocking assigned features"
+                        )
+                        try:
+                            with httpx.Client(base_url=PM_API_URL, timeout=10) as c4:
+                                for f in assigned_features:
+                                    c4.patch(f"/api/features/{f['id']}", json={
+                                        "status": "Blocked",
+                                        "blocked_reason": (
+                                            f"Sprint PR re-provisioning failed "
+                                            f"in session {session_uid}; the "
+                                            f"sprint integration branch + PR "
+                                            f"could not be re-created."
+                                        ),
+                                    })
+                        except Exception:
+                            pass
+                        return pushed_ids
+                except Exception as e:
+                    log.exception(
+                        f"[post-coder] {pname}: re-provision crashed: {e}"
+                    )
+                    return pushed_ids
+
+    # Rework detection: when every assigned feature shares one open PR, the
+    # prior coder cycle produced a session PR that the reviewer rejected and
+    # bounced back. Force-push fresh commits to that session PR's head branch
+    # so the reviewer sees the new diff on the same PR (preserves the comment
+    # thread). Applies under sprint_pr_mode AND legacy per-feature mode
+    # because under the two-tier model the feature's `pr_number` is the
+    # session PR (its base is the sprint branch), not the sprint PR itself.
     rework_pr_mode = False
     rework_pr_number: int | None = None
     rework_branch_name: str = ""
     rework_pr_url: str = ""
-    if not sprint_pr_mode:
-        existing_prs = {f.get("pr_number") for f in assigned_features
-                        if isinstance(f.get("pr_number"), int)}
-        if len(existing_prs) == 1:
-            candidate = next(iter(existing_prs))
-            gh_token_for_lookup = _get_gh_token()
-            github_repo = product.get("github_repo", "")
-            if gh_token_for_lookup and github_repo and candidate:
-                try:
-                    repo_slug = _parse_repo_slug(github_repo)
-                    pr_resp = httpx.get(
-                        f"https://api.github.com/repos/{repo_slug}/pulls/{candidate}",
-                        headers={
-                            "Authorization": f"Bearer {gh_token_for_lookup}",
-                            "Accept": "application/vnd.github+json",
-                        },
-                        timeout=10,
-                    )
-                    if pr_resp.status_code == 200:
-                        pr_data = pr_resp.json()
-                        if isinstance(pr_data, dict) and pr_data.get("state") == "open":
+    existing_prs = {f.get("pr_number") for f in assigned_features
+                    if isinstance(f.get("pr_number"), int)}
+    if len(existing_prs) == 1:
+        candidate = next(iter(existing_prs))
+        gh_token_for_lookup = _get_gh_token()
+        github_repo = product.get("github_repo", "")
+        if gh_token_for_lookup and github_repo and candidate:
+            try:
+                repo_slug = _parse_repo_slug(github_repo)
+                pr_resp = httpx.get(
+                    f"https://api.github.com/repos/{repo_slug}/pulls/{candidate}",
+                    headers={
+                        "Authorization": f"Bearer {gh_token_for_lookup}",
+                        "Accept": "application/vnd.github+json",
+                    },
+                    timeout=10,
+                )
+                if pr_resp.status_code == 200:
+                    pr_data = pr_resp.json()
+                    if isinstance(pr_data, dict) and pr_data.get("state") == "open":
+                        # Sanity-guard: the sprint integration PR is not a
+                        # rework target — if every feature happens to point
+                        # at it (legacy state from the pre-two-tier model),
+                        # ignore it and cut a fresh session branch below.
+                        if sprint_pr_mode and candidate == int(sprint_pr_num or 0):
+                            log.info(
+                                f"[post-coder] {pname}: features all point at the "
+                                f"sprint PR #{candidate} (legacy state) — opening "
+                                f"a fresh session PR instead of treating it as rework"
+                            )
+                        else:
                             rework_pr_mode = True
                             rework_pr_number = candidate
                             rework_branch_name = (pr_data.get("head") or {}).get("ref") or ""
@@ -580,86 +686,107 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                             )
                             if not rework_branch_name:
                                 log.warning(
-                                    f"[post-coder] {pname}: rework PR #{candidate} has no head.ref — falling back to per-feature mode"
+                                    f"[post-coder] {pname}: rework PR #{candidate} has no head.ref — opening a fresh session PR"
                                 )
                                 rework_pr_mode = False
-                except Exception as e:
-                    log.warning(f"[post-coder] {pname}: rework lookup for PR #{candidate} failed: {e} — falling back to per-feature mode")
+            except Exception as e:
+                log.warning(f"[post-coder] {pname}: rework lookup for PR #{candidate} failed: {e} — opening a fresh session PR")
 
-    if sprint_pr_mode:
-        branch = sprint_branch
-        # In Path B the agent runs on main (or whatever branch _reset_workspace
-        # left us on) and writes code there as untracked/modified files. We need
-        # those diffs on sprint_branch instead. Plain `git checkout sprint/79`
-        # fails when the agent's changes conflict with sprint_branch's content
-        # (e.g. agent recreated a file that sprint_branch already had a different
-        # version of). Stash → switch → pop carries the diffs across. On stash-
-        # pop conflict we resolve in favor of the agent ("theirs" in stash terms)
-        # since the post-coder force-push will overwrite the sprint branch tree
-        # anyway.
-        from orchestrator.integrations.git_ops import git_fetch_authenticated
-        git_fetch_authenticated(["origin"], cwd=working_dir, product_name=pname, timeout=120)
-        # Stash with -u so UNTRACKED files survive the branch switch too. The
-        # agent's brand-new source files (e.g. SRC/healthz.ts, app/api/.../route.ts)
-        # are untracked at this point; without -u, `git checkout sprint/79`
-        # errors with "untracked working tree files would be overwritten by
-        # checkout" the moment local sprint/79 has tracked content at the
-        # same path — which it does after any prior session committed there.
-        # Real incident 2026-05-06 17:14: 10 changed files detected, checkout
-        # sprint/79 failed on SRC/healthz.{js,ts} + package.json conflicts,
-        # post-coder bailed, agent's work was hard-reset away on next cycle's
-        # _reset_workspace, feature 179 stranded at Implemented.
-        # -u respects .gitignore (node_modules/, .next/, dist/) so the stash
-        # stays small even on Node/Python/Go projects.
-        stash_r = _run(["git", "stash", "push", "-u", "-m",
-                        f"post-coder-{session_uid}"], timeout=300)
-        stashed = (stash_r.returncode == 0
-                   and "No local changes to save" not in (stash_r.stdout or ""))
-        # Force-reset local `branch` to origin/`branch` before switching. If a
-        # prior session committed junk to local sprint/79 and that branch
-        # wasn't cleaned up by _reset_workspace, plain `git checkout BRANCH`
-        # would land us on stale tracked content. `-B` overwrites the local
-        # ref, ensuring we always start from the canonical remote state.
-        co = _run(["git", "checkout", "-B", branch, f"origin/{branch}"])
-        if co.returncode != 0:
-            log.warning(f"[post-coder] {pname}: git checkout -B {branch} origin/{branch} failed — {_fmt_err(co)}")
-            if stashed:
-                _run(["git", "stash", "pop"])  # best-effort restore
-            return pushed_ids
-        from orchestrator.integrations.git_ops import git_pull_authenticated
-        pull_r = git_pull_authenticated(
-            ["--ff-only", "origin", branch], cwd=working_dir, product_name=pname, timeout=120,
-        )
-        if pull_r.returncode != 0:
-            log.warning(f"[post-coder] {pname}: git pull --ff-only on {branch} failed — {_fmt_err(pull_r)}")
-            # Don't return: a non-fast-forward state is rare and we still want
-            # to attempt the push so the operator sees the conflict.
-        if stashed:
-            pop_r = _run(["git", "stash", "pop"])
-            if pop_r.returncode != 0:
-                # Conflict — agent's file overlaps with sprint_branch's. Resolve
-                # in favor of the agent (its diff is the "theirs" side relative
-                # to the stash apply). `git checkout --theirs <path>` keeps the
-                # incoming version; we then `git add` to mark resolved.
-                conflicts = _run(["git", "diff", "--name-only", "--diff-filter=U"])
-                paths = [p for p in conflicts.stdout.splitlines() if p.strip()]
-                if paths:
-                    _run(["git", "checkout", "--theirs", "--"] + paths)
-                    _run(["git", "add", "--"] + paths)
-                    log.info(f"[post-coder] {pname}: resolved {len(paths)} stash-pop conflict(s) "
-                             f"in favor of agent's diff (sprint branch will be force-overwritten anyway)")
-                # Drop whatever's left in the stash list to avoid accumulation.
-                _run(["git", "stash", "drop"])
-    elif rework_pr_mode:
-        # Stay on whatever branch we're on (HEAD = origin/main + agent's edits)
-        # and create/reset a local branch with the rework branch name pointing
-        # at HEAD. Force-push later replaces the rejected prior commits on the
-        # remote PR branch with our fresh main-based commits.
+    # Branch resolution. Three modes, evaluated in priority order:
+    #   1. rework_pr_mode — features share an open session PR, force-push to
+    #      its branch so the reviewer's existing comment thread carries over.
+    #   2. sprint_pr_mode — cut a fresh `coder/<session_uid>` from the sprint
+    #      branch tip. We'll open a session PR (base=sprint_branch) after the
+    #      push. Two-tier model: session PRs are the reviewable unit; merging
+    #      one accumulates that session's work onto the sprint integration
+    #      branch. The sprint branch ships to main when the sprint completes.
+    #   3. legacy per-feature mode — push to coder/<session_uid> from main.
+    #      Dead path; the PR-resolution step below warns + bails because
+    #      the per-feature `gh pr create` was removed in Phase 6.2.
+    if rework_pr_mode:
+        # Stay on whatever branch we're on (HEAD = origin/main or sprint tip
+        # + agent's edits) and reset a local branch with the rework branch
+        # name pointing at HEAD. Force-push later replaces the rejected
+        # prior commits on the remote PR branch with our fresh commits.
         branch = rework_branch_name
         co = _run(["git", "checkout", "-B", branch])
         if co.returncode != 0:
             log.warning(f"[post-coder] {pname}: rework `git checkout -B {branch}` failed — {_fmt_err(co)}")
             return pushed_ids
+    elif sprint_pr_mode:
+        # Cut a fresh session branch from the sprint integration branch tip.
+        # The agent has been editing files in the working tree (the pre-
+        # checkout left it on the sprint branch for sprint_pr_mode); we
+        # stash those edits, switch to a brand-new coder/<session_uid>
+        # branched off origin/{sprint_branch}, then pop the stash to apply
+        # the agent's diff onto the new branch. The session PR will target
+        # the sprint branch as its base, so the diff GitHub renders is
+        # exactly this session's changes.
+        branch = f"coder/{session_uid}"
+        from orchestrator.integrations.git_ops import git_fetch_authenticated
+        git_fetch_authenticated(["origin"], cwd=working_dir, product_name=pname, timeout=120)
+        # Stash with -u so UNTRACKED files survive the branch switch too.
+        # The agent's brand-new source files (e.g. SRC/healthz.ts, app/api/
+        # .../route.ts) are untracked at this point; without -u, the branch
+        # cut would refuse on the first overlap.
+        # -u respects .gitignore (node_modules/, .next/, dist/) so the
+        # stash stays small even on Node/Python/Go projects.
+        stash_r = _run(["git", "stash", "push", "-u", "-m",
+                        f"post-coder-{session_uid}"], timeout=300)
+        stashed = (stash_r.returncode == 0
+                   and "No local changes to save" not in (stash_r.stdout or ""))
+        # Cut the new session branch from the sprint integration branch's
+        # current remote tip. -B creates-or-resets, so a stale local
+        # coder/<uid> from a crashed prior session is overwritten.
+        co = _run(["git", "checkout", "-B", branch, f"origin/{sprint_branch}"])
+        if co.returncode != 0:
+            log.warning(
+                f"[post-coder] {pname}: git checkout -B {branch} "
+                f"origin/{sprint_branch} failed — {_fmt_err(co)}"
+            )
+            if stashed:
+                _run(["git", "stash", "pop"])  # best-effort restore
+            return pushed_ids
+        if stashed:
+            pop_r = _run(["git", "stash", "pop"])
+            if pop_r.returncode != 0:
+                # Conflict between the agent's edits and the sprint branch's
+                # current content (likely because another session merged into
+                # the sprint branch between this session's start and its
+                # post-coder run). Under the two-tier model the session PR's
+                # diff IS what gets reviewed, so a force-`--theirs` resolution
+                # would produce a misleading PR — better to surface the
+                # conflict explicitly. Mark every assigned feature Blocked
+                # with a clear reason; PM resolves manually (rebase or
+                # re-plan) and unblocks. Drop the stash so it doesn't
+                # accumulate across sessions.
+                conflicts = _run(["git", "diff", "--name-only", "--diff-filter=U"])
+                paths = [p for p in conflicts.stdout.splitlines() if p.strip()]
+                _run(["git", "stash", "drop"])
+                log.warning(
+                    f"[post-coder] {pname}: stash-pop conflict on session "
+                    f"branch cut from origin/{sprint_branch} — {len(paths)} "
+                    f"conflicted path(s): {paths[:5]}. Blocking assigned "
+                    f"features for PM resolution."
+                )
+                try:
+                    with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                        for f in assigned_features:
+                            client.patch(f"/api/features/{f['id']}", json={
+                                "status": "Blocked",
+                                "blocked_reason": (
+                                    f"Stash-pop conflict cutting coder/"
+                                    f"{session_uid} from origin/{sprint_branch}; "
+                                    f"agent's edits overlap with sprint branch "
+                                    f"content (likely concurrent session merged "
+                                    f"in). Conflicted paths: {paths[:5]}. "
+                                    f"Resolve by rebasing the feature work onto "
+                                    f"the current sprint branch tip."
+                                ),
+                            })
+                except Exception:
+                    pass
+                return pushed_ids
     else:
         branch = f"coder/{session_uid}"
         co = _run(["git", "checkout", "-b", branch])
@@ -740,13 +867,15 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     # push_args lists everything AFTER "push" — git_push_authenticated owns
     # the "git push" prefix and adds a one-shot credential helper so the App
     # installation token is never written to .git/config or visible in `ps`.
-    if sprint_pr_mode:
-        push_args = ["--no-verify", "origin", branch]
-    elif rework_pr_mode:
+    if rework_pr_mode:
         # Replace the prior (rejected) commits on the remote PR branch with our
-        # fresh main-based commits. --force-with-lease aborts if the remote was
-        # touched by anyone else since our last fetch.
+        # fresh commits. --force-with-lease aborts if the remote was touched
+        # by anyone else since our last fetch.
         push_args = ["--no-verify", "--force-with-lease", "origin", branch]
+    elif sprint_pr_mode:
+        # Fresh session branch — set upstream so subsequent rework cycles can
+        # detect it via the rework path above.
+        push_args = ["--no-verify", "-u", "origin", branch]
     else:
         push_args = ["--no-verify", "-u", "origin", branch]
     from orchestrator.integrations.git_ops import git_push_authenticated
@@ -756,22 +885,84 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         return pushed_ids
     log.info(f"[post-coder] {pname}: pushed branch {branch}")
 
-    # 4. PR resolution. In sprint mode the PR already exists — just reuse it.
-    # In rework mode the PR also already exists (the one we just force-pushed
-    # to); reuse its number+url. In bare per-feature mode (sprint_pr_mode=False
-    # AND no rework PR), the per-feature `gh pr create` path was removed in
-    # Phase 6.2 — products in this state must be migrated to sprint_pr_mode
-    # OR have features Blocked. Falling through here previously left
-    # pr_number/pr_url unassigned and the downstream "direct PATCH for feature"
-    # block raised UnboundLocalError silently. Surface it loudly + bail.
-    if sprint_pr_mode:
-        pr_number = int(sprint_pr_num)
-        pr_url = sprint_pr_url
-        log.info(f"[post-coder] {pname}: reusing sprint PR #{pr_number} — {pr_url}")
-    elif rework_pr_mode:
+    # 4. PR resolution. Three paths:
+    #   - rework_pr_mode: reuse the existing open session PR we just force-
+    #     pushed to (preserves the reviewer's comment thread).
+    #   - sprint_pr_mode (fresh session): open a new session PR with
+    #     base=sprint_branch, head=coder/<session_uid>. The session PR is
+    #     the reviewable unit; merging it accumulates this session's work
+    #     into the sprint integration branch. The sprint PR ships to main
+    #     when the sprint completes (existing _do_complete_sprint path).
+    #   - legacy per-feature: dead path. Warn + bail.
+    if rework_pr_mode:
         pr_number = int(rework_pr_number)  # type: ignore[arg-type]
         pr_url = rework_pr_url
         log.info(f"[post-coder] {pname}: reusing rework PR #{pr_number} — {pr_url}")
+    elif sprint_pr_mode:
+        # Open a new session PR targeting the sprint integration branch.
+        gh_token_pr = _get_gh_token()
+        github_repo_pr = product.get("github_repo", "")
+        if not gh_token_pr or not github_repo_pr:
+            log.warning(
+                f"[post-coder] {pname}: cannot open session PR — missing "
+                f"github_repo or auth token. Branch {branch} was pushed but "
+                f"no PR will be linked; features stay Implementing for retry."
+            )
+            return pushed_ids
+        repo_slug_pr = _parse_repo_slug(github_repo_pr)
+        feat_bullets = "\n".join(
+            f"- `[feature-{f['id']}]` {f.get('name','')}" for f in assigned_features
+        ) or f"- session {session_uid}"
+        pr_body = (
+            f"Session `{session_uid}` for sprint #{(product.get('_active_sprint') or {}).get('id','?')}: "
+            f"`{sprint_branch}`.\n\n"
+            f"## Stories in this session\n{feat_bullets}\n\n"
+            f"Merges into the sprint integration branch; the sprint branch ships "
+            f"to `main` at sprint completion."
+        )
+        try:
+            pr_resp = httpx.post(
+                f"https://api.github.com/repos/{repo_slug_pr}/pulls",
+                headers={
+                    "Authorization": f"Bearer {gh_token_pr}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                timeout=20,
+                json={
+                    "title": f"session {session_uid}: features {feat_summary}",
+                    "head":  branch,
+                    "base":  sprint_branch,
+                    "body":  pr_body,
+                    # Non-draft: the reviewer's approval flips review_outcome,
+                    # and auto_merge_reviewer / sweep_product merge on that
+                    # signal. Draft state would add an unreliable un-draft
+                    # dance — same reasoning as the sprint PR in
+                    # provision_sprint_pr's module docstring.
+                    "draft": False,
+                },
+            )
+            if pr_resp.status_code not in (200, 201):
+                log.warning(
+                    f"[post-coder] {pname}: session PR create returned "
+                    f"{pr_resp.status_code}: {pr_resp.text[:200]} — "
+                    f"branch {branch} pushed but no PR linked; features "
+                    f"stay Implementing for retry"
+                )
+                return pushed_ids
+            pr_data = pr_resp.json()
+            pr_number = pr_data["number"]
+            pr_url    = pr_data.get("html_url") or ""
+            log.info(
+                f"[post-coder] {pname}: opened session PR #{pr_number} "
+                f"({branch} → {sprint_branch}) — {pr_url}"
+            )
+        except Exception as e:
+            log.warning(
+                f"[post-coder] {pname}: session PR create raised: {e} — "
+                f"branch {branch} pushed but no PR linked"
+            )
+            return pushed_ids
     else:
         log.warning(
             f"[post-coder] {pname}: bare per-feature PR mode no longer supported — "
@@ -880,6 +1071,12 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                             "status": "Reviewing",
                             "pr_number": pr_number,
                             "pr_url": pr_url,
+                            # branch_name is the SESSION branch (coder/<uid>),
+                            # not the sprint branch. The reviewer dispatch
+                            # uses it to check out exactly the branch under
+                            # review, so the diff the agent sees matches the
+                            # PR diff GitHub renders.
+                            "branch_name": branch,
                             "review_outcome": None,
                             "changed_by": "post-coder:fallback",
                         },

@@ -150,49 +150,10 @@ class TestMergeSprintPr:
         assert "exception" in body
 
 
-class TestCheckOpenPrInvariant:
-    def setup_method(self):
-        from orchestrator.sprint_pr import _alerted_excess_prs
-        _alerted_excess_prs.clear()
-
-    def test_no_alert_when_count_one(self):
-        from orchestrator.sprint_pr import check_open_pr_invariant
-        calls = []
-        check_open_pr_invariant({"id": 1, "name": "P"}, 1, alerter=lambda lvl, msg: calls.append((lvl, msg)))
-        assert calls == []
-
-    def test_no_alert_when_count_zero(self):
-        from orchestrator.sprint_pr import check_open_pr_invariant
-        calls = []
-        check_open_pr_invariant({"id": 1, "name": "P"}, 0, alerter=lambda lvl, msg: calls.append((lvl, msg)))
-        assert calls == []
-
-    def test_alerts_on_count_above_one(self):
-        from orchestrator.sprint_pr import check_open_pr_invariant
-        calls = []
-        check_open_pr_invariant({"id": 1, "name": "MyProd"}, 3, alerter=lambda lvl, msg: calls.append((lvl, msg)))
-        assert len(calls) == 1
-        level, msg = calls[0]
-        assert level == "warning"
-        assert "MyProd" in msg
-        assert "3" in msg
-
-    def test_idempotent_per_run(self):
-        from orchestrator.sprint_pr import check_open_pr_invariant
-        calls = []
-        alerter = lambda lvl, msg: calls.append((lvl, msg))
-        for _ in range(5):
-            check_open_pr_invariant({"id": 1, "name": "P"}, 2, alerter=alerter)
-        assert len(calls) == 1
-
-    def test_rearms_after_recovery(self):
-        from orchestrator.sprint_pr import check_open_pr_invariant
-        calls = []
-        alerter = lambda lvl, msg: calls.append((lvl, msg))
-        check_open_pr_invariant({"id": 1, "name": "P"}, 2, alerter=alerter)
-        check_open_pr_invariant({"id": 1, "name": "P"}, 1, alerter=alerter)  # recovered
-        check_open_pr_invariant({"id": 1, "name": "P"}, 2, alerter=alerter)  # spike again
-        assert len(calls) == 2
+# TestCheckOpenPrInvariant removed: the open-PR-count invariant was retired
+# with the two-tier (session-PR) model. A healthy product now has 1 sprint
+# integration PR + N session PRs open in parallel; the >1 alert would fire
+# every cycle. See orchestrator/sprint_pr.py history for the removed helper.
 
 
 class TestAutoMergeDraftHandling:

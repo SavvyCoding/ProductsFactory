@@ -54,45 +54,6 @@ def _headers(token: str) -> dict:
     }
 
 
-_alerted_excess_prs: set[int] = set()
-
-
-def check_open_pr_invariant(product: dict, count: int, alerter=None) -> None:
-    """Sprint-PR mode invariant: exactly 1 open PR per product (the sprint PR).
-
-    When more than 1 is observed it's anomalous — likely a stale orphan from
-    before Phase 6.2 cutover, a manual PR opened by a human, or a sprint PR
-    that was never merged before the next was activated. Replaces the old
-    `MAX_OPEN_PRS=3` gate (Phase 6.5): we no longer pause the coder, just
-    alert the operator.
-
-    Idempotent per process: only alerts once per product per poller run, so
-    the operator sees one notification rather than one per cycle. Re-arms when
-    count drops back to ≤1, so a recurring anomaly alerts again.
-
-    `alerter` is a callable(level: str, message: str). Pass
-    `orchestrator.alerts.send_alert` from production callers; left injectable
-    so tests can capture without importing the real alert sink.
-    """
-    pid = product.get("id")
-    if pid is None:
-        return
-    if count <= 1:
-        _alerted_excess_prs.discard(pid)
-        return
-    if pid in _alerted_excess_prs:
-        return
-    _alerted_excess_prs.add(pid)
-    msg = (
-        f"{product.get('name', '?')}: {count} open PRs (expected 1 in "
-        f"sprint-PR mode) — investigate stale orphans or manually-opened PRs"
-    )
-    if alerter is not None:
-        alerter("warning", msg)
-    else:
-        log.warning(msg)
-
-
 def merge_sprint_pr(github_repo: str, pr_number: int, token: str) -> tuple[int, str]:
     """Squash-merge the sprint PR, marking it ready and updating the branch first.
 

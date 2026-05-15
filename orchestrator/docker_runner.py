@@ -318,15 +318,35 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                                   and f.get("review_outcome") == "changes_requested")]
                 features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
             elif persona == "reviewer":
-                # Reviewer follows the PR — scope to active sprint but fall back to any sprint
-                # so open PRs are not left hanging if sprint rolled over mid-review.
+                # Reviewer follows the SESSION PR (two-tier model): every
+                # reviewer session reviews exactly one open session PR's
+                # worth of features. Group by `pr_number` and pick the
+                # oldest session PR (lowest pr_number — GitHub assigns
+                # them monotonically per repo) so older work doesn't
+                # starve waiting on newer session PRs.
+                # Scope to active sprint first, fall back to any sprint so
+                # open PRs aren't left hanging if a sprint rolled over
+                # mid-review.
                 candidates = [f for f in all_features
                               if f.get("status") == "Reviewing"
                               and f.get("pr_number")
                               and f.get("sprint_id") is not None]
-                features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
-                if not features:
-                    features = candidates
+                in_active = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
+                pool = in_active or candidates
+                if pool:
+                    from collections import defaultdict as _dd
+                    by_pr: dict = _dd(list)
+                    for _f in pool:
+                        by_pr[_f["pr_number"]].append(_f)
+                    oldest_pr = min(by_pr.keys())
+                    features = by_pr[oldest_pr]
+                    log.info(
+                        f"[assign] reviewer scoped to session PR #{oldest_pr} "
+                        f"({len(features)} feature(s)); {len(by_pr)} open "
+                        f"session PR group(s) total"
+                    )
+                else:
+                    features = []
             elif persona == "designer":
                 # product_planner was merged into designer 2026-05-06 (Phase 1
                 # of futureplan.md). They shared this same filter and wrote
@@ -348,6 +368,11 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                 "design_doc_path": f.get("design_doc_path"),
                 "pr_number": f.get("pr_number"),
                 "pr_url": f.get("pr_url"),
+                # Session branch name written by post_coder when the
+                # session PR was opened. Reviewer dispatch + the two-tier
+                # session-context block in docker_runner read this to
+                # find the branch under review without an extra GitHub call.
+                "branch_name": f.get("branch_name"),
                 "fix_attempts": f.get("fix_attempts", 0),
                 "blocked_reason": f.get("blocked_reason"),
                 # `review_outcome` lets the prompt-builder distinguish a fresh
@@ -1465,18 +1490,54 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     product["_sprint_pr_number"] = (active_sprint or {}).get("pr_number") or ""
     product["_sprint_pr_url"] = (active_sprint or {}).get("pr_url") or ""
 
-    # Pre-checkout the sprint branch so the agent's very first tool call —
-    # regardless of whether it follows the prompt's MANDATORY-FIRST-ACTION
-    # block — runs against `sprint/<id>` rather than `main`. Without this,
-    # tiny models reliably skip the checkout and fall through to grepping
-    # files on main; the post-coder pipeline can transfer dirty changes
-    # but it's wasted turns and confusing transcripts.
-    # Only fires when sprint_pr_mode is on AND the sprint already has a
-    # provisioned branch (i.e. _sprint_pr_mode==True is the same gate).
+    # Session-PR context (two-tier model). Reviewer assignments are
+    # already grouped by `pr_number` in _fetch_assigned_features, so the
+    # set of session pr_numbers across assigned_features should be
+    # singleton. The session branch comes from the feature row's
+    # `branch_name` (set by post_coder when the session PR was opened).
+    # Coder/designer don't need session context here — coder cuts its own
+    # fresh session branch in post_coder, designer commits to the sprint
+    # branch.
+    _session_pr_set = {
+        f.get("pr_number") for f in assigned_features
+        if isinstance(f.get("pr_number"), int)
+    }
+    _session_branch_set = {
+        f.get("branch_name") for f in assigned_features
+        if f.get("branch_name")
+    }
+    if persona == "reviewer" and len(_session_pr_set) == 1:
+        product["_session_pr_number"] = next(iter(_session_pr_set))
+        product["_session_branch"] = (
+            next(iter(_session_branch_set)) if len(_session_branch_set) == 1 else ""
+        )
+        product["_session_pr_url"] = next(
+            (f.get("pr_url", "") for f in assigned_features if f.get("pr_url")), ""
+        )
+    else:
+        product["_session_pr_number"] = None
+        product["_session_branch"] = ""
+        product["_session_pr_url"] = ""
+
+    # Pre-checkout the right branch so the agent's first tool call runs
+    # against the branch under review (reviewer) or the sprint integration
+    # branch (designer/coder). Without this, tiny models reliably skip the
+    # checkout and grep on main; the post-coder pipeline can transfer
+    # dirty changes but it's wasted turns and confusing transcripts.
+    # Branch resolution per persona:
+    #   - reviewer: the session branch the assigned session PR points at
+    #   - designer/coder: the sprint integration branch (designer commits
+    #     docs to it directly; coder edits land here and post_coder cuts
+    #     a fresh coder/<uid> off this tip)
     if product.get("_sprint_pr_mode"):
+        _pre_co_branch = (
+            product["_session_branch"]
+            if (persona == "reviewer" and product.get("_session_branch"))
+            else product["_sprint_branch"]
+        )
         _checkout_sprint_branch(
             working_dir,
-            product["_sprint_branch"],
+            _pre_co_branch,
             product.get("name", str(working_dir)),
         )
         # _prepare_workspace already ran chmod a+rwX, but the sprint checkout

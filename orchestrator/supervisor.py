@@ -879,11 +879,19 @@ def detect_dirty_prs(
     open_prs_with_state: list[dict],
     features: list[dict],
     github_token: str | None,
+    sprint_pr_numbers: set[int] | None = None,
 ) -> int:
     """Caller passes pre-fetched PR + feature data so we don't re-hit GitHub.
 
     Each entry in `open_prs_with_state` must include: number, mergeable_state,
     created_at, last_commit_at (ISO strings).
+
+    `sprint_pr_numbers` is the set of sprint integration PR numbers for this
+    product (one per active/planned sprint in sprint-PR mode). The detector
+    excludes them from the dirty-close action: dirty sprint PRs are the
+    sprint-completion flow's concern (it'll auto-merge or alert), not
+    individual session-PR cleanup. Defaults to empty if not provided.
+
     Returns number of PRs closed (or that would be closed in dry-run).
     """
     cfg = _get_supervisor_config()
@@ -894,6 +902,7 @@ def detect_dirty_prs(
     idle    = cfg["supervisor_dirty_pr_idle_min"] * 60
     now = datetime.now(timezone.utc).timestamp()
     closed = 0
+    sprint_pr_numbers = sprint_pr_numbers or set()
 
     def _ts(s: str | None) -> float:
         if not s:
@@ -906,6 +915,10 @@ def detect_dirty_prs(
     for pr in open_prs_with_state:
         if closed >= _DIRTY_PR_MAX_PER_CYCLE:
             break
+        # Never close the sprint integration PR via this detector — it's
+        # the sprint-completion flow's territory.
+        if pr.get("number") in sprint_pr_numbers:
+            continue
         if pr.get("mergeable_state") != "dirty":
             continue
         age = now - _ts(pr.get("created_at"))
@@ -1083,8 +1096,16 @@ def detect_overlapping_prs(
     github_repo: str,
     open_prs: list[dict],
     github_token: str | None,
+    sprint_pr_numbers: set[int] | None = None,
 ) -> int:
     """Each entry in `open_prs` should have number, title, created_at.
+
+    `sprint_pr_numbers` is the set of sprint integration PR numbers for this
+    product. The detector excludes them from both directions of the
+    subset-overlap check — under the two-tier model the sprint PR's title
+    or body may list every feature in the sprint, which would make it look
+    like a "newer superset" closing every session PR. Defaults to empty.
+
     Returns number of PRs closed (or that would close in dry-run).
     """
     cfg = _get_supervisor_config()
@@ -1092,10 +1113,14 @@ def detect_overlapping_prs(
         return 0
     dry_run = cfg["supervisor_dry_run_only"]
     closed = 0
+    sprint_pr_numbers = sprint_pr_numbers or set()
 
-    # Parse feature-ID set from each PR title; sort newest-first
+    # Parse feature-ID set from each PR title; sort newest-first. Sprint
+    # integration PRs are never candidates either as keeper or as closer.
     parsed = []
     for pr in open_prs:
+        if pr.get("number") in sprint_pr_numbers:
+            continue
         ids = set(int(m) for m in _PR_FEAT_RE.findall(pr.get("title", "")))
         if not ids:
             continue

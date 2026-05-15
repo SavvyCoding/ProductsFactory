@@ -786,18 +786,13 @@ def main():
             # Phase 4 of PollerRevamp: single per-product entry point in
             # orchestrator/reconcile.py — see INVARIANTS.md V.3-V.4 for contract.
             #
-            # Also runs the open-PR-count invariant (Phase 6.5): in sprint-PR
-            # mode there should be exactly one open PR per product. >1 alerts
-            # the operator once per product per run, but no longer gates work
-            # (the old MAX_OPEN_PRS gate was removed).
-            from orchestrator.sprint_pr import check_open_pr_invariant
+            # The old open-PR-count invariant ("exactly 1 open PR per product
+            # in sprint-PR mode") was retired with the two-tier model: now we
+            # routinely have 1 sprint integration PR + N session PRs open in
+            # parallel during a sprint, so an alert on >1 would fire on every
+            # healthy cycle.
             for _p in products:
                 reconcile_product(_p)
-                if _p.get("github_repo"):
-                    try:
-                        check_open_pr_invariant(_p, count_open_prs(_p), alerter=send_alert)
-                    except Exception:
-                        log.exception(f"open-PR invariant check failed for {_p.get('name', '?')}")
 
             # ⑥c Auto-merge sweep — Phase 1 of PollerRevamp.
             # Merges every Reviewed+approved+pr_number feature across ALL ready
