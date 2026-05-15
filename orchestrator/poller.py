@@ -283,9 +283,23 @@ def _auto_create_sprint_for_unsprinted(product: dict, client: httpx.Client) -> b
     phases = phases_resp.json() if phases_resp.status_code == 200 and isinstance(phases_resp.json(), list) else []
 
     if phases:
-        last_phase = max(phases, key=lambda p: (p.get("order", 0), p["id"]))
-        phase_id = last_phase["id"]
-        log.info(f"[auto-sprint] Using existing phase '{last_phase['name']}' (id={phase_id})")
+        # Pick the ACTIVE phase, not the highest-ordered one. Skipping ahead
+        # to a later phase buries unfinished work in the current phase
+        # (incident pattern: phase 1 leaves features Approved-but-stuck, poller
+        # creates phase-3 sprint, the phase-1 features never get picked up).
+        # Fallback to the lowest-order planned phase only if no phase is active.
+        active = [p for p in phases if p.get("status") == "active"]
+        if active:
+            cur_phase = min(active, key=lambda p: (p.get("order", 0), p["id"]))
+        else:
+            planned = [p for p in phases if p.get("status") == "planned"]
+            if planned:
+                cur_phase = min(planned, key=lambda p: (p.get("order", 0), p["id"]))
+            else:
+                # All phases completed — fall back to last phase (legacy behavior)
+                cur_phase = max(phases, key=lambda p: (p.get("order", 0), p["id"]))
+        phase_id = cur_phase["id"]
+        log.info(f"[auto-sprint] Using {cur_phase.get('status','?')} phase '{cur_phase['name']}' (id={phase_id})")
     else:
         phase_resp = client.post("/api/phases", json={
             "product_id": pid,
