@@ -535,9 +535,26 @@ _TRANSIENT_GIT_PATTERNS = (
 )
 
 def _git_status_with_retry(max_retries: int = 3, sleep_s: float = 0.5):
-    """Run `git status --porcelain` with retries on transient lock errors.
+    """Run `git status --porcelain --untracked-files=no` with retries on transient errors.
 
-    Two transient failure modes get retried:
+    **Why --untracked-files=no:** the default `git status` walks the entire
+    working tree to enumerate untracked files. On a Windows bind-mounted
+    workspace (Docker Desktop) with a Next.js / Python venv / etc.
+    project, the underlying `stat()` calls go through Docker's filesystem
+    layer for every file — including `node_modules/` even when gitignored
+    (git still has to traverse to check). 30k+ files × Windows-bind-mount
+    stat latency consistently overruns the 10s timeout, blocking the
+    `_agent_made_edits` gate even on workspaces with real edits. Real
+    incident 2026-05-18 02:46: session `c5a9cf52` exhausted the 3-retry
+    budget on a 35K-file Next.js workspace; agent refused task_done; all
+    work discarded. Skipping the untracked walk drops the typical scan
+    from 5-15s to <1s. Untracked files are still checked via the
+    separate `_has_untracked_files()` helper which uses `git ls-files
+    --others --exclude-standard` — that respects .gitignore so
+    node_modules is excluded at git's discovery level, not just at the
+    "report it" stage.
+
+    Two transient failure modes still get retried:
 
     1. **stderr-fail-fast** — git returns non-zero quickly with a lock-message
        (e.g. `fatal: Unable to create '.../index.lock': File exists`).
@@ -559,7 +576,7 @@ def _git_status_with_retry(max_retries: int = 3, sleep_s: float = 0.5):
     for attempt in range(max_retries):
         try:
             last = subprocess.run(
-                ["git", "status", "--porcelain"],
+                ["git", "status", "--porcelain", "--untracked-files=no"],
                 cwd=WORKSPACE_DIR, capture_output=True, text=True, timeout=10,
             )
         except subprocess.TimeoutExpired:
@@ -577,6 +594,47 @@ def _git_status_with_retry(max_retries: int = 3, sleep_s: float = 0.5):
             continue
         return last  # non-transient — surface immediately
     return last
+
+
+def _has_untracked_files() -> bool:
+    """Fast check for any untracked, non-ignored file in the workspace.
+
+    Companion to `_git_status_with_retry` (which excludes untracked
+    enumeration for perf). Uses `git ls-files --others --exclude-standard`
+    which:
+      - Respects .gitignore at the enumeration level (node_modules,
+        .next, dist, etc. are SKIPPED entirely, not just filtered after
+        stat — this is the key perf win).
+      - Returns one path per line, no diff computation, no rename detection.
+      - Empty output ⇒ no untracked files.
+
+    Filters out the same housekeeping paths the tracked-file check
+    ignores (session_result.json, session_summary.md, Temp/, Results/).
+    Returns False on timeout — we'd rather miss a corner-case "agent
+    wrote only into a Temp/-shaped path" than block the gate. The
+    tracked-file check + commits-ahead check cover the typical real-edit
+    cases.
+    """
+    try:
+        r = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=WORKSPACE_DIR, capture_output=True, text=True, timeout=8,
+        )
+    except subprocess.TimeoutExpired:
+        _log("_has_untracked_files: timed out — falling back to tracked-only check")
+        return False
+    if r.returncode != 0:
+        return False
+    for path in (r.stdout or "").split("\x00"):
+        path = path.strip()
+        if not path:
+            continue
+        if path.endswith("session_result.json") or path.endswith("session_summary.md"):
+            continue
+        if "/Temp/" in path or "/Results/" in path:
+            continue
+        return True
+    return False
 
 
 def _reviewer_made_decisions() -> int:
@@ -621,7 +679,8 @@ def _agent_made_edits() -> bool:
     all (test_run.py edge cases) — there the gate is meaningless.
     """
     try:
-        # 1. Uncommitted changes in the tree
+        # 1a. Tracked-file changes (fast: skips the untracked walk; see
+        #     _git_status_with_retry docstring).
         status = _git_status_with_retry()
         if status.returncode == 0:
             for line in status.stdout.splitlines():
@@ -643,6 +702,12 @@ def _agent_made_edits() -> bool:
                 return True
             _log(f"WARNING: git status failed (rc={status.returncode}); gate FAIL-CLOSED. stderr: {stderr_lc[:200]}")
             return False
+
+        # 1b. Untracked files (fast via `git ls-files --others
+        #     --exclude-standard`; respects .gitignore at enumeration
+        #     time so node_modules etc. are skipped, not just filtered).
+        if _has_untracked_files():
+            return True
 
         # 2/3. Local commits ahead of remote tracking branch (or main).
         for ref in ("@{u}", "origin/main", "origin/master"):
