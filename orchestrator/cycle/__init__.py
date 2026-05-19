@@ -1,10 +1,9 @@
-# Cycle subpackage — the orchestrator's main loop and its supporting pieces.
+# Cycle subpackage — per-cycle helpers shared by the orchestrator's main loop.
 #
-# Phase 4 of OrchestratorRefactor:
-#   loop_detector.py — _LoopDetector (3-in-a-row + 4-element alternating)
-#                      and _heal_loop (root-cause diagnostic)
-#   selection.py     — round-robin selection, run_now priority, reviewer
-#                      preempt, retro preempt, quiet hours, daily caps
-#   locks.py         — _acquire_db_lock, _release_db_lock, _heartbeat_loop
-#                      (INVARIANTS I.1–I.4)
-#   runner.py        — main() — the cycle controller (Phase 5 target)
+# persona.py — _decide_action and the determine_persona adapter
+#              (Phase 5 of OrchestratorRefactor — adopted tools.determine_next_action's
+#              behavior as the single source of truth across paths).
+#
+# (selection.py, locks.py, loop_detector.py were deleted with the legacy
+# host-mode poller on 2026-05-19 — their behaviors are now in
+# deploy/orchestrator/tools.py + orchestrate.py.)

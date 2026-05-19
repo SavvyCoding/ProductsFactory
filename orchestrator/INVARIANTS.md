@@ -1,6 +1,6 @@
 # Poller Invariants
 
-This document is the behavioral spec for the orchestrator. Every invariant listed here is something the current code enforces — sourced from reading `poller.py`, `docker_runner.py`, `supervisor.py`, `github_client.py`, and `deploy/orchestrator/tools.py`. If a future refactor (or rewrite) breaks any of these without an explicit decision to change the behavior, that's a regression.
+This document is the behavioral spec for the orchestrator. Every invariant listed here is something the current code enforces — sourced from reading `deploy/orchestrator/{orchestrate,tools}.py`, `docker_runner.py`, `supervisor.py`, and `github_client.py`. If a future refactor (or rewrite) breaks any of these without an explicit decision to change the behavior, that's a regression.
 
 ## Vocabulary — domain ↔ code mapping
 
@@ -23,7 +23,7 @@ Branch names (`sprint/N`), API URLs (`/api/sprints/...`), and the `_sprint_branc
 
 ---
 
-> **Two orchestrator implementations co-exist today**: `orchestrator/poller.py` (the legacy host-mode entry point invoked by `deploy/windows/start_poller.ps1`) and `deploy/orchestrator/{orchestrate,tools}.py` (the containerized entry point used by `pf-orchestrator`, currently the deployed path). The Phase 1-4 modules in `orchestrator/` (`auto_merge`, `dispatch`, `reconcile`) are wired into BOTH paths where applicable. The `dispatch.py` priority-list cascade is only used by the legacy path; `tools.py.determine_next_action` keeps its own decision tree. Consolidating the two entry points is on the future-work list.
+> **Single orchestrator entry point** as of 2026-05-19: `deploy/orchestrator/orchestrate.py` calls `tools.run_cycle` (in `deploy/orchestrator/tools.py`) every ~60 s inside the `pf-orchestrator` container. The legacy host-mode `orchestrator/poller.py` + `orchestrator/dispatch.py` were retired in PR `88d8031`; the helper modules they relied on (`orchestrator/cycle/{selection,locks,loop_detector}.py`, `orchestrator/log_context.py`, `orchestrator/metrics.py`) were removed in the follow-up PR that landed this doc rewrite.
 
 Each invariant is tagged with **why** (the failure mode it guards against) and **how** (the function or module that enforces it). Citations are by name, not line number — line numbers drift on every refactor, and a stale citation is worse than no citation. If a citation's function gets renamed or moved, that's exactly the kind of regression this document is supposed to catch.
 
@@ -33,20 +33,20 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 
 ## I. Distributed lock & process safety
 
-**I.1 ✅ At most one poller per database.**
-- *How*: `poller._acquire_db_lock` calls `POST /api/poller/lock`; the website handler uses a single Postgres `UPDATE WHERE` — atomic. 409 returned if another live poller holds it.
-- *Why*: Two pollers running against the same DB will both pick the same product, launch duplicate Docker containers for it, and race on `session_result.json` writes. Caused real corruption pre-lock.
+**I.1 ✅ At most one orchestrator per database.**
+- *How*: `bootstrap.sh` `POST`s `/api/poller/lock` on container startup; the website handler uses a single Postgres `UPDATE WHERE` — atomic. On 409 the container exits and Docker's restart policy will retry (eventually getting through after the lock TTL expires).
+- *Why*: Two orchestrators running against the same DB will both pick the same product, launch duplicate Docker containers for it, and race on `session_result.json` writes. Caused real corruption pre-lock.
 
-**I.2 ✅ A crashed poller's lock self-heals within 30 seconds.**
-- *How*: `poller._heartbeat_loop` refreshes every 15 s; lock TTL is 30 s. Same-host stale-PID recovery in `_acquire_db_lock` probes the holder PID with `os.kill(pid, 0)` and force-unlocks if dead.
-- *Why*: Hard crashes (OOM, SIGKILL, host reboot) leave the lock held. Without TTL + PID probe, the next poller waits indefinitely or — worse — the user manually clears it and double-runs.
+**I.2 ✅ A crashed orchestrator's lock self-heals within 30 seconds.**
+- *How*: `tools.poller_heartbeat` refreshes every cycle (~60 s default; cycle period in `orchestrate.CYCLE_SECONDS`); lock TTL is 30 s. The website handler clears stale rows whose `updated_at` is older than the TTL before issuing the next lock.
+- *Why*: Hard crashes (OOM, SIGKILL, host reboot) leave the lock held. Without TTL, the next orchestrator waits indefinitely or — worse — the operator manually clears it and double-runs.
 
-**I.3 ✅ A poller whose lock was stolen mid-cycle exits, doesn't keep working.**
-- *How*: `poller._heartbeat_loop` treats 404 from `/api/poller/heartbeat` as theft and sets `_hb_lock_stolen`. `poller.main` checks the flag at top of each cycle and breaks.
-- *Why*: A stolen lock means another poller is already running; continuing would produce the duplicate-container scenario from I.1.
+**I.3 ✅ An orchestrator whose lock was stolen mid-cycle exits, doesn't keep working.**
+- *How*: `tools.poller_heartbeat` returns a non-success on 404 from `/api/poller/heartbeat`; the cycle loop in `orchestrate.py` detects the failed heartbeat and exits. Docker's restart policy re-launches the container, which then hits the I.1 lock contest and waits its turn.
+- *Why*: A stolen lock means another orchestrator is already running; continuing would produce the duplicate-container scenario from I.1.
 
 **I.4 ✅ Lock release is best-effort and never raises.**
-- *How*: `poller._release_db_lock` wraps in `try/except: pass`, registered with `atexit`.
+- *How*: Container exit naturally drops the heartbeat; the lock's TTL handles cleanup. No explicit release call (the previous host-mode `atexit` path is gone with `poller.py`).
 - *Why*: A failing release on shutdown must not prevent the process from exiting — TTL cleanup will recover.
 
 ---
@@ -54,40 +54,40 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 ## II. Round-robin fairness across products
 
 **II.1 ✅ Each cycle visits one product max for an agent session.**
-- *How*: `poller.main` calls `get_next_product` once per cycle, launches at most one Docker session.
+- *How*: `tools.run_cycle` resolves to exactly one `launch_session` call (or `action=exit`) per call. `orchestrate.py`'s main loop calls `run_cycle` once per `CYCLE_SECONDS` tick.
 - *Why*: Concurrent agent sessions per cycle would exhaust Claude API rate limits, Docker host resources, and the GitHub PR cap. The system is built around serial per-cycle work.
 
 **II.2 ✅ `last_run_at` advances on every cycle visit, not only on session launch.**
-- *How*: Cycle-visit bump after `determine_next_action` runs for a product, regardless of whether it produced a launch (`poller.main` loop). The post-success bump from `launch_session` on Docker exit code 0 is independent.
+- *How*: `tools._bump_product_last_run(product_id)` is called from `tools.run_cycle` on every Priority-2 (round-robin) resolution — including the `action=exit` branches. Independent of whether `launch_session` actually created a container.
 - *Why*: Without this, products that resolve to `action=exit` (no actionable work, PR-gated, etc.) keep getting picked by the round-robin and starve every other product. Real incident: pre-fix, a single PR-gated product blocked the loop for hours.
 
 **II.3 ✅ `run_now=True` jumps the queue.**
-- *How*: `poller.get_next_product` sorts `run_now=True` first, then `last_run_at ASC`.
+- *How*: The website's `GET /api/products/next` handler sorts `run_now=True` first, then `last_run_at ASC`. `tools.run_cycle` Priority 2 just consumes that ordering.
 - *Why*: PMs need an "act now" button for urgent work. Without priority override, PM requests would wait for the round-robin.
 
 **II.4 ✅ `run_trainer_now` bypasses persona selection entirely.**
-- *How*: `poller.main` checks `run_trainer_now` before round-robin and forces `persona = "product_trainer"`.
-- *Why*: Showcase video generation is on-demand; running it through the normal sprint-aware flow would queue behind feature delivery.
+- *How*: `tools.run_cycle` Priority 0 scans `ready` products for `run_trainer_now` (and `run_persona_now`) before reviewer preemption or round-robin and forces `persona = "product_trainer"` (or the queued maintenance persona). The flag is cleared up front; on a non-error launch deferral (`already_active`/`already_launching`), it is restored so the next cycle retries.
+- *Why*: Showcase video generation is on-demand; running it through the normal sprint-aware flow would queue behind feature delivery. The restore-on-deferral protects against the request being silently dropped when a coder happens to be running.
 
 **II.5 ✅ Reviewer work preempts everything except trainer.**
-- *How*: `poller.main` calls `get_next_reviewer_product` *before* round-robin; if any product has `Reviewing` features with PRs, it runs reviewer first.
-- *Why*: Reviewing is the bottleneck of the delivery pipeline. If reviewer falls behind, the sprint PR keeps growing and merge-time conflicts compound.
+- *How*: `tools.run_cycle` Priority 1 calls `/api/features/next-for-persona?persona=reviewer`. If a product has a `Reviewing` feature with a PR, the reviewer session launches before round-robin.
+- *Why*: Reviewing is the bottleneck of the delivery pipeline. If reviewer falls behind, session PRs keep growing and merge-time conflicts compound.
 
 ---
 
 ## III. Auth and external system gating
 
-**III.1 ✅ Auth-failed cycles skip all work, don't fail loud.**
-- *How*: `poller.claude_auth_healthy` runs at top of each cycle in `poller.main`; on fail, alert + `continue`.
-- *Why*: Mass spurious failures across products on auth lapse would create false "feature broken" alerts. Better to halt and alert humans.
+**III.1 ⚠ Auth-failed cycles skip all work, don't fail loud.**
+- *How*: Previously enforced by `poller.claude_auth_healthy` (host-mode poller). The containerized path does not currently run a per-cycle Claude CLI auth probe — agent containers acquire their OAuth credential at launch time via the `~/.claude` mount. A persistent auth lapse currently surfaces as repeated failed `claude` invocations inside the agent container, which bump `fix_attempts` until the feature routes to Blocked (VI.2).
+- *Why*: Mass spurious failures across products on auth lapse would create false "feature broken" alerts. The `fix_attempts → Blocked` budget catches this eventually, but the loss of the upfront probe means symptoms surface as ~5 failed agent sessions instead of a single skip. Tracked as follow-up; not currently load-bearing.
 
 **III.2 ✅ PM API unreachable → retry with backoff, then skip cycle.**
-- *How*: `poller.main` retries the per-cycle products fetch 3× with `2**attempt` backoff; on final failure, alert + `continue`.
-- *Why*: PM API restarts should not crash the poller. The poller is designed to outlive the website.
+- *How*: `tools.run_cycle` fetches via `_pm("GET", "/api/products")`; on transport failure the cycle returns `action=exit` and the next tick retries. Docker's container restart policy provides the outer retry envelope if the orchestrator itself crashes on a malformed response.
+- *Why*: PM API restarts should not crash the orchestrator. The orchestrator is designed to outlive the website.
 
-**III.3 ✅ More than 1 open PR per product is anomalous and surfaces an alert.**
-- *How*: `poller.main` runs `orchestrator.sprint_pr.check_open_pr_invariant` for every product after the per-cycle reconcile sweep. When `count_open_prs > 1` it calls `send_alert("warning", …)` once per product per process run (re-arms when the count drops back to ≤1).
-- *Why*: In sprint-PR mode there should be exactly one open PR per product (the sprint PR). >1 means a stale orphan, a manually-opened PR, or an unmerged previous sprint PR — all worth a human look. Replaces the legacy `MAX_OPEN_PRS=3` coder gate (Phase 6.5): we no longer pause work, just alert. Pausing on the sprint PR's own existence would block every coder run forever.
+**III.3 ❌ More than 1 open PR per product is anomalous and surfaces an alert.**
+- *How*: Previously enforced by `orchestrator.sprint_pr.check_open_pr_invariant`, called from `poller.main`. Both `sprint_pr.py` and the legacy poller are retired (the 1-PR session-PR model on 2026-05-15 changed the semantics — sprint PRs no longer exist, so "one open PR per product" is the wrong invariant). Currently unenforced; not re-implemented because the new model produces 0–N concurrent session PRs (one per coder session) as normal behavior. Tracked as follow-up; the correct successor invariant would alert on PRs older than a threshold without a Reviewing feature pointed at them.
+- *Why*: Stale orphan PRs (manually opened, abandoned mid-session, unmerged across an orchestrator restart) need a human look. The 1-PR refactor preserved this need but removed the previous implementation; new shape pending.
 
 ---
 
@@ -122,7 +122,7 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 ## V. Stuck feature recovery (multiple layers)
 
 **V.1 ✅ A feature in an agent state (Designing/Implementing/Reviewing) for >`stuck_feature_timeout_hours` is reset to its prior ready state.**
-- *How*: `poller.reset_stuck_features` calls `/api/features/reset_stuck` every cycle. Default 0.75h.
+- *How*: `tools.reset_stuck_features` (called from `tools.run_cycle` step 1) `POST`s `/api/features/reset_stuck` every cycle. Default 0.75h.
 - *Why*: Crashed agents leave features pinned in agent states. Without this, a single crash poisons that feature forever.
 
 **V.2 ✅ A `claimed` feature with no PR after the session ends is rolled back.**
@@ -170,7 +170,7 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 ## VII. Auto-merge
 
 **VII.1 ✅ Auto-merge fires for any Reviewed+approved+pr_number feature with `auto_merge_enabled` set, regardless of sprint membership.**
-- *How*: `auto_merge.sweep_all` (called from `poller.main` step ⑥c) iterates every `ready` product per cycle. For each product it walks `(status=Reviewed AND pr_number AND review_outcome=approved)` features and attempts squash-merge against GitHub. The post-reviewer-session `docker_runner._auto_merge_approved` path is still in place as a belt-and-braces second layer for the reviewer-session-specific flow (it does PR `update-branch` before merge, which the sweep doesn't).
+- *How*: `auto_merge.sweep_all` (called from `tools.run_cycle` after the per-cycle reconcile pass) iterates every `ready` product per cycle. For each product it walks `(status=Reviewed AND pr_number AND review_outcome=approved)` features and attempts squash-merge against GitHub. The post-reviewer-session `docker_runner._auto_merge_approved` path is still in place as a belt-and-braces second layer for the reviewer-session-specific flow (it does PR `update-branch` before merge, which the sweep doesn't).
 - *Why*: Approved PRs must move to Pushed within bounded time (1-2 cycles), or the sprint can't complete.
 - *Historical context*: Pre-Phase-1 there were two paths, both bound to a session ever launching — when an active sprint had only Reviewed features (no Reviewing), neither path fired and PRs stranded. The webcalculator class of deadlock. Phase 1 added the per-cycle sweep to cut that dependency.
 
@@ -218,19 +218,13 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 
 ---
 
-## IX. Loop detection (defensive in-memory)
+## IX. Loop detection (withdrawn 2026-05-19)
 
-**IX.1 ✅ Same persona 3× in a row triggers a loop alert (excluding expected repeaters).**
-- *How*: `poller._LoopDetector.detect_loop`. Excluded set `_EXPECTED_REPEATS`: `planner, product_trainer, coder, reviewer, designer, qa_tester, security_auditor, retrospective, product_planner`.
-- *Why*: Maintenance personas (documenter, analytics, refactorer, devops, recommender) shouldn't run twice in a row — that means scheduling is broken. Real incident: a config bug caused `documenter` to run every cycle.
+The in-memory `_LoopDetector` that enforced IX.1–IX.3 lived only in the host-mode `poller.py`. The containerized orchestrator never had an equivalent and was the lock-holder for an extended period without the detector running, with no observed incidents traceable to its absence. IX.1–IX.3 were withdrawn with the deletion of `orchestrator/cycle/loop_detector.py`.
 
-**IX.2 ✅ Two-persona alternating loop (A-B-A-B) triggers an alert.**
-- *How*: `poller._LoopDetector.detect_loop` 4-element history check.
-- *Why*: A reviewer-coder ping-pong on the same feature without progress is a sign of a stuck PR or a broken contract. Catches before fix_attempts crosses threshold.
+The active loop guard is now **Section VI**: `fix_attempts` is bumped on every changes-requested rework, false-success detection, killed-session recovery, and closed-unmerged PR; on reaching `max_fix_attempts` (default 5) the feature routes to the per-product Blocked sprint. That cap catches reviewer-coder ping-pongs in a strict-budget way that does not depend on in-memory state surviving container restarts.
 
-**IX.3 ✅ Loop alerts are rate-limited to 1 per 15 minutes per product.**
-- *How*: `poller._LoopDetector.should_alert` cooldown dict.
-- *Why*: Without rate-limit, a single loop generates dozens of duplicate Slack alerts.
+If real-time persona-alternation detection ever becomes necessary again, the natural home is `tools.run_cycle` rather than back inside the orchestrator package — it needs a single-process scope, which the container model already enforces.
 
 ---
 
@@ -241,11 +235,11 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 - *Why*: A canonical FSM column means watchdog/reconciler/harvester can be written as pure transitions without parsing docker output or file mtimes.
 
 **X.2 ✅ Watchdog kills sessions past `expected_deadline`.**
-- *How*: `heartbeat.check_stale_sessions`, called from `poller.main` per cycle.
+- *How*: `heartbeat.check_stale_sessions`, called per cycle from `tools.check_stale_sessions` (invoked by `tools.run_cycle`).
 - *Why*: Default 90 min cap. Without it, runaway agents burn API quota indefinitely.
 
-**X.3 ✅ Orphaned sessions (DB says running but container missing) are recovered on poller startup.**
-- *How*: `poller._close_orphaned_sessions`, registered as a startup hook.
+**X.3 ✅ Orphaned sessions (DB says running but container missing) are recovered on orchestrator startup.**
+- *How*: `orchestrate.startup_reconcile`, called once before the cycle loop begins. Compares live `pf-*` containers against `sessions` rows in `running`/`starting`/`pending`/`wrapping` state; closes any session whose container is not found.
 - *Why*: Hard reboots leave session rows with `status=running` but no container. Without recovery, the DB shows phantom in-flight work.
 
 **X.4 ✅ Every transition writes a `session_events` row.**
@@ -270,23 +264,23 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 
 **XI.4 ✅ Detectors never raise into the orchestrator.**
 - *How*: Each detector wraps its body in try/except. `_record_action` itself catches and discards exceptions so an audit-write failure can't break a detector.
-- *Why*: A supervisor bug must not take down the poller. Audit-layer crashes are silent by design.
+- *Why*: A supervisor bug must not take down the orchestrator. Audit-layer crashes are silent by design.
 
 ---
 
 ## XII. Discovery and onboarding
 
 **XII.1 ✅ Greenfield products are auto-discovered and scaffolded once.**
-- *How*: `setup_product.discover_and_populate` + `greenfield_scaffold.scaffold_greenfield`, dispatched from `poller.main` for `status=greenfield_pending` and `status=registered` products.
-- *Why*: PM should not need to manually `git init`, create a GitHub repo, or generate SSH keys.
+- *How*: `setup_product.discover_and_populate` + `greenfield_scaffold.scaffold_greenfield`, dispatched from `tools.run_cycle` via `tools._scaffold_greenfield_pending` for `status=greenfield_pending` and `status=registered` products.
+- *Why*: PM should not need to manually `git init` or create a GitHub repo. (SSH-key generation was retired with the GitHub App migration on 2026-05-14 — all git auth now flows through installation tokens.)
 
 **XII.2 ✅ Setup is idempotent — re-running discovery never breaks existing products.**
 - *How*: Templates only written if missing; DB inserts use upsert semantics.
 - *Why*: A poller restart re-runs discovery; non-idempotency would corrupt registered products.
 
-**XII.3 ✅ `features.md` is reconciled into the DB on poller startup.**
-- *How*: `poller._startup_sync_features`, called once at process boot.
-- *Why*: After a DB volume wipe, the feature backlog must be recoverable from the source-of-truth file in the product repo.
+**XII.3 ❌ `features.md` is reconciled into the DB on orchestrator startup.**
+- *How*: Was previously enforced by `poller._startup_sync_features`. That call was a no-op stub by the time it was deleted in 2026-05-19, and the containerized orchestrator has no equivalent. After a DB volume wipe today, the operator must call `POST /api/products/{id}/sync-features` manually per product.
+- *Why*: After a DB volume wipe, the feature backlog must be recoverable from the source-of-truth file in the product repo. The manual endpoint exists; the automatic-on-boot wiring does not. Tracked as follow-up.
 
 ---
 
