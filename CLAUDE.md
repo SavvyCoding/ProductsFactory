@@ -11,6 +11,13 @@ ProductFactory is a 24/7 autonomous development system. It orchestrates Claude C
 - **PM Website** (`website/`) — FastAPI dashboard + REST API for managing products and features
 - **Agent Image** (`deploy/docker/Dockerfile`) — Docker image Claude runs inside per product session
 
+**Orchestrator subpackage layout** (not obvious from a top-level `ls`):
+- `orchestrator/pipelines/` — per-persona post-session pipelines: `post_coder.py` (cut session branch, commit, push, open PR), `post_doc.py` (designer commits to main), `post_maintenance.py`, `auto_merge_reviewer.py` (per-reviewer-session squash-merge of approved session PRs)
+- `orchestrator/session/` — the session FSM. `state_machine.py` defines lifecycle states (incl. the "wrapping" state wired up in `04c4282`); `reconciler.py` reconciles DB session rows against Docker reality; `result_io.py` reads/writes `session_result.json`. The agent loop is hardened against shape drift / hallucinated tool calls here (`d1bf9a9`).
+- `orchestrator/cycle/` — cycle-level helpers: `selection.py` (which product/persona this cycle), `persona.py` (gating per maintenance persona), `locks.py` (per-product mutex), `loop_detector.py` (catches planner spirals like the `kimi-k2.6` pattern).
+- `orchestrator/integrations/` — outbound integrations: `github_app.py` (JWT sign + installation-token minting, single chokepoint for all git auth), `github.py`, `git_ops.py` (authenticated push via one-shot credential helper, no token in `.git/config`), `docker_cli.py`.
+- `orchestrator/infra/` — `redaction.py` (token redaction in logs).
+
 ## Commands
 
 ```bash
@@ -83,13 +90,12 @@ Retired with the 1-PR model (2026-05-15): the sprint integration branch (`sprint
 ### Greenfield Scaffolding
 
 When `setup_product.py` discovers a new product directory with fewer than `BROWNFIELD_FILE_THRESHOLD` (default: 10) source files, it is classified as **greenfield**. `greenfield_scaffold.py` then:
-1. Creates a GitHub repo via the GitHub API (using `system_config.github_pat`)
-2. Generates a per-product Ed25519 SSH deploy key (`id_ed25519_{product_name}`) in `SSH_DIR`
-3. Uploads the public key to GitHub as a deploy key with write access
-4. Initializes the local git repo, commits templates, and pushes to GitHub
-5. Stores the repo URL in `product.github_repo`
+1. Creates a private GitHub repo via `POST /orgs/{org}/repos` using a fresh GitHub App installation token (no PAT).
+2. Initializes the local repo with `git init -b main`, sets the HTTPS origin (no token embedded).
+3. Writes `README.md` + `product_config.json`, commits, and pushes via `git_ops.git_push_authenticated` — the installation token is supplied through a one-shot credential helper and is never persisted to `.git/config`.
+4. Creates AI-suggested features as `Pending` and flips the product to `registered` so the next cycle picks up discovery.
 
-For brownfield products (existing repos), `setup_product.py` only installs templates and registers in the DB. Deploy keys fall back to `id_ed25519_productfactory` if no per-product key exists.
+Migration note (2026-05-14): per-product Ed25519 SSH deploy keys, `~/.ssh/config` Host blocks, and PAT-based auth are all retired. `greenfield_scaffold.scaffold_greenfield(...)` still takes an `ssh_dir` kwarg for callsite compatibility but ignores it. For brownfield products, `setup_product.py` only installs templates and registers in the DB.
 
 ### Product Lifecycle
 
@@ -190,9 +196,8 @@ FastAPI evaluates routes in definition order. The parameterized `GET /api/featur
 - PM website uses HTTP Basic Auth (`secrets.compare_digest` — timing-safe); falls back to env-var credentials if no `pm_users` rows exist
 - REST API (`/api/...`) has no auth (internal-only)
 - OAuth tokens (`~/.claude`) mounted read-only into agent containers
-- SSH deploy keys in `SSH_DIR`: per-product key `id_ed25519_{product_name}` with fallback to `id_ed25519_productfactory`; mounted read-only (not the full `~/.ssh` directory)
-- Agent containers run on an isolated bridge network, not `--network host`, no `--privileged`
-- GitHub PAT stored in `system_config.github_pat` (DB), not an env var — fetched fresh each call so live updates take effect at runtime
+- **Git auth: GitHub App only.** All git push, PR API calls, and repo creation go through short-lived installation access tokens minted by `orchestrator/integrations/github_app.py` (JWT signed with the App's PEM → POST `/app/installations/{id}/access_tokens` → 60-min token, cached and refreshed when < 5 min remains). App config lives in `system_config` (`github_app_id`, `github_app_private_key`, `github_app_installation_id`, `github_org`) — read fresh each call so operators can rotate without restarting the poller. The PM website was migrated off direct `github_pat` reads in `6d16deb`; do not propose PAT fallbacks. SSH deploy keys (per-product `id_ed25519_{name}` and `id_ed25519_productfactory`) are retired.
+- Agent containers run as non-root user `agent` (UID 1001) on an isolated bridge network, no `--network host`, no `--privileged`
 
 ## Key Conventions
 
@@ -220,7 +225,7 @@ See `.env.example` for all variables. Critical ones:
 - `PM_API_URL` — PM website internal URL (poller → website REST API)
 - `AGENT_IMAGE` — Docker image name (default: `productfactory-agent`)
 - `AGENT_BACKEND` — Set to `ollama` to use local Ollama instead of Claude CLI
-- `CLAUDE_DIR` / `SSH_DIR` — Host paths for OAuth tokens and deploy key mounts
+- `CLAUDE_DIR` — Host path for Claude OAuth token mount into agent containers (`SSH_DIR` is legacy; SSH-based git auth is retired — see Auth & Security)
 - `SESSION_TIMEOUT_MINUTES` — Kill Docker container after N minutes (default: 90)
 - `STALE_THRESHOLD_MINUTES` — Alert if progress.md not pushed in N minutes (default: 45)
 - `BROWNFIELD_FILE_THRESHOLD` — Source file count above which a product is treated as brownfield (default: 10)
@@ -231,5 +236,6 @@ See `.env.example` for all variables. Critical ones:
 - `MAX_TURNS` — Hard cap on Ollama agent turns per session (default: 80)
 - `AUTH_CHECK_TIMEOUT` — Seconds for Claude CLI auth probe (default: 30)
 - `ANTHROPIC_API_KEY` — Optional; used for AI feature recommendations on the greenfield product form
+- `system_config.github_app_id` / `github_app_private_key` / `github_app_installation_id` / `github_org` — GitHub App credentials (DB-stored, hot-reloadable). All git auth flows through these.
 - `SESSION_LOG_MAXLEN` — Max in-memory log lines buffered per session in the PM website (default: 1000)
 - `PRODUCTS_BASE_DIR` — Root directory where product repos live; also used for video serving in docker-compose
