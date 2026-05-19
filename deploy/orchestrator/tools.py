@@ -583,16 +583,30 @@ def run_cycle(args: dict, **kwargs) -> str:
         # and the determine_next_action decision tree — the PM clicked a
         # button, run that persona for that product. Flag is cleared up
         # front so a crashing launch doesn't re-fire on every cycle.
+        #
+        # 2026-05-19: the up-front clear was over-eager. launch_session has
+        # two non-error skip paths (status=already_active / already_launching)
+        # that fire when the product happens to have a coder or designer
+        # session in flight at the moment the PM clicks the button. Those are
+        # not crashes — they're "try again next cycle." Pre-fix, the flag was
+        # already cleared by then and the request was silently dropped; the
+        # PM had to re-click. Now we inspect launch_session's status and
+        # restore the flag on those specific deferred cases. A real crash
+        # (run_claude_in_docker raising, GitHub API down, etc.) still doesn't
+        # carry those status values, so the original crash-safety is preserved.
         for p in ready:
             persona = None
             patch: dict = {}
+            restore_patch: dict = {}
             queued = p.get("run_persona_now")
             if queued and queued in _ONDEMAND_PERSONAS:
                 persona = queued
                 patch["run_persona_now"] = None
+                restore_patch["run_persona_now"] = queued
             elif p.get("run_trainer_now"):
                 persona = "product_trainer"
                 patch["run_trainer_now"] = False
+                restore_patch["run_trainer_now"] = True
             if not persona:
                 continue
             pid = p["id"]
@@ -604,6 +618,19 @@ def run_cycle(args: dict, **kwargs) -> str:
             launch_result = json.loads(launch_session(
                 {"product_id": pid, "persona": persona}, **kwargs
             ))
+            launch_data = launch_result.get("data") if isinstance(launch_result, dict) else None
+            if isinstance(launch_data, dict) and launch_data.get("status") in (
+                "already_active", "already_launching",
+            ):
+                log.info(
+                    f"[on-demand] launch deferred (status={launch_data.get('status')}, "
+                    f"existing_session={launch_data.get('existing_session_id')}) — "
+                    f"restoring {list(restore_patch)[0]} on product {pid}"
+                )
+                try:
+                    _pm("PATCH", f"/api/products/{pid}", restore_patch)
+                except Exception:
+                    log.exception(f"[on-demand] could not restore flag on product {pid}")
             return _ok({"action": "launched", "product_id": pid, "persona": persona,
                         "reason": f"on-demand {persona}",
                         "launch": launch_result})
