@@ -1,7 +1,7 @@
 # ProductFactory — Infrastructure services
 # Runs: PostgreSQL + PM website + Orchestrator container
-# (Legacy Windows poller still works via deploy/windows/start_poller.ps1 for
-# host-mode fallback; the orchestrator container is the preferred path.)
+# (The legacy Windows host-mode poller was retired 2026-05-18. Orchestration
+# now runs only inside the pf-orchestrator container — see profile below.)
 #
 # Start:  docker compose up -d
 # Logs:   docker compose logs -f

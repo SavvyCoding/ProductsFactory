@@ -1,203 +1,24 @@
 """
-Tests for orchestrator/poller.py — the main poll loop and its helper functions.
+Tests for orchestrator helper modules — github_client, heartbeat, alerts.
+
+Previously this file was tests/test_poller.py; the legacy host-mode poller
+was retired 2026-05-18 (deprecation guard in commit 648ab33, full deletion
+in this PR). The three test classes that targeted poller.get_next_product,
+claude_auth_healthy, and reset_stuck_features went with it — those code
+paths now live in deploy/orchestrator/tools.py + deploy/orchestrator/
+orchestrate.py and are covered by integration testing of the live
+pf-orchestrator container, not by these unit tests.
+
+The five surviving test classes here exercise the shared helper modules
+that both the legacy and live paths use: github_client, heartbeat, alerts.
 
 Strategy: unit tests with httpx and subprocess mocked. No live Docker or PM API required.
 """
 
-import subprocess
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 import httpx
-
-
-# ── get_next_product ──────────────────────────────────────────────────────────
-
-class TestGetNextProduct:
-    def test_returns_product_dict_on_200(self, monkeypatch):
-        monkeypatch.setenv("PM_API_URL", "http://pm-api:8080")
-        monkeypatch.setenv("UBUNTU_VM_IP", "192.168.1.100")
-
-        from orchestrator import poller
-
-        product_data = {"id": 1, "name": "TestProd", "status": "ready"}
-
-        def mock_get(*args, **kwargs):
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.json.return_value = product_data
-            resp.raise_for_status = lambda: None
-            return resp
-
-        with patch("httpx.Client") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.__enter__ = lambda s: mock_client
-            mock_client.__exit__ = MagicMock(return_value=False)
-            mock_client.get.side_effect = mock_get
-            mock_client_cls.return_value = mock_client
-
-            result = poller.get_next_product([])
-
-        assert result == product_data
-
-    def test_returns_none_on_204(self, monkeypatch):
-        monkeypatch.setenv("PM_API_URL", "http://pm-api:8080")
-
-        from orchestrator import poller
-
-        def mock_get(*args, **kwargs):
-            resp = MagicMock()
-            resp.status_code = 204
-            return resp
-
-        with patch("httpx.Client") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.__enter__ = lambda s: mock_client
-            mock_client.__exit__ = MagicMock(return_value=False)
-            mock_client.get.side_effect = mock_get
-            mock_client_cls.return_value = mock_client
-
-            result = poller.get_next_product([])
-
-        assert result is None
-
-    def test_returns_none_on_http_error(self, monkeypatch):
-        monkeypatch.setenv("PM_API_URL", "http://pm-api:8080")
-
-        from orchestrator import poller
-
-        with patch("httpx.Client") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.__enter__ = lambda s: mock_client
-            mock_client.__exit__ = MagicMock(return_value=False)
-            mock_client.get.side_effect = httpx.ConnectError("refused")
-            mock_client_cls.return_value = mock_client
-
-            result = poller.get_next_product([])
-
-        assert result is None
-
-
-# ── reset_stuck_features ──────────────────────────────────────────────────────
-
-class TestResetStuckFeatures:
-    def test_posts_to_reset_stuck_endpoint(self, monkeypatch):
-        monkeypatch.setenv("PM_API_URL", "http://pm-api:8080")
-
-        from orchestrator import poller
-
-        post_calls = []
-
-        def mock_post(path, **kwargs):
-            post_calls.append(path)
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.json.return_value = {"reset_count": 0}
-            resp.raise_for_status = lambda: None
-            return resp
-
-        with patch("httpx.Client") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.__enter__ = lambda s: mock_client
-            mock_client.__exit__ = MagicMock(return_value=False)
-            mock_client.post.side_effect = mock_post
-            mock_client_cls.return_value = mock_client
-
-            poller.reset_stuck_features()
-
-        assert any("/api/features/reset_stuck" in p for p in post_calls)
-
-    def test_logs_when_features_reset(self, monkeypatch, caplog):
-        monkeypatch.setenv("PM_API_URL", "http://pm-api:8080")
-
-        from orchestrator import poller
-        import logging
-        caplog.set_level(logging.INFO)
-
-        def mock_post(path, **kwargs):
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.json.return_value = {"reset_count": 3}
-            resp.raise_for_status = lambda: None
-            return resp
-
-        with patch("httpx.Client") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.__enter__ = lambda s: mock_client
-            mock_client.__exit__ = MagicMock(return_value=False)
-            mock_client.post.side_effect = mock_post
-            mock_client_cls.return_value = mock_client
-
-            poller.reset_stuck_features()
-
-        assert "3" in caplog.text or "stuck" in caplog.text.lower()
-
-    def test_swallows_http_error(self, monkeypatch):
-        """reset_stuck_features must never raise — poller loop must keep going."""
-        monkeypatch.setenv("PM_API_URL", "http://pm-api:8080")
-
-        from orchestrator import poller
-
-        with patch("httpx.Client") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.__enter__ = lambda s: mock_client
-            mock_client.__exit__ = MagicMock(return_value=False)
-            mock_client.post.side_effect = httpx.ConnectError("refused")
-            mock_client_cls.return_value = mock_client
-
-            # Must not raise
-            poller.reset_stuck_features()
-
-
-# ── claude_auth_healthy ───────────────────────────────────────────────────────
-
-class TestClaudeAuthHealthy:
-    def test_returns_true_on_zero_exit(self, monkeypatch):
-        monkeypatch.setenv("PM_API_URL", "http://pm-api:8080")
-        from orchestrator import poller
-
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-
-        with patch("subprocess.run", return_value=mock_result) as mock_run:
-            result = poller.claude_auth_healthy()
-
-        assert result is True
-        cmd = mock_run.call_args[0][0]
-        assert "claude" in cmd
-        assert "-p" in cmd
-        # Must be a real API call — not --version
-        assert "--version" not in cmd
-
-    def test_returns_false_on_nonzero_exit(self, monkeypatch):
-        monkeypatch.setenv("PM_API_URL", "http://pm-api:8080")
-        from orchestrator import poller
-
-        mock_result = MagicMock()
-        mock_result.returncode = 1
-
-        with patch("subprocess.run", return_value=mock_result):
-            result = poller.claude_auth_healthy()
-
-        assert result is False
-
-    def test_returns_false_on_timeout(self, monkeypatch):
-        monkeypatch.setenv("PM_API_URL", "http://pm-api:8080")
-        from orchestrator import poller
-
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 30)):
-            result = poller.claude_auth_healthy()
-
-        assert result is False
-
-    def test_returns_false_when_claude_not_found(self, monkeypatch):
-        monkeypatch.setenv("PM_API_URL", "http://pm-api:8080")
-        from orchestrator import poller
-
-        with patch("subprocess.run", side_effect=FileNotFoundError):
-            result = poller.claude_auth_healthy()
-
-        assert result is False
 
 
 # ── github_client — count_open_prs ───────────────────────────────────────────
