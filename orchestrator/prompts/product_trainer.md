@@ -32,7 +32,7 @@ for f in shipped:
 "
 ```
 
-If fewer than 2 features are shipped, log `"Not enough shipped features for a showcase — skipping."` and jump to Step 6.
+If fewer than 2 features are shipped, log `"Not enough shipped features for a showcase — skipping."` and jump to Step 5 (still record `last_product_trainer_at` so we don't retry-loop).
 
 ### Step 3 — Write narration script
 Create `/workspace/output/narration.md`:
@@ -64,12 +64,13 @@ WORKSPACE = Path("/workspace")
 OUTPUT_DIR = WORKSPACE / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-W, H     = 1280, 720
+W, H     = 960, 540         # qHD — fits comfortably under GitHub's 100 MB file-size limit
 BG       = (15,  23,  42)   # slate-900
 FG       = (248, 250, 252)  # slate-50
 ACCENT   = (99,  102, 241)  # indigo-500
 MUTED    = (148, 163, 184)  # slate-400
 SLIDE_DURATION = 6          # seconds per slide (extended if TTS is longer)
+MAX_FEATURES   = 6          # cap so a long backlog can't push the MP4 over GitHub's limit
 
 PM_API_URL   = os.environ.get("PM_API_URL", "http://pm-api:8080")
 PRODUCT_ID   = int(os.environ.get("PRODUCT_ID", "0"))
@@ -174,11 +175,11 @@ def main():
             clips.append(ImageClip(str(slide), duration=SLIDE_DURATION))
         slide.unlink(missing_ok=True)
 
-        # Features (max 8)
-        for i, feat in enumerate(shipped[:8], 1):
+        # Features (cap at MAX_FEATURES)
+        for i, feat in enumerate(shipped[:MAX_FEATURES], 1):
             text = narrations.get(feat["name"]) or f"Feature: {feat['name']}. {feat.get('description','')[:200]}"
             slide = make_slide(feat["name"], feat.get("description","")[:120],
-                               index_label=f"Feature {i} of {min(len(shipped),8)}", accent_bar=False)
+                               index_label=f"Feature {i} of {min(len(shipped),MAX_FEATURES)}", accent_bar=False)
             ap = tmp / f"feat_{i}.mp3"
             ok = narrate(text, ap)
             if ok:
@@ -202,7 +203,8 @@ def main():
         ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         out = OUTPUT_DIR / f"product_video_{ts}.mp4"
         concatenate_videoclips(clips, method="compose").write_videofile(
-            str(out), fps=24, codec="libx264", audio_codec="aac", logger=None)
+            str(out), fps=24, codec="libx264", audio_codec="aac", logger=None,
+            ffmpeg_params=["-crf", "28", "-preset", "fast", "-pix_fmt", "yuv420p"])
         print(f"Video saved: {out}")
 
 if __name__ == "__main__":
@@ -217,15 +219,7 @@ PRODUCT_ID={product_id} PRODUCT_NAME="{product_name}" PM_API_URL="{pm_api_url}" 
 
 If generation fails due to missing dependencies, log the error and continue to Step 5 — don't fail the session.
 
-### Step 5 — Commit and push
-```bash
-cd /workspace
-git add output/
-git commit -m "feat: product showcase video — {session_uid}" || echo "Nothing to commit"
-git push
-```
-
-### Step 6 — Record completion
+### Step 5 — Record completion
 ```bash
 curl -s -X PATCH {pm_api_url}/api/products/{product_id} \
   -H "Content-Type: application/json" \
@@ -233,13 +227,16 @@ curl -s -X PATCH {pm_api_url}/api/products/{product_id} \
 echo "ProductTrainer {session_uid}: generated showcase for {product_name} — $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /workspace/session_summary.md
 ```
 
-### Step 7 — Exit 0
+### Step 6 — Exit 0
+
+Do NOT run `git add`, `git commit`, or `git push`. The orchestrator's post-session pipeline picks up everything in `/workspace/output/` and pushes it to `origin/main`. Pushing yourself was the old contract; under the maintenance-pipeline path a failed push (e.g. mp4 over GitHub's 100 MB single-file limit) lands in the orchestrator log instead of being silently lost on the next workspace reset.
 
 ---
 
 ## Hard rules
 
 - Do NOT modify any source code — read-only on the product codebase. The `output/` directory is the only place you write files.
-- If video generation fails, commit `narration.md` and any slide images that exist — partial output is better than nothing.
+- Do NOT run git commands. The orchestrator commits and pushes `/workspace/output/` after your session exits.
+- If video generation fails, leave `narration.md` and any partial slide images in `/workspace/output/` — the orchestrator commits and pushes whatever it finds. Partial output is better than nothing.
 - Always update `last_product_trainer_at` even if video generation fails — prevents retry loops.
 - Keep the narration professional and factual — describe what was built, not promises.

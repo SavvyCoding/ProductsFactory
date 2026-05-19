@@ -203,13 +203,25 @@ from orchestrator.pipelines.post_doc import (
 # git+GitHub fallback) moved into orchestrator/pipelines/post_coder.py.
 from orchestrator.pipelines.post_coder import _run_post_coder_pipeline
 # On-demand maintenance personas (documenter, analytics, recommender, devops,
-# refactorer): orchestrator owns git add/commit/push for any file edits the
-# agent left in the working tree. Without this, the agent's uncommitted work
-# is discarded by the next _cleanup_workspace_post_session reset.
+# refactorer, product_trainer): orchestrator owns git add/commit/push for any
+# file edits the agent left in the working tree. Without this, the agent's
+# uncommitted work is discarded by the next _cleanup_workspace_post_session
+# reset.
+#
+# product_trainer added 2026-05-18: previously the trainer prompt had its own
+# Step 5 "git add output/ && git commit && git push" block, but it had no
+# error check on push — a failed push (most commonly product_video_*.mp4
+# exceeding GitHub's 100 MB single-file limit, with no Git LFS configured)
+# silently left the commit local, and the next _reset_workspace --hard wiped
+# it. Routing the trainer through the same maintenance pipeline as documenter
+# means narration.md + slides + video are committed and pushed loudly: push
+# failures land in the log via post_maintenance.py's stderr capture instead of
+# being swallowed.
 from orchestrator.pipelines.post_maintenance import _run_post_maintenance_pipeline
 
 _MAINTENANCE_PERSONAS = frozenset({
     "documenter", "analytics", "recommender", "devops", "refactorer",
+    "product_trainer",
 })
 
 
