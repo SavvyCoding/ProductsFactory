@@ -3,6 +3,23 @@
 #
 # To install as a scheduled task: run deploy\windows\install_task.ps1 as Administrator
 # To run manually: powershell -File deploy\windows\start_poller.ps1
+#
+# DEPRECATED 2026-05-18: the live orchestrator now runs inside the
+# pf-orchestrator container — `docker compose --profile orchestrator up -d`.
+# This wrapper is preserved as a break-glass fallback only. Refuses to start
+# unless ALLOW_LEGACY_POLLER=1 is set, to prevent silent crash-loops like the
+# 2026-05-15 PyJWT incident.
+
+if (-not $env:ALLOW_LEGACY_POLLER) {
+    Write-Error @"
+
+start_poller.ps1: DEPRECATED — this host-mode wrapper is no longer the live path.
+  Live orchestrator:  docker compose --profile orchestrator up -d
+  See orchestrator/INVARIANTS.md preface for the consolidation note.
+  Override (not recommended):  `$env:ALLOW_LEGACY_POLLER='1'; .\start_poller.ps1
+"@
+    exit 2
+}
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
