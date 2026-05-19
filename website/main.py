@@ -508,6 +508,75 @@ async def _max_fix_attempts(db: AsyncSession) -> int:
     return val if (val and val > 0) else 5
 
 
+async def _close_blocked_feature_pr(
+    feature: Feature, github_repo: str, reason: str, db: AsyncSession
+) -> None:
+    """Close the GitHub PR for a feature that just transitioned to Blocked,
+    and clear pr_number / pr_url / branch_name on the feature row on success.
+
+    Best-effort: on close failure, fields are left in place for next-cycle
+    retry; on missing config (no token, no github_repo), logs a warning and
+    leaves state unchanged. Idempotent: a feature without pr_number is a
+    no-op.
+
+    Designed as the single chokepoint for "feature just got Blocked-routed,
+    close its open PR." Currently called from two sites:
+      - api_route_to_blocked_sprint (the orchestrator-driven entrypoint)
+      - api_update_feature's inline cap-routing block (the reviewer-PATCH
+        path at main.py:~2407 — fix_attempts crosses cap during a rework
+        cycle and the feature is routed inline without a separate POST)
+
+    If a third Blocked-routing path is ever added, route it through this
+    helper too. The 2026-05-19 PR #81 incident on StockAnalysis happened
+    because the inline path bypassed this helper's predecessor (the
+    inline loop inside api_route_to_blocked_sprint) and left PR #81 open
+    after feature 594 was Blocked.
+    """
+    if not feature.pr_number:
+        return
+    pr_n = int(feature.pr_number)
+    if not github_repo:
+        log.warning(
+            "blocked-pr-close: feature %s has pr_number=%s but product %s "
+            "has no github_repo — leaving PR open",
+            feature.id, pr_n, feature.product_id,
+        )
+        return
+    sys_cfg = await _get_system_config(db)
+    token = _github_token_from_config(sys_cfg)
+    if not token:
+        log.warning(
+            "blocked-pr-close: no GitHub token (App or PAT) — skipped "
+            "closing PR #%s for feature %s (product %s). PR will remain "
+            "open until a token is configured.",
+            pr_n, feature.id, feature.product_id,
+        )
+        return
+    try:
+        ok = close_pr(
+            github_repo, pr_n, token,
+            reason=f"Auto-closed: feature #{feature.id} routed to Blocked "
+                   f"sprint ({reason}).",
+        )
+        if ok:
+            feature.pr_number  = None
+            feature.pr_url     = None
+            feature.branch_name = None
+        else:
+            log.warning(
+                "blocked-pr-close: close_pr returned False for PR #%s "
+                "(feature %s) — leaving pr_number/pr_url/branch_name in "
+                "place for retry next cycle",
+                pr_n, feature.id,
+            )
+    except Exception:
+        log.exception(
+            "blocked-pr-close: close_pr crashed for PR #%s (feature %s) — "
+            "leaving pr_number/pr_url/branch_name in place for retry",
+            pr_n, feature.id,
+        )
+
+
 async def _next_planned_sprint(product_id: int, db: AsyncSession) -> Sprint | None:
     """Return the lowest-id planned sprint for this product, or None.
 
@@ -2431,6 +2500,17 @@ async def api_update_feature(
                 new_value="Blocked",
                 changed_by=f"{changed_by} (auto-blocked at cap)",
             ))
+            # Close the open GitHub PR for this feature (if any). Same
+            # chokepoint api_route_to_blocked_sprint uses — both Blocked-
+            # routing paths must close the PR or we get the 2026-05-19
+            # PR #81 shape (StockAnalysis feature 594 Blocked via this
+            # inline path; PR left open because the close hook only ran
+            # in api_route_to_blocked_sprint).
+            _product_for_pr = await db.get(Product, feature.product_id)
+            _gh_repo = (_product_for_pr.github_repo or "") if _product_for_pr else ""
+            await _close_blocked_feature_pr(
+                feature, _gh_repo, feature.blocked_reason or trigger, db,
+            )
 
     # Flush + refresh so response serialization can read server-computed
     # columns (updated_at uses onupdate=func.now()) without triggering a
@@ -3197,40 +3277,8 @@ async def api_route_to_blocked_sprint(
     if pr_close_targets:
         product = await db.get(Product, product_id)
         github_repo = (product.github_repo or "") if product else ""
-        sys_cfg = await _get_system_config(db)
-        token = _github_token_from_config(sys_cfg)
-        if github_repo and token:
-            for feat, pr_n in pr_close_targets:
-                try:
-                    ok = close_pr(
-                        github_repo, pr_n, token,
-                        reason=f"Auto-closed: feature #{feat.id} routed to Blocked sprint "
-                               f"({reason}).",
-                    )
-                    if ok:
-                        feat.pr_number  = None
-                        feat.pr_url     = None
-                        feat.branch_name = None
-                    else:
-                        log.warning(
-                            "blocked-route: close_pr returned False for product %s PR #%s "
-                            "(feature #%s) — leaving pr_number/pr_url/branch_name in place "
-                            "for retry next cycle",
-                            product_id, pr_n, feat.id,
-                        )
-                except Exception:
-                    log.exception(
-                        "blocked-route: close_pr crashed for product %s PR #%s (feature #%s) — "
-                        "leaving pr_number/pr_url/branch_name in place for retry",
-                        product_id, pr_n, feat.id,
-                    )
-        elif github_repo:
-            log.warning(
-                "blocked-route: no GitHub token (App or PAT) available — skipped closing "
-                "%d PR(s) on product %s. They will remain open until a token is configured.",
-                len(pr_close_targets), product_id,
-            )
-        # else: product has no github_repo (local-only); nothing to close.
+        for feat, _pr_n in pr_close_targets:
+            await _close_blocked_feature_pr(feat, github_repo, reason, db)
 
     return {"moved": len(moved), "sprint_id": blocked.id, "feature_ids": moved}
 
