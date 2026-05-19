@@ -41,7 +41,38 @@ Conventions specific to this subsystem:
 """
 
 import os
+import sys
 from pathlib import Path
+
+# ── Deprecation guard ────────────────────────────────────────────────────────
+# This host-mode poller was the legacy entry point invoked by
+# deploy/windows/start_poller.ps1 + deploy/windows/install_task.ps1. The live
+# system runs the orchestrator inside the pf-orchestrator container — see
+# deploy/docker/Dockerfile.orchestrator + deploy/orchestrator/orchestrate.py
+# and the INVARIANTS.md preface "Two orchestrator implementations co-exist"
+# paragraph for the consolidation history.
+#
+# Last known-good host-mode run was 2026-05-15. After that the GitHub App
+# migration added a PyJWT runtime dep that was never installed into the
+# wrapper's venv, so every restart for 3+ days failed with
+# `ModuleNotFoundError: No module named 'jwt'` and silently looped 18 times in
+# 3 minutes before the wrapper itself died. No alarm fired — there's no
+# "no cycle in N minutes" heartbeat.
+#
+# Refuse to start unless the operator opts in. The override is for emergencies
+# (container daemon down, image build broken) and must be paired with
+# `pip install -r requirements.txt` against the same venv this script uses,
+# or you'll just re-hit the PyJWT crash-loop.
+if not os.environ.get("ALLOW_LEGACY_POLLER"):
+    sys.stderr.write(
+        "\n[poller.py] DEPRECATED — this host-mode entry point is no longer "
+        "the live path.\n"
+        "  Live orchestrator: docker compose --profile orchestrator up -d\n"
+        "  See orchestrator/INVARIANTS.md preface for the consolidation note.\n"
+        "  Override (not recommended):  ALLOW_LEGACY_POLLER=1 "
+        "python orchestrator/poller.py\n\n"
+    )
+    sys.exit(2)
 
 # Auto-load .env from repo root - MUST happen before any other imports
 # because docker_runner.py reads env vars at module level.
