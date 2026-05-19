@@ -3157,6 +3157,15 @@ async def api_route_to_blocked_sprint(
     fix_attempts crosses max_fix_attempts. Also creates the Blocked sprint
     on first use if it doesn't exist. Idempotent — re-routing a feature
     that's already there is a no-op.
+
+    Closes the feature's open GitHub PR (if any) as a side effect. Pre-fix
+    (2026-05-19) the route handler only updated DB state and left the GitHub
+    PR open — that's why StockAnalysis accumulated open PRs #67 / #77 on
+    Blocked-routed features. The reconcile-sweep callsite in github_client
+    fires only when a PR was *already closed*, so this is the chokepoint
+    for "PR still open at the moment of Blocked routing." On close success,
+    pr_number/pr_url/branch_name are cleared on the feature; on failure they
+    are left in place so a subsequent retry has the PR number.
     """
     feature_ids = body.feature_ids
     reason = body.reason or "auto-escalated after exceeding max_fix_attempts"
@@ -3164,17 +3173,65 @@ async def api_route_to_blocked_sprint(
         return {"moved": 0, "sprint_id": None}
     blocked = await _get_or_create_blocked_sprint(product_id, db)
     moved: list[int] = []
+    # (feature_obj, pr_number) pairs captured before the status flip so we can
+    # close the PR after the DB updates land — close happens out-of-transaction
+    # because PATCHing GitHub is a multi-hundred-millisecond network call.
+    pr_close_targets: list[tuple[Feature, int]] = []
     for fid in feature_ids:
         feat = await db.get(Feature, fid)
         if not feat or feat.product_id != product_id:
             continue
         if feat.sprint_id == blocked.id and feat.status == "Blocked":
             continue  # already routed
+        if feat.pr_number:
+            pr_close_targets.append((feat, int(feat.pr_number)))
         feat.sprint_id = blocked.id
         feat.status = "Blocked"
         if not feat.blocked_reason:
             feat.blocked_reason = reason
         moved.append(fid)
+
+    # Close GitHub PRs for newly-routed features. Best-effort — a failure
+    # here must not fail the route, because the DB is already mutated and
+    # the next reconcile cycle would re-attempt the routing as a no-op.
+    if pr_close_targets:
+        product = await db.get(Product, product_id)
+        github_repo = (product.github_repo or "") if product else ""
+        sys_cfg = await _get_system_config(db)
+        token = _github_token_from_config(sys_cfg)
+        if github_repo and token:
+            for feat, pr_n in pr_close_targets:
+                try:
+                    ok = close_pr(
+                        github_repo, pr_n, token,
+                        reason=f"Auto-closed: feature #{feat.id} routed to Blocked sprint "
+                               f"({reason}).",
+                    )
+                    if ok:
+                        feat.pr_number  = None
+                        feat.pr_url     = None
+                        feat.branch_name = None
+                    else:
+                        log.warning(
+                            "blocked-route: close_pr returned False for product %s PR #%s "
+                            "(feature #%s) — leaving pr_number/pr_url/branch_name in place "
+                            "for retry next cycle",
+                            product_id, pr_n, feat.id,
+                        )
+                except Exception:
+                    log.exception(
+                        "blocked-route: close_pr crashed for product %s PR #%s (feature #%s) — "
+                        "leaving pr_number/pr_url/branch_name in place for retry",
+                        product_id, pr_n, feat.id,
+                    )
+        elif github_repo:
+            log.warning(
+                "blocked-route: no GitHub token (App or PAT) available — skipped closing "
+                "%d PR(s) on product %s. They will remain open until a token is configured.",
+                len(pr_close_targets), product_id,
+            )
+        # else: product has no github_repo (local-only); nothing to close.
+
     return {"moved": len(moved), "sprint_id": blocked.id, "feature_ids": moved}
 
 
