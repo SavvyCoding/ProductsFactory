@@ -487,11 +487,60 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     # run"; with it off, the bare-branch-no-PR legacy path warns + bails.
     sprint_pr_mode = bool(product.get("_sprint_pr_mode"))
 
-    # Detect the default branch from the workspace state. `_reset_workspace`
-    # has already checked us out onto `main` or `master`; whichever it
-    # landed on is the repo's default branch and the merge target.
+    # Resolve the repo's true default branch via origin refs — do NOT trust
+    # the local HEAD. A prior _reset_workspace that silently failed (stale
+    # index.lock, fetch error, checkout failure, etc.) can leave HEAD on a
+    # coder/<uid> branch from a previous session. Reading HEAD then would
+    # set default_branch to that coder branch, and downstream we'd both
+    # (a) cut the new session branch off origin/coder/<prev-uid> and
+    # (b) open the GitHub PR with base=coder/<prev-uid>. PR #77 on
+    # StockAnalysis (feature 590) was the canonical incident — 2026-05-19.
+    default_branch = ""
+    for _candidate in ("origin/main", "origin/master"):
+        _rv = _run(["git", "rev-parse", "--verify", _candidate])
+        if _rv.returncode == 0:
+            default_branch = _candidate.split("/", 1)[1]
+            break
+    if not default_branch:
+        log.error(
+            f"[post-coder] {pname}: could not resolve repo default branch via "
+            f"origin/main or origin/master — bailing without opening a PR. "
+            f"Workspace likely has no fetched remote refs; investigate _reset_workspace."
+        )
+        return pushed_ids
+
+    # Belt-and-braces: if local HEAD is on a coder/* or sprint/* branch, that
+    # is evidence _reset_workspace didn't land cleanly. Force checkout to the
+    # true default branch before continuing — agent's working-tree edits are
+    # restashed-and-popped so they survive the switch. Loud warning so the
+    # operator can chase the _reset_workspace failure separately.
     _hb = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
-    default_branch = (_hb.stdout or "").strip() or "main"
+    current_head = (_hb.stdout or "").strip()
+    if current_head.startswith(("coder/", "sprint/")):
+        log.warning(
+            f"[post-coder] {pname}: HEAD is on {current_head!r} entering "
+            f"post-coder (should have been {default_branch!r} after "
+            f"_reset_workspace) — forcing checkout. This indicates "
+            f"_reset_workspace silently failed; check the prior session's "
+            f"reset logs."
+        )
+        _pre = _run(["git", "stash", "push", "-u", "-m",
+                     f"post-coder-pre-reset-{session_uid}"], timeout=300)
+        _pre_stashed = (_pre.returncode == 0
+                        and "No local changes to save" not in (_pre.stdout or ""))
+        _co = _run(["git", "checkout", "-f", default_branch])
+        if _co.returncode != 0:
+            log.error(
+                f"[post-coder] {pname}: forced checkout to {default_branch} "
+                f"failed — {_fmt_err(_co)}. Bailing rather than opening a PR "
+                f"with the wrong base."
+            )
+            if _pre_stashed:
+                _run(["git", "stash", "pop"])  # best-effort restore
+            return pushed_ids
+        _run(["git", "reset", "--hard", f"origin/{default_branch}"])
+        if _pre_stashed:
+            _run(["git", "stash", "pop"])
 
     # Rework detection: when every assigned feature shares one open PR, the
     # prior coder cycle produced a session PR that the reviewer rejected and
