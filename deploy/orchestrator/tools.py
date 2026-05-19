@@ -647,9 +647,33 @@ def run_cycle(args: dict, **kwargs) -> str:
                 launch_result = json.loads(launch_session(
                     {"product_id": pid, "persona": "reviewer"}, **kwargs
                 ))
-                return _ok({"action": "launched", "product_id": pid, "persona": "reviewer",
-                            "reason": f"reviewer work for feature {reviewer_feature.get('id')}",
-                            "launch": launch_result})
+                # If launch_session deferred because a session is already
+                # running on this product, fall through to Priority 2
+                # (round-robin) so OTHER products' work isn't starved for
+                # the duration of the active session. Pre-fix (2026-05-19)
+                # this branch returned action=launched regardless of the
+                # deferral, which (a) produced misleading "launched reviewer"
+                # log lines every cycle for the duration of the blocking
+                # session (typically up to 90 minutes), and (b) starved
+                # other ready products of any dispatch slot during that
+                # window. See the e60fd18 precedent for the Priority-0
+                # on-demand path (which had the same shape).
+                launch_data = launch_result.get("data") if isinstance(launch_result, dict) else None
+                if isinstance(launch_data, dict) and launch_data.get("status") in (
+                    "already_active", "already_launching",
+                ):
+                    log.info(
+                        f"[reviewer] deferred for product {pid} "
+                        f"(feature {reviewer_feature.get('id')}, status="
+                        f"{launch_data.get('status')}, existing_session="
+                        f"{launch_data.get('existing_session_id')}) — falling "
+                        f"through to round-robin"
+                    )
+                    # fall through (don't return) so Priority 2 gets a turn
+                else:
+                    return _ok({"action": "launched", "product_id": pid, "persona": "reviewer",
+                                "reason": f"reviewer work for feature {reviewer_feature.get('id')}",
+                                "launch": launch_result})
 
         # Priority 2: round-robin product
         next_raw = json.loads(_pm("GET", "/api/products/next"))
