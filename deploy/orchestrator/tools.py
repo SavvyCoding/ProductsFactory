@@ -631,6 +631,16 @@ def run_cycle(args: dict, **kwargs) -> str:
                     _pm("PATCH", f"/api/products/{pid}", restore_patch)
                 except Exception:
                     log.exception(f"[on-demand] could not restore flag on product {pid}")
+                # Honest reporting (matches Priority 2 below) — don't claim
+                # "launched" when launch_session short-circuited via the
+                # active-session guard.
+                return _ok({"action": "deferred", "product_id": pid, "persona": persona,
+                            "reason": (
+                                f"on-demand {persona} deferred "
+                                f"(status={launch_data.get('status')}); "
+                                f"flag restored for next cycle"
+                            ),
+                            "launch": launch_result})
             return _ok({"action": "launched", "product_id": pid, "persona": persona,
                         "reason": f"on-demand {persona}",
                         "launch": launch_result})
@@ -710,6 +720,25 @@ def run_cycle(args: dict, **kwargs) -> str:
             launch_result = json.loads(launch_session(
                 {"product_id": product_id, "persona": persona}, **kwargs
             ))
+            # Same shape as the Priority 0 (on-demand) and Priority 1 (reviewer)
+            # branches: report the deferred status honestly when launch_session
+            # short-circuits via the active-session guard. Priority 2 is the
+            # terminal priority — there's nothing to fall through to — so this
+            # is a log-honesty fix, not a behavior change. action="deferred"
+            # makes the cycle-summary line accurate (operator was seeing
+            # "launched session" every cycle while a coder was running, with no
+            # container actually spawned).
+            launch_data = launch_result.get("data") if isinstance(launch_result, dict) else None
+            if isinstance(launch_data, dict) and launch_data.get("status") in (
+                "already_active", "already_launching",
+            ):
+                return _ok({"action": "deferred", "product_id": product_id, "persona": persona,
+                            "reason": (
+                                f"launch deferred (status={launch_data.get('status')}, "
+                                f"existing_session={launch_data.get('existing_session_id')}); "
+                                f"product {product_id} already has work in flight"
+                            ),
+                            "launch": launch_result})
             return _ok({"action": "launched", "product_id": product_id, "persona": persona,
                         "reason": action_data.get("reason", ""),
                         "launch": launch_result})
