@@ -87,7 +87,3 @@ echo ""
 echo "Next steps:"
 echo "  1. Start infrastructure:   docker compose up -d  (from repo root)"
 echo "  2. Orchestrator:           docker compose --profile orchestrator up -d"
-# Legacy host-mode poller (orchestrator/poller.py via deploy/windows/start_poller.ps1)
-# was retired 2026-05-18 — see those files' deprecation guards and INVARIANTS.md
-# preface for the consolidation history. No longer mentioned here so new
-# contributors aren't directed at the dead path.

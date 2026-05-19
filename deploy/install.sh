@@ -5,7 +5,11 @@
 #   1. Creates the Docker bridge network (productfactory-net)
 #   2. Builds the agent image (productfactory-agent)
 #   3. Builds and starts the infrastructure containers (PostgreSQL + PM website)
-#   4. Installs the poller startup entry (Windows Startup folder)
+#
+# (Step 4 was "Install the poller startup entry"; the legacy host-mode poller
+# was retired 2026-05-18 — the orchestrator now runs inside the
+# pf-orchestrator container started by `docker compose --profile orchestrator
+# up -d`.)
 #
 # Prerequisites:
 #   - Docker Desktop running
@@ -21,7 +25,7 @@ echo "=== ProductFactory Setup ==="
 echo ""
 
 # ── 1. Check prerequisites ────────────────────────────────────────────────────
-echo "[1/5] Checking prerequisites..."
+echo "[1/4] Checking prerequisites..."
 
 if ! docker info &>/dev/null; then
     echo "  ERROR: Docker is not running. Start Docker Desktop first."
@@ -42,7 +46,7 @@ fi
 echo "  OK"
 
 # ── 2. Create Docker network (idempotent) ─────────────────────────────────────
-echo "[2/5] Creating Docker network: productfactory-net"
+echo "[2/4] Creating Docker network: productfactory-net"
 if docker network inspect productfactory-net &>/dev/null; then
     echo "  Already exists — skipping"
 else
@@ -51,7 +55,7 @@ else
 fi
 
 # ── 3. Build agent image ──────────────────────────────────────────────────────
-echo "[3/5] Building agent image (productfactory-agent)..."
+echo "[3/4] Building agent image (productfactory-agent)..."
 echo "      First build takes 5-15 minutes (pyenv downloads Python runtimes)"
 docker build \
     --file deploy/docker/Dockerfile \
@@ -61,7 +65,7 @@ docker build \
 echo "  Built: productfactory-agent"
 
 # ── 4. Start infrastructure (PostgreSQL + PM website) ────────────────────────
-echo "[4/5] Starting infrastructure containers..."
+echo "[4/4] Starting infrastructure containers..."
 docker compose up -d --build
 echo "  Waiting for PM website to be ready..."
 for i in $(seq 1 30); do
@@ -72,28 +76,15 @@ for i in $(seq 1 30); do
     sleep 2
 done
 
-# ── 5. Install poller startup entry ──────────────────────────────────────────
-echo "[5/5] Installing poller startup entry..."
-STARTUP_DIR="$APPDATA/Microsoft/Windows/Start Menu/Programs/Startup"
-STARTUP_BAT="$STARTUP_DIR/ProductFactoryPoller.bat"
-
-cat > "$STARTUP_BAT" << EOF
-@echo off
-powershell.exe -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${REPO_ROOT//\//\\}\\deploy\\windows\\start_poller.ps1"
-EOF
-
-echo "  Installed: $STARTUP_BAT"
-echo "  (Runs automatically on next Windows login)"
-
 echo ""
 echo "=== Setup complete ==="
 echo ""
 echo "PM Website:  http://localhost:8080  (admin / see .env PM_PASSWORD)"
 echo "DB:          ProductsFactoryDB container (PostgreSQL 16)"
 echo ""
-echo "To start the poller now (no reboot needed):"
-echo "  source .env && PYTHONIOENCODING=utf-8 .venv/Scripts/python -m orchestrator.poller"
+echo "To start the orchestrator:"
+echo "  docker compose --profile orchestrator up -d"
 echo ""
 echo "Logs:"
-echo "  docker compose logs -f          # web + db logs"
-echo "  tail -f orchestrator/poller.log # poller log"
+echo "  docker compose logs -f                    # web + db logs"
+echo "  docker logs -f pf-orchestrator            # orchestrator logs"

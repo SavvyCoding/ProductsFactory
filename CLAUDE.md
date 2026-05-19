@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ProductFactory is a 24/7 autonomous development system. It orchestrates Claude Code agents inside isolated Docker containers to implement features across multiple product repos, monitored by a FastAPI PM dashboard.
 
 **Three independent subsystems:**
-- **Orchestrator** (`orchestrator/`) — long-running host process. See its module docstrings (`orchestrator/poller.py`, `dispatch.py`, `auto_merge.py`, `reconcile.py`, `supervisor.py`) and `orchestrator/INVARIANTS.md` for the behavioral contract.
+- **Orchestrator** (`orchestrator/` + `deploy/orchestrator/`) — long-running process inside the `pf-orchestrator` container. The cycle loop is `deploy/orchestrator/orchestrate.py` calling `tools.run_cycle` every ~60s; per-cycle decisions live in `orchestrator/cycle/persona.py`. See module docstrings (`orchestrator/auto_merge.py`, `reconcile.py`, `supervisor.py`, `docker_runner.py`) and `orchestrator/INVARIANTS.md` for the behavioral contract. (The host-mode `orchestrator/poller.py` and `orchestrator/dispatch.py` were retired 2026-05-18.)
 - **PM Website** (`website/`) — FastAPI dashboard + REST API for managing products and features
 - **Agent Image** (`deploy/docker/Dockerfile`) — Docker image Claude runs inside per product session
 
@@ -41,7 +41,7 @@ TEST_DATABASE_URL=postgresql://productfactory:PASSWORD@localhost:5432/productfac
   pytest tests/ -v
 
 # Run a single test file
-pytest tests/test_poller.py -v
+pytest tests/test_orchestrator_helpers.py -v
 
 # Run a single test
 pytest tests/test_website.py::test_list_products -v
@@ -49,8 +49,8 @@ pytest tests/test_website.py::test_list_products -v
 # Run with coverage
 pytest tests/ --cov=orchestrator,website --cov-fail-under=70
 
-# Start the poller (Windows host, after .env is configured)
-python orchestrator/poller.py
+# Start the orchestrator (container; production path)
+docker compose --profile orchestrator up -d
 
 # Start PM website locally (outside Docker)
 uvicorn website.main:app --host 0.0.0.0 --port 8080
