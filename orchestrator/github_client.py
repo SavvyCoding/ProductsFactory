@@ -410,3 +410,159 @@ def reconcile_in_flight_prs(product: dict):
 
     except Exception as e:
         log.warning(f"reconcile_in_flight_prs failed: {e}")
+
+
+def reconcile_orphaned_session_prs(product: dict):
+    """Close GitHub PRs in the coder/<uid> namespace that no feature references.
+
+    The single source of truth for "PR should be open" is the features table:
+    if a session PR exists on GitHub but no feature row has pr_number == that
+    PR number, the PR is orphaned. Possible causes (all caught by this sweep):
+
+      1. post_coder.py opens the PR at line ~1570, then the lint or test guard
+         at line ~1595 / ~1664 rejects the commit and returns early without
+         writing pr_number to the DB (the PATCH that links the feature is at
+         line ~1793, never reached on gate failure).
+      2. supervisor.detect_rapid_flap routes a feature to Blocked while a
+         coder session is still running on the same product; post-coder then
+         opens a PR at session-end for an already-Blocked feature.
+      3. website._close_blocked_feature_pr crashed or returned False on a
+         Blocked-route, leaving the GitHub PR open after pr_number was cleared.
+      4. Any future leak vector — this sweep is invariant-based, not
+         event-based, so new bugs land in the same bucket and self-heal.
+
+    Three safety gates make closing safe:
+      - Namespace: head.ref starts with "coder/" (our session-branch prefix).
+        Never touches main, feature/, hotfix/, etc.
+      - Authorship: user.type == "Bot" (the GitHub App opened it). Excludes
+        manual PRs on the same branch namespace.
+      - Grace window: PR.created_at is older than ORPHAN_GRACE_SECONDS.
+        Absorbs the small gap between gh pr create (post_coder.py:1570) and
+        the post-coder PATCH that writes pr_number (post_coder.py:1793),
+        so we don't close a PR mid-handoff.
+    """
+    ORPHAN_GRACE_SECONDS = 90
+
+    slug = _parse_repo_slug(product)
+    if not slug:
+        return
+    owner, repo = slug
+
+    resp = _gh_get(
+        f"https://api.github.com/repos/{owner}/{repo}/pulls",
+        params={"state": "open", "per_page": 50},
+        headers=_github_headers(),
+    )
+    if resp is None or resp.status_code != 200:
+        return
+    open_prs = resp.json()
+    if not isinstance(open_prs, list) or not open_prs:
+        return
+
+    from datetime import datetime, timezone, timedelta
+    grace_cutoff = datetime.now(timezone.utc) - timedelta(seconds=ORPHAN_GRACE_SECONDS)
+
+    candidates: list[dict] = []
+    for pr in open_prs:
+        head_ref = ((pr.get("head") or {}).get("ref") or "")
+        if not head_ref.startswith("coder/"):
+            continue
+        user = pr.get("user") or {}
+        if (user.get("type") or "") != "Bot":
+            continue
+        created_raw = pr.get("created_at") or ""
+        try:
+            created = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if created > grace_cutoff:
+            continue
+        candidates.append(pr)
+
+    if not candidates:
+        return
+
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=15) as client:
+            feat_resp = client.get(f"/api/products/{product['id']}/features")
+            if feat_resp.status_code != 200:
+                log.warning(
+                    f"reconcile_orphaned_session_prs: features fetch failed "
+                    f"({feat_resp.status_code}) for product {product.get('id')}"
+                )
+                return
+            features = feat_resp.json()
+            if not isinstance(features, list):
+                return
+    except Exception as e:
+        log.warning(f"reconcile_orphaned_session_prs: PM client error: {e}")
+        return
+
+    import re as _re
+    linked: set[int] = set()
+    for f in features:
+        n = f.get("pr_number")
+        if n:
+            linked.add(int(n))
+            continue
+        url = f.get("pr_url") or ""
+        m = _re.search(r"/pull/(\d+)", url)
+        if m:
+            linked.add(int(m.group(1)))
+
+    orphans = [pr for pr in candidates if pr["number"] not in linked]
+    if not orphans:
+        return
+
+    token = _get_auth_token()
+    if not token:
+        log.warning(
+            f"reconcile_orphaned_session_prs: no auth token; leaving "
+            f"{len(orphans)} orphan(s) open on product {product.get('id')}"
+        )
+        return
+
+    headers = _github_headers()
+    closed = 0
+    for pr in orphans:
+        pr_n = pr["number"]
+        head_ref = pr["head"]["ref"]
+        body = (
+            f"Auto-closed by ProductFactory reconciler: this session PR is "
+            f"orphaned — no feature in the database references PR #{pr_n}. "
+            f"Common causes are the post-coder lint/test gate rejected the "
+            f"commit before linking the feature, or the feature was routed "
+            f"to Blocked while the coder session was still running. Branch "
+            f"`{head_ref}` is left in place for inspection."
+        )
+        try:
+            httpx.post(
+                f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_n}/comments",
+                json={"body": body}, headers=headers, timeout=15,
+            )
+            cresp = httpx.patch(
+                f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_n}",
+                json={"state": "closed"}, headers=headers, timeout=15,
+            )
+            if cresp.status_code == 200:
+                closed += 1
+                log.info(
+                    f"reconcile_orphaned_session_prs: closed orphan PR #{pr_n} "
+                    f"({head_ref}) on {owner}/{repo}"
+                )
+            else:
+                log.warning(
+                    f"reconcile_orphaned_session_prs: PATCH {cresp.status_code} "
+                    f"on PR #{pr_n} ({owner}/{repo})"
+                )
+        except Exception as e:
+            log.warning(
+                f"reconcile_orphaned_session_prs: error closing PR #{pr_n} "
+                f"on {owner}/{repo}: {e}"
+            )
+
+    if closed:
+        log.info(
+            f"reconcile_orphaned_session_prs: closed {closed}/{len(orphans)} "
+            f"orphan PR(s) on product {product.get('id')} ({owner}/{repo})"
+        )

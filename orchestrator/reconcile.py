@@ -7,6 +7,15 @@ the existing reconciliation passes in a defined order:
   1. reconcile_merged_prs  — sync GitHub-side merges/closures back to DB
   2. reconcile_in_flight_prs — drill into each in-flight feature, route
                                to Blocked sprint when fix_attempts cap hits
+  3. reconcile_orphaned_session_prs — close GitHub PRs in the coder/<uid>
+                               namespace that no feature row references.
+                               This is the single chokepoint for orphan
+                               cleanup; the prior model relied on every
+                               Blocked-routing callsite remembering to
+                               call _close_blocked_feature_pr, which
+                               could not cover post-coder lint/test
+                               early-return orphans or supervisor-during-
+                               session races.
 
 (`reconcile_sprint_pr_state` was retired with the 1-PR model on
 2026-05-15 — sprints no longer have their own PR to keep in sync.)
@@ -34,6 +43,7 @@ import os
 from orchestrator.github_client import (
     reconcile_in_flight_prs,
     reconcile_merged_prs,
+    reconcile_orphaned_session_prs,
 )
 
 log = logging.getLogger("reconcile")
@@ -63,3 +73,8 @@ def reconcile_product(product: dict) -> None:
         reconcile_in_flight_prs(product)
     except Exception:
         log.exception(f"reconcile_in_flight_prs crashed for product {pid} ({pname})")
+
+    try:
+        reconcile_orphaned_session_prs(product)
+    except Exception:
+        log.exception(f"reconcile_orphaned_session_prs crashed for product {pid} ({pname})")
