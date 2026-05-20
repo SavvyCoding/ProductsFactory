@@ -806,6 +806,66 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
             f"get_db_connection() as conn:` to make the check unambiguous."
         )
 
+    # --- Guard 15: alembic-branch detection ---
+    # When two coder sessions independently create migrations for the same or
+    # related schema concerns, both can end up branching off the same
+    # down_revision, producing parallel alembic heads that require a manual
+    # `alembic merge heads` to reconcile. Real 2026-05-20 incident: MyDocusign
+    # had session A ship a stub migration (`232cdbb426a1`, upgrade() pass)
+    # and session B ship the real one (`232cdbb426a2`), both `Revises:
+    # 20260520043729`. A third merge-heads migration (`dffefb102f96`) had to
+    # be added later to reunite the chain.
+    #
+    # This guard scans alembic/versions/ on disk for any two files sharing a
+    # single-parent down_revision, when a new migration file is being added
+    # by this commit. Skips merge migrations (which legitimately have
+    # tuple/sequence parents) because their down_revision doesn't match the
+    # single-string pattern.
+    from pathlib import Path as _PP
+    new_alembic_files = [
+        f for f in files
+        if f.startswith("alembic/versions/") and f.endswith(".py")
+    ]
+    if new_alembic_files:
+        versions_dir = _PP(working_dir) / "alembic" / "versions"
+        revises_map: dict[str, list[str]] = {}
+        if versions_dir.is_dir():
+            # Match single-string `down_revision = 'X'` (with or without a
+            # type annotation). Tuple/sequence values (merge migrations) and
+            # `= None` (initial migrations) are intentionally skipped.
+            _down_re = _re.compile(
+                r"^down_revision(?:\s*:\s*[^=\n]+)?\s*=\s*[\"']([^\"']+)[\"']\s*$",
+                _re.MULTILINE,
+            )
+            for migration_path in versions_dir.glob("*.py"):
+                try:
+                    content = migration_path.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                except Exception:
+                    continue
+                m = _down_re.search(content)
+                if m:
+                    revises_map.setdefault(m.group(1), []).append(migration_path.name)
+        new_alembic_basenames = {_PP(f).name for f in new_alembic_files}
+        branch_hits = []
+        for down_rev, migrations in revises_map.items():
+            if len(migrations) > 1 and any(m in new_alembic_basenames for m in migrations):
+                branch_hits.append(
+                    f"`{down_rev}` ← {', '.join(sorted(migrations))}"
+                )
+        if branch_hits:
+            violations.append(
+                "alembic branch detected — multiple migrations share the same "
+                "down_revision, which will require an `alembic merge heads` "
+                "to reconcile: " + "; ".join(branch_hits) + ". "
+                "Either rebase the new migration on the existing head, or "
+                "delete the duplicate before commit. Canonical incident: "
+                "MyDocusign 2026-05-20 #618 shipped a stub + real pair "
+                "(`232cdbb426a1` empty, `232cdbb426a2` real), both "
+                "branching from `20260520043729`."
+            )
+
     return violations
 
 
