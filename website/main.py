@@ -1449,32 +1449,6 @@ async def save_schedule(
     return RedirectResponse(f"/product/{product_id}?tab=settings", status_code=303)
 
 
-@app.post("/product/{product_id}/sprints/create")
-async def create_sprint_form(
-    product_id: int,
-    name:       str = Form(...),
-    goal:       str = Form(""),
-    start_date: str = Form(""),
-    end_date:   str = Form(""),
-    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
-):
-    """Create a sprint from the Sprints tab form."""
-    from datetime import date as _date
-    await _get_product_or_404(product_id, db)
-    sprint = Sprint(
-        product_id=product_id,
-        name=name.strip(),
-        goal=goal.strip() or None,
-        start_date=_date.fromisoformat(start_date) if start_date else None,
-        end_date=_date.fromisoformat(end_date) if end_date else None,
-        status="active",
-    )
-    db.add(sprint)
-    await db.flush()
-    # 1-PR model: no sprint integration branch/PR to provision.
-    return RedirectResponse(f"/product/{product_id}?tab=sprints", status_code=303)
-
-
 @app.post("/api/sprints/bug-fix", response_model=schemas.SprintOut, status_code=201)
 async def api_create_bugfix_sprint(body: schemas.BugFixSprintCreate, db: AsyncSession = Depends(get_db)):
     """
@@ -1583,36 +1557,6 @@ async def api_sprint_report(sprint_id: int, db: AsyncSession = Depends(get_db)):
             for f in sprint_features
         ],
         "sessions": sessions,
-    }
-
-
-@app.post("/api/sprints/{sprint_id}/force-complete")
-async def api_force_complete_sprint(sprint_id: int, db: AsyncSession = Depends(get_db)):
-    """
-    Poller calls this when all features are terminal: auto-signs DoD gates,
-    generates release notes, marks sprint completed, activates next sprint.
-    Single endpoint replaces the poller's manual multi-step completion logic.
-    """
-    sprint = await db.get(Sprint, sprint_id)
-    if not sprint:
-        raise HTTPException(status_code=404, detail="Sprint not found")
-    if sprint.status == "completed":
-        return {"action": "already_completed"}
-
-    # Phase 4 simplification (2026-05-06): qa_passed/security_clean
-    # gates retired with the qa_tester + security_auditor → reviewer
-    # merge. force-complete now only ensures retro_done is left as-is
-    # (agent-owned). No structural gates need auto-signing here.
-    # Pre-existing sprints with the legacy gates set keep them in
-    # dod_status for archaeology.
-
-    # Full completion: set completed_at, generate release notes, activate next sprint
-    await _do_complete_sprint(sprint, sprint.product_id, db)
-
-    return {
-        "action": "completed",
-        "sprint_id": sprint_id,
-        "release_notes": sprint.release_notes,
     }
 
 
@@ -3750,34 +3694,6 @@ async def api_active_session(
     return sessions
 
 
-@app.get("/api/products/{product_id}/sessions/audit")
-async def api_session_audit(product_id: int, limit: int = 10, db: AsyncSession = Depends(get_db)):
-    """
-    Returns the last N completed sessions for a product, ordered newest-first.
-    Used by the orchestrator to detect looping (same persona, no progress) before launching.
-    """
-    q = (
-        select(DBSession)
-        .where(DBSession.product_id == product_id, DBSession.ended_at.is_not(None))
-        .order_by(DBSession.started_at.desc())
-        .limit(limit)
-    )
-    result = await db.execute(q)
-    sessions = result.scalars().all()
-    return [
-        {
-            "id":                 s.id,
-            "persona":            s.persona,
-            "exit_code":          s.exit_code,
-            "features_attempted": s.features_attempted,
-            "features_pushed":    s.features_pushed,
-            "started_at":         s.started_at.isoformat() if s.started_at else None,
-            "ended_at":           s.ended_at.isoformat() if s.ended_at else None,
-        }
-        for s in sessions
-    ]
-
-
 @app.patch("/api/sessions/{session_id}", response_model=schemas.SessionOut)
 async def api_end_session(
     session_id: int, body: schemas.SessionEnd,
@@ -3937,27 +3853,6 @@ async def api_get_session(session_id: int, db: AsyncSession = Depends(get_db)):
         # for in-flight sessions too.
         "log": session.log or _snapshot_session_log(session),
     }
-
-
-@app.patch("/api/products/{product_id}/last-session/persona")
-async def api_set_last_session_persona(
-    product_id: int, body: schemas.SessionPersonaSetRequest,
-    db: AsyncSession = Depends(get_db),
-):
-    """Poller calls this after container exits to record the persona on the most recent session."""
-    persona = body.persona
-    if not persona:
-        raise HTTPException(status_code=422, detail="persona required")
-    result = await db.execute(
-        select(DBSession)
-        .where(DBSession.product_id == product_id)
-        .order_by(DBSession.started_at.desc())
-        .limit(1)
-    )
-    session = result.scalar_one_or_none()
-    if session:
-        session.persona = persona
-    return {"ok": True}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

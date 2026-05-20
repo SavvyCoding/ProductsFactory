@@ -208,9 +208,9 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 - *How*: `dispatch._decide_complete_sprint` returns `"retrospective"` if all sprint features are in `TERMINAL = {Pushed, Deferred, Rejected, Reverted}` and `retro_doc_path` is unset.
 - *Why*: Retro must run while sprint context is fresh, before the next sprint activates.
 
-**VIII.4 ✅ A sprint with retro complete is force-completed via API.**
-- *How*: `dispatch._decide_complete_sprint` calls `POST /api/sprints/{id}/force-complete` once retro is recorded.
-- *Why*: DoD gates (qa_passed, security_clean) may be falsy for harmless reasons on legacy sprints; force-complete bypasses them once retro is in. Without this, ancient sprints never close.
+**VIII.4 ❌ A sprint with retro complete is force-completed via API.**
+- *Status*: Both the dispatcher (`dispatch._decide_complete_sprint`) and the website endpoint (`POST /api/sprints/{id}/force-complete`) were retired 2026-05-19 with the dead-code sweep. The natural sprint-completion path now is the DoD check (`POST /api/sprints/{id}/check-dod`) which runs the full gate evaluation. Legacy sprints whose qa_passed/security_clean gates were retired (Phase 4, 2026-05-06) need the operator to call `/check-dod` to flip them to completed; the auto-force path is gone.
+- *Why retired*: With the dispatcher and the legacy poller both deleted, the only caller of force-complete was gone, and the endpoint's purpose (bypass DoD on ancient sprints) was already moot once qa_passed/security_clean stopped blocking.
 
 **VIII.5 ✅ Features in agent states with no active session are reset.**
 - *How*: `dispatch._decide_reset_orphan_agents` checks `/api/sessions/active` per product; if no live session, resets `(Designing, Implementing, Reviewing)` features in the active sprint to their prior ready state (Designed if `design_doc_path` exists, else Approved).
