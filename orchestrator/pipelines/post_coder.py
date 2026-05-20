@@ -247,6 +247,296 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
             except Exception:
                 pass
 
+    # ── Quality-spec Phase 2 additions (2026-05-19) ─────────────────────────
+    # Eight new guards motivated by the StockAnalysis + Calculator code
+    # reviews. Each is a tight regex + a deterministic verdict, scoped to
+    # specific file classes to keep false-positive rate low. Failures here
+    # are best-effort like the guards above; a broken regex never blocks a
+    # feature, it just skips the check.
+
+    import hashlib as _hashlib
+    import re as _re
+
+    def _read(rel_path: str) -> str:
+        try:
+            from pathlib import Path as _P
+            return (_P(working_dir) / rel_path).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    # --- Guard 5: hardcoded secret fallback in token/crypto calls ---
+    # Calculator's SRC/main.py + StockAnalysis's tokenGenerator.js both shipped
+    # `os.environ.get("JWT_SECRET", "fallback_secret_key_for_development")` —
+    # tokens forgeable in any env missing the var. Flag any os.environ.get /
+    # process.env-OR with a string fallback when the env name contains
+    # SECRET / KEY / TOKEN.
+    _PY_SECRET_FALLBACK = _re.compile(
+        r'''os\.environ\.get\(\s*["'][^"']*(SECRET|KEY|TOKEN)[^"']*["']\s*,\s*["'][^"']{3,}["']''',
+        _re.I,
+    )
+    _JS_SECRET_FALLBACK = _re.compile(
+        r'''process\.env\.\w*(SECRET|KEY|TOKEN)\w*\s*(\|\||\?\?)\s*["'][^"']{3,}["']''',
+        _re.I,
+    )
+    secret_hits = []
+    for f in src_files:
+        if f.startswith("tests/") or f.startswith("TestCases/"):
+            continue
+        content = _read(f)
+        if not content:
+            continue
+        rgx = _PY_SECRET_FALLBACK if f.endswith(".py") else _JS_SECRET_FALLBACK
+        m = rgx.search(content)
+        if m:
+            secret_hits.append(f"{f} ({m.group(0)[:80]}...)")
+    if secret_hits:
+        violations.append(
+            f"hardcoded secret fallback in token/crypto calls: "
+            f"{', '.join(secret_hits[:3])}{'...' if len(secret_hits) > 3 else ''}. "
+            f"Replace with: if not os.environ.get('X'): return 503 — never "
+            f"substitute a literal as the secret."
+        )
+
+    # --- Guard 6: state-changing API route without auth check ---
+    # StockAnalysis's profile.js / alerts/trigger.js, Calculator's API_KEY-unset
+    # bypass. Files under src/pages/api/ or app/api/ that handle POST/PUT/PATCH/
+    # DELETE must call one of the recognized auth functions, or be annotated
+    # with `// PUBLIC_ROUTE: <reason>` (or `# PUBLIC_ROUTE:` for Python) on
+    # the first non-empty line.
+    _AUTH_TOKENS = (
+        "verifyAuth", "requireAuth", "withAuth", "verifyToken",
+        "getServerSession", "requireSession", "getToken",
+        "verify_auth", "require_auth", "current_user", "Depends(verify",
+        "_require_api_key", "require_api_key",
+    )
+    _STATE_CHANGE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
+    _METHOD_HINTS = (
+        # JS/Express/Next
+        "method ===", "method===", "method =", "req.method",
+        "@router.post", "@router.put", "@router.patch", "@router.delete",
+        "@app.post", "@app.put", "@app.patch", "@app.delete",
+        "@app.route",
+    )
+    api_route_dirs = ("src/pages/api/", "app/api/", "pages/api/",
+                      "SRC/routes/", "src/routes/", "SRC/main.py", "src/main.py")
+    api_files = [f for f in src_files
+                 if any(f.startswith(d) for d in api_route_dirs)]
+    auth_missing = []
+    for f in api_files:
+        content = _read(f)
+        if not content:
+            continue
+        first_non_empty = next((ln for ln in content.splitlines() if ln.strip()), "")
+        if "PUBLIC_ROUTE:" in first_non_empty:
+            continue
+        # Does this file have a state-changing route at all?
+        has_state_route = any(m in content for m in _METHOD_HINTS) and any(
+            method in content for method in _STATE_CHANGE_METHODS
+        )
+        if not has_state_route:
+            continue
+        if any(tok in content for tok in _AUTH_TOKENS):
+            continue
+        auth_missing.append(f)
+    if auth_missing:
+        violations.append(
+            f"state-changing route(s) without recognized auth check: "
+            f"{', '.join(auth_missing[:3])}{'...' if len(auth_missing) > 3 else ''}. "
+            f"Add verifyAuth / verify_auth / equivalent (see ARCHITECTURE.md "
+            f"REFERENCE PATTERNS) or annotate first line with `// PUBLIC_ROUTE: <reason>`."
+        )
+
+    # --- Guard 7: ESM/CJS module-system mismatch ---
+    # StockAnalysis had package.json type=module but several src/lib files
+    # used `module.exports`. Inconsistent module style breaks Jest config
+    # and produces import order dependencies.
+    pkg_json = _read("package.json")
+    if pkg_json and '"type": "module"' in pkg_json:
+        cjs_re = _re.compile(r"^\s*(module\.exports\s*=|const\s+\w+\s*=\s*require\()", _re.M)
+        cjs_hits = []
+        for f in src_files:
+            if not f.endswith((".js", ".mjs")):
+                continue
+            if "node_modules" in f:
+                continue
+            content = _read(f)
+            if not content:
+                continue
+            m = cjs_re.search(content)
+            if m:
+                cjs_hits.append(f"{f}: {m.group(0).strip()[:50]}")
+        if cjs_hits:
+            violations.append(
+                f"package.json declares type=module but file(s) use CommonJS: "
+                f"{', '.join(cjs_hits[:3])}{'...' if len(cjs_hits) > 3 else ''}. "
+                f"Convert to ESM (import/export) — mixed style breaks Jest "
+                f"+ import-order behavior."
+            )
+
+    # --- Guard 8: byte-identical duplicate sibling ---
+    # StockAnalysis's testcopy.js was an exact copy of register.js. Calculator
+    # has multiple "_qa.py" pairs. Detect: for each new source file in this
+    # commit, sha256 its content and walk the parent directory for an
+    # existing file with the same hash. Same-content same-dir = copy-paste.
+    dupe_hits = []
+    for f in src_files:
+        if not f.endswith((".js", ".jsx", ".ts", ".tsx", ".py")):
+            continue
+        content = _read(f)
+        if not content or len(content) < 100:
+            continue   # tiny files (one-liners, re-exports) are uninteresting
+        h = _hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
+        try:
+            from pathlib import Path as _P
+            sib_dir = (_P(working_dir) / f).parent
+            for sib in sib_dir.iterdir():
+                rel_sib = sib.relative_to(_P(working_dir))
+                if str(rel_sib).replace("\\", "/") == f:
+                    continue
+                if not sib.is_file():
+                    continue
+                if sib.stat().st_size != len(content.encode("utf-8", errors="replace")):
+                    continue   # cheap pre-check, avoid hashing every neighbor
+                sib_hash = _hashlib.sha256(sib.read_bytes()).hexdigest()
+                if sib_hash == h:
+                    dupe_hits.append(f"{f} ≡ {rel_sib}")
+                    break
+        except Exception:
+            continue
+    if dupe_hits:
+        violations.append(
+            f"byte-identical duplicate file(s): "
+            f"{', '.join(dupe_hits[:3])}{'...' if len(dupe_hits) > 3 else ''}. "
+            f"Delete one — almost certainly a copy-paste during rework. "
+            f"If you genuinely need a parallel file, change at least one byte "
+            f"and add a comment on the first line explaining why."
+        )
+
+    # --- Guard 9: bare except / catch swallowing all errors ---
+    # Calculator's SRC/main.py had 5 bare `except Exception: pass` blocks
+    # around ALTER TABLE statements. Intended for "column already exists" —
+    # actually swallowed "out of disk", "connection lost", everything.
+    _PY_BARE_EXCEPT = _re.compile(
+        r"except(\s+(Exception|BaseException))?\s*(\s+as\s+\w+)?\s*:\s*\n\s+pass\b",
+        _re.M,
+    )
+    _JS_EMPTY_CATCH = _re.compile(
+        r"catch\s*(\([^)]*\))?\s*\{\s*(\}|//[^\n]*\n\s*\})",
+        _re.M,
+    )
+    swallow_hits = []
+    for f in src_files:
+        if f.startswith(("tests/", "TestCases/")) or "test" in Path(f).name.lower():
+            continue
+        content = _read(f)
+        if not content:
+            continue
+        rgx = _PY_BARE_EXCEPT if f.endswith(".py") else _JS_EMPTY_CATCH
+        if rgx.search(content):
+            swallow_hits.append(f)
+    if swallow_hits:
+        violations.append(
+            f"bare except: pass / empty catch in non-test code: "
+            f"{', '.join(swallow_hits[:3])}{'...' if len(swallow_hits) > 3 else ''}. "
+            f"Catch the specific exception class you need; let others propagate "
+            f"(or log + re-raise). Bare swallow hides 'out of disk', 'connection "
+            f"lost' — the failures you most want to see."
+        )
+
+    # --- Guard 10: auth default-deny anti-pattern ---
+    # Calculator's _require_api_key: `if expected_key and api_key != expected_key:
+    # return 401`. When expected_key is falsy (env var unset), comparison is
+    # skipped and any non-empty header passes. Classic "if X and X-condition:"
+    # default-allow shape.
+    _AUTH_DEFAULT_ALLOW = _re.compile(
+        r"if\s+(\w+)\s+and\s+\w+\s*(!=|==)\s*\1\s*:",
+        _re.M,
+    )
+    auth_default_hits = []
+    for f in src_files:
+        if not f.endswith(".py"):
+            continue
+        fname_l = f.lower()
+        if not any(k in fname_l for k in ("auth", "verify", "token", "session", "key")):
+            continue
+        content = _read(f)
+        if not content:
+            continue
+        if _AUTH_DEFAULT_ALLOW.search(content):
+            auth_default_hits.append(f)
+    if auth_default_hits:
+        violations.append(
+            f"auth check has default-allow shape ('if expected and key != expected'): "
+            f"{', '.join(auth_default_hits[:3])}{'...' if len(auth_default_hits) > 3 else ''}. "
+            f"Fix: `if not expected: return 503` BEFORE the comparison. Else any "
+            f"request bypasses auth when the secret env var is unset."
+        )
+
+    # --- Guard 11: eval / exec / pickle.loads on user input ---
+    # Calculator's safe AST evaluator allowed ast.Call + exposed pow/min/max.
+    # `pow(2, 10**8)` is a memory bomb. Broader: any eval/exec/pickle.loads
+    # in route or handler files is high-risk and needs explicit review.
+    _DANGER = _re.compile(
+        r"""\b(eval|exec|compile|pickle\.loads|os\.system|subprocess\.(call|run|Popen)\(.*shell\s*=\s*True)\(""",
+    )
+    danger_hits = []
+    for f in src_files:
+        if f.startswith(("tests/", "TestCases/")):
+            continue
+        if not f.endswith((".py", ".js", ".ts")):
+            continue
+        content = _read(f)
+        if not content:
+            continue
+        for m in _DANGER.finditer(content):
+            # narrow: only flag if file is in a routes / handlers / API dir
+            if any(d in f for d in ("api/", "routes/", "handlers/", "main.py", "server.py")):
+                danger_hits.append(f"{f} ({m.group(1)})")
+                break
+    if danger_hits:
+        violations.append(
+            f"eval/exec/pickle/shell-exec call in request-handling file: "
+            f"{', '.join(danger_hits[:3])}{'...' if len(danger_hits) > 3 else ''}. "
+            f"These are typically used to evaluate user input — review for "
+            f"injection / DoS. Use ast.literal_eval, parametrized parsers, "
+            f"or an explicit allow-list with size + recursion caps."
+        )
+
+    # --- Guard 12: DB connection lifecycle (heuristic, warning-level) ---
+    # Calculator's SRC/main.py:782-802 raised after a metric bump without a
+    # finally close. Detection is heuristic: file opens a connection, has a
+    # `raise` somewhere, but no `with` block. False-positive prone, so the
+    # message is phrased as a warning rather than a hard refusal.
+    conn_leak_hits = []
+    for f in src_files:
+        if not f.endswith(".py"):
+            continue
+        if f.startswith(("tests/", "TestCases/")):
+            continue
+        content = _read(f)
+        if not content:
+            continue
+        opens_conn = _re.search(
+            r"(mysql\.connector\.connect|psycopg2\.connect|sqlite3\.connect|get_(db_)?connection\s*\()",
+            content,
+        )
+        if not opens_conn:
+            continue
+        has_with = _re.search(r"with\s+\w+(_connection|get_connection|_conn)\s*[(\[]", content) \
+                   or "with get_db_connection" in content
+        has_raise = "raise" in content
+        has_finally_close = _re.search(r"finally\s*:[^}]*?\.close\(\)", content)
+        if has_raise and not has_with and not has_finally_close:
+            conn_leak_hits.append(f)
+    if conn_leak_hits:
+        violations.append(
+            f"potential DB connection leak (open + raise without `with` or "
+            f"`finally: close`): {', '.join(conn_leak_hits[:3])}"
+            f"{'...' if len(conn_leak_hits) > 3 else ''}. "
+            f"Heuristic — verify; if false positive, refactor to `with "
+            f"get_db_connection() as conn:` to make the check unambiguous."
+        )
+
     return violations
 
 
