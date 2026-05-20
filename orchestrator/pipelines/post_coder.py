@@ -809,6 +809,143 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
     return violations
 
 
+def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
+                            timeout: int = 300) -> dict:
+    """
+    Phase 5 of quality-specs (2026-05-19): run the stack-specific test
+    command and classify the outcome.
+
+    Returns a dict:
+      {"passed": bool, "env_broken": bool, "collection_errors": int,
+       "framework": str, "output": str, "first_failure": str}
+
+    Classification (in order):
+      - framework=none: no recognized test config (pytest.ini / package.json /
+        go.mod). passed=True (nothing to check). Caller skips the gate.
+      - passed=True: exit 0 and no collection ERRORs.
+      - env_broken=True: output matches a known infra-failure pattern
+        (jest missing, node_modules absent, ENOENT). Caller should alert
+        the operator but NOT bump fix_attempts — this isn't the coder's
+        fault. Calculator's feature 594 cascade was driven by jest missing,
+        which iterations of coder rework can't fix.
+      - collection_errors > 0: pytest reported "ERROR" lines during
+        collection (test files that fail to import). Calculator has ~100
+        such test files referencing functions that don't exist in
+        SRC/main.py. Treated as a real test failure but with a different
+        bounce message.
+      - else: real test failure. Caller bounces features to Implementing.
+
+    Best-effort: any unexpected exception → passed=True (skip the gate).
+    """
+    from pathlib import Path as _PP
+    wd = _PP(working_dir)
+    result = {
+        "passed": True, "env_broken": False, "collection_errors": 0,
+        "framework": "none", "output": "", "first_failure": "",
+    }
+    # ---- detect framework from filesystem markers ----
+    if (wd / "pytest.ini").exists() or (wd / "pyproject.toml").exists():
+        framework = "pytest"
+        collect_cmd = ["pytest", "--collect-only", "-q"]
+        run_cmd     = ["pytest", "-q", "--no-header"]
+    elif (wd / "package.json").exists():
+        try:
+            import json as _json
+            pkg = _json.loads((wd / "package.json").read_text(encoding="utf-8"))
+            scripts = (pkg.get("scripts") or {})
+            if "test" not in scripts:
+                return result
+            test_script = scripts["test"] or ""
+            # Trivial no-op scripts: don't try to "run" them, just flag as failure.
+            if _re.match(r"^\s*(echo|exit\s+0|true|:)\b", test_script):
+                result["passed"] = False
+                result["first_failure"] = (
+                    f"package.json scripts.test is a no-op: {test_script[:60]}"
+                )
+                return result
+            framework = "npm"
+            collect_cmd = None   # jest exposes --listTests, but not all node
+                                 # projects use jest; skip the collection pass
+            run_cmd     = ["npm", "test", "--silent"]
+        except Exception:
+            return result
+    elif (wd / "go.mod").exists():
+        framework = "go"
+        collect_cmd = None
+        run_cmd     = ["go", "test", "./..."]
+    else:
+        return result
+    result["framework"] = framework
+
+    # ---- env-broken patterns: these aren't code bugs the coder can fix ----
+    _ENV_BROKEN_PATTERNS = [
+        r"Cannot find module 'jest'",
+        r"jest: command not found",
+        r"sh:\s+\S+:\s+command not found",
+        r"npm ERR! missing script",
+        r"npm ERR!.*ENOENT",
+        r"ENOENT: no such file or directory.*node_modules",
+        r"go:.*missing go\.sum entry",
+        r"can't load package: package",
+        r"pytest: command not found",
+        r"ModuleNotFoundError: No module named 'pytest'",
+    ]
+    _ENV_BROKEN_RE = _re.compile("|".join(_ENV_BROKEN_PATTERNS))
+
+    try:
+        # ---- collection check (pytest only — surfaces import errors fast) ----
+        if collect_cmd:
+            r = _run(collect_cmd, timeout=min(60, timeout))
+            collect_out = (r.stdout or "") + "\n" + (r.stderr or "")
+            if _ENV_BROKEN_RE.search(collect_out):
+                result["env_broken"] = True
+                result["passed"] = False
+                result["output"] = collect_out
+                return result
+            # pytest --collect-only reports collection errors as lines
+            # starting with "ERROR " or "!!!"
+            errs = [ln for ln in collect_out.splitlines()
+                    if ln.startswith("ERROR ") or ln.startswith("!!!")]
+            if errs:
+                result["collection_errors"] = len(errs)
+                result["passed"] = False
+                result["first_failure"] = errs[0][:200]
+                result["output"] = collect_out
+                return result
+
+        # ---- run actual tests ----
+        r = _run(run_cmd, timeout=timeout)
+        run_out = (r.stdout or "") + "\n" + (r.stderr or "")
+        result["output"] = run_out
+        if r.returncode == 0:
+            result["passed"] = True
+            return result
+        # Non-zero exit: classify
+        if _ENV_BROKEN_RE.search(run_out):
+            result["env_broken"] = True
+            result["passed"] = False
+            return result
+        # Real test failure — extract first failing test name for the bounce
+        # message. pytest: "FAILED tests/X::test_Y" ; jest: "FAIL tests/X.test.js" ;
+        # go: "--- FAIL: TestFoo"
+        first = ""
+        for ln in run_out.splitlines():
+            if ln.startswith("FAILED ") or ln.startswith("FAIL ") \
+                    or "--- FAIL:" in ln:
+                first = ln[:200]
+                break
+        result["passed"] = False
+        result["first_failure"] = first or "see test output below"
+        return result
+    except Exception as e:
+        # Tooling failure (timeout, subprocess.SubprocessError, etc.) →
+        # treat as env_broken (don't blame the coder). Caller alerts.
+        result["env_broken"] = True
+        result["passed"] = False
+        result["output"] = f"_post_coder_test_check tooling error: {e}"
+        return result
+
+
 def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                               assigned_features: list[dict]) -> list[int]:
     """
@@ -1515,6 +1652,117 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         )
         # Commit was pushed (record of attempt). Feature in rework cycle. Exit.
         return pushed_ids
+
+    # 4b. Post-coder test execution (Phase 5 of quality-specs, 2026-05-19).
+    # Run the stack's test command. If tests fail or fail-to-collect, bounce
+    # the features to Implementing same way the lint guard does. If the test
+    # env itself is broken (jest missing, node_modules absent), alert the
+    # operator and roll the features back to their prior ready state without
+    # bumping fix_attempts — broken-env is not the coder's fault. Calculator's
+    # feature 594 cascade was driven by missing jest/dev-deps, which iterations
+    # of coder rework can't fix.
+    test_result = _post_coder_test_check(working_dir, _run, pname)
+    if test_result.get("framework") != "none" and not test_result.get("passed"):
+        env_broken = test_result.get("env_broken", False)
+        first_failure = test_result.get("first_failure", "")
+        collection_errors = test_result.get("collection_errors", 0)
+        output_excerpt = (test_result.get("output") or "")[:1500]
+        if env_broken:
+            log.error(
+                f"[post-coder] {pname}: test env broken — NOT bumping "
+                f"fix_attempts on the coder. Operator must fix the agent "
+                f"image / dev-deps / test runner before next session."
+            )
+            try:
+                from orchestrator.alerts import send_alert
+                send_alert(
+                    "error",
+                    f"{pname}: post-coder test env broken (session "
+                    f"{session_uid}). Test runner couldn't start. Excerpt:\n"
+                    f"{output_excerpt[:400]}",
+                )
+            except Exception:
+                pass
+            # Roll features back to a non-agent-claimed state so the next
+            # cycle doesn't relaunch a coder on the same feature against
+            # a still-broken env. Reset to Approved/Designed; the operator's
+            # env fix unblocks them.
+            try:
+                with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                    for feat in assigned_features:
+                        fid = feat["id"]
+                        reset_to = "Designed" if feat.get("design_doc_path") else "Approved"
+                        try:
+                            client.post(
+                                f"/api/features/{fid}/comments",
+                                json={"author": "post-coder:test-env",
+                                      "body": f"⚠️ Test env broken (no fix_attempts bump). "
+                                              f"Operator alerted. Reset to {reset_to} "
+                                              f"pending env repair. Excerpt:\n```\n"
+                                              f"{output_excerpt[:600]}\n```"},
+                            )
+                            client.patch(
+                                f"/api/features/{fid}",
+                                json={
+                                    "status": reset_to,
+                                    "changed_by": "post-coder:test-env-broken",
+                                },
+                            )
+                        except Exception as e2:
+                            log.warning(
+                                f"[post-coder] {pname}: env-broken rollback for "
+                                f"#{fid} failed: {e2}"
+                            )
+            except Exception as e:
+                log.warning(f"[post-coder] {pname}: env-broken PM client error: {e}")
+            _filter_session_result_by_id(
+                working_dir, {f["id"] for f in assigned_features}, pname,
+            )
+            return pushed_ids
+        else:
+            # Real test failure (or collection error). Bounce like lint guard.
+            reason = (f"collection errors ({collection_errors})"
+                      if collection_errors else "tests failed")
+            log.warning(
+                f"[post-coder] {pname}: {reason} — bouncing features to "
+                f"Implementing+changes_requested"
+            )
+            try:
+                with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                    for feat in assigned_features:
+                        fid = feat["id"]
+                        body = (
+                            f"❌ post-coder test-check auto-reject ({reason}):\n"
+                            f"First failure: `{first_failure}`\n\n"
+                            f"```\n{output_excerpt[:800]}\n```\n"
+                            f"Fix the failing test(s) and re-push. If tests reference "
+                            f"symbols that don't exist (collection error), align the "
+                            f"test file with the actual code or delete the orphan test."
+                        )
+                        try:
+                            client.post(
+                                f"/api/features/{fid}/comments",
+                                json={"author": "post-coder:test-check", "body": body},
+                            )
+                            client.patch(
+                                f"/api/features/{fid}",
+                                json={
+                                    "status": "Implementing",
+                                    "review_outcome": "changes_requested",
+                                    "changed_by": "post-coder:test-check",
+                                },
+                            )
+                        except Exception as e2:
+                            log.warning(
+                                f"[post-coder] {pname}: test-check PATCH for "
+                                f"#{fid} failed: {e2}"
+                            )
+            except Exception as e:
+                log.warning(f"[post-coder] {pname}: test-check PM client error: {e}")
+            _filter_session_result_by_id(
+                working_dir, {f["id"] for f in assigned_features}, pname,
+            )
+            return pushed_ids
 
     # 5. Mark assigned features as Reviewing + link to the PR via direct PM
     # API PATCH. Until 2026-05-06 this used a session_result.json append +
