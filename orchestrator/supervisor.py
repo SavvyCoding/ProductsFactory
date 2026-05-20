@@ -1669,21 +1669,6 @@ def _fetch_product(pid: int) -> dict | None:
         return None
 
 
-def _github_repo_slug(product: dict) -> str | None:
-    """Derive the SSH alias slug from product.github_repo (basename, lowercase,
-    `-` and `.` → `_`). Matches greenfield_scaffold's _generate_deploy_key
-    naming so the slug + key file + Host block agree."""
-    gh = (product.get("github_repo") or "").rstrip("/")
-    if not gh:
-        return None
-    base = gh.rsplit("/", 1)[-1]
-    if base.endswith(".git"):
-        base = base[:-4]
-    if not base:
-        return None
-    return base.lower().replace("-", "_").replace(".", "_")
-
-
 def _check_app_token(product: dict) -> dict:
     """Mint a GitHub App installation token bypassing cache to verify
     git auth is actually working end-to-end.
