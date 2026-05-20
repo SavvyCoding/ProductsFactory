@@ -221,7 +221,7 @@ from orchestrator.pipelines.post_maintenance import _run_post_maintenance_pipeli
 
 _MAINTENANCE_PERSONAS = frozenset({
     "documenter", "analytics", "recommender", "devops", "refactorer",
-    "product_trainer",
+    "product_trainer", "architect",
 })
 
 
