@@ -266,15 +266,12 @@ ARCHITECTURE.md edits: <N> inline (MODULES/DEPRECATED/ENTRY POINTS rows), <M> re
 EOF
 ```
 
-### 7 — Record completion
+### 7 — Exit 0
 
-```bash
-curl -s -X PATCH {pm_api_url}/api/products/{product_id} \
-  -H "Content-Type: application/json" \
-  -d "{\"config\": {\"last_architect_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\", \"features_pushed_at_last_architect\": $(curl -s {pm_api_url}/api/products/{product_id}/features?status=Pushed | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))')}}"
-```
-
-### 8 — Exit 0
+(The orchestrator's scheduler owns the cadence counters `last_architect_at`
+and `features_pushed_at_last_architect`; they were written when this session
+was queued. You don't need to PATCH them on completion -- doing so risks
+race conflicts with the next scheduler check.)
 
 ---
 

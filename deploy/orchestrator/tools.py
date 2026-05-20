@@ -1138,16 +1138,42 @@ def _check_architect_due(product: dict) -> None:
     if not reasons:
         return
 
+    # Advance the cadence counters AT QUEUE TIME, not at agent completion.
+    # Originally the architect's prompt step 7 was responsible for writing
+    # last_architect_at + features_pushed_at_last_architect via curl PATCH,
+    # but Ollama LLMs (qwen3-coder etc.) routinely skip that step -- session
+    # 2903 on MyDocusign 2026-05-20 exited 0 without writing the counter,
+    # so the next cycle's scheduler re-fired the architect (since last_at
+    # was still null) and session 2904 launched immediately after. With
+    # cadence ownership in the scheduler, the counter advances even when
+    # the agent fails / skips / crashes; the worst case is a missed drift
+    # detection bounded by the 7-day fallback.
+    #
+    # Config is a JSONB column and the PATCH replaces it wholesale (no
+    # field-level merge in api_update_product), so fetch existing config
+    # and merge our two keys before sending.
+    existing_cfg = dict(cfg)  # cfg captured at top of this function
+    merged_cfg = {
+        **existing_cfg,
+        "last_architect_at": _dt.now(_tz.utc).isoformat(),
+        "features_pushed_at_last_architect": pushed_count,
+    }
     try:
         with _pm_client() as client:
             client.patch(
                 f"/api/products/{pid}",
-                json={"run_persona_now": "architect"},
+                json={
+                    "run_persona_now": "architect",
+                    "config": merged_cfg,
+                },
             )
         # Mutate the in-memory product dict too so the Priority-0 on-demand
-        # block in the same run_cycle picks the flag up immediately instead
-        # of waiting ~60s for the next cycle to re-read it from the DB.
+        # block in the same run_cycle picks the flag up immediately, AND so
+        # subsequent _check_architect_due calls in the same cycle (e.g. if
+        # multiple products are processed in a loop) see the updated cfg
+        # for *this* product.
         product["run_persona_now"] = "architect"
+        product["config"] = merged_cfg
         log.info(
             f"[architect-scheduler] product {pid} ({product.get('name','?')}): "
             f"queued architect -- {'; '.join(reasons)}"
