@@ -199,6 +199,18 @@ def install_templates(
             context, force,
         )
 
+    # 3c. quality_gates.json — stack-specific. Machine-readable mirror of the
+    # CONFIG GATES section in ARCHITECTURE.md. Consumed by the post-coder
+    # _check_config_gates lint (Phase 4 of quality-specs). Skipped (passes
+    # through unchanged) if the stack has no enforced gates.
+    stack_gates = STACKS_DIR / stack / "quality_gates.json"
+    if stack_gates.exists():
+        written += _write_file(
+            working_dir / "quality_gates.json",
+            stack_gates,
+            context, force,
+        )
+
     # 4. features.md — no longer created (DB is single source of truth)
 
     # 5. Create required directories if they don't exist (greenfield only).

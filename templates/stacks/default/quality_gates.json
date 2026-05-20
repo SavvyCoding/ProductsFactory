@@ -1,0 +1,5 @@
+{
+  "_doc": "Machine-readable quality gates for products that don't match a known stack. Authoritative source consumed by orchestrator/pipelines/post_coder.py's _check_config_gates (Phase 4). The default stack ships with no enforced gates — fill in per project at first feature land, OR migrate the product to a known stack template.",
+  "_version": 1,
+  "gates": {}
+}

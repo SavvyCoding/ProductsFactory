@@ -1,6 +1,7 @@
 # {PRODUCT_NAME} — Architecture
 
-Hard cap: ~800 tokens. Self-trim when updating — keep only what the next session needs.
+Hard cap: ~1500 tokens (raised from 800 — this doc is now machine-read by ProductFactory's pre-coder context builder, lint guard, and architect persona).
+Self-trim when updating — keep only what the next session needs.
 Last updated: {DATE} by session {SESSION_UID}
 
 ---
@@ -16,11 +17,83 @@ Results/
   {feature_name}_results.json
 ```
 
-## Key modules
+## ENTRY POINTS
 
-| Module | Responsibility |
-|--------|----------------|
-| _(populated after first session)_ | |
+The single source for "where the app starts." If a session needs to register a route, add a CLI command, or wire a new entry, edit the canonical file listed here. Do not create `main_v2.py`, `main_complete.py`, `app.py`, or sibling variants.
+
+| Concern | Canonical file | Notes |
+|---|---|---|
+| App factory | _(populate — e.g. `SRC/main.py:create_app`)_ | Only place that registers routes. |
+| WSGI / ASGI entry | _(populate — e.g. `SRC/main.py` via `gunicorn SRC.main:create_app()`)_ | Production server entrypoint. |
+| CLI entry | _(populate if applicable — e.g. `SRC/cli.py`)_ | |
+
+## MODULES
+
+The source-of-truth registry. Pre-coder context reads this section; when your feature touches a listed concern, USE the canonical module — do not create a parallel `*Repository.py` / `*Store.py` / `*Service.py` alongside it.
+
+| Concern | Canonical module | Owns | Notes |
+|---|---|---|---|
+| _(populated as features land)_ | | | |
+
+Example rows (replace as the product grows):
+- `User persistence` | `SRC/users/user_store.py` | `User`, `create_user`, `get_user_by_id` | Single store; do not create `user_repository.py` etc.
+- `Authentication` | `SRC/auth/verify.py` | `verify_auth(request) → User` | Raises `Unauthorized`; do not hand-roll per-route.
+- `HTTP client` | `SRC/lib/http_client.py` | `get_session()` | Configures retries/timeouts; do not call `requests.get()` directly.
+
+## RULES
+
+Machine-checkable invariants. The post-coder lint guard refuses commits that violate these.
+
+- Every state-changing API handler (`POST`, `PUT`, `PATCH`, `DELETE`) MUST call `verify_auth(request)` unless the first line of the file contains `# PUBLIC_ROUTE: <reason>`.
+- No bare `except: pass` / `except Exception: pass` in non-test code. Catch the specific exception class you need; let others propagate.
+- No `eval()`, `exec()`, or `pickle.loads()` on data derived from request input.
+- No hardcoded fallback secrets in `jwt.encode` / `jwt.decode` / `crypto.create_hmac` calls. If the secret env var is unset, return 503 — never substitute a constant.
+- DB connections must be closed via `with` context manager OR a `finally:` block in the same function.
+- Files in `SRC/` MUST use Python imports — no `module.exports` / CommonJS / `require()` (this is a Python project).
+- No `sys.modules.get('main')` lookups baked into source for test monkey-patching. Use dependency injection via function parameters.
+
+## REFERENCE PATTERNS
+
+Copy-pasteable canonical code. Use verbatim. If you need a variant, propose updates to this section first.
+
+### Auth check at the top of every state-changing route
+```python
+from SRC.auth.verify import verify_auth, Unauthorized
+
+@app.route("/api/v1/resource", methods=["POST"])
+def create_resource():
+    try:
+        user = verify_auth(request)
+    except Unauthorized as e:
+        return jsonify({"error": str(e)}), 401
+    # ... handler body, with user.id available
+```
+
+### Error response (never leak tracebacks)
+```python
+return jsonify({"error": {"code": "INVALID_INPUT", "message": "x is required"}}), 400
+# NEVER: return jsonify({"error": str(exc)}), 400
+```
+
+### DB connection lifecycle
+```python
+with get_db_connection() as conn:
+    cur = conn.cursor()
+    cur.execute("SELECT ... WHERE id = %s", (user_id,))   # parameterized, not f-string
+    rows = cur.fetchall()
+# conn closes via context manager — no leak in any branch
+```
+
+## CONFIG GATES
+
+Quality bars that the post-coder lint guard verifies. Authoritative source: `quality_gates.json` (installed alongside this file).
+
+| File | Setting | Required | Rationale |
+|---|---|---|---|
+| `pytest.ini` | `addopts --cov-fail-under` | ≥ 70 | Template default. Lower only with PM approval. |
+| `pytest.ini` | `testpaths` | `tests TestCases` | Both discovered. Adding other dirs requires updating this row. |
+
+Override path: PM edits `product.config.quality_gates_override` — never edit `pytest.ini` directly to bypass.
 
 ## Patterns in use
 
@@ -32,6 +105,12 @@ Results/
 - **HTTP client:** `httpx.Client` (sync) or `httpx.AsyncClient` (async). Always set `timeout=`.
 - **Type hints:** all function signatures annotated. `from __future__ import annotations` at top of each file.
 - **Testing:** pytest fixtures for shared state. `conftest.py` at `TestCases/` root. Rolled-back DB transactions per test.
+
+## DEPRECATED
+
+Files / modules / paths slated for removal. The agent-debris detector refuses commits that re-introduce items listed here. The architect persona uses this as its TODO queue.
+
+- _(populated as cruft is identified — e.g. "`SRC/main.py.backup` — older snapshot, delete in next cleanup")_
 
 ## Naming conventions
 
