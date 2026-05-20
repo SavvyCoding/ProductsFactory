@@ -165,6 +165,97 @@ def _check_required_arch_sections(working_dir: str) -> list[str]:
     return []
 
 
+def _stage_allowed_paths(
+    persona: str, working_dir: str, _run, product_name: str = "?",
+) -> tuple[int, list[str]]:
+    """For personas with an allowlist, selectively stage ONLY paths that match
+    the allowlist. Out-of-scope changes are left in the working tree (next
+    `_reset_workspace` wipes them) and never enter the commit.
+
+    Returns (staged_count, stripped_paths). For personas with no allowlist,
+    falls back to `git add -A` and returns (-1, []) to signal "no filtering
+    applied". The pipeline interprets staged_count == 0 as "nothing to
+    commit after filtering" and exits early.
+
+    This is the soft-allowlist enforcement path -- the alternative to the
+    strict-refusal `_post_maintenance_allowlist_check`. Both exist:
+    soft-allowlist runs first (filters at stage time), strict check runs
+    after as defense in depth (catches anything that snuck through).
+
+    Real failure mode (2026-05-20 sessions 2928 + 2933): architect repeatedly
+    deleted features.md and left sed backup artifacts because the LLM has
+    a strong "deprecated file → delete" prior that the strengthened prompt
+    didn't override. Strict refusal cost the legitimate ARCHITECTURE.md edits
+    on both runs. Soft-allowlist lets the good work land while silently
+    discarding the bad ops.
+    """
+    allowlist = _MAINTENANCE_ALLOWLISTS.get(persona)
+    if allowlist is None:
+        # Unknown persona — preserve existing behaviour
+        add_r = _run(["git", "add", "-A"], timeout=60)
+        if add_r.returncode != 0:
+            log.warning(
+                f"[post-{persona}] {product_name}: git add -A failed -- "
+                f"{add_r.stderr.strip()[:200]}"
+            )
+        return (-1, [])
+
+    status_r = _run(["git", "status", "--porcelain"], timeout=30)
+    if status_r.returncode != 0:
+        log.warning(
+            f"[post-{persona}] {product_name}: git status failed -- "
+            f"falling back to git add -A (will trigger strict allowlist check)"
+        )
+        _run(["git", "add", "-A"], timeout=60)
+        return (-1, [])
+
+    staged: list[str] = []
+    stripped: list[tuple[str, str]] = []  # (status_letter, path)
+    for line in status_r.stdout.splitlines():
+        if not line.strip():
+            continue
+        # `git status --porcelain` line format: `XY path` where X is index
+        # status, Y is worktree status; X/Y can be ` MADRCU?!`. For renames
+        # the line is `RY origpath -> newpath`. Take the worktree status
+        # (Y) for our routing decision and the LAST path token.
+        status_pair = line[:2]
+        rest = line[2:].strip()
+        # Handle rename arrow
+        path = rest.split(" -> ")[-1].strip().strip('"')
+        if not path:
+            continue
+        # Skip the same Temp/Results filter the original `changed` list used.
+        if "/Temp/" in path or "/Results/" in path:
+            continue
+        status_letter = status_pair[1] if status_pair[1] != " " else status_pair[0]
+        if status_letter == " ":
+            continue
+        if _path_matches(path, allowlist):
+            staged.append(path)
+        else:
+            stripped.append((status_letter, path))
+
+    # Stage the allowed paths. `git add -A -- <path>` handles M/A/D/R uniformly.
+    for path in staged:
+        _run(["git", "add", "-A", "--", path], timeout=30)
+
+    if stripped:
+        verbs = {
+            "M": "modify", "D": "delete", "R": "rename",
+            "C": "copy", "T": "change type of", "A": "add", "?": "add (untracked)",
+        }
+        log.warning(
+            f"[post-{persona}] {product_name}: stripped {len(stripped)} "
+            f"out-of-scope change(s) from commit (left in working tree, will "
+            f"be wiped by next workspace reset):"
+        )
+        for st, p in stripped:
+            verb = verbs.get(st, st)
+            log.warning(f"  - {verb} `{p}` -- not in {persona}'s allowlist")
+
+    return (len(staged), [p for _, p in stripped])
+
+
 def _post_maintenance_allowlist_check(
     persona: str, working_dir: str, _run, product_name: str = "?",
 ) -> list[str]:
@@ -287,21 +378,30 @@ def _run_post_maintenance_pipeline(product: dict, session_uid: str,
                          f"stash-pop conflict(s) in favor of agent")
             _run(["git", "stash", "drop"])
 
-    add_r = _run(["git", "add", "-A"])
-    if add_r.returncode != 0:
-        log.warning(f"[post-{persona}] {pname}: git add failed — "
-                    f"{add_r.stderr.strip()[:200]}")
-        return
+    # Soft-allowlist staging: for personas with an allowlist (architect,
+    # documenter, devops, etc.), stage ONLY paths that match the allowlist.
+    # Out-of-scope changes (e.g., architect's repeated features.md deletion
+    # attempt, sed -i backup artifacts) stay in the working tree and get
+    # wiped by the next _reset_workspace; they never enter the commit.
+    # Personas without an allowlist (or unknown ones) fall back to git add -A.
+    staged_count, stripped = _stage_allowed_paths(persona, working_dir, _run, pname)
 
     cached = _run(["git", "diff", "--cached", "--quiet"])
     if cached.returncode == 0:
-        log.info(f"[post-{persona}] {pname}: nothing staged after add — done")
+        if stripped:
+            log.info(
+                f"[post-{persona}] {pname}: nothing in scope to commit "
+                f"({len(stripped)} out-of-scope change(s) stripped) — done"
+            )
+        else:
+            log.info(f"[post-{persona}] {pname}: nothing staged after add — done")
         return
 
-    # Persona-aware allowlist check. Refuse the commit if the agent went
-    # off-script and touched files outside its maintenance scope. Critically,
-    # this is the ONLY enforcement point that lets architect write
-    # ARCHITECTURE.md while keeping every other persona out of it.
+    # Defense-in-depth allowlist check. With soft-allowlist staging above,
+    # this should be a no-op for personas with an allowlist; kept as a
+    # belt-and-suspenders gate in case the soft path missed something
+    # (e.g., a path-matcher bug). For unknown personas without an allowlist,
+    # this is the primary enforcement.
     violations = _post_maintenance_allowlist_check(persona, working_dir, _run, pname)
     if violations:
         log.warning(
