@@ -26,6 +26,7 @@ After you exit, the orchestrator cuts a fresh **session branch** (`coder/<sessio
 
 {reviewer_patterns}
 {reviewer_feedback}
+{related_existing_code}
 ## Per-story workflow (one at a time — finish #N before starting #N+1)
 
 1. **Read minimal context:** `/workspace/CLAUDE.md` (test command, paths), `/workspace/product_config.json` if present, `/workspace/docs/story_<ID>.md` if it exists, and any source files relevant to the feature area.
