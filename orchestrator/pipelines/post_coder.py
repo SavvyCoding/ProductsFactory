@@ -502,6 +502,96 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
             f"or an explicit allow-list with size + recursion caps."
         )
 
+    # --- Guard 13: agent-debris detector (Phase 3 of quality-specs) ---
+    # Calculator accumulated: temp_fixed_top.py, src_head_end_correctly,
+    # SRC/main.py.backup, SRC/main.py.bak.before_temperature, main_complete.py,
+    # temp_storage/ (full product clone), test_X_qa.py pairs. Each was an
+    # agent-debris artifact from rework cycles that no session cleaned up.
+    # Refuse commits that introduce or modify files matching these patterns,
+    # except when the file's first line is `# AGENT_DEBRIS_EXEMPT: <reason>`
+    # (or the JS/TS comment variant) — the override is for legitimate
+    # operator-committed backups before a risky migration.
+    _DEBRIS_PATTERNS = [
+        _re.compile(r"\.(bak|backup|orig)(\.|$)"),
+        _re.compile(r"_temp[._]"),
+        _re.compile(r"_old[._]"),
+        _re.compile(r"_fixed[._]"),
+        _re.compile(r"_v[0-9]+[._]"),
+        _re.compile(r"_complete[._]"),
+        _re.compile(r"^temp_fixed"),
+        _re.compile(r"^src_(head|tail)_"),
+    ]
+    _SCRATCH_DIRS = ("Temp/", "temp/", "temp_storage/")
+    _SOURCE_EXTENSIONS = (".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".rb")
+    debris_hits = []
+    qa_pair_hits = []
+    from pathlib import Path as _PP
+    for f in files:
+        fname = _PP(f).name
+        # 13a: name patterns
+        debris_match = next((p.pattern for p in _DEBRIS_PATTERNS if p.search(fname)), None)
+        if debris_match:
+            # Honour the exemption marker on the first non-empty line
+            first = next((ln for ln in _read(f).splitlines() if ln.strip()), "")
+            if "AGENT_DEBRIS_EXEMPT" in first:
+                continue
+            debris_hits.append(f"{f} (matches {debris_match})")
+            continue
+        # 13b: tracked files in scratch directories the template marks
+        # as never-committed
+        if any(f.startswith(d) for d in _SCRATCH_DIRS):
+            first = next((ln for ln in _read(f).splitlines() if ln.strip()), "")
+            if "AGENT_DEBRIS_EXEMPT" in first:
+                continue
+            debris_hits.append(f"{f} (in scratch dir — template forbids commits here)")
+            continue
+        # 13c: empty source file
+        try:
+            full = _PP(working_dir) / f
+            if (any(f.endswith(ext) for ext in _SOURCE_EXTENSIONS)
+                    and full.is_file() and full.stat().st_size == 0):
+                debris_hits.append(f"{f} (empty source file)")
+                continue
+        except Exception:
+            pass
+        # 13d: source dir file with no extension at all (e.g. src_head_end_correctly)
+        if "." not in fname and not f.endswith("/") and any(
+            f.startswith(d) for d in ("SRC/", "src/", "lib/", "internal/", "app/", "pages/")
+        ):
+            try:
+                if (_PP(working_dir) / f).is_file():
+                    debris_hits.append(f"{f} (no extension in source dir)")
+                    continue
+            except Exception:
+                pass
+        # 13e: test_X_qa.py pair when test_X.py already exists
+        m = _re.match(r"^(.*?test_[A-Za-z0-9_]+)_qa(\.[A-Za-z]+)$", fname)
+        if m:
+            base = m.group(1) + m.group(2)
+            try:
+                if ((_PP(working_dir) / f).parent / base).exists():
+                    qa_pair_hits.append(f"{f} (paired with existing {base})")
+            except Exception:
+                pass
+    if debris_hits:
+        violations.append(
+            f"agent-debris file(s) in commit: "
+            f"{', '.join(debris_hits[:5])}{'...' if len(debris_hits) > 5 else ''}. "
+            f"Calculator accumulated 12+ of these (main.py.backup, "
+            f"src_head_end_correctly, temp_fixed_top.py, etc.) — each was "
+            f"never cleaned up. Delete them and re-commit. If a backup is "
+            f"intentional, annotate the first line with `# AGENT_DEBRIS_EXEMPT: "
+            f"<reason>`."
+        )
+    if qa_pair_hits:
+        violations.append(
+            f"test_X_qa.py pair(s) when test_X.py already exists: "
+            f"{', '.join(qa_pair_hits[:3])}{'...' if len(qa_pair_hits) > 3 else ''}. "
+            f"The QA reviewer should EDIT the existing test file, not create a "
+            f"parallel _qa.py. Merge the new assertions into the original test "
+            f"and delete the _qa file."
+        )
+
     # --- Guard 12: DB connection lifecycle (heuristic, warning-level) ---
     # Calculator's SRC/main.py:782-802 raised after a metric bump without a
     # finally close. Detection is heuristic: file opens a connection, has a
