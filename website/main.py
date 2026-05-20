@@ -1294,6 +1294,13 @@ async def admin_save_poller_settings(
     config.auto_merge_enabled              = form.get("auto_merge_enabled") == "1"
     config.agent_backend               = _str("agent_backend")
     config.ollama_host                 = _str("ollama_host")
+    # ollama_api_key: leave-blank-to-keep semantics so accidentally saving
+    # the form with the password field empty doesn't wipe an existing key.
+    # Only overwrite when the operator submitted a non-empty value. Mirrors
+    # the github_app_private_key PEM textarea pattern in admin_save_settings.
+    _new_ollama_key = form.get("ollama_api_key", "").strip()
+    if _new_ollama_key:
+        config.ollama_api_key = _new_ollama_key
     config.designer_model              = _str("designer_model")
     config.coder_model                 = _str("coder_model")
     # Per-persona overrides for the orchestrator's runtime model resolver
