@@ -1534,6 +1534,31 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     product["_reviewer_feedback_md"] = (
         _format_reviewer_feedback(assigned_features) if persona == "coder" else ""
     )
+    # Phase 7 of quality-specs (2026-05-19): pre-coder context augmentation.
+    # Read the product's ARCHITECTURE.md + scan the area's source dir for
+    # existing modules so the coder prompt can render a "use these, don't
+    # parallel them" block before any code is written. Coder only — other
+    # personas don't need this scaffolding. Best-effort: any failure → empty
+    # block, never blocks session launch.
+    product["_related_existing_code_md"] = ""
+    if persona == "coder" and assigned_features:
+        try:
+            from orchestrator.session.context_builder import build_related_code_context
+            _arch_md = ""
+            try:
+                from pathlib import Path as _PArch
+                _arch_path = _PArch(product.get("working_dir", "")) / "ARCHITECTURE.md"
+                if _arch_path.exists():
+                    _arch_md = _arch_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+            product["_related_existing_code_md"] = build_related_code_context(
+                product.get("working_dir", ""),
+                assigned_features[0],
+                architecture_md=_arch_md,
+            )
+        except Exception:
+            log.debug("Phase 7 pre-coder context build failed (non-fatal)", exc_info=True)
     product["_active_sprint"] = active_sprint or {}
 
     # 1-PR model: `sprint_pr_mode` now toggles "open a session PR per coder

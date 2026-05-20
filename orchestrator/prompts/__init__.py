@@ -237,6 +237,15 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
         # 2026-05-06: reviewer 1975 left specific line-numbered comments
         # that coder 1976 never saw because the prompt didn't render them.
         "{reviewer_feedback}": product.get("_reviewer_feedback_md", ""),
+        # Phase 7 of quality-specs (2026-05-19): pre-coder context augmentation.
+        # See orchestrator/session/context_builder.py. Empty for non-coder
+        # personas; empty for coder when ARCHITECTURE.md MODULES has no rows
+        # that match the feature's keywords. When populated, the block lists
+        # canonical modules + AST-discovered exports for the area, with
+        # explicit "do not parallel these" framing — closes the multi-agent
+        # drift pattern that produced StockAnalysis's two user-stores and
+        # Calculator's five main.py variants.
+        "{related_existing_code}": product.get("_related_existing_code_md", ""),
         "{prev_session_summary}": (
             f"## Previous session context\n\n{prev}\n\n---\n" if prev else ""
         ),
