@@ -592,6 +592,185 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
             f"and delete the _qa file."
         )
 
+    # --- Guard 14: config-as-gate integrity (Phase 4 of quality-specs) ---
+    # Calculator shipped `pytest.ini --cov-fail-under=0` despite the python
+    # template default being 70. The agent edited the gate value down to
+    # make tests pass. Reads the per-product quality_gates.json (installed
+    # by templates/renderer.py at discovery) and verifies pytest.ini /
+    # package.json / jest.config.cjs / go.mod values match.
+    #
+    # Skipped silently if quality_gates.json is absent (legacy products
+    # discovered before this file shipped). Backfill via the architect
+    # persona (Phase 8) for those.
+    try:
+        import json as _json
+        import configparser as _cp
+        gates_blob = _read("quality_gates.json")
+        if gates_blob.strip():
+            gates_doc = _json.loads(gates_blob)
+            gates = (gates_doc or {}).get("gates") or {}
+            gate_hits: list[str] = []
+
+            def _parse_addopts(value: str) -> dict[str, str]:
+                """Parse pytest.ini's `addopts = --x=1 --y=2 -v` into a flag→value dict."""
+                out: dict[str, str] = {}
+                if not value:
+                    return out
+                tokens = value.split()
+                i = 0
+                while i < len(tokens):
+                    tok = tokens[i]
+                    if "=" in tok and tok.startswith("--"):
+                        k, v = tok.split("=", 1)
+                        out[k] = v
+                    elif tok.startswith("--") and i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
+                        out[tok] = tokens[i + 1]
+                        i += 1
+                    i += 1
+                return out
+
+            # gate_file: e.g. "pytest.ini"
+            for gate_file, gate_settings in gates.items():
+                if not isinstance(gate_settings, dict):
+                    continue  # null/None gates = "this stack doesn't enforce X"
+                file_blob = _read(gate_file)
+                if not file_blob:
+                    # Required gate file is missing in working tree. Flag.
+                    gate_hits.append(f"{gate_file} (file missing in working tree but required by quality_gates.json)")
+                    continue
+                # setting_key: e.g. "addopts.--cov-fail-under"
+                for setting_key, rule in gate_settings.items():
+                    if not isinstance(rule, dict):
+                        continue
+                    kind = rule.get("kind") or ""
+                    # ---- pytest.ini --cov-fail-under integer ----
+                    if kind == "ini_addopts_int":
+                        try:
+                            cp = _cp.ConfigParser()
+                            cp.read_string(file_blob)
+                            sec = None
+                            for cand in ("pytest", "tool:pytest"):
+                                if cp.has_section(cand):
+                                    sec = cand
+                                    break
+                            if sec is None:
+                                continue
+                            addopts = cp.get(sec, "addopts", fallback="")
+                            flag = setting_key.split(".", 1)[1]
+                            current = _parse_addopts(addopts).get(flag)
+                            if current is None:
+                                gate_hits.append(f"{gate_file}: {flag} not set in addopts (required by quality_gates.json)")
+                                continue
+                            try:
+                                if int(current) < int(rule.get("min", 0)):
+                                    gate_hits.append(
+                                        f"{gate_file}: {flag}={current} < required minimum "
+                                        f"{rule.get('min')} ({rule.get('rationale','')})"
+                                    )
+                            except ValueError:
+                                gate_hits.append(f"{gate_file}: {flag}={current!r} not an integer")
+                        except Exception:
+                            pass
+                    # ---- pytest.ini --x string forbidden_patterns ----
+                    elif kind == "ini_addopts_str":
+                        try:
+                            cp = _cp.ConfigParser()
+                            cp.read_string(file_blob)
+                            sec = next((s for s in ("pytest", "tool:pytest") if cp.has_section(s)), None)
+                            if sec is None:
+                                continue
+                            addopts = cp.get(sec, "addopts", fallback="")
+                            flag = setting_key.rsplit(".forbidden_values", 1)[0].split(".", 1)[1] \
+                                   if ".forbidden_values" in setting_key \
+                                   else setting_key.split(".", 1)[1]
+                            current = _parse_addopts(addopts).get(flag, "")
+                            for pat in rule.get("forbidden_patterns", []):
+                                if _re.search(pat, current):
+                                    gate_hits.append(
+                                        f"{gate_file}: {flag}={current!r} matches forbidden "
+                                        f"pattern {pat!r}"
+                                    )
+                                    break
+                        except Exception:
+                            pass
+                    # ---- package.json string forbidden_patterns ----
+                    elif kind == "json_string":
+                        try:
+                            doc = _json.loads(file_blob)
+                            # navigate dotted path: scripts.test → doc["scripts"]["test"]
+                            cur: object = doc
+                            for part in setting_key.split("."):
+                                if isinstance(cur, dict):
+                                    cur = cur.get(part)
+                                else:
+                                    cur = None
+                                    break
+                            if not isinstance(cur, str):
+                                continue
+                            for pat in rule.get("forbidden_patterns", []):
+                                if _re.search(pat, cur):
+                                    gate_hits.append(
+                                        f"{gate_file}: {setting_key}={cur!r} matches forbidden "
+                                        f"pattern {pat!r} ({rule.get('rationale','')})"
+                                    )
+                                    break
+                        except Exception:
+                            pass
+                    # ---- jest.config.cjs integer (regex extraction) ----
+                    elif kind == "js_object_int":
+                        # setting_key like "coverageThreshold.global.lines"
+                        # Build a regex like: lines\s*:\s*(\d+) preceded by global: { ... lines:
+                        try:
+                            parts = setting_key.split(".")
+                            # Walk the regex incrementally: each parent must appear before child
+                            pattern = ""
+                            for p in parts:
+                                pattern += _re.escape(p) + r"\s*:\s*\{?[\s\S]*?"
+                            # Last component should grab the integer
+                            last = parts[-1]
+                            value_pattern = (
+                                r"\b" + _re.escape(last) + r"\s*:\s*(\d+)"
+                            )
+                            # Use the last-component pattern (simpler than threading all parents):
+                            m = _re.search(value_pattern, file_blob)
+                            if not m:
+                                continue
+                            current_int = int(m.group(1))
+                            if current_int < int(rule.get("min", 0)):
+                                gate_hits.append(
+                                    f"{gate_file}: {setting_key}={current_int} < required "
+                                    f"minimum {rule.get('min')}"
+                                )
+                        except Exception:
+                            pass
+                    # ---- go.mod go-version ----
+                    elif kind == "go_mod_version":
+                        try:
+                            m = _re.search(r"^go\s+(\d+\.\d+)", file_blob, _re.M)
+                            if not m:
+                                continue
+                            cur_tuple = tuple(int(p) for p in m.group(1).split("."))
+                            req_tuple = tuple(int(p) for p in str(rule.get("min", "0.0")).split("."))
+                            if cur_tuple < req_tuple:
+                                gate_hits.append(
+                                    f"{gate_file}: go {m.group(1)} < required {rule.get('min')}"
+                                )
+                        except Exception:
+                            pass
+                    # else: unknown kind — silently skip (forward compat)
+
+            if gate_hits:
+                violations.append(
+                    f"config-gate integrity violation(s): "
+                    f"{'; '.join(gate_hits[:5])}{'...' if len(gate_hits) > 5 else ''}. "
+                    f"Quality bars are encoded in quality_gates.json — do not edit "
+                    f"pytest.ini / package.json / jest.config.cjs / go.mod to bypass. "
+                    f"If you genuinely need to lower a bar, edit "
+                    f"product.config.quality_gates_override via the PM website."
+                )
+    except Exception:
+        pass  # any parser failure → skip check; never blocks push
+
     # --- Guard 12: DB connection lifecycle (heuristic, warning-level) ---
     # Calculator's SRC/main.py:782-802 raised after a metric bump without a
     # finally close. Detection is heuristic: file opens a connection, has a
