@@ -1282,23 +1282,47 @@ def _finalize_session(
         # Best-effort — never raises.
         if exit_code == 0 and persona == "reviewer":
             try:
-                from orchestrator.supervisor import detect_repeated_review_feedback
+                from orchestrator.supervisor import (
+                    detect_repeated_review_feedback,
+                    detect_divergent_review_feedback,
+                )
                 for _entry in _session_features:
                     if (isinstance(_entry, dict)
                             and _entry.get("review_outcome") == "changes_requested"
                             and _entry.get("id")):
+                        # Convergent cascade: same feedback N× in a row.
                         _result = detect_repeated_review_feedback(
                             feature_id=_entry["id"],
                             product_id=product["id"],
                             review_notes=_entry.get("review_notes"),
                         )
-                        # If the detector blocked the feature, mutate the
-                        # session entry so reconcile doesn't roll it back to
-                        # Implementing+changes_requested over our PATCH.
                         if _result.get("action") == "blocked":
                             _entry["status"] = "Blocked"
                             _entry["pr_number"] = None
                             _entry["review_outcome"] = "changes_requested"
+                            continue   # already blocked; skip the divergent check
+                        # Divergent cascade: different feedback each round.
+                        # Phase 6 of quality-specs (2026-05-19). Same end-state
+                        # (route to Blocked sprint) but a different signal:
+                        # max pairwise Jaccard similarity across the last N
+                        # reviewer comments is below threshold (default 0.25).
+                        # StockAnalysis feature 594's cascade was the canonical
+                        # case — 4 rounds, 4 different findings, the convergent
+                        # detector never fired.
+                        try:
+                            _divergent = detect_divergent_review_feedback(
+                                feature_id=_entry["id"],
+                                product_id=product["id"],
+                            )
+                            if _divergent.get("action") == "blocked":
+                                _entry["status"] = "Blocked"
+                                _entry["pr_number"] = None
+                                _entry["review_outcome"] = "changes_requested"
+                        except Exception:
+                            log.exception(
+                                f"Supervisor detect_divergent_review_feedback "
+                                f"failed for {product.get('name')} feature #{_entry['id']}"
+                            )
             except Exception:
                 log.exception(
                     f"Supervisor detect_repeated_review_feedback failed "
