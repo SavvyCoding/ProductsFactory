@@ -150,11 +150,11 @@ if OP in ("add-module", "update-module", "remove-module"):
     s, e = section_bounds(content, "MODULES")
     fence_off(s, e)
     new_row = f'| {PARAMS["concern"]} | `{PARAMS["module"]}` | {PARAMS["owns"]} | {PARAMS["notes"]} |'
-    row_re = rf'^\|\s*{re.escape(PARAMS["concern"])}\s*\|[^\n]*\|\s*$'
+    row_re = rf'^\|\s*{re.escape(PARAMS["concern"])}\s*\|[^\n]*\|[ \t]*$'
     existing = re.search(row_re, content[s:e], re.M)
     if OP == "add-module":
         if existing: sys.exit(f"row for `{PARAMS['concern']}` already exists -- use update-module")
-        rows = list(re.finditer(r'^\|.+\|\s*$', content[s:e], re.M))
+        rows = list(re.finditer(r'^\|.+\|[ \t]*$', content[s:e], re.M))
         if not rows: sys.exit("MODULES table has no rows; structure unexpected")
         insert_at = s + rows[-1].end()
         content = content[:insert_at] + "\n" + new_row + content[insert_at:]
@@ -172,7 +172,7 @@ elif OP in ("add-deprecated", "remove-deprecated"):
     s, e = section_bounds(content, "DEPRECATED")
     new_entry = f'- {PARAMS["entry"]}'
     if OP == "add-deprecated":
-        placeholder = re.search(r'^-\s*_\([^\n]*\)_\s*$', content[s:e], re.M)
+        placeholder = re.search(r'^-\s*_\([^\n]*\)_[ \t]*$', content[s:e], re.M)
         if placeholder:
             a, b = s + placeholder.start(), s + placeholder.end()
             content = content[:a] + new_entry + content[b:]
@@ -181,7 +181,7 @@ elif OP in ("add-deprecated", "remove-deprecated"):
             insert_at = s + (items[-1].end() if items else 0)
             content = content[:insert_at] + ("\n" if items else "") + new_entry + content[insert_at:]
     else:  # remove-deprecated -- match by full entry text in PARAMS["entry"]
-        row_re = rf'^-\s+{re.escape(PARAMS["entry"])}\s*$'
+        row_re = rf'^-\s+{re.escape(PARAMS["entry"])}[ \t]*$'
         m = re.search(row_re, content[s:e], re.M)
         if not m: sys.exit(f"DEPRECATED entry not found: {PARAMS['entry']}")
         a = s + m.start()
@@ -192,11 +192,11 @@ elif OP in ("add-entry-point", "update-entry-point", "remove-entry-point"):
     s, e = section_bounds(content, "ENTRY POINTS")
     fence_off(s, e)
     new_row = f'| {PARAMS["concern"]} | `{PARAMS["file"]}` | {PARAMS["notes"]} |'
-    row_re = rf'^\|\s*{re.escape(PARAMS["concern"])}\s*\|[^\n]*\|\s*$'
+    row_re = rf'^\|\s*{re.escape(PARAMS["concern"])}\s*\|[^\n]*\|[ \t]*$'
     existing = re.search(row_re, content[s:e], re.M)
     if OP == "add-entry-point":
         if existing: sys.exit(f"row for `{PARAMS['concern']}` already exists -- use update-entry-point")
-        rows = list(re.finditer(r'^\|.+\|\s*$', content[s:e], re.M))
+        rows = list(re.finditer(r'^\|.+\|[ \t]*$', content[s:e], re.M))
         if not rows: sys.exit("ENTRY POINTS table has no rows")
         insert_at = s + rows[-1].end()
         content = content[:insert_at] + "\n" + new_row + content[insert_at:]
@@ -277,8 +277,10 @@ race conflicts with the next scheduler check.)
 
 ## Hard rules
 
-- **Read-only on source code.** You may edit `/workspace/ARCHITECTURE.md` (factual sections only — MODULES, DEPRECATED, ENTRY POINTS, Directory structure — per §4(a) and §5), `/workspace/docs/architecture_review_*.md` (for contract-section proposals), and `/workspace/product_memory.md`. Everything else in the repo (src/, tests/, CLAUDE.md, .gitignore, quality_gates.json, etc.) is off-limits. The orchestrator's post-maintenance allowlist refuses commits that touch other paths.
+- **Strict path allowlist.** The ONLY files you may create, modify, delete, or rename are: `/workspace/ARCHITECTURE.md` (factual-section edits via §5), `/workspace/docs/architecture_review_*.md` (contract-section proposals), `/workspace/product_memory.md` (cross-session notes), and `/workspace/session_summary.md` (per-session log). **Everything else is off-limits** — including `features.md`, `src/*`, `tests/*`, `alembic/*`, `CLAUDE.md`, `.gitignore`, `quality_gates.json`, and any tooling backup files. The post-maintenance allowlist is the hard gate: if your commit touches *any* path outside this list, the entire commit is refused and ALL your work in this session is discarded.
+- **Never delete files, even ones that look stale.** If you see a file that should be removed (deprecated module, parallel implementation, anti-pattern leftover like `*.bak` or `temp_*`), **ADD IT TO THE `## DEPRECATED` LIST in ARCHITECTURE.md instead of deleting it**. Post-coder Guard 13 refuses re-introduction of DEPRECATED files; the next coder session that touches the area will see the entry and clean up. Real failure mode (2026-05-20 session 2928): architect deleted `features.md` because it looked outdated, allowlist refused the entire commit, all good ARCHITECTURE.md edits got discarded.
 - **Surgical edits only inside ARCHITECTURE.md.** Use the §5 Python script — it parses the markdown, scopes to one row at a time, and refuses to touch RULES / REFERENCE PATTERNS / CONFIG GATES. Do NOT rewrite tables, reorder rows, or touch unrelated cells. The post-maintenance lint guard will refuse your commit if you delete a required section header.
+- **Use the §5 Python helper exclusively for ARCHITECTURE.md.** Do NOT use `sed -i`, `sed -i.<suffix>`, `awk -i inplace`, `perl -i`, `vim -c`, or any in-place editor — they leave backup artifacts (`*.QCWAaF`, `*.bak`, etc.) in the working tree that the allowlist refuses. The helper is the only sanctioned edit path. If the helper sys.exits with an error, do NOT fall back to manual sed/python — write a `docs/architecture_review_<date>.md` proposal explaining what you would have changed and exit. Real failure mode (2026-05-20 session 2928): architect ran `sed -i.QCWAaF` to fix a formatting issue, the backup artifact `sedQCWAaF` ended up in the working tree, allowlist refused the commit.
 - **Do NOT file chore features.** Previously the architect filed `feature_type=chore` rows for ARCHITECTURE.md updates the PM had to action. That path is retired — you have inline edit authority for the doc itself now. Code-drift findings (parallel modules, anti-pattern files in tree) go into the DEPRECATED section so post-coder Guard 13 enforces them; you don't file a chore for those either.
 - **Quantitative drift only.** "Pattern A would be cleaner than pattern B" is opinion. "Doc claims 40 endpoints, code has 5" is drift. Act on the latter, ignore the former.
 - **Cap at 5 inline edits per session.** Past that, you're either churning on cosmetic stuff or the doc is so far gone you should write a §4(b) review proposal instead.
