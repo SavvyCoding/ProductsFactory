@@ -585,6 +585,17 @@ def run_cycle(args: dict, **kwargs) -> str:
             except Exception:
                 log.exception(f"supervisor per-product detectors failed for product {p.get('id')}")
 
+        # Per-cycle architect scheduler. Queues the architect persona when
+        # features-pushed delta crosses N (default 3) or the 7-day fallback
+        # elapses. Sets run_persona_now="architect" so the Priority-0 block
+        # below picks it up on this same cycle. See _check_architect_due for
+        # the trigger logic.
+        for p in ready:
+            try:
+                _check_architect_due(p)
+            except Exception:
+                log.exception(f"architect-scheduler failed for product {p.get('id')}")
+
         # Priority 0: PM-triggered on-demand sessions. Bypasses round-robin
         # and the determine_next_action decision tree — the PM clicked a
         # button, run that persona for that product. Flag is cleared up
@@ -1031,6 +1042,120 @@ def _run_supervisor_per_product_detectors(product: dict) -> None:
             detect_rapid_flap(product_id=pid, flapping_features=flapping)
     except Exception:
         log.exception(f"rapid_flap detector failed for product {pid}")
+
+
+_DEFAULT_ARCHITECT_PUSHED_THRESHOLD = 3
+_ARCHITECT_FALLBACK_SECONDS = 7 * 24 * 3600
+
+
+def _check_architect_due(product: dict) -> None:
+    """Per-cycle: launch the architect persona when ARCHITECTURE.md drift
+    is likely. Two triggers, either is sufficient:
+
+      1. **Delta-since-last-run >= N.** Count of features with status=Pushed
+         minus `product.config.features_pushed_at_last_architect`. N defaults
+         to 3, soft-overrideable via `system_config.architect_pending_threshold`
+         (no migration required — falls back if the column doesn't exist).
+         The architect persona's prompt step 7 already writes both
+         `last_architect_at` and `features_pushed_at_last_architect` on
+         completion, so the counters self-maintain.
+
+      2. **7-day fallback.** Even if no features pushed (dormant product),
+         run architect once a week to catch quality-gate tampering,
+         DEPRECATED entries whose files were quietly deleted, etc. Without
+         this, a paused product's ARCHITECTURE.md never gets reviewed.
+
+    Side-effect: PATCHes `run_persona_now="architect"` on the product. The
+    existing on-demand launch path at run_cycle line 603+ then picks it up
+    on the same cycle. If `run_persona_now` is already set (PM clicked a
+    button, or a prior scheduler decision wasn't consumed yet), do nothing
+    -- the existing flag wins.
+
+    Best-effort: never raises into the cycle.
+    """
+    import httpx as _httpx
+    from datetime import datetime as _dt, timezone as _tz
+
+    pid = product.get("id")
+    if not pid:
+        return
+    if product.get("run_persona_now"):
+        return  # something else already queued; don't overwrite
+
+    cfg = product.get("config") or {}
+    threshold = _DEFAULT_ARCHITECT_PUSHED_THRESHOLD
+    last_at_iso = cfg.get("last_architect_at")
+    last_pushed_count = cfg.get("features_pushed_at_last_architect") or 0
+
+    try:
+        with _pm_client() as client:
+            sc_resp = client.get("/api/system-config")
+            sc = sc_resp.json() if sc_resp.is_success else {}
+        if isinstance(sc, dict):
+            override = sc.get("architect_pending_threshold")
+            if isinstance(override, int) and override > 0:
+                threshold = override
+    except Exception:
+        pass  # use default
+
+    # Count Pushed features. Cheap GET of just status to avoid serialising
+    # full feature payloads -- but the existing /api/products/{id}/features
+    # endpoint doesn't support field projection, so we fetch and filter.
+    # If the per-product feature count grows huge this is worth revisiting.
+    pushed_count = 0
+    try:
+        with _pm_client() as client:
+            f_resp = client.get(f"/api/products/{pid}/features")
+            features = f_resp.json() if f_resp.is_success else []
+        if isinstance(features, list):
+            pushed_count = sum(1 for f in features if f.get("status") == "Pushed")
+    except Exception:
+        return  # can't decide without features; defer to next cycle
+
+    delta = pushed_count - int(last_pushed_count or 0)
+    reasons: list[str] = []
+
+    if delta >= threshold:
+        reasons.append(
+            f"{delta} features Pushed since last architect run "
+            f"(threshold {threshold})"
+        )
+
+    if last_at_iso:
+        try:
+            last_at = _dt.fromisoformat(str(last_at_iso).replace("Z", "+00:00"))
+            age = (_dt.now(_tz.utc) - last_at).total_seconds()
+            if age >= _ARCHITECT_FALLBACK_SECONDS:
+                reasons.append(f"7d fallback ({int(age/3600)}h since last run)")
+        except Exception:
+            pass
+    else:
+        # Never run before. Trigger on the fallback condition so first-cycle
+        # ARCHITECTURE.md gets at least one architect pass without waiting
+        # for the delta threshold.
+        reasons.append("first architect run for this product")
+
+    if not reasons:
+        return
+
+    try:
+        with _pm_client() as client:
+            client.patch(
+                f"/api/products/{pid}",
+                json={"run_persona_now": "architect"},
+            )
+        # Mutate the in-memory product dict too so the Priority-0 on-demand
+        # block in the same run_cycle picks the flag up immediately instead
+        # of waiting ~60s for the next cycle to re-read it from the DB.
+        product["run_persona_now"] = "architect"
+        log.info(
+            f"[architect-scheduler] product {pid} ({product.get('name','?')}): "
+            f"queued architect -- {'; '.join(reasons)}"
+        )
+    except Exception:
+        log.exception(
+            f"[architect-scheduler] could not queue architect for product {pid}"
+        )
 
 
 def _route_unsprinted_security_bugs(product: dict) -> int:

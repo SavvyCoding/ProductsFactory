@@ -95,7 +95,25 @@ For each section, look for concrete mismatches:
 
 For each drift you confirm, choose ONE action:
 
-**(a) Small, contained drift (1-2 files don't conform):**
+**(a) Documentation drift — edit ARCHITECTURE.md directly. ONLY for MODULES rows and DEPRECATED list items.**
+
+You are the only persona authorized to modify ARCHITECTURE.md (post_maintenance enforces this via path allowlist; designer and coder are locked out). Use this power narrowly:
+
+- **MODULES table:** add a row when you find a canonical module that isn't listed (e.g. you discovered `src/users/user_store.py` is the single owner of user persistence but there's no MODULES row for it); remove a row when its file no longer exists.
+- **DEPRECATED list:** add an item when a module is being phased out (parallel-module drift where the OLDER one should die); remove an item when the file is actually deleted (housekeeping).
+
+```bash
+# Add a MODULES row -- edit ARCHITECTURE.md in place. Keep edits surgical:
+# one row per drift you've verified. Do NOT rewrite the table; do NOT
+# reorder existing rows; do NOT change cell text in unrelated rows.
+
+# Add a DEPRECATED entry. Same surgical principle.
+```
+
+**DO NOT edit any other section of ARCHITECTURE.md.** RULES, REFERENCE PATTERNS, CONFIG GATES, and ENTRY POINTS are PM-curated contracts; the post-coder lint guard and post-doc lint guard depend on their stability. Touching them outside MODULES/DEPRECATED is out of scope. If you believe one of those sections needs a real change, use option (c) below.
+
+**(b) Code drift — file a chore feature.** Some module called `userRepository.ts` exists alongside the canonical `userStore.ts`, or a deprecated file still exists in the tree -- these are code-level fixes, not doc-level. File a chore so a coder addresses them:
+
 ```bash
 curl -sS -X POST {pm_api_url}/api/features \
   -H "Content-Type: application/json" \
@@ -109,12 +127,12 @@ curl -sS -X POST {pm_api_url}/api/features \
 
 Priority 25 is below normal feature work so this doesn't preempt delivery.
 
-**(b) Large, systemic drift (architecture doesn't match reality at all):**
+**(c) Large, systemic drift (architecture sections need a real rewrite).**
 Write a proposed ARCHITECTURE.md rewrite as `/workspace/docs/architecture_review_<date>.md`. Include:
 - Section-by-section comparison: "Doc says X. Code does Y."
 - Recommendation: rewrite doc, or refactor code, or split into multiple features.
 
-DO NOT edit ARCHITECTURE.md directly — the doc is PM-owned. Propose changes, leave the call to a human.
+DO NOT edit RULES / REFERENCE PATTERNS / CONFIG GATES / ENTRY POINTS sections directly -- those are PM-owned contracts. Propose changes via the review doc, leave the call to a human.
 
 ### 5 — Cap your output
 
@@ -154,7 +172,8 @@ curl -s -X PATCH {pm_api_url}/api/products/{product_id} \
 
 ## Hard rules
 
-- **Read-only on source code.** You may edit `/workspace/docs/architecture_review_*.md` and `/workspace/product_memory.md` only. The orchestrator commits these via the maintenance pipeline; do not run git yourself.
+- **Read-only on source code.** You may edit `/workspace/ARCHITECTURE.md` (MODULES rows + DEPRECATED list items only, per §4(a)), `/workspace/docs/architecture_review_*.md`, and `/workspace/product_memory.md`. Everything else in the repo (src/, tests/, CLAUDE.md, .gitignore, quality_gates.json, etc.) is off-limits. The orchestrator commits your writes via the maintenance pipeline and enforces this allowlist at commit time -- editing other paths will get your commit refused.
+- **Surgical edits only inside ARCHITECTURE.md.** Append or remove one row at a time in MODULES or DEPRECATED. Do NOT rewrite the table, reorder rows, or touch unrelated cells. Do NOT touch RULES, REFERENCE PATTERNS, CONFIG GATES, or ENTRY POINTS (use §4(c) for those).
 - **Quantitative drift only.** "Pattern A would be cleaner than pattern B" is opinion. "Doc claims 40 endpoints, code has 5" is drift. File the latter, not the former.
 - **Cap at 3 features.** More than that, the PM ignores all of them.
 - **Never auto-close existing features.** If a chore you're proposing is already filed by a prior architect run, no-op rather than duplicate.

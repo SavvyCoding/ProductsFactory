@@ -39,6 +39,140 @@ log = logging.getLogger("poller.docker")
 PM_API_URL = os.environ["PM_API_URL"]
 
 
+# Per-persona write allowlists for maintenance commits. Same shape as
+# post_doc's allowlist but persona-keyed because architect needs to write
+# ARCHITECTURE.md (the whole point of putting it on this persona is so the
+# document stays current) while every other maintenance persona must not.
+# Paths are fnmatch globs against forward-slashed relative paths.
+#
+# Architect specifically gains write access to ARCHITECTURE.md as the *only*
+# persona authorized to maintain it (designer is blocked by post_doc's
+# allowlist; coders write through post_coder which is feature-scoped).
+# Architect's prompt scopes WHAT it may edit inside ARCHITECTURE.md (MODULES
+# and DEPRECATED rows only -- no section rewrites); this allowlist enforces
+# the PATH boundary, the prompt enforces the in-file scope.
+_MAINTENANCE_ALLOWLISTS: dict[str, tuple[str, ...]] = {
+    "architect": (
+        "ARCHITECTURE.md",
+        "docs/architecture_review_*.md",
+        "product_memory.md",
+        "session_summary.md",
+    ),
+    "documenter": (
+        "README.md",
+        "docs/*.md",
+        "docs/**/*.md",
+        "product_memory.md",
+        "session_summary.md",
+    ),
+    "analytics": (
+        "docs/analytics_*.md",
+        "docs/*_analytics.md",
+        "product_memory.md",
+        "session_summary.md",
+    ),
+    "refactorer": (
+        # Refactorer needs broad source-code access by definition.
+        # Locking it down properly needs a separate review pass; for now
+        # keep the existing behaviour (no enforcement) by allowing the
+        # universal pattern. Future work: lock to specific dirs per stack.
+        "*",
+        "**/*",
+    ),
+    "devops": (
+        ".github/**/*",
+        "Dockerfile",
+        "docker-compose.yml",
+        "Makefile",
+        "scripts/*",
+        "product_memory.md",
+        "session_summary.md",
+    ),
+    "recommender": (
+        # Recommender only POSTs to the PM API (creates Pending features);
+        # it doesn't write files. Keep the bookkeeping appends allowed in
+        # case the prompt is later expanded.
+        "product_memory.md",
+        "session_summary.md",
+    ),
+    "product_trainer": (
+        "docs/*.md",
+        "product_memory.md",
+        "session_summary.md",
+    ),
+}
+
+
+def _path_matches(path: str, patterns: tuple[str, ...]) -> bool:
+    import fnmatch
+    normalized = path.replace("\\", "/")
+    for pat in patterns:
+        if fnmatch.fnmatchcase(normalized, pat):
+            return True
+    return False
+
+
+def _post_maintenance_allowlist_check(
+    persona: str, working_dir: str, _run, product_name: str = "?",
+) -> list[str]:
+    """Refuse a maintenance commit that touches paths outside the persona's
+    allowed write set.
+
+    Returns a list of violation strings; empty list = clean (commit may proceed).
+
+    The architect is currently the only persona that may modify ARCHITECTURE.md
+    -- this is what fixes the post-2026-05-20 gap where designer was locked
+    out of ARCHITECTURE.md edits (post_doc allowlist) but no other persona
+    was authorized to update it either. If a new maintenance persona later
+    needs ARCHITECTURE.md write access, add it to _MAINTENANCE_ALLOWLISTS.
+
+    Personas not listed in _MAINTENANCE_ALLOWLISTS are treated as "unknown" --
+    we don't second-guess; the check passes them through (logged as info).
+    This matches the existing failure mode where unknown personas just run
+    without an allowlist.
+    """
+    allowlist = _MAINTENANCE_ALLOWLISTS.get(persona)
+    if allowlist is None:
+        log.info(
+            f"[post-{persona}] {product_name}: no allowlist defined "
+            f"for persona; commit passes through unfiltered"
+        )
+        return []
+
+    try:
+        diff_r = _run(["git", "diff", "--cached", "--name-status"], timeout=15)
+    except Exception:
+        return []
+    if diff_r.returncode != 0:
+        return []
+
+    violations: list[str] = []
+    for raw in (diff_r.stdout or "").splitlines():
+        line = raw.rstrip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        status_raw = parts[0]
+        if not status_raw:
+            continue
+        status = status_raw[0]
+        path = parts[-1].strip()
+        if not path:
+            continue
+        if _path_matches(path, allowlist):
+            continue
+        verb = {
+            "M": "modify", "D": "delete", "R": "rename",
+            "C": "copy", "T": "change type of", "A": "add",
+        }.get(status, status)
+        violations.append(
+            f"Persona `{persona}` attempts to {verb} `{path}` -- "
+            f"outside its maintenance allowlist. Permitted patterns: "
+            f"{', '.join('`' + p + '`' for p in allowlist)}."
+        )
+    return violations
+
+
 def _run_post_maintenance_pipeline(product: dict, session_uid: str,
                                     working_dir: str, persona: str) -> None:
     pname = product.get("name", "?")
@@ -96,6 +230,24 @@ def _run_post_maintenance_pipeline(product: dict, session_uid: str,
     cached = _run(["git", "diff", "--cached", "--quiet"])
     if cached.returncode == 0:
         log.info(f"[post-{persona}] {pname}: nothing staged after add — done")
+        return
+
+    # Persona-aware allowlist check. Refuse the commit if the agent went
+    # off-script and touched files outside its maintenance scope. Critically,
+    # this is the ONLY enforcement point that lets architect write
+    # ARCHITECTURE.md while keeping every other persona out of it.
+    violations = _post_maintenance_allowlist_check(persona, working_dir, _run, pname)
+    if violations:
+        log.warning(
+            f"[post-{persona}] {pname}: allowlist refused commit "
+            f"({len(violations)} out-of-scope path(s)):"
+        )
+        for v in violations:
+            log.warning(f"  - {v}")
+        log.warning(
+            f"[post-{persona}] {pname}: maintenance commit discarded; "
+            f"the local edits will be cleaned by the next workspace reset"
+        )
         return
 
     # --no-verify: pre-commit hooks (husky, lint-staged) installed by the
