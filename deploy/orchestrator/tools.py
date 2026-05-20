@@ -181,7 +181,13 @@ _PRODUCT_KEEP = {"id", "name", "status", "working_dir", "github_repo", "tech_sta
                  "quiet_hours_start", "quiet_hours_end",
                  "daily_session_cap", "last_run_at", "config", "type"}
 
-_ONDEMAND_PERSONAS = ("documenter", "analytics", "refactorer", "devops", "recommender")
+_ONDEMAND_PERSONAS = ("documenter", "analytics", "refactorer", "devops", "recommender",
+                      # Phase 8 of quality-specs (2026-05-19): architect persona
+                      # for quantitative drift detection. Maintenance-shape
+                      # (read-only on source); PM triggers on demand via
+                      # run_persona_now="architect", or the cycle/persona gate
+                      # fires it automatically every ~50 features pushed.
+                      "architect")
 _FEATURE_KEEP = {"id", "product_id", "sprint_id", "name", "status", "feature_type",
                  "design_doc_path", "pr_number", "pr_url", "fix_attempts"}
 _SPRINT_KEEP  = {"id", "product_id", "phase_id", "name", "status", "goal",

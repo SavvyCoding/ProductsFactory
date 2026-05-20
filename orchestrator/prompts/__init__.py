@@ -149,6 +149,14 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
         template_name = "analytics"
     elif persona == "product_trainer":
         template_name = "product_trainer"
+    elif persona == "architect":
+        # Phase 8 of quality-specs (2026-05-19): quantitative drift detection
+        # against ARCHITECTURE.md's MODULES / ENTRY POINTS / CONFIG GATES
+        # sections. Maintenance persona — read-only on source, may write
+        # /workspace/docs/architecture_review_*.md and product_memory.md.
+        # Schedule: every ~50 features pushed (gate in cycle/persona.py),
+        # or on-demand via run_persona_now="architect".
+        template_name = "architect"
     elif product.get("analysis_status") == "running":
         template_name = "analysis_run"
     elif product.get("type") == "brownfield":
