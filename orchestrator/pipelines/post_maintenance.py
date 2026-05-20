@@ -112,6 +112,59 @@ def _path_matches(path: str, patterns: tuple[str, ...]) -> bool:
     return False
 
 
+# The six Phase-1 section headers that must remain present in ARCHITECTURE.md.
+# Downstream consumers (orchestrator/session/context_builder.py, post_coder
+# Guards 13/14, the architect persona itself) all depend on these. If the
+# architect's inline edit accidentally strips a header, the consumer breaks
+# silently. Same defensive check as the original (pre-pivot) post-doc lint
+# guard; kept here specifically for architect because architect is the only
+# persona authorized to modify ARCHITECTURE.md at all -- if anyone is going
+# to strip a section by accident, it's them.
+_REQUIRED_ARCHITECTURE_SECTIONS = (
+    "ENTRY POINTS",
+    "MODULES",
+    "RULES",
+    "REFERENCE PATTERNS",
+    "CONFIG GATES",
+    "DEPRECATED",
+)
+
+
+def _check_required_arch_sections(working_dir: str) -> list[str]:
+    """Return a violation list if ARCHITECTURE.md is missing any required
+    Phase-1 section header. Empty list = all six headers present.
+
+    Architect's §5 Python script has its own `fence_off` guard preventing
+    edits to RULES/REFERENCE PATTERNS/CONFIG GATES sections, but the LLM
+    might bypass the script and edit ARCHITECTURE.md by hand. This is the
+    post-commit verifier that catches that failure mode.
+    """
+    import re as _re
+    arch_path = os.path.join(working_dir, "ARCHITECTURE.md")
+    try:
+        with open(arch_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except FileNotFoundError:
+        return []  # no file = nothing to check (greenfield first-arch run)
+    except Exception as e:
+        return [f"ARCHITECTURE.md unreadable: {e}"]
+    missing: list[str] = []
+    for section in _REQUIRED_ARCHITECTURE_SECTIONS:
+        pattern = _re.compile(rf"^##\s+{_re.escape(section)}\b", _re.MULTILINE)
+        if not pattern.search(content):
+            missing.append(section)
+    if missing:
+        return [
+            f"ARCHITECTURE.md is missing required section header(s) after "
+            f"architect's edit: {', '.join('`## ' + s + '`' for s in missing)}. "
+            f"Downstream consumers (pre-coder context, post-coder lint guards, "
+            f"architect persona itself) depend on these. Use the §5 Python "
+            f"helper in the architect prompt -- its fence_off check refuses "
+            f"to touch contract sections."
+        ]
+    return []
+
+
 def _post_maintenance_allowlist_check(
     persona: str, working_dir: str, _run, product_name: str = "?",
 ) -> list[str]:
@@ -170,6 +223,19 @@ def _post_maintenance_allowlist_check(
             f"outside its maintenance allowlist. Permitted patterns: "
             f"{', '.join('`' + p + '`' for p in allowlist)}."
         )
+
+    # Architect-specific defensive check: if ARCHITECTURE.md is being modified,
+    # verify all six required Phase-1 section headers remain present. Catches
+    # the case where the architect bypassed the prompt's §5 helper and edited
+    # the file by hand, stripping a contract section header.
+    if persona == "architect":
+        arch_touched = any(
+            line.endswith("ARCHITECTURE.md")
+            for line in (diff_r.stdout or "").splitlines()
+        )
+        if arch_touched:
+            violations.extend(_check_required_arch_sections(working_dir))
+
     return violations
 
 
