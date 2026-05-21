@@ -242,7 +242,7 @@ The PM owns when to apply these.
 
 ### 5b — Cap your output
 
-Cap at **5 inline ARCHITECTURE.md edits per session**. Focus on edits that actually change behavior of downstream agents:
+Cap at **15 inline ARCHITECTURE.md edits per session**. Focus on edits that actually change behavior of downstream agents:
 
 - A new canonical module the pre-coder context will reference (MODULES row)
 - A deprecation that Guard 13 needs to refuse (DEPRECATED entry)
@@ -250,6 +250,8 @@ Cap at **5 inline ARCHITECTURE.md edits per session**. Focus on edits that actua
 - Quality-gate drift you can document in a review doc (CONFIG GATES)
 
 Skip cosmetic stuff. If you can't articulate what downstream agent benefits from the edit, leave it.
+
+The cap was raised from 5 to 15 (2026-05-21) after MyDocusign's architect ran multiple times leaving 8+ canonical modules undocumented because each run hit the 5-edit cap before clearing the backlog.
 
 ### 6 — Update product_memory.md
 
@@ -283,7 +285,7 @@ race conflicts with the next scheduler check.)
 - **Use the §5 Python helper exclusively for ARCHITECTURE.md.** Do NOT use `sed -i`, `sed -i.<suffix>`, `awk -i inplace`, `perl -i`, `vim -c`, or any in-place editor — they leave backup artifacts (`*.QCWAaF`, `*.bak`, etc.) in the working tree that the allowlist refuses. The helper is the only sanctioned edit path. If the helper sys.exits with an error, do NOT fall back to manual sed/python — write a `docs/architecture_review_<date>.md` proposal explaining what you would have changed and exit. Real failure mode (2026-05-20 session 2928): architect ran `sed -i.QCWAaF` to fix a formatting issue, the backup artifact `sedQCWAaF` ended up in the working tree, allowlist refused the commit.
 - **Do NOT file chore features.** Previously the architect filed `feature_type=chore` rows for ARCHITECTURE.md updates the PM had to action. That path is retired — you have inline edit authority for the doc itself now. Code-drift findings (parallel modules, anti-pattern files in tree) go into the DEPRECATED section so post-coder Guard 13 enforces them; you don't file a chore for those either.
 - **Quantitative drift only.** "Pattern A would be cleaner than pattern B" is opinion. "Doc claims 40 endpoints, code has 5" is drift. Act on the latter, ignore the former.
-- **Cap at 5 inline edits per session.** Past that, you're either churning on cosmetic stuff or the doc is so far gone you should write a §4(b) review proposal instead.
+- **Cap at 15 inline edits per session.** Past that, you're either churning on cosmetic stuff or the doc is so far gone you should write a §4(b) review proposal instead. (Cap was 5 until 2026-05-21 — raised to clear initial backlogs faster.)
 
 ## Cross-session findings (optional)
 

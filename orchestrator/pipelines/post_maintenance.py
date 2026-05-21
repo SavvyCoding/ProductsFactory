@@ -116,10 +116,7 @@ def _path_matches(path: str, patterns: tuple[str, ...]) -> bool:
 # Downstream consumers (orchestrator/session/context_builder.py, post_coder
 # Guards 13/14, the architect persona itself) all depend on these. If the
 # architect's inline edit accidentally strips a header, the consumer breaks
-# silently. Same defensive check as the original (pre-pivot) post-doc lint
-# guard; kept here specifically for architect because architect is the only
-# persona authorized to modify ARCHITECTURE.md at all -- if anyone is going
-# to strip a section by accident, it's them.
+# silently.
 _REQUIRED_ARCHITECTURE_SECTIONS = (
     "ENTRY POINTS",
     "MODULES",
@@ -129,15 +126,44 @@ _REQUIRED_ARCHITECTURE_SECTIONS = (
     "DEPRECATED",
 )
 
+# The full set of section headers permitted in ARCHITECTURE.md. Anything else
+# is unauthorized creation (e.g. architect-ce3601f7 on MyDocusign 2026-05-21
+# added a 58-line `## AWS Shield Standard` section out of nowhere).
+# Includes the six required plus the soft/template sections that ship in the
+# stack templates (templates/stacks/*/ARCHITECTURE.md). The presence check
+# refuses BOTH: any required header missing AND any non-canonical header
+# present. Effectively: set(headers_in_file) must equal a subset of
+# _ALLOWED_ARCHITECTURE_SECTIONS, and must contain every required header.
+_ALLOWED_ARCHITECTURE_SECTIONS = _REQUIRED_ARCHITECTURE_SECTIONS + (
+    "Directory structure",
+    "Patterns in use",
+    "Naming conventions",
+    "Do not change without PM approval",
+    "Pre-existing test failures (brownfield only)",
+)
+
 
 def _check_required_arch_sections(working_dir: str) -> list[str]:
-    """Return a violation list if ARCHITECTURE.md is missing any required
-    Phase-1 section header. Empty list = all six headers present.
+    """Return a violation list if ARCHITECTURE.md's section headers don't
+    match the canonical set: every required header must be present AND no
+    unauthorized header may have been added.
 
-    Architect's §5 Python script has its own `fence_off` guard preventing
-    edits to RULES/REFERENCE PATTERNS/CONFIG GATES sections, but the LLM
-    might bypass the script and edit ARCHITECTURE.md by hand. This is the
-    post-commit verifier that catches that failure mode.
+    Two failure modes both produce violations:
+
+      1. Missing required header. Downstream consumers break silently.
+         Real incident: designer-63e95f37 commit 5296af4 (MyDocusign 2026-05-20)
+         deleted RULES, REFERENCE PATTERNS, CONFIG GATES, DEPRECATED.
+
+      2. Unauthorized header added. The architect's prompt forbids creating
+         new sections; the §5 helper only edits rows. But an LLM bypassing
+         the helper can extend the file freely. Real incident: architect
+         session ce3601f7 (MyDocusign 2026-05-21) added a 58-line `## AWS
+         Shield Standard` section -- documentation creation, not drift
+         correction. The architect ran twice and each run made ARCHITECTURE.md
+         worse rather than better.
+
+    Headers are matched case-sensitively against `^## <NAME>` since
+    context_builder._section_blob uses exact-case + word-boundary matching.
     """
     import re as _re
     arch_path = os.path.join(working_dir, "ARCHITECTURE.md")
@@ -148,21 +174,41 @@ def _check_required_arch_sections(working_dir: str) -> list[str]:
         return []  # no file = nothing to check (greenfield first-arch run)
     except Exception as e:
         return [f"ARCHITECTURE.md unreadable: {e}"]
-    missing: list[str] = []
-    for section in _REQUIRED_ARCHITECTURE_SECTIONS:
-        pattern = _re.compile(rf"^##\s+{_re.escape(section)}\b", _re.MULTILINE)
-        if not pattern.search(content):
-            missing.append(section)
+
+    # All h2 headers actually in the file.
+    actual = [m.group(1).strip() for m in
+              _re.finditer(r"^##\s+(.+?)\s*$", content, _re.MULTILINE)]
+    actual_set = set(actual)
+    required_set = set(_REQUIRED_ARCHITECTURE_SECTIONS)
+    allowed_set = set(_ALLOWED_ARCHITECTURE_SECTIONS)
+
+    violations: list[str] = []
+
+    missing = required_set - actual_set
     if missing:
-        return [
-            f"ARCHITECTURE.md is missing required section header(s) after "
-            f"architect's edit: {', '.join('`## ' + s + '`' for s in missing)}. "
+        violations.append(
+            f"ARCHITECTURE.md is missing required section header(s): "
+            f"{', '.join('`## ' + s + '`' for s in sorted(missing))}. "
             f"Downstream consumers (pre-coder context, post-coder lint guards, "
             f"architect persona itself) depend on these. Use the §5 Python "
             f"helper in the architect prompt -- its fence_off check refuses "
             f"to touch contract sections."
-        ]
-    return []
+        )
+
+    unauthorized = actual_set - allowed_set
+    if unauthorized:
+        violations.append(
+            f"ARCHITECTURE.md has unauthorized section header(s): "
+            f"{', '.join('`## ' + s + '`' for s in sorted(unauthorized))}. "
+            f"The architect (and any agent that touches ARCHITECTURE.md) is "
+            f"restricted to row-level edits in the canonical sections "
+            f"({', '.join(_ALLOWED_ARCHITECTURE_SECTIONS)}). Adding new "
+            f"sections is out of scope -- if the content is documentation "
+            f"that doesn't fit those sections, write it to "
+            f"`docs/architecture_review_<date>.md` for PM review instead."
+        )
+
+    return violations
 
 
 def _stage_allowed_paths(
