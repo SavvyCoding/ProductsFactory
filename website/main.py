@@ -3336,10 +3336,20 @@ async def api_plan_sprints(
     # Block re-planning if there are any active or planned sprints — those already
     # have features assigned and changing them would conflict. Completed sprints are
     # fine; we just create new phases/sprints for the unsprinted features.
+    #
+    # Exclude `kind='blocked'`: the per-product Blocked holdpen sprint has
+    # status='planned' by design (so /sprints/active queries skip it) but it's
+    # semantically a parking lot, not a real planned sprint. Without this
+    # filter the holdpen trips the 409 guard and re-planning is permanently
+    # impossible once any feature gets routed to Blocked. Real failure mode:
+    # MyDocusign 2026-05-21 — 21 unsprinted Approved features, 0 active
+    # sprints, but the orchestrator's plan_sprints action looped 25+ minutes
+    # silently 409'ing because Blocked sprint 216 had status='planned'.
     active_check = await db.execute(
         select(Sprint.id).where(
             Sprint.product_id == product_id,
             Sprint.status.in_(("active", "planned")),
+            Sprint.kind != "blocked",
         ).limit(1)
     )
     if active_check.scalar_one_or_none() is not None:
