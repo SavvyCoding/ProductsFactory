@@ -1,0 +1,20 @@
+{
+  "_doc": "Machine-readable quality gates for Python products. Authoritative source consumed by orchestrator/pipelines/post_coder.py's _check_config_gates (Phase 4). Mirrors the human-readable CONFIG GATES table in ARCHITECTURE.md. Lower a value here only with PM approval — do not edit pytest.ini directly to bypass.",
+  "_version": 1,
+  "gates": {
+    "pytest.ini": {
+      "addopts.--cov-fail-under": {
+        "kind": "ini_addopts_int",
+        "min": 70,
+        "rationale": "Python template default. Calculator product showed --cov-fail-under=0 being edited in by agents; this gate prevents that."
+      },
+      "addopts.--cov-fail-under.forbidden_values": {
+        "kind": "ini_addopts_str",
+        "forbidden_patterns": ["^0$", "^-?[0-9]$"],
+        "rationale": "Explicit deny of trivially-low coverage thresholds."
+      }
+    },
+    "package.json": null,
+    "jest.config.cjs": null
+  }
+}

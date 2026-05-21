@@ -265,6 +265,13 @@
           <p class="field-hint">Ollama API base URL (inside Docker containers).</p>
         </div>
         <div class="form-group">
+          <label for="p-ollama-api-key">Ollama API key</label>
+          <input type="password" id="p-ollama-api-key" name="ollama_api_key"
+                 value="" autocomplete="new-password"
+                 placeholder="{% if config.ollama_api_key %}set ({{ config.ollama_api_key|length }} chars, starts with {{ config.ollama_api_key[:8] }}…; leave blank to keep){% else %}required for Ollama Cloud; ignored for local{% endif %}">
+          <p class="field-hint">Required for Ollama Cloud (<code>https://ollama.com</code>). Ignored when host is a local Ollama. Leave blank on save to keep the existing key — only non-empty submissions overwrite. After a save, the placeholder updates to reflect the new key's prefix (visible confirmation of rotation).</p>
+        </div>
+        <div class="form-group">
           <label for="p-designer">Designer model chain</label>
           <input type="text" id="p-designer" name="designer_model"
                  value="{{ config.designer_model or '' }}"

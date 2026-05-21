@@ -149,6 +149,14 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
         template_name = "analytics"
     elif persona == "product_trainer":
         template_name = "product_trainer"
+    elif persona == "architect":
+        # Phase 8 of quality-specs (2026-05-19): quantitative drift detection
+        # against ARCHITECTURE.md's MODULES / ENTRY POINTS / CONFIG GATES
+        # sections. Maintenance persona — read-only on source, may write
+        # /workspace/docs/architecture_review_*.md and product_memory.md.
+        # Schedule: every ~50 features pushed (gate in cycle/persona.py),
+        # or on-demand via run_persona_now="architect".
+        template_name = "architect"
     elif product.get("analysis_status") == "running":
         template_name = "analysis_run"
     elif product.get("type") == "brownfield":
@@ -237,6 +245,15 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
         # 2026-05-06: reviewer 1975 left specific line-numbered comments
         # that coder 1976 never saw because the prompt didn't render them.
         "{reviewer_feedback}": product.get("_reviewer_feedback_md", ""),
+        # Phase 7 of quality-specs (2026-05-19): pre-coder context augmentation.
+        # See orchestrator/session/context_builder.py. Empty for non-coder
+        # personas; empty for coder when ARCHITECTURE.md MODULES has no rows
+        # that match the feature's keywords. When populated, the block lists
+        # canonical modules + AST-discovered exports for the area, with
+        # explicit "do not parallel these" framing — closes the multi-agent
+        # drift pattern that produced StockAnalysis's two user-stores and
+        # Calculator's five main.py variants.
+        "{related_existing_code}": product.get("_related_existing_code_md", ""),
         "{prev_session_summary}": (
             f"## Previous session context\n\n{prev}\n\n---\n" if prev else ""
         ),

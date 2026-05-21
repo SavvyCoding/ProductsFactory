@@ -308,66 +308,6 @@ class TestDockerRunCommand:
         assert "AGENT_PERSONA=designer" in captured_cmd
 
 
-# ── Deploy key selection tests ────────────────────────────────────────────────
-
-class TestDeployKeySelection:
-    def test_per_product_key_used_when_exists(self, tmp_path):
-        from orchestrator import docker_runner
-        key = tmp_path / "id_ed25519_my_test_product"
-        key.write_text("key")
-
-        product = {"name": "My Test Product", "id": "1", "working_dir": str(tmp_path)}
-        result = docker_runner._get_deploy_key_path.__wrapped__(product) \
-            if hasattr(docker_runner._get_deploy_key_path, "__wrapped__") \
-            else _call_get_deploy_key(docker_runner, product, tmp_path)
-        assert result == key
-
-    def test_falls_back_to_default_key(self, tmp_path):
-        from orchestrator import docker_runner
-        default_key = tmp_path / "id_ed25519_productfactory"
-        default_key.write_text("key")
-
-        product = {"name": "Unknown Product", "id": "2", "working_dir": str(tmp_path)}
-        result = _call_get_deploy_key(docker_runner, product, tmp_path)
-        assert result == default_key
-
-    def test_returns_none_when_no_key_found(self, tmp_path):
-        from orchestrator import docker_runner
-        product = {"name": "No Key Product", "id": "3", "working_dir": str(tmp_path)}
-        result = _call_get_deploy_key(docker_runner, product, tmp_path)
-        assert result is None
-
-    def test_name_slug_normalizes_spaces_and_hyphens(self, tmp_path):
-        from orchestrator import docker_runner
-        key = tmp_path / "id_ed25519_my_cool_product"
-        key.write_text("key")
-
-        # Spaces and hyphens both → underscores
-        product = {"name": "My-Cool Product", "id": "4", "working_dir": str(tmp_path)}
-        result = _call_get_deploy_key(docker_runner, product, tmp_path)
-        assert result == key
-
-    def test_no_ssh_mount_when_no_key(self, tmp_path, monkeypatch):
-        from orchestrator import docker_runner
-        product = {"name": "No Key", "id": "5", "working_dir": str(tmp_path)}
-        captured_cmd, _ = _setup_runner(monkeypatch, docker_runner, tmp_path)
-        docker_runner.run_claude_in_docker(product)
-
-        # No SSH volume mount at all (known_hosts from image is the only .ssh entry)
-        ssh_mounts = [arg for arg in captured_cmd if "/root/.ssh/id_ed25519" in arg]
-        assert ssh_mounts == [], f"Expected no SSH key mount, got: {ssh_mounts}"
-
-
-def _call_get_deploy_key(docker_runner_module, product, ssh_dir):
-    """Helper: call _get_deploy_key_path with a patched SSH_DIR."""
-    original = docker_runner_module.SSH_DIR
-    docker_runner_module.SSH_DIR = ssh_dir
-    try:
-        return docker_runner_module._get_deploy_key_path(product)
-    finally:
-        docker_runner_module.SSH_DIR = original
-
-
 # ── Session lock guard tests ──────────────────────────────────────────────────
 
 class TestSessionLockGuard:

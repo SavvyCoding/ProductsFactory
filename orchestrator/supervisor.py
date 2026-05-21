@@ -480,6 +480,161 @@ def detect_repeated_review_feedback(
                 "reason": "exception (logged)"}
 
 
+# ── Detector: divergent review feedback (Phase 6 of quality-specs) ──────────
+#
+# Complement to detect_repeated_review_feedback. That detector fires when the
+# reviewer flags the SAME issue N consecutive cycles (convergent cascade).
+# This detector fires when the reviewer flags DIFFERENT issues each cycle
+# (divergent cascade) — same end-state of fix_attempts climbing toward the
+# cap, but a different failure mode: the codebase is fragmented enough that
+# every rework introduces a new visible issue the reviewer catches.
+#
+# StockAnalysis feature 594's cascade: 4 rework rounds, 4 different findings.
+# detect_repeated_review_feedback never fired (signatures all differed).
+# fix_attempts reached 5, routed to Blocked anyway, but only after wasting
+# 4 reviewer sessions. This detector catches the pattern earlier — when
+# pairwise Jaccard similarity across the last N reviewer comments is below
+# the threshold.
+#
+# Hook point: post-reviewer pipeline (docker_runner.py), called once per
+# feature with review_outcome=changes_requested. Runs alongside the
+# convergent detector — either can fire independently.
+
+def detect_divergent_review_feedback(
+    *,
+    feature_id: int,
+    product_id: int | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """Block the feature when the last N reviewer comments are mutually
+    dissimilar — divergent cascade pattern.
+
+    Returns {"action": "no-op|insufficient_history|under_threshold|blocked",
+             "max_similarity": <float>, "comparisons": <int>,
+             "reason": "<explanation>"}.
+
+    Best-effort — never raises. Honors dry-run + per-detector enabled flag.
+    """
+    cfg = _get_supervisor_config()
+    if cfg.get("supervisor_dry_run_only"):
+        dry_run = True
+    if not cfg.get("supervisor_divergent_feedback_enabled", True):
+        return {"action": "no-op", "max_similarity": 1.0, "comparisons": 0,
+                "reason": "detector disabled in system_config"}
+
+    lookback = int(cfg.get("supervisor_divergent_feedback_lookback", 3))
+    threshold = float(cfg.get("supervisor_divergent_feedback_threshold", 0.25))
+
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            feat_resp = client.get(f"/api/features/{feature_id}")
+            if feat_resp.status_code != 200:
+                return {"action": "no-op", "max_similarity": 1.0, "comparisons": 0,
+                        "reason": f"feature fetch returned HTTP {feat_resp.status_code}"}
+            feat = feat_resp.json()
+            comments_resp = client.get(f"/api/features/{feature_id}/comments")
+            comments = comments_resp.json() if comments_resp.status_code == 200 else []
+            if not isinstance(comments, list):
+                comments = []
+
+            # Reviewer/QA/security-auditor authored only, newest-first then
+            # take the last `lookback`. Tokenize each into a set of words.
+            comments.sort(key=lambda c: (c.get("created_at") or ""))
+            reviewer_only = [
+                (c.get("body") or "") for c in comments
+                if (c.get("author") or "").lower()
+                in ("reviewer", "security_auditor", "qa_tester")
+            ]
+            recent = reviewer_only[-lookback:]
+            if len(recent) < lookback:
+                return {"action": "insufficient_history",
+                        "max_similarity": 1.0, "comparisons": 0,
+                        "reason": f"need {lookback} reviewer comments, have {len(recent)}"}
+
+            # Tokenize: lowercase words ≥3 chars, strip code fences / urls.
+            _TOKEN_RE = re.compile(r"[a-z_][a-z0-9_]{2,}", re.I)
+            def _tokens(s: str) -> set[str]:
+                s = re.sub(r"```[\s\S]*?```", " ", s)            # drop code blocks
+                s = re.sub(r"https?://\S+", " ", s)               # drop URLs
+                return {t.lower() for t in _TOKEN_RE.findall(s)}
+
+            sets = [_tokens(s) for s in recent]
+            # Pairwise Jaccard similarity. Range [0, 1]; 1 = identical, 0 = disjoint.
+            sims = []
+            for i in range(len(sets)):
+                for j in range(i + 1, len(sets)):
+                    inter = len(sets[i] & sets[j])
+                    union = len(sets[i] | sets[j]) or 1
+                    sims.append(inter / union)
+            max_sim = max(sims) if sims else 1.0
+
+            if max_sim >= threshold:
+                return {"action": "under_threshold", "max_similarity": max_sim,
+                        "comparisons": len(sims),
+                        "reason": (
+                            f"max pairwise Jaccard {max_sim:.2f} ≥ "
+                            f"{threshold} — feedback overlaps enough to "
+                            f"call it convergent, not divergent"
+                        )}
+
+            # Divergence detected — block.
+            block_reason = (
+                f"Auto-blocked by supervisor.divergent_review_feedback: "
+                f"reviewer flagged divergent issues across {lookback} rework "
+                f"rounds (max pairwise Jaccard similarity {max_sim:.2f} < "
+                f"{threshold:.2f}). Cascade pattern — needs human triage to "
+                f"identify the foundational issue rather than another rework."
+            )
+            _record_action(
+                detector="divergent_review_feedback",
+                product_id=product_id or feat.get("product_id"),
+                target_type="feature",
+                target_id=feature_id,
+                action="block_divergent_feedback",
+                reason=block_reason,
+                dry_run=dry_run,
+            )
+            if dry_run:
+                return {"action": "blocked", "max_similarity": max_sim,
+                        "comparisons": len(sims),
+                        "reason": "dry-run: would block + route to Blocked sprint"}
+
+            client.patch(
+                f"/api/features/{feature_id}",
+                json={
+                    "status": "Blocked",
+                    "pr_number": None,
+                    "blocked_reason": block_reason,
+                    "changed_by": "supervisor.divergent_review_feedback",
+                },
+            )
+            try:
+                pid = product_id or feat.get("product_id")
+                if pid:
+                    client.post(
+                        f"/api/products/{pid}/sprints/blocked/route",
+                        json={"feature_ids": [feature_id], "reason": block_reason},
+                    )
+            except Exception as e:
+                log.warning(
+                    f"[divergent_review_feedback] route-to-Blocked-sprint failed "
+                    f"for #{feature_id}: {e}"
+                )
+            log.warning(
+                f"[divergent_review_feedback] Feature #{feature_id} -> Blocked "
+                f"(divergent cascade, max Jaccard {max_sim:.2f} < {threshold:.2f})"
+            )
+            return {"action": "blocked", "max_similarity": max_sim,
+                    "comparisons": len(sims),
+                    "reason": "threshold met; feature blocked"}
+    except Exception:
+        log.exception(
+            f"detect_divergent_review_feedback crashed for feature #{feature_id}"
+        )
+        return {"action": "no-op", "max_similarity": 1.0, "comparisons": 0,
+                "reason": "exception (logged)"}
+
+
 # ── Detector: invalid status/review_outcome combos (per-cycle sweep) ─────────
 # Per-cycle reactive layer for the same reviewer-prompt-violation that the
 # state_machine normalizer guards against in real time. Catches:
@@ -1512,21 +1667,6 @@ def _fetch_product(pid: int) -> dict | None:
             return r.json() if r.status_code == 200 else None
     except Exception:
         return None
-
-
-def _github_repo_slug(product: dict) -> str | None:
-    """Derive the SSH alias slug from product.github_repo (basename, lowercase,
-    `-` and `.` → `_`). Matches greenfield_scaffold's _generate_deploy_key
-    naming so the slug + key file + Host block agree."""
-    gh = (product.get("github_repo") or "").rstrip("/")
-    if not gh:
-        return None
-    base = gh.rsplit("/", 1)[-1]
-    if base.endswith(".git"):
-        base = base[:-4]
-    if not base:
-        return None
-    return base.lower().replace("-", "_").replace(".", "_")
 
 
 def _check_app_token(product: dict) -> dict:

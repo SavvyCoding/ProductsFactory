@@ -1,0 +1,32 @@
+{
+  "_doc": "Machine-readable quality gates for Node/TypeScript products. Authoritative source consumed by orchestrator/pipelines/post_coder.py's _check_config_gates (Phase 4). Mirrors the human-readable CONFIG GATES table in ARCHITECTURE.md.",
+  "_version": 1,
+  "gates": {
+    "package.json": {
+      "scripts.test": {
+        "kind": "json_string",
+        "forbidden_patterns": [
+          "^echo\\b",
+          "^true\\s*$",
+          "^exit\\s+0\\s*$",
+          "^:\\s*$",
+          "^node\\s+-e\\s+['\\\"]\\s*['\\\"]"
+        ],
+        "rationale": "Test script must actually invoke a test runner. No-op replacements (echo / exit 0 / true) defeat CI."
+      }
+    },
+    "jest.config.cjs": {
+      "coverageThreshold.global.lines": {
+        "kind": "js_object_int",
+        "min": 70,
+        "rationale": "Node template default."
+      },
+      "coverageThreshold.global.branches": {
+        "kind": "js_object_int",
+        "min": 60,
+        "rationale": "Node template default — branches lower than lines is normal."
+      }
+    },
+    "pytest.ini": null
+  }
+}

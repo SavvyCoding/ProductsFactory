@@ -12,8 +12,8 @@ ProductFactory is a 24/7 autonomous development system. It orchestrates Claude C
 - **Agent Image** (`deploy/docker/Dockerfile`) — Docker image Claude runs inside per product session
 
 **Orchestrator subpackage layout** (not obvious from a top-level `ls`):
-- `orchestrator/pipelines/` — per-persona post-session pipelines: `post_coder.py` (cut session branch, commit, push, open PR), `post_doc.py` (designer commits to main), `post_maintenance.py`, `auto_merge_reviewer.py` (per-reviewer-session squash-merge of approved session PRs)
-- `orchestrator/session/` — the session FSM. `state_machine.py` defines lifecycle states (incl. the "wrapping" state wired up in `04c4282`); `reconciler.py` reconciles DB session rows against Docker reality; `result_io.py` reads/writes `session_result.json`. The agent loop is hardened against shape drift / hallucinated tool calls here (`d1bf9a9`).
+- `orchestrator/pipelines/` — per-persona post-session pipelines: `post_coder.py` (cut session branch, run lint guards + test execution, commit, push, open PR), `post_doc.py` (designer commits to main), `post_maintenance.py`, `auto_merge_reviewer.py` (per-reviewer-session squash-merge of approved session PRs)
+- `orchestrator/session/` — the session FSM. `state_machine.py` defines lifecycle states (incl. the "wrapping" state wired up in `04c4282`); `reconciler.py` reconciles DB session rows against Docker reality; `result_io.py` reads/writes `session_result.json`; `context_builder.py` (Phase 7) builds the pre-coder "related code" context from ARCHITECTURE.md MODULES/ENTRY POINTS/DEPRECATED to stop parallel-module drift. The agent loop is hardened against shape drift / hallucinated tool calls here (`d1bf9a9`).
 - `orchestrator/cycle/` — cycle-level helpers: `selection.py` (which product/persona this cycle), `persona.py` (gating per maintenance persona), `locks.py` (per-product mutex), `loop_detector.py` (catches planner spirals like the `kimi-k2.6` pattern).
 - `orchestrator/integrations/` — outbound integrations: `github_app.py` (JWT sign + installation-token minting, single chokepoint for all git auth), `github.py`, `git_ops.py` (authenticated push via one-shot credential helper, no token in `.git/config`), `docker_cli.py`.
 - `orchestrator/infra/` — `redaction.py` (token redaction in logs).
@@ -86,6 +86,27 @@ Pre-checkout (`docker_runner.py`): reviewer lands on the session branch under re
 Rework path: when reviewer rejects features in a session PR, `post_coder.py` detects on the next coder cycle that the rejected features share an open PR (the original session PR) and force-pushes fresh commits to its branch, preserving the reviewer's comment thread.
 
 Retired with the 1-PR model (2026-05-15): the sprint integration branch (`sprint/<id>`) and sprint PR; `provision_sprint_pr` / `merge_sprint_pr`; `_maybe_provision_sprint_pr` / `_attempt_merge_completed_sprint_pr`; `reconcile_sprint_pr_state`; supervisor's `_check_sprint_provisioned` / `_fix_sprint_provisioned`; `check_open_pr_invariant`.
+
+### Post-coder quality pipeline
+
+After the coder agent exits, `_run_post_coder_pipeline` (`orchestrator/pipelines/post_coder.py`) runs a sequence of gates BEFORE pushing the branch / opening the PR. Failing any gate either bounces the features back to `Implementing` with `changes_requested` or, for infra failures, rolls them back to `Approved`/`Designed` without bumping `fix_attempts`. The gates are deliberately deterministic (regex + AST + subprocess) so the reviewer never sees the patterns they catch:
+
+- **`_post_coder_lint_check`** (Phases 2–4) — 14 guards. Notable ones: hardcoded secret fallbacks in token/crypto calls (Guard 5); state-changing API routes (`POST/PUT/PATCH/DELETE`) without an auth check, opt-out via `// PUBLIC_ROUTE:` or `# PUBLIC_ROUTE:` annotation (Guard 6); agent-debris filenames — `*.bak`, `*_old_*`, `*_v\d+_*`, `*_complete_*`, `temp_fixed*`, files under `Temp/` or `temp_storage/`, `test_X_qa.py` siblings of `test_X.py` (Guard 13); config-as-gate integrity — refuses commits that lower bars declared in `quality_gates.json` by editing `pytest.ini` / `package.json` directly (Guard 14).
+- **`_post_coder_test_check`** (Phase 5) — runs the stack's test command and classifies the outcome four ways:
+  - `passed`: continue to push.
+  - `env_broken` (jest missing, ENOENT on node_modules, ModuleNotFoundError pytest): roll back to `Approved`/`Designed`, send operator alert, **do NOT bump `fix_attempts`** (infra failures must not auto-Block features after 5 attempts).
+  - `collection_errors > 0`: pytest collect-only errors → bounce to `Implementing` with the first failing import quoted.
+  - test failures: bounce to `Implementing` with the first failure quoted.
+
+### Supervisor cascade detectors
+
+`orchestrator/supervisor.py` runs after each reviewer session. Two complementary detectors for stuck rework loops:
+- `detect_repeated_review_feedback` — **convergent cascade**: same comment signature across N consecutive cycles (reviewer flags the same issue, coder keeps missing it).
+- `detect_divergent_review_feedback` (Phase 6) — **divergent cascade**: reviewer flags a *different* issue each cycle while ignoring earlier ones. The 25-comment cumulative-feedback context (`_fetch_recent_review_comments` + `_format_reviewer_feedback`, limit raised 6→25 on 2026-05-07) is injected into the rework coder prompt via `{reviewer_feedback}` to make the running checklist explicit.
+
+### Maintenance personas
+
+`_MAINTENANCE_PERSONAS` in `orchestrator/docker_runner.py` is the canonical set of scheduled personas (gated per-cycle in `orchestrator/cycle/persona.py`): `documenter`, `analytics`, `recommender`, `devops`, `refactorer`, `product_trainer`, and `architect` (Phase 8 — quantitative drift detection: counts documented vs registered endpoints, detects parallel-module drift, verifies `CONFIG GATES` values match `quality_gates.json`, files chore features with `priority=25` + labels `["architecture","drift"]`; capped at 3 features per session).
 
 ### Greenfield Scaffolding
 
@@ -164,10 +185,17 @@ Agent containers run as non-root user `agent` (UID 1001), with no `--privileged`
 
 ### Templates
 
-`templates/renderer.py` installs 3 files into every product repo on discovery (idempotent — skips if already present):
+`templates/renderer.py` installs the following files into every product repo on discovery (idempotent — skips if already present):
 - `AGENT_WORKFLOW.md` — Claude's standing operating procedure (startup checklist, batch planning, per-feature loop)
 - `CLAUDE.md` — stack-specific config (test command, folder layout); selected from `templates/stacks/{python|node|go|default}/`
-- `ARCHITECTURE.md` — architecture doc template the PM fills in
+- `ARCHITECTURE.md` — **structured architecture doc** with six machine-readable sections consumed by other subsystems (Phase 1):
+  - `ENTRY POINTS` — canonical app/server/CLI entry files (prevents "5 versions of main.py")
+  - `MODULES` — source-of-truth registry of canonical modules per concern; read by `orchestrator/session/context_builder.py` to tell the coder "userStore.py already exists, use it"
+  - `RULES` — machine-checkable invariants the post-coder lint guard (`_post_coder_lint_check`, Phase 2) refuses commits against
+  - `REFERENCE PATTERNS` — copy-pasteable canonical snippets (auth check, error response, DB lifecycle)
+  - `CONFIG GATES` — quality bars cross-checked by the config-integrity guard (Phase 4) against `quality_gates.json`
+  - `DEPRECATED` — removal queue; the agent-debris detector (Phase 3) refuses commits that re-introduce listed items
+- `quality_gates.json` — per-product quality bars (e.g. `pytest --cov-fail-under`, eslint max-warnings) declared once at discovery. Phase 4's `_post_coder_lint_check` Guard 14 refuses commits that lower these gates by editing `pytest.ini` / `package.json` directly instead of clearing the bar with code.
 
 ### Local Development Without Docker (Ollama)
 
@@ -215,6 +243,7 @@ FastAPI evaluates routes in definition order. The parameterized `GET /api/featur
 - `scripts/backup_db.sh` — Backs up the PostgreSQL database
 - `scripts/recover_db.py` — Restores a database from backup
 - `scripts/test_calculator.py` — End-to-end integration test: creates a greenfield "Calculator" product and runs a full agent cycle (scaffold → discover → coder session → GitHub PR). Use `--dry-run` to stop after scaffolding, `--persona designer` to test other personas.
+- `scripts/orchestrator_drain_check.py` — **Run before any orchestrator restart.** Refuses (exit 1) if any agent session is `running`/`wrapping`; restarting mid-session orphans the post-coder pipeline (lint/test/push/PR-open runs in the orchestrator process) and strands the feature in `Implementing` for ~1 hour until `reset_stuck` fires. Canonical 2026-05-20 #626 incident. Use `--wait <seconds>` to poll-and-drain, or `--force` to override. Typical recipe: `python scripts/orchestrator_drain_check.py --wait 600 && docker compose --profile orchestrator up -d --force-recreate orchestrator`.
 - `deploy/docker/test_image.sh` — Smoke test for the agent Docker image; verifies all required tools (git, gh, claude, etc.) are installed. Usage: `bash deploy/docker/test_image.sh [image-tag]`
 - `deploy/docker/startup.sh` — Runs inside the pm-api container before uvicorn. Sanity-checks DB state (alembic_version presence + core table presence). Refuses to start (exit 2) if alembic_version is populated but all core tables are missing — this used to auto-clear via a "self-heal" that triggered on a single false negative on 2026-05-02 and DROPped the entire schema. Operators must now manually `DELETE FROM alembic_version` to opt into a destructive re-init.
 

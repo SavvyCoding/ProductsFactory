@@ -22,6 +22,21 @@ target/
 .env.local
 .env.*.local
 
+# Test / coverage / cache artefacts (multi-language; covers mixed-stack repos
+# where the python or node specific .gitignore isn't shipped because the
+# product was discovered as `default`)
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.cache/
+*.db
+*.sqlite
+*.sqlite3
+
 # Editor / OS
 .DS_Store
 *.swp
