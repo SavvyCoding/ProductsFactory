@@ -3361,12 +3361,32 @@ async def api_plan_sprints(
     # Read max features per sprint from DB config
     max_per_sprint = await _sprint_cap(db)
 
-    # Fetch all non-terminal features (everything except Pushed/Rejected/Reverted/Deferred)
-    terminal_statuses = ("Pushed", "Rejected", "Reverted", "Deferred")
+    # Only sprint features that actually want a sprint assignment.
+    #
+    # Eligible:
+    #   - Approved: PM-approved, no design yet
+    #   - Designed: has design doc, ready for coder
+    # Both can be moved into a fresh sprint without disrupting in-flight work.
+    #
+    # Explicitly NOT eligible (and the bug we're fixing here — before this
+    # 2026-05-21 fix the filter was just `notin (Pushed/Rejected/Reverted/
+    # Deferred)`, which caught everything else):
+    #   - Pending: recommender's draft list, not yet PM-approved
+    #   - Blocked: deliberately parked (by supervisor or PM); re-sprinting
+    #     would resurrect features that were explicitly held out
+    #   - Designing/Implementing/Reviewing/Reviewed: in flight with an
+    #     active session or open PR; rewriting sprint_id would orphan
+    #     that work
+    #
+    # Plus only features with sprint_id IS NULL — completed-sprint
+    # leftovers stay in their completed sprint (PM can move them via the
+    # web UI if they want to retry).
+    sprintable_statuses = ("Approved", "Designed")
     feat_result = await db.execute(
         select(Feature).where(
             Feature.product_id == product_id,
-            Feature.status.notin_(terminal_statuses),
+            Feature.status.in_(sprintable_statuses),
+            Feature.sprint_id.is_(None),
         ).order_by(Feature.priority.desc())
     )
     approved = feat_result.scalars().all()
