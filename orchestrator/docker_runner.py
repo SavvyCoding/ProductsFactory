@@ -188,6 +188,88 @@ _MAINTENANCE_PERSONAS = frozenset({
 })
 
 
+# PM-curated files that always get mounted read-only into agent containers.
+# These are stack-template artifacts (CLAUDE.md, AGENT_WORKFLOW.md, etc.) or
+# greenfield-PM-set config (product_config.json, quality_gates.json) or
+# operational invariants (.gitignore). No agent persona is authorized to
+# modify these; until now the only enforcement was post-commit denylisting
+# (post-coder) and allowlisting (post-doc / post-maintenance), which let
+# the agent silently write and then silently strip — wasting LLM tokens
+# and providing no feedback to the agent.
+#
+# With kernel-level RO bind mounts: `echo > /workspace/CLAUDE.md` from inside
+# the agent container returns EROFS immediately. The lint guards become
+# belt-and-suspenders rather than primary defense.
+#
+# Real incidents this hard-enforces against:
+#   - MyDocusign PR #36 (2026-05-21): coder added 58-line `## AWS Shield`
+#     section to ARCHITECTURE.md
+#   - designer #608 (2026-05-20): deleted Phase-1 sections from ARCH.md
+#   - designer #608: also rewrote large parts of CLAUDE.md
+#   - architect ce3601f7 (2026-05-21): added rogue AWS Shield section
+#
+# ARCHITECTURE.md is handled per-persona — see _build_pm_curated_ro_mounts.
+_PM_CURATED_RO_FILES = (
+    "CLAUDE.md",
+    "AGENT_WORKFLOW.md",
+    "CONTRIBUTING.md",
+    "quality_gates.json",
+    "product_config.json",
+    ".gitignore",
+)
+
+
+def _build_pm_curated_ro_mounts(
+    working_dir: str,
+    working_dir_host: str,
+    persona: str | None,
+) -> list[str]:
+    """Return `-v <host>:<container>:ro` docker args for PM-curated files.
+
+    Docker bind-mount overlay semantics: a more-specific bind mount
+    overrides a less-specific one at the same path. So after the parent
+    `-v {working_dir_host}:/workspace` (RW), these per-file `:ro` mounts
+    make each specific file read-only while the rest of /workspace stays
+    writable. The agent's `sed`/`echo`/`cat >` against these paths returns
+    EROFS at the kernel level — no syscall succeeds, no post-commit cleanup
+    needed.
+
+    Per-persona logic: architect is the ONLY persona authorized to write
+    ARCHITECTURE.md (enforced by orchestrator/pipelines/post_maintenance.py's
+    `_MAINTENANCE_ALLOWLISTS["architect"]`). For architect, ARCHITECTURE.md
+    stays RW (no overlay). For every other persona, it gets the RO overlay.
+
+    Defensive: skips files that don't exist on the host. Docker file-level
+    bind mounts behave badly when the source is missing — Docker silently
+    creates a DIRECTORY at the source path. That would (a) corrupt the
+    working tree by replacing a missing file with an empty directory and
+    (b) make the container's view of that path a directory instead of a
+    file, breaking any code that tries to read it. Greenfield first
+    sessions where the renderer hasn't installed templates yet would hit
+    this. Skip-if-missing is the only safe default.
+    """
+    args: list[str] = []
+    files_to_mount = list(_PM_CURATED_RO_FILES)
+    # Architect: skip ARCHITECTURE.md (needs RW to add MODULES rows).
+    # Everyone else: prepend it so it gets the RO overlay.
+    if persona != "architect":
+        files_to_mount.insert(0, "ARCHITECTURE.md")
+    for filename in files_to_mount:
+        # Use the in-process working_dir for the file-exists check (the
+        # orchestrator can stat its own bind-mounted /products path).
+        # Use working_dir_host for the docker bind spec (what the Docker
+        # daemon sees on the host filesystem).
+        if not os.path.isfile(os.path.join(working_dir, filename)):
+            continue
+        # Forward slashes inside the host_spec join are accepted by Docker
+        # on both Linux and Windows. The existing parent mount
+        # (`-v {working_dir_host}:/workspace`) uses the same path format.
+        host_spec = f"{working_dir_host}/{filename}"
+        container_spec = f"/workspace/{filename}"
+        args.extend(["-v", f"{host_spec}:{container_spec}:ro"])
+    return args
+
+
 # _get_gh_token moved to orchestrator/integrations/github.py and re-exported
 # above (Phase 2b). Keeping _get_system_config_sync local for now — it's used
 # pervasively from run_claude_in_docker and will move with the launcher in
@@ -1735,6 +1817,11 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         "--tmpfs", "/home/agent/.local:rw,size=500m,uid=1001,gid=1001",
         # Volume mounts — unaffected by --read-only
         "-v", f"{working_dir_host}:/workspace",
+        # Per-file RO overlays on PM-curated files. Kernel-level enforcement
+        # against agent writes — `echo > /workspace/CLAUDE.md` returns EROFS
+        # instead of succeeding-then-getting-stripped at commit time.
+        # ARCHITECTURE.md stays RW for architect, RO for everyone else.
+        *_build_pm_curated_ro_mounts(working_dir, working_dir_host, persona),
         *claude_mount,                             # OAuth session (claude backend only)
         *ssh_mount,                                # deploy key :ro (not whole .ssh dir)
         *gh_mount,                                 # GH_TOKEN via file at /run/secrets/gh_token (not env)
