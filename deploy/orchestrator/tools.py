@@ -726,7 +726,30 @@ def run_cycle(args: dict, **kwargs) -> str:
 
         action = action_data.get("action")
         if action == "plan_sprints":
-            _pm("POST", f"/api/products/{product_id}/plan-sprints")
+            # Capture + log the response so silent failures are visible.
+            # Pre-2026-05-21 the response was discarded — a 409 from the
+            # endpoint looked identical to a 201 in the cycle log, and the
+            # orchestrator looped on the same plan_sprints decision every
+            # cycle (e.g. MyDocusign 25+ min idle after the Blocked-sprint
+            # holdpen tripped the 409 guard).
+            plan_response = _pm("POST", f"/api/products/{product_id}/plan-sprints")
+            try:
+                parsed = json.loads(plan_response)
+                # pm_api wraps successes as {"ok": True, "data": ...}; non-2xx
+                # surface as {"ok": False, "error": "..."} or include status in
+                # the error string.
+                if isinstance(parsed, dict) and not parsed.get("ok", True):
+                    log.warning(
+                        f"[plan-sprints] product {product_id}: planning call "
+                        f"failed: {parsed.get('error') or plan_response[:200]}"
+                    )
+                else:
+                    log.info(
+                        f"[plan-sprints] product {product_id}: planning call "
+                        f"returned {plan_response[:200]}"
+                    )
+            except Exception:
+                log.info(f"[plan-sprints] product {product_id}: {plan_response[:200]}")
             return _ok({"action": "exit", "reason": f"Planned sprints for product {product_id}"})
         elif action == "launch_session":
             persona = action_data.get("persona", "planner")
