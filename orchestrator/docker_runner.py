@@ -109,43 +109,6 @@ CODER_MODEL          = os.environ.get("CODER_MODEL",          "qwen3-coder:30b")
 MAX_FEATURES_PER_SPRINT = int(os.environ.get("MAX_FEATURES_PER_SPRINT", "5"))
 
 
-def _get_deploy_key_path(product: dict, ssh_dir: Path | None = None) -> Path | None:
-    """
-    Returns the deploy key path for this product, falling back to the default key.
-    Mounting only the key file (not the whole .ssh dir) preserves the
-    known_hosts baked into the image.
-    ssh_dir: resolved from sys_cfg.ssh_keys_dir → SSH_DIR env var — passed at call site.
-    """
-    resolved_ssh_dir = ssh_dir or SSH_DIR
-    if not resolved_ssh_dir or not resolved_ssh_dir.exists():
-        log.warning(f"SSH keys directory not configured or missing: {resolved_ssh_dir}")
-        return None
-    # Try the github_repo basename slug first — this is the canonical filename
-    # written by greenfield_scaffold._generate_deploy_key (and aliased in
-    # ~/.ssh/config by the same scaffold step). Fall back to product.name slug
-    # for legacy products created before the SSH alias switch on 2026-05-09.
-    candidates: list[str] = []
-    gh = (product.get("github_repo") or "").rstrip("/")
-    if gh:
-        repo_basename = gh.rsplit("/", 1)[-1]
-        if repo_basename.endswith(".git"):
-            repo_basename = repo_basename[:-4]
-        if repo_basename:
-            candidates.append(repo_basename.lower().replace("-", "_").replace(".", "_"))
-    name_slug = (product.get("name") or "").lower().replace(" ", "_").replace("-", "_")
-    if name_slug and name_slug not in candidates:
-        candidates.append(name_slug)
-    for slug in candidates:
-        per_product = resolved_ssh_dir / f"id_ed25519_{slug}"
-        if per_product.exists():
-            return per_product
-    default_key = resolved_ssh_dir / DEPLOY_KEY_FILENAME
-    if default_key.exists():
-        return default_key
-    log.warning(f"No deploy key found for product '{product.get('name')}' — git push may fail")
-    return None
-
-
 # Phase 1 of OrchestratorRefactor: the feature state machine, session_result.json
 # I/O, and post-session reconciler moved into orchestrator/session/. Re-exported
 # here so deploy/orchestrator/orchestrate.py and tests/test_docker.py continue
@@ -221,7 +184,7 @@ from orchestrator.pipelines.post_maintenance import _run_post_maintenance_pipeli
 
 _MAINTENANCE_PERSONAS = frozenset({
     "documenter", "analytics", "recommender", "devops", "refactorer",
-    "product_trainer",
+    "product_trainer", "architect",
 })
 
 
@@ -1282,23 +1245,47 @@ def _finalize_session(
         # Best-effort — never raises.
         if exit_code == 0 and persona == "reviewer":
             try:
-                from orchestrator.supervisor import detect_repeated_review_feedback
+                from orchestrator.supervisor import (
+                    detect_repeated_review_feedback,
+                    detect_divergent_review_feedback,
+                )
                 for _entry in _session_features:
                     if (isinstance(_entry, dict)
                             and _entry.get("review_outcome") == "changes_requested"
                             and _entry.get("id")):
+                        # Convergent cascade: same feedback N× in a row.
                         _result = detect_repeated_review_feedback(
                             feature_id=_entry["id"],
                             product_id=product["id"],
                             review_notes=_entry.get("review_notes"),
                         )
-                        # If the detector blocked the feature, mutate the
-                        # session entry so reconcile doesn't roll it back to
-                        # Implementing+changes_requested over our PATCH.
                         if _result.get("action") == "blocked":
                             _entry["status"] = "Blocked"
                             _entry["pr_number"] = None
                             _entry["review_outcome"] = "changes_requested"
+                            continue   # already blocked; skip the divergent check
+                        # Divergent cascade: different feedback each round.
+                        # Phase 6 of quality-specs (2026-05-19). Same end-state
+                        # (route to Blocked sprint) but a different signal:
+                        # max pairwise Jaccard similarity across the last N
+                        # reviewer comments is below threshold (default 0.25).
+                        # StockAnalysis feature 594's cascade was the canonical
+                        # case — 4 rounds, 4 different findings, the convergent
+                        # detector never fired.
+                        try:
+                            _divergent = detect_divergent_review_feedback(
+                                feature_id=_entry["id"],
+                                product_id=product["id"],
+                            )
+                            if _divergent.get("action") == "blocked":
+                                _entry["status"] = "Blocked"
+                                _entry["pr_number"] = None
+                                _entry["review_outcome"] = "changes_requested"
+                        except Exception:
+                            log.exception(
+                                f"Supervisor detect_divergent_review_feedback "
+                                f"failed for {product.get('name')} feature #{_entry['id']}"
+                            )
             except Exception:
                 log.exception(
                     f"Supervisor detect_repeated_review_feedback failed "
@@ -1510,6 +1497,31 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     product["_reviewer_feedback_md"] = (
         _format_reviewer_feedback(assigned_features) if persona == "coder" else ""
     )
+    # Phase 7 of quality-specs (2026-05-19): pre-coder context augmentation.
+    # Read the product's ARCHITECTURE.md + scan the area's source dir for
+    # existing modules so the coder prompt can render a "use these, don't
+    # parallel them" block before any code is written. Coder only — other
+    # personas don't need this scaffolding. Best-effort: any failure → empty
+    # block, never blocks session launch.
+    product["_related_existing_code_md"] = ""
+    if persona == "coder" and assigned_features:
+        try:
+            from orchestrator.session.context_builder import build_related_code_context
+            _arch_md = ""
+            try:
+                from pathlib import Path as _PArch
+                _arch_path = _PArch(product.get("working_dir", "")) / "ARCHITECTURE.md"
+                if _arch_path.exists():
+                    _arch_md = _arch_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+            product["_related_existing_code_md"] = build_related_code_context(
+                product.get("working_dir", ""),
+                assigned_features[0],
+                architecture_md=_arch_md,
+            )
+        except Exception:
+            log.debug("Phase 7 pre-coder context build failed (non-fatal)", exc_info=True)
     product["_active_sprint"] = active_sprint or {}
 
     # 1-PR model: `sprint_pr_mode` now toggles "open a session PR per coder

@@ -75,10 +75,33 @@ STACK_DEFAULTS: dict[str, dict] = {
 
 
 def select_stack(tech_stack: list[str] | None) -> str:
-    """Returns the best matching stack name, or 'default'."""
+    """Returns the best matching stack name, or 'default'.
+
+    Accepts both bare stack names (`python`, `node`, `go`) and
+    framework-qualified ones (`python_fastapi`, `node_react`, `go_chi`, etc.).
+    The PM web UI lets operators pick framework-specific options like
+    `python_fastapi`; before this normalisation those were silently dropping
+    to the `default` template because select_stack only matched against the
+    bare-language KNOWN_STACKS set.
+
+    Real incident: MyDocusign 2026-05-20 had tech_stack=["python_fastapi"],
+    select_stack returned "default", products got the generic
+    `default/.gitignore` (missing `.coverage`, `*.db`) and empty
+    `default/quality_gates.json`. Cascade of debris committed + no
+    enforced coverage gate.
+
+    Normalisation strategy: try the bare value first (for backward
+    compatibility), then strip a single framework qualifier on `_` and
+    retry against KNOWN_STACKS.
+    """
     for tech in (tech_stack or []):
-        if tech.lower() in KNOWN_STACKS:
-            return tech.lower()
+        normalised = tech.lower()
+        if normalised in KNOWN_STACKS:
+            return normalised
+        # Framework-qualified like `python_fastapi` → try the bare language
+        base = normalised.split("_", 1)[0]
+        if base in KNOWN_STACKS:
+            return base
     return "default"
 
 
@@ -196,6 +219,18 @@ def install_templates(
         written += _write_file(
             working_dir / ".gitignore",
             stack_gitignore,
+            context, force,
+        )
+
+    # 3c. quality_gates.json — stack-specific. Machine-readable mirror of the
+    # CONFIG GATES section in ARCHITECTURE.md. Consumed by the post-coder
+    # _check_config_gates lint (Phase 4 of quality-specs). Skipped (passes
+    # through unchanged) if the stack has no enforced gates.
+    stack_gates = STACKS_DIR / stack / "quality_gates.json"
+    if stack_gates.exists():
+        written += _write_file(
+            working_dir / "quality_gates.json",
+            stack_gates,
             context, force,
         )
 

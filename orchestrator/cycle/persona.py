@@ -14,7 +14,7 @@ API surface:
         Caller provides the httpx.Client (poller uses plain client; the
         deployed orchestrator passes its signing client).
 
-  determine_persona(product) -> str | None
+  _decide_action(product_id, client) -> dict  (single source of truth)
         Adapter for orchestrator.poller. Calls _decide_action and collapses
         the response: returns persona name on launch_session, None otherwise
         (exit, plan_sprints, etc.). Manages its own httpx.Client lifecycle.
@@ -214,26 +214,7 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
         return {"action": "exit", "reason": f"_decide_action failed: {e}"}
 
 
-def determine_persona(product: dict) -> Optional[str]:
-    """
-    Adapter for orchestrator.poller.
-
-    Returns the persona name on ``action == "launch_session"`` and ``None``
-    for ``exit`` / ``plan_sprints`` / unknown actions. Manages its own
-    httpx.Client (plain — no PF-internal signing because the legacy poller
-    runs on the host with the website assumed unsigned).
-
-    Replaces the dispatch.py cascade that the poller path used pre-Phase 5.
-    """
-    pid = product.get("id")
-    if pid is None:
-        return None
-    try:
-        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-            result = _decide_action(pid, client)
-    except Exception as e:
-        log.error(f"determine_persona failed for product {pid}: {e}")
-        return None
-    if result.get("action") == "launch_session":
-        return result.get("persona")
-    return None
+# determine_persona adapter retired 2026-05-19: it was the bridge for the
+# legacy orchestrator/poller.py which was deleted in PR A (commit 88d8031).
+# The live containerized path (deploy/orchestrator/tools.py) calls
+# _decide_action directly. No callers remained.
