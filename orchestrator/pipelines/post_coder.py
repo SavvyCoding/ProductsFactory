@@ -37,6 +37,110 @@ log = logging.getLogger("poller.docker")
 PM_API_URL = os.environ["PM_API_URL"]
 
 
+# Files coders may NOT modify. The coder's scope is broad (src/, tests/,
+# alembic/, requirements.txt, etc.) so a denylist is more compact than an
+# allowlist. These paths are PM-curated contracts or other-persona territory:
+#
+#   - ARCHITECTURE.md       — architect-only (post-maintenance allowlist)
+#   - CLAUDE.md             — stack-template, PM-curated at greenfield
+#   - AGENT_WORKFLOW.md     — stack-template, PM-curated
+#   - CONTRIBUTING.md       — stack-template, PM-curated
+#   - quality_gates.json    — PM-curated quality bars (Guard 14 cross-checks)
+#   - product_config.json   — PM-set greenfield config
+#   - product_memory.md     — architect / cross-session bookkeeping
+#   - .gitignore            — PM-set at greenfield (Phase 1 of quality-specs)
+#   - session_summary.md    — other-persona working file
+#
+# Real incident driving this denylist: MyDocusign 2026-05-21 PR #36 was a
+# coder commit that added a 58-line `## AWS Shield Standard` section to
+# ARCHITECTURE.md (out of coder scope) AND wrote
+# tests/docs/test_architecture_docs.py to verify the section exists. Both
+# slipped through because post_coder.py had no path enforcement -- only
+# post_doc.py (designer) and post_maintenance.py (architect + others) did.
+# Soft enforcement (silently strip out-of-scope changes from the staged
+# set) lets the legitimate work still ship and the PR still open.
+_CODER_DENYLIST = (
+    "ARCHITECTURE.md",
+    "CLAUDE.md",
+    "AGENT_WORKFLOW.md",
+    "CONTRIBUTING.md",
+    "quality_gates.json",
+    "product_config.json",
+    "product_memory.md",
+    ".gitignore",
+    "session_summary.md",
+)
+
+
+def _coder_stage_with_denylist(working_dir: str, _run, product_name: str = "?") -> tuple[int, list[str]]:
+    """Stage all changed paths EXCEPT those in _CODER_DENYLIST. Mirrors the
+    post-maintenance soft allowlist (filter at staging time, leave out-of-scope
+    changes in working tree, let next workspace reset wipe them).
+
+    Returns (staged_count, stripped_paths). Out-of-scope changes don't make
+    it into the commit; the PR opens with only in-scope changes.
+
+    Soft enforcement rationale (mirrors post-maintenance soft allowlist):
+    the alternative is strict refusal of the entire commit, which would burn
+    fix_attempts on the feature for what is often an unrelated agent-debris
+    issue. With soft, the coder's legitimate code change still ships through
+    the PR pipeline; the unauthorized ARCHITECTURE.md edit silently dies.
+    """
+    import fnmatch as _fnmatch
+    status_r = _run(["git", "status", "--porcelain"], timeout=30)
+    if status_r.returncode != 0:
+        log.warning(
+            f"[post-coder] {product_name}: git status failed -- falling back "
+            f"to git add -A (denylist bypassed for this commit)"
+        )
+        _run(["git", "add", "-A"], timeout=60)
+        return (-1, [])
+
+    staged: list[str] = []
+    stripped: list[tuple[str, str]] = []  # (status_letter, path)
+    for line in status_r.stdout.splitlines():
+        if not line.strip():
+            continue
+        status_pair = line[:2]
+        rest = line[2:].strip()
+        # Handle rename arrow `R  old -> new` (take destination).
+        path = rest.split(" -> ")[-1].strip().strip('"')
+        if not path:
+            continue
+        # Skip the same Temp/Results filter post_doc / post_maintenance use.
+        if "/Temp/" in path or "/Results/" in path:
+            continue
+        status_letter = status_pair[1] if status_pair[1] != " " else status_pair[0]
+        if status_letter == " ":
+            continue
+        # Denylist match -- forward-slash normalized for Windows safety.
+        normalized = path.replace("\\", "/")
+        if any(_fnmatch.fnmatchcase(normalized, deny) for deny in _CODER_DENYLIST):
+            stripped.append((status_letter, normalized))
+            continue
+        staged.append(normalized)
+
+    # Stage allowed paths. `git add -A -- <path>` handles M / A / D / R.
+    for path in staged:
+        _run(["git", "add", "-A", "--", path], timeout=30)
+
+    if stripped:
+        verbs = {
+            "M": "modify", "D": "delete", "R": "rename",
+            "C": "copy", "T": "change type of", "A": "add", "?": "add (untracked)",
+        }
+        log.warning(
+            f"[post-coder] {product_name}: stripped {len(stripped)} "
+            f"out-of-scope path(s) from commit (denylist; coder cannot "
+            f"touch PM-curated files):"
+        )
+        for st, p in stripped:
+            verb = verbs.get(st, st)
+            log.warning(f"  - {verb} `{p}` -- in coder denylist")
+
+    return (len(staged), [p for _, p in stripped])
+
+
 def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> list[str]:
     """
     Deterministic lint guards on the files in the most recent commit.
@@ -866,6 +970,88 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
                 "branching from `20260520043729`."
             )
 
+    # --- Guard 16: alembic revision-ID coherence ---
+    # Per-migration `down_revision` must be one of:
+    #   - None / null (the initial migration)
+    #   - A single string matching another migration's `revision` field
+    #   - A tuple/list (merge migration; not validated here, covered by 15)
+    # Catches the case where a coder agent invents a down_revision value
+    # (a filename slug, a feature-id alias, a typo) that doesn't actually
+    # resolve to any migration on disk. The migration imports but
+    # `alembic upgrade head` errors on the dangling reference.
+    # Defensive guard -- no known incident yet, but the cost of a broken
+    # migration chain is high (every fresh DB setup fails) and the check
+    # is cheap (single regex per migration file).
+    if new_alembic_files:
+        # Re-use the versions_dir captured by Guard 15; for safety reconstruct.
+        versions_dir = _PP(working_dir) / "alembic" / "versions"
+        if versions_dir.is_dir():
+            # Collect every existing `revision = '...'` value on disk.
+            _rev_re = _re.compile(
+                r"^revision(?:\s*:\s*[^=\n]+)?\s*=\s*[\"']([^\"']+)[\"']\s*$",
+                _re.MULTILINE,
+            )
+            _down_re_g16 = _re.compile(
+                r"^down_revision(?:\s*:\s*[^=\n]+)?\s*=\s*(.+?)\s*$",
+                _re.MULTILINE,
+            )
+            known_revisions: set[str] = set()
+            for migration_path in versions_dir.glob("*.py"):
+                try:
+                    content = migration_path.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                except Exception:
+                    continue
+                rm = _rev_re.search(content)
+                if rm:
+                    known_revisions.add(rm.group(1))
+            # For each NEW migration in this commit, check its down_revision.
+            phantom_hits: list[str] = []
+            new_alembic_paths = [_PP(working_dir) / f for f in new_alembic_files]
+            for migration_path in new_alembic_paths:
+                if not migration_path.is_file():
+                    continue
+                try:
+                    content = migration_path.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                except Exception:
+                    continue
+                dm = _down_re_g16.search(content)
+                if not dm:
+                    continue
+                raw_down = dm.group(1).strip()
+                # Skip None and tuple/list (merge migrations, covered by 15).
+                if raw_down == "None" or raw_down.startswith(("(", "[")):
+                    continue
+                # Strip quotes if a bare string literal.
+                if raw_down.startswith(("'", '"')) and raw_down.endswith(raw_down[0]):
+                    value = raw_down[1:-1]
+                else:
+                    continue  # not a recognizable string literal
+                if value not in known_revisions:
+                    phantom_hits.append(
+                        f"`{migration_path.name}` references "
+                        f"`down_revision = '{value}'` but no migration on "
+                        f"disk has `revision = '{value}'`"
+                    )
+            if phantom_hits:
+                violations.append(
+                    "alembic migration has phantom parent revision -- "
+                    "down_revision doesn't match any existing migration's "
+                    "revision field. The migration will fail to import or "
+                    "fail `alembic upgrade head`: " + "; ".join(phantom_hits) +
+                    ". Use the parent's `revision = 'XXXX'` value (the "
+                    "alphanumeric ID), NOT its filename slug. Canonical "
+                    "incident: MyDocusign 2026-05-20 "
+                    "`20260520171100_add_signers_table_for_feature_612.py` "
+                    "had `down_revision = 'add_template_model_for_feature_629'` "
+                    "(parent's slug) instead of `'20260520171004'` (parent's "
+                    "revision ID). Migration imported but never ran "
+                    "end-to-end on a fresh DB."
+                )
+
     return violations
 
 
@@ -1473,22 +1659,33 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             log.warning(f"[post-coder] {pname}: git checkout -b {branch} failed — {_fmt_err(co)}")
             return pushed_ids
 
-    # 3. Add + commit + push
-    add_r = _run(["git", "add", "-A"])
-    if add_r.returncode != 0:
-        log.warning(f"[post-coder] {pname}: git add -A failed — {_fmt_err(add_r)}")
-        return pushed_ids
+    # 3. Add + commit + push.
+    # Use the soft denylist stager so the coder's modifications to PM-curated
+    # files (ARCHITECTURE.md, CLAUDE.md, .gitignore, etc.) get silently
+    # stripped instead of poisoning the entire commit. The legitimate src/
+    # / tests/ / alembic/ work still lands. See _coder_stage_with_denylist
+    # docstring for the MyDocusign #36 incident that drove this.
+    staged_count, stripped = _coder_stage_with_denylist(working_dir, _run, pname)
     # Sanity: was anything actually staged? `diff --cached --quiet` exits 1 if
     # there are staged changes, 0 if none. Catches the "porcelain showed lines
     # but add staged nothing" scenario (e.g. all changes inside a submodule or
-    # excluded path) so we surface a clear error instead of an empty stderr.
+    # excluded path, or all changes were stripped by the denylist).
     cached = _run(["git", "diff", "--cached", "--quiet"])
     if cached.returncode == 0:
         ls = _run(["git", "status", "--porcelain"])
-        log.warning(
-            f"[post-coder] {pname}: nothing staged after `git add -A` "
-            f"despite {len(changed)} porcelain entries. status={ls.stdout.strip()[:400]!r}"
-        )
+        if stripped:
+            log.warning(
+                f"[post-coder] {pname}: nothing in scope to commit after "
+                f"denylist filter (all {len(stripped)} changed path(s) were "
+                f"PM-curated files coders may not touch). "
+                f"status={ls.stdout.strip()[:400]!r}"
+            )
+        else:
+            log.warning(
+                f"[post-coder] {pname}: nothing staged after add "
+                f"despite {len(changed)} porcelain entries. "
+                f"status={ls.stdout.strip()[:400]!r}"
+            )
         return pushed_ids
 
     # Binary / oversize guard. GitHub rejects pushes with any single file >100 MB
