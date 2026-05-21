@@ -3336,10 +3336,20 @@ async def api_plan_sprints(
     # Block re-planning if there are any active or planned sprints — those already
     # have features assigned and changing them would conflict. Completed sprints are
     # fine; we just create new phases/sprints for the unsprinted features.
+    #
+    # Exclude `kind='blocked'`: the per-product Blocked holdpen sprint has
+    # status='planned' by design (so /sprints/active queries skip it) but it's
+    # semantically a parking lot, not a real planned sprint. Without this
+    # filter the holdpen trips the 409 guard and re-planning is permanently
+    # impossible once any feature gets routed to Blocked. Real failure mode:
+    # MyDocusign 2026-05-21 — 21 unsprinted Approved features, 0 active
+    # sprints, but the orchestrator's plan_sprints action looped 25+ minutes
+    # silently 409'ing because Blocked sprint 216 had status='planned'.
     active_check = await db.execute(
         select(Sprint.id).where(
             Sprint.product_id == product_id,
             Sprint.status.in_(("active", "planned")),
+            Sprint.kind != "blocked",
         ).limit(1)
     )
     if active_check.scalar_one_or_none() is not None:
@@ -3351,12 +3361,32 @@ async def api_plan_sprints(
     # Read max features per sprint from DB config
     max_per_sprint = await _sprint_cap(db)
 
-    # Fetch all non-terminal features (everything except Pushed/Rejected/Reverted/Deferred)
-    terminal_statuses = ("Pushed", "Rejected", "Reverted", "Deferred")
+    # Only sprint features that actually want a sprint assignment.
+    #
+    # Eligible:
+    #   - Approved: PM-approved, no design yet
+    #   - Designed: has design doc, ready for coder
+    # Both can be moved into a fresh sprint without disrupting in-flight work.
+    #
+    # Explicitly NOT eligible (and the bug we're fixing here — before this
+    # 2026-05-21 fix the filter was just `notin (Pushed/Rejected/Reverted/
+    # Deferred)`, which caught everything else):
+    #   - Pending: recommender's draft list, not yet PM-approved
+    #   - Blocked: deliberately parked (by supervisor or PM); re-sprinting
+    #     would resurrect features that were explicitly held out
+    #   - Designing/Implementing/Reviewing/Reviewed: in flight with an
+    #     active session or open PR; rewriting sprint_id would orphan
+    #     that work
+    #
+    # Plus only features with sprint_id IS NULL — completed-sprint
+    # leftovers stay in their completed sprint (PM can move them via the
+    # web UI if they want to retry).
+    sprintable_statuses = ("Approved", "Designed")
     feat_result = await db.execute(
         select(Feature).where(
             Feature.product_id == product_id,
-            Feature.status.notin_(terminal_statuses),
+            Feature.status.in_(sprintable_statuses),
+            Feature.sprint_id.is_(None),
         ).order_by(Feature.priority.desc())
     )
     approved = feat_result.scalars().all()
