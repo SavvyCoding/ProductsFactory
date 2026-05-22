@@ -74,6 +74,13 @@ def build_related_code_context(
         else:
             area_dirs = _guess_area_dirs(working_dir, keywords)
         discovered = _ast_scan_dirs(working_dir, area_dirs, max_symbols)
+        log.info(
+            "[phase-7] feature=%s keywords=%d canonical=%d discovered=%d "
+            "deprecated=%d entry_points=%d",
+            feature.get("id") or feature.get("name") or "?",
+            len(keywords), len(canonical), len(discovered),
+            len(deprecated), len(entry_points),
+        )
         return _render_block(canonical, discovered, deprecated, entry_points)
     except Exception:
         log.debug("build_related_code_context failed (returning empty)", exc_info=True)
