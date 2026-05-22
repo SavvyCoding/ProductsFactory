@@ -216,6 +216,10 @@ _PM_CURATED_RO_FILES = (
     "quality_gates.json",
     "product_config.json",
     ".gitignore",
+    # Pre-commit self-review helper installed by templates/renderer.py.
+    # RO so the coder can't tamper with the check to return clean — see
+    # AGENT_WORKFLOW.md Step 5b and post_coder.py Guard 17.
+    "check_deletion_safety.py",
 )
 
 

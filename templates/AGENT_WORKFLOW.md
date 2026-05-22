@@ -145,6 +145,25 @@ Write a **Verification Note** to `progress.md`:
 
 Update `progress.md`: `resume_step: 5` → commit + push (heartbeat)
 
+### Step 5b — Deletion safety self-review
+
+Before staging or committing, run:
+
+```
+python check_deletion_safety.py
+```
+
+This script (shipped read-only into your working directory) catches the case where you removed a top-level Python `def`, `async def`, `class`, or module-level assignment that another file still references. It compares HEAD vs the working tree, AST-parses both, and word-greps surviving callers.
+
+- **Exit 0** → continue to Step 6.
+- **Exit 1** → the script prints a list of dangling deletions. For each one, you must pick a forced choice:
+  - **Restore** the removed symbol in its original file, OR
+  - **Update the caller(s)** listed to no longer reference it.
+
+Do not commit until the script exits 0. The orchestrator runs the same check (Guard 17) after push; failing it bounces the feature back to `Implementing` with `changes_requested` and burns a `fix_attempts`.
+
+This is a deterministic check, not a vibes review — false positives on common names (`name`, `run`, `get`) are possible. If the report names a caller you genuinely don't recognize, verify by opening the file before deciding the script is wrong.
+
 ### Step 6 — Commit + push + PR
 
 Stage only:

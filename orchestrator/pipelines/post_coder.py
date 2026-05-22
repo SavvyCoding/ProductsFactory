@@ -20,6 +20,7 @@ will decompose it into 4 helpers (detect_unpushed_work, verify_agent_pr_tags,
 commit_and_push, record_reviewing_entries).
 """
 
+import ast as _ast
 import json as _json
 import logging
 import os
@@ -181,7 +182,16 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
     except Exception:
         return []
 
-    if not files:
+    # Guard 17 (AST-diff deletion safety) also needs to run on deletion-only
+    # commits, where `files` (AM-only) is empty but a `D` entry exists. Probe
+    # for any MD file up front; if both are empty, nothing to check.
+    try:
+        _has_md_r = _run(["git", "show", "HEAD", "--name-only", "--pretty=",
+                          "--diff-filter=MD"], timeout=20)
+        _has_md = bool(_has_md_r.returncode == 0 and (_has_md_r.stdout or "").strip())
+    except Exception:
+        _has_md = False
+    if not files and not _has_md:
         return []
 
     violations: list[str] = []
@@ -1050,6 +1060,104 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
                     "(parent's slug) instead of `'20260520171004'` (parent's "
                     "revision ID). Migration imported but never ran "
                     "end-to-end on a fresh DB."
+                )
+
+    # --- Guard 17: AST-diff deletion safety ---
+    # Catch deletions of top-level Python defs/classes/module-level assignments
+    # that other files in the repo still reference. AST-parse the pre- and
+    # post-commit version of each modified/deleted .py file, take the set
+    # difference of public top-level names, then word-grep surviving callers
+    # in the rest of the tracked tree (excluding files co-modified in this
+    # commit — those the coder is already aware of). Catches the
+    # "deleted foo() but bar.py still calls foo()" mistake before tests run.
+    #
+    # Best-effort and Python-only for v1: HEAD~1 may not exist on first commit,
+    # files may have syntax errors, products may not be Python — all soft fail.
+    # JS/TS has no stdlib AST parser; a future iteration could use tree-sitter.
+    # Whole-word grep has false positives on common names (`name`, `run`,
+    # `get`) inside docstrings/strings/local vars; the error message names
+    # the symbol + caller paths so the coder can verify in seconds.
+    try:
+        md_r = _run(["git", "show", "HEAD", "--name-only", "--pretty=",
+                     "--diff-filter=MD"], timeout=20)
+        md_files = (
+            {f.strip() for f in (md_r.stdout or "").splitlines()
+             if f.strip().endswith(".py")}
+            if md_r.returncode == 0 else set()
+        )
+    except Exception:
+        md_files = set()
+
+    if md_files:
+        try:
+            all_r = _run(["git", "show", "HEAD", "--name-only", "--pretty=",
+                          "--diff-filter=AMD"], timeout=20)
+            all_changed = (
+                {f.strip() for f in (all_r.stdout or "").splitlines() if f.strip()}
+                if all_r.returncode == 0 else set(md_files)
+            )
+        except Exception:
+            all_changed = set(md_files)
+
+        def _top_level_names(src: str) -> set[str]:
+            try:
+                tree = _ast.parse(src)
+            except (SyntaxError, ValueError):
+                return set()
+            names: set[str] = set()
+            for node in tree.body:
+                if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                                     _ast.ClassDef)):
+                    if not node.name.startswith("_"):
+                        names.add(node.name)
+                elif isinstance(node, _ast.Assign):
+                    for tgt in node.targets:
+                        if isinstance(tgt, _ast.Name) and not tgt.id.startswith("_"):
+                            names.add(tgt.id)
+            return names
+
+        removed_symbols: list[tuple[str, str]] = []
+        for path in md_files:
+            try:
+                old_r = _run(["git", "show", f"HEAD~1:{path}"], timeout=10)
+                if old_r.returncode != 0:
+                    continue  # path absent in HEAD~1 (e.g., first commit)
+                new_r = _run(["git", "show", f"HEAD:{path}"], timeout=10)
+                new_src = new_r.stdout if new_r.returncode == 0 else ""
+            except Exception:
+                continue
+            for name in (_top_level_names(old_r.stdout)
+                         - _top_level_names(new_src)):
+                removed_symbols.append((path, name))
+
+        if removed_symbols:
+            dangling: list[str] = []
+            for path, name in removed_symbols:
+                try:
+                    g = _run(["git", "grep", "-l", "-w", name, "--", "*.py"],
+                             timeout=15)
+                except Exception:
+                    continue
+                if g.returncode != 0:
+                    continue
+                hits = [h.strip() for h in (g.stdout or "").splitlines()
+                        if h.strip()]
+                surviving = [h for h in hits if h not in all_changed]
+                if surviving:
+                    sample = ", ".join(surviving[:3])
+                    more = " ..." if len(surviving) > 3 else ""
+                    dangling.append(
+                        f"`{name}` (removed from {path}) still referenced in "
+                        f"{sample}{more}"
+                    )
+            if dangling:
+                violations.append(
+                    "removed top-level symbol still referenced elsewhere "
+                    "(deletion-safety): " + "; ".join(dangling[:5])
+                    + (" ..." if len(dangling) > 5 else "")
+                    + ". Restore the symbol or update all surviving callers."
+                    " Before pushing the rework, verify locally with:"
+                    " `python check_deletion_safety.py` (exits 0 when clean)."
                 )
 
     return violations
