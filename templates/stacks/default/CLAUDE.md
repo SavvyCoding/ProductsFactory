@@ -13,8 +13,8 @@ Hard cap: 1,500 tokens. Fill in the blanks below based on the actual tech stack.
 ## Folder layout
 
 ```
-SRC/               ← implementation files
-TestCases/         ← test files
+src/               ← implementation files
+tests/             ← test files
 Results/           ← test output JSON
 Temp/              ← scratch only (never committed)
 ```

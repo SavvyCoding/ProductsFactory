@@ -159,7 +159,7 @@ correctly, design it normally — don't recursively split.
    coder will reuse. If something needs to be invented from scratch,
    justify in one sentence why no existing pattern applies.
 
-     AC1 — reuses `@require_api_key` from `SRC/main.py:142`.
+     AC1 — reuses `@require_api_key` from `src/main.py:142`.
      AC2 — new module `src/lib/charts/indicatorCalculators.js` because
            no existing indicator code; pattern follows `src/lib/utils/numericFns.js`
            (pure-fn module exporting named exports).

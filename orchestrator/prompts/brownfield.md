@@ -33,7 +33,7 @@ After you exit, the orchestrator cuts a fresh **session branch** (`coder/<sessio
 
 2. **Edit code with the file-write tool** — never `sed -i` or `awk -i` (they corrupt indentation). Add tests in the project's test directory. New code goes in the `new_feature_source` path from `product_config.json` if specified.
 
-3. **Run tests scoped to the files you changed** (e.g. `pytest TestCases/test_<feature>.py -q`). Avoid the full suite — slow/flaky here. If a previously-passing test now fails: investigate, fix or revert. If stuck after 2 attempts, write `BLOCKED: <reason>` to `/workspace/session_summary.md` and exit cleanly.
+3. **Run tests scoped to the files you changed** (e.g. `pytest tests/test_<feature>.py -q`). Avoid the full suite — slow/flaky here. If a previously-passing test now fails: investigate, fix or revert. If stuck after 2 attempts, write `BLOCKED: <reason>` to `/workspace/session_summary.md` and exit cleanly.
 
 4. **Append ONE JSON line to `/workspace/session_result.json`** — no arrays, no `{"features": [...]}` wrapping. `status` must be exactly `"Implemented"` or `"Blocked"` — never `"Reviewing"` (that's the orchestrator's downstream state):
    ```bash

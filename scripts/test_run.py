@@ -591,7 +591,7 @@ def _run_tests(product: dict, working_dir: Path, python_exe: str, log_path: Path
     if config.get("test_command"):
         test_cmd_str = config["test_command"]
     elif stack == "python":
-        test_cmd_str = f"{python_exe} -m pytest TestCases/ -v --tb=short"
+        test_cmd_str = f"{python_exe} -m pytest tests/ -v --tb=short"
     elif stack == "node":
         test_cmd_str = "npm test"
     elif stack == "go":
