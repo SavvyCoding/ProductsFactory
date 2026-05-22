@@ -88,7 +88,7 @@ For each assigned feature (in order, up to {max_features_per_run}):
    - Code follows ARCHITECTURE.md conventions.
    - No obvious logic bugs / TODO / placeholder code.
 
-   **(b) Test coverage** — `grep -rn "\.skip\|\.todo\|xit(\|xdescribe(" TestCases/` on changed test files (skipped tests count as missing). Run the test command from CLAUDE.md scoped to affected files — they must actually pass. Eyeball coverage of new code paths; obvious gaps in error paths get flagged.
+   **(b) Test coverage** — `grep -rn "\.skip\|\.todo\|xit(\|xdescribe(" tests/ TestCases/ 2>/dev/null` on changed test files (skipped tests count as missing; both casings checked because legacy products may still be mid-migration). Run the test command from CLAUDE.md scoped to affected files — they must actually pass. Eyeball coverage of new code paths; obvious gaps in error paths get flagged.
 
    ⚠️ **When tests time out or fail, never guess the cause** — quote the actual error/log line in your comment. Specifically, do NOT claim "Playwright browsers not installed" without first running `ls $PLAYWRIGHT_BROWSERS_PATH` (browsers are baked into the agent image at `/opt/ms-playwright/` — if you see chromium-1217/ there, the install is fine). False root-cause diagnoses send the coder on wild fixes.
 
@@ -98,7 +98,7 @@ For each assigned feature (in order, up to {max_features_per_run}):
    - Information disclosure: raw `error.message` / `err.message` / stack traces in HTTP response bodies.
    - SQL injection: untemplated string-concat into SQL queries.
    - XSS: untemplated user input in HTML/JSX without explicit `escape()` / `safe()` annotation.
-   - Hardcoded secrets: `grep -rnE "(api[_-]?key|password|secret|token)\s*[:=]\s*["']" SRC/ app/` on changed files.
+   - Hardcoded secrets: `grep -rnE "(api[_-]?key|password|secret|token)\s*[:=]\s*[\"']" src/ SRC/ app/ lib/ 2>/dev/null` on changed files (both casings + extra source roots — legacy products mid-migration).
    - Missing auth: API routes taking user input with no auth check above them.
    - Unvalidated input flowing into eval/exec/shell/sql/path operations.
 

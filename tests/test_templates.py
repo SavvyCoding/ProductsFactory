@@ -190,15 +190,15 @@ class TestInstallTemplatesPositive:
     def test_greenfield_directories_created(self, product_dir):
         p = make_product(product_dir, type="greenfield")
         install_templates(p, PM_API)
-        assert (product_dir / "SRC").is_dir()
-        assert (product_dir / "TestCases").is_dir()
+        assert (product_dir / "src").is_dir()
+        assert (product_dir / "tests").is_dir()
         assert (product_dir / "Results").is_dir()
         assert (product_dir / "Temp").is_dir()
 
     def test_brownfield_directories_not_created(self, product_dir):
         p = make_product(product_dir, type="brownfield")
         install_templates(p, PM_API)
-        assert not (product_dir / "SRC").exists()
+        assert not (product_dir / "src").exists()
 
     def test_python_claude_md_contains_pytest(self, product_dir):
         p = make_product(product_dir, tech_stack=["python"])

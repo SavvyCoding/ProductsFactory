@@ -13,8 +13,8 @@ Hard cap: 1,500 tokens. Remove sections that don't apply to this product.
 ## Folder layout
 
 ```
-SRC/               ← implementation files  ({feature_name}.py)
-TestCases/         ← test files            (test_{feature_name}.py)
+src/               ← implementation files  ({feature_name}.py)
+tests/             ← test files            (test_{feature_name}.py)
 Results/           ← test output JSON      ({feature_name}_results.json)
 Temp/              ← scratch only          (never committed)
 ```
@@ -48,5 +48,5 @@ pip freeze | grep <pkg> >> requirements.txt
 - Raise specific exceptions (never bare `except:` or `except Exception:` without re-raise)
 - No hardcoded secrets — use `os.environ["KEY"]` (raise, not `.get()` for required vars)
 - Follow patterns in ARCHITECTURE.md exactly — same error handling, same naming, same structure
-- One module per feature file: `SRC/{feature_name}.py`
-- One test file per feature: `TestCases/test_{feature_name}.py`
+- One module per feature file: `src/{feature_name}.py`
+- One test file per feature: `tests/test_{feature_name}.py`

@@ -9,10 +9,10 @@ Last updated: {DATE} by session {SESSION_UID}
 ## Directory structure
 
 ```
-SRC/
+src/
   {feature_name}.py        ← one module per feature
-TestCases/
-  test_{feature_name}.py   ← mirrors SRC structure
+tests/
+  test_{feature_name}.py   ← mirrors src/ structure
 Results/
   {feature_name}_results.json
 ```
@@ -23,9 +23,9 @@ The single source for "where the app starts." If a session needs to register a r
 
 | Concern | Canonical file | Notes |
 |---|---|---|
-| App factory | _(populate — e.g. `SRC/main.py:create_app`)_ | Only place that registers routes. |
-| WSGI / ASGI entry | _(populate — e.g. `SRC/main.py` via `gunicorn SRC.main:create_app()`)_ | Production server entrypoint. |
-| CLI entry | _(populate if applicable — e.g. `SRC/cli.py`)_ | |
+| App factory | _(populate — e.g. `src/main.py:create_app`)_ | Only place that registers routes. |
+| WSGI / ASGI entry | _(populate — e.g. `src/main.py` via `gunicorn src.main:create_app()`)_ | Production server entrypoint. |
+| CLI entry | _(populate if applicable — e.g. `src/cli.py`)_ | |
 
 ## MODULES
 
@@ -36,9 +36,9 @@ The source-of-truth registry. Pre-coder context reads this section; when your fe
 | _(populated as features land)_ | | | |
 
 Example rows (replace as the product grows):
-- `User persistence` | `SRC/users/user_store.py` | `User`, `create_user`, `get_user_by_id` | Single store; do not create `user_repository.py` etc.
-- `Authentication` | `SRC/auth/verify.py` | `verify_auth(request) → User` | Raises `Unauthorized`; do not hand-roll per-route.
-- `HTTP client` | `SRC/lib/http_client.py` | `get_session()` | Configures retries/timeouts; do not call `requests.get()` directly.
+- `User persistence` | `src/users/user_store.py` | `User`, `create_user`, `get_user_by_id` | Single store; do not create `user_repository.py` etc.
+- `Authentication` | `src/auth/verify.py` | `verify_auth(request) → User` | Raises `Unauthorized`; do not hand-roll per-route.
+- `HTTP client` | `src/lib/http_client.py` | `get_session()` | Configures retries/timeouts; do not call `requests.get()` directly.
 
 ## RULES
 
@@ -49,7 +49,7 @@ Machine-checkable invariants. The post-coder lint guard refuses commits that vio
 - No `eval()`, `exec()`, or `pickle.loads()` on data derived from request input.
 - No hardcoded fallback secrets in `jwt.encode` / `jwt.decode` / `crypto.create_hmac` calls. If the secret env var is unset, return 503 — never substitute a constant.
 - DB connections must be closed via `with` context manager OR a `finally:` block in the same function.
-- Files in `SRC/` MUST use Python imports — no `module.exports` / CommonJS / `require()` (this is a Python project).
+- Files in `src/` MUST use Python imports — no `module.exports` / CommonJS / `require()` (this is a Python project).
 - No `sys.modules.get('main')` lookups baked into source for test monkey-patching. Use dependency injection via function parameters.
 
 ## REFERENCE PATTERNS
@@ -58,7 +58,7 @@ Copy-pasteable canonical code. Use verbatim. If you need a variant, propose upda
 
 ### Auth check at the top of every state-changing route
 ```python
-from SRC.auth.verify import verify_auth, Unauthorized
+from src.auth.verify import verify_auth, Unauthorized
 
 @app.route("/api/v1/resource", methods=["POST"])
 def create_resource():
@@ -91,7 +91,7 @@ Quality bars that the post-coder lint guard verifies. Authoritative source: `qua
 | File | Setting | Required | Rationale |
 |---|---|---|---|
 | `pytest.ini` | `addopts --cov-fail-under` | ≥ 70 | Template default. Lower only with PM approval. |
-| `pytest.ini` | `testpaths` | `tests TestCases` | Both discovered. Adding other dirs requires updating this row. |
+| `pytest.ini` | `testpaths` | `tests` | Single canonical test directory. Adding other dirs requires PM approval — do NOT include `TestCases` or other parallel test roots. |
 
 Override path: PM edits `product.config.quality_gates_override` — never edit `pytest.ini` directly to bypass.
 
@@ -104,13 +104,13 @@ Override path: PM edits `product.config.quality_gates_override` — never edit `
 - **Auth:** JWT verified in middleware before reaching feature code. Feature modules receive `user_id: int`, not raw tokens.
 - **HTTP client:** `httpx.Client` (sync) or `httpx.AsyncClient` (async). Always set `timeout=`.
 - **Type hints:** all function signatures annotated. `from __future__ import annotations` at top of each file.
-- **Testing:** pytest fixtures for shared state. `conftest.py` at `TestCases/` root. Rolled-back DB transactions per test.
+- **Testing:** pytest fixtures for shared state. `conftest.py` at `tests/` root. Rolled-back DB transactions per test.
 
 ## DEPRECATED
 
 Files / modules / paths slated for removal. The agent-debris detector refuses commits that re-introduce items listed here. The architect persona uses this as its TODO queue.
 
-- _(populated as cruft is identified — e.g. "`SRC/main.py.backup` — older snapshot, delete in next cleanup")_
+- _(populated as cruft is identified — e.g. "`src/main.py.backup` — older snapshot, delete in next cleanup")_
 
 ## Naming conventions
 

@@ -29,11 +29,23 @@ STACK_DEFAULTS: dict[str, dict] = {
     "python": {
         "PYTHON_VERSION": "3.11",
         "RUNTIME":        "Python 3.11",
-        "TEST_COMMAND":   "pytest TestCases/ -v --json-report --json-report-file=Results/{feature_name}_results.json --cov=SRC --cov-fail-under=70",
+        # 2026-05-22: aligned with the default/node stacks — lowercase
+        # src/tests instead of Salesforce-style uppercase SRC/TestCases.
+        # The 2026-05-07 default-stack migration (see "default" block below)
+        # left this entry alone, which caused python products to drift onto
+        # SRC/TestCases while every other stack used src/tests. On a
+        # case-sensitive Linux container, an agent that wrote both
+        # variants (e.g. SRC/main.py from the template + src/api.py because
+        # most FastAPI tutorials use lowercase) ended up with parallel
+        # directories and broken imports. MyDocusign 2026-05-22 had both
+        # `tests/` AND `TestCases/` for this reason. Existing python
+        # products need a one-time `git mv SRC src && git mv TestCases tests`
+        # migration; new products will get the right layout immediately.
+        "TEST_COMMAND":   "pytest tests/ -v --json-report --json-report-file=Results/{feature_name}_results.json --cov=src --cov-fail-under=70",
         "AUDIT_COMMAND":  "pip-audit",
-        "SOURCE_PATH":    "SRC",
-        "TEST_PATH":      "TestCases",
-        "NEW_FEATURE_SOURCE": "SRC",
+        "SOURCE_PATH":    "src",
+        "TEST_PATH":      "tests",
+        "NEW_FEATURE_SOURCE": "src",
     },
     "node": {
         "NODE_VERSION":   "20",
