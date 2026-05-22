@@ -234,6 +234,20 @@ def install_templates(
             context, force,
         )
 
+    # 3d. check_deletion_safety.py — stack-agnostic. Standalone helper the
+    # coder runs pre-commit (Step 5b in AGENT_WORKFLOW.md) to catch removed
+    # top-level Python symbols that other files still reference. Mirrors
+    # the orchestrator's post-coder Guard 17. Stdlib-only, runs from the
+    # product's working directory. Listed in _PM_CURATED_RO_FILES so the
+    # coder can't tamper with it.
+    helper_script = TEMPLATES_DIR / "check_deletion_safety.py"
+    if helper_script.exists():
+        written += _write_file(
+            working_dir / "check_deletion_safety.py",
+            helper_script,
+            context, force,
+        )
+
     # 4. features.md — no longer created (DB is single source of truth)
 
     # 5. Create required directories if they don't exist (greenfield only).
