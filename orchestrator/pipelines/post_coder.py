@@ -1160,6 +1160,137 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
                     " `python check_deletion_safety.py` (exits 0 when clean)."
                 )
 
+    # --- Guard 18: deps coherence (imports vs requirements.txt) ---
+    # Catch the MyDocusign-2026-05-22 failure mode: the coder's container
+    # has fastapi/celery/passlib/etc. pre-installed in the agent image, so
+    # `python -m pytest` succeeds inside the container even though
+    # requirements.txt is missing those declarations. The reviewer (and
+    # anyone outside the agent image) then sees ModuleNotFoundError on
+    # collect, and the project ships broken.
+    #
+    # AST-walk changed .py files, extract top-level package names from
+    # `import X` / `from X.Y import Z` statements, filter out:
+    #   - stdlib modules (sys.stdlib_module_names — Python 3.10+)
+    #   - first-party imports (top-level dir in working_dir)
+    #   - well-known import→pypi name mappings (yaml→pyyaml, jwt→PyJWT)
+    # Then diff against the union of declared deps in requirements.txt +
+    # requirements-dev.txt. Any leftover = undeclared package.
+    #
+    # Python-only (skips silently when no requirements.txt is present —
+    # Node/Go products handled by their own future guards). Diff-based: a
+    # pre-existing undeclared import in an unchanged file is NOT flagged,
+    # since the agent didn't introduce it. The first time the agent edits
+    # such a file, the guard fires — a deliberately incremental cleanup.
+    _PYPI_NAME_MAP = {
+        # import name → pypi distribution name
+        "yaml":       "pyyaml",
+        "jwt":        "PyJWT",
+        "cv2":        "opencv-python",
+        "PIL":        "Pillow",
+        "sklearn":    "scikit-learn",
+        "bs4":        "beautifulsoup4",
+        "dateutil":   "python-dateutil",
+        "dotenv":     "python-dotenv",
+        "magic":      "python-magic",
+        "MySQLdb":    "mysqlclient",
+        "google":     "google-cloud-storage",  # best-effort; google.* is huge
+        "OpenSSL":    "pyOpenSSL",
+    }
+    try:
+        from pathlib import Path as _PPath
+        _wd_path = _PPath(working_dir)
+        _req_files = ("requirements.txt", "requirements-dev.txt")
+        _req_present = [f for f in _req_files if (_wd_path / f).exists()]
+        # Skip silently for non-Python projects (no requirements.txt at all).
+        if _req_present:
+            import sys as _sys
+            # stdlib detection: Python 3.10+ ships sys.stdlib_module_names.
+            _stdlib = set(getattr(_sys, "stdlib_module_names", ()))
+            # First-party: any top-level dir in working_dir that's not a
+            # virtualenv/build/scratch dir.
+            _skip_dirs = {".git", ".venv", "venv", "env", "__pycache__",
+                          "node_modules", "Temp", "Results", "dist", "build",
+                          ".pytest_cache", ".mypy_cache"}
+            try:
+                _first_party = {
+                    p.name for p in _wd_path.iterdir()
+                    if p.is_dir() and p.name not in _skip_dirs
+                    and not p.name.startswith(".")
+                }
+            except Exception:
+                _first_party = set()
+
+            def _canon(name: str) -> str:
+                # PEP 503: lowercase, collapse runs of [-_.] to single '-'.
+                return _re.sub(r"[-_.]+", "-", name.lower())
+
+            # Parse declared deps from requirements files. Strip extras
+            # ([bcrypt]), version specs, env markers, comments. Best-effort.
+            _declared: set[str] = set()
+            for rf in _req_present:
+                try:
+                    for raw in (_wd_path / rf).read_text(
+                            encoding="utf-8", errors="replace").splitlines():
+                        line = raw.split("#", 1)[0].strip()
+                        if not line or line.startswith("-"):
+                            continue  # pip flags like -r foo.txt, -e .
+                        m = _re.match(r"^([A-Za-z0-9_.\-]+)", line)
+                        if m:
+                            _declared.add(_canon(m.group(1)))
+                except Exception:
+                    continue
+
+            # Imports collected from changed .py files in this commit (AM).
+            _imported: dict[str, str] = {}  # canon-pypi → first source file
+            for f in files:
+                if not f.endswith(".py"):
+                    continue
+                try:
+                    src = (_wd_path / f).read_text(
+                        encoding="utf-8", errors="replace")
+                    tree = _ast.parse(src)
+                except (OSError, SyntaxError, ValueError):
+                    continue
+                for node in _ast.walk(tree):
+                    top = None
+                    if isinstance(node, _ast.Import):
+                        for alias in node.names:
+                            top = alias.name.split(".", 1)[0]
+                            if not top or top.startswith("_") or top in _stdlib \
+                                    or top in _first_party or top == "__future__":
+                                continue
+                            pypi = _canon(_PYPI_NAME_MAP.get(top, top))
+                            _imported.setdefault(pypi, f)
+                    elif isinstance(node, _ast.ImportFrom) and node.level == 0:
+                        # node.level > 0 is a relative import (always first-party)
+                        if not node.module:
+                            continue
+                        top = node.module.split(".", 1)[0]
+                        if not top or top.startswith("_") or top in _stdlib \
+                                or top in _first_party or top == "__future__":
+                            continue
+                        pypi = _canon(_PYPI_NAME_MAP.get(top, top))
+                        _imported.setdefault(pypi, f)
+
+            _missing = sorted(set(_imported) - _declared)
+            if _missing:
+                sample = ", ".join(
+                    f"`{pkg}` (used in {_imported[pkg]})" for pkg in _missing[:5]
+                )
+                more = f" ... ({len(_missing) - 5} more)" if len(_missing) > 5 else ""
+                violations.append(
+                    "imports use packages not declared in "
+                    + " / ".join(_req_present) + " (deps-coherence): "
+                    + sample + more
+                    + ". The agent image masks this because it pre-installs "
+                    "common Python libs; the reviewer and any fresh `pip "
+                    "install -r requirements.txt && pytest` will fail. Add "
+                    "the missing packages to requirements.txt (or "
+                    "requirements-dev.txt for test-only deps)."
+                )
+    except Exception:
+        log.debug("Guard 18 deps-coherence raised", exc_info=True)
+
     return violations
 
 
