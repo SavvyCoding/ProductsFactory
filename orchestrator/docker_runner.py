@@ -28,7 +28,7 @@ import httpx
 
 from orchestrator.prompts import build_prompt
 from orchestrator.alerts import send_alert
-from orchestrator.paths import host_path, container_path, in_container_mode
+from orchestrator.paths import host_path, container_path
 from templates.renderer import install_templates
 
 log = logging.getLogger("poller.docker")

@@ -308,35 +308,6 @@ def _discover_registered_products(products: list, **kwargs) -> int:
     return n
 
 
-# Module-level cache of the last-seen PAT so we only rotate when it changes.
-# Reset on orchestrator restart, which is fine — the first cycle after a
-# restart will simply re-detect a "change" if the DB PAT differs from what
-# the products' .git/configs already have, which is also harmless (idempotent).
-_LAST_KNOWN_PAT: str | None = None
-
-
-def _maybe_rotate_pat(products: list, new_pat: str) -> None:
-    """Detect PAT changes between cycles and rewrite every product's
-    embedded git remote URL. Cheap when PAT is unchanged (just a string
-    compare); only walks workspaces when the value differs."""
-    global _LAST_KNOWN_PAT
-    if not new_pat:
-        return
-    if _LAST_KNOWN_PAT is None:
-        _LAST_KNOWN_PAT = new_pat
-        return
-    if _LAST_KNOWN_PAT == new_pat:
-        return
-    log.info("[pat-rotate] system_config.github_pat changed — rewriting remote URLs")
-    try:
-        from orchestrator.pat_rotate import rotate_pat
-        updated, skipped = rotate_pat(products, new_pat)
-        log.info("[pat-rotate] updated=%d skipped=%d", updated, skipped)
-    except Exception:
-        log.exception("[pat-rotate] failed")
-    _LAST_KNOWN_PAT = new_pat
-
-
 def _scaffold_greenfield_pending(products: list, **kwargs) -> int:
     """
     For every product in `greenfield_pending`, invoke the host-side
@@ -486,16 +457,6 @@ def run_cycle(args: dict, **kwargs) -> str:
         products_raw = json.loads(get_products({}, **kwargs))
         products_data = products_raw.get("data") if isinstance(products_raw, dict) else products_raw
         products = products_data if isinstance(products_data, list) else []
-
-        # 5α. PAT-rotation auto-detect. Cheap on the steady state (string
-        # compare); only rewrites every product's .git/config when the PM
-        # rotates the token in system_config.
-        try:
-            with _pm_client() as client:
-                _sc = client.get("/api/system-config").json()
-            _maybe_rotate_pat(products, _sc.get("github_pat") or "")
-        except Exception:
-            log.exception("[pat-rotate] auto-detect failed")
 
         # 5a. Scaffold greenfield_pending products (creates GitHub repo, deploy
         # key, initial files, flips status → registered).
