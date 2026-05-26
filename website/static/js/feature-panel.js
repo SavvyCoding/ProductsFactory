@@ -150,8 +150,12 @@ function renderFeaturePanel(f, comments, changelog, labels, links, story) {
     </div>`;
   }
 
-  // Blocked reason
-  if (f.blocked_reason) {
+  // Blocked reason — render only when the feature is actually Blocked.
+  // The `blocked_reason` column lingers as historical text after a feature
+  // transitions out of Blocked (e.g. PM rolls it back to Approved); showing
+  // it unconditionally creates a "this feature looks Blocked" false-positive
+  // in the UI. Gating on status mirrors the new product.html phase listing.
+  if (f.blocked_reason && f.status === 'Blocked') {
     html += `<div class="pf-panel__section">
       <div style="padding:8px 12px;background:var(--color-danger-subtle);border:1px solid var(--color-danger-fg);border-radius:var(--radius-md);font-size:13px;color:var(--color-danger-fg)">
         <strong>Blocked:</strong> ${escHtmlGlobal(f.blocked_reason)}
