@@ -80,14 +80,15 @@ PM_API_URL = os.environ["PM_API_URL"]
 def _get_auth_token() -> str:
     """Return a fresh GitHub App installation token, or ``""``.
 
-    Per CLAUDE.md "Git auth: GitHub App only": the PAT fallback was
-    removed in the drift-cleanup pass. The App-token path owns its own
-    short-lived cache (see github_app.py); on mint failure the empty
-    string surfaces here so callers can report a real misconfiguration
-    instead of silently degrading.
+    Thin str-return alias over the canonical
+    ``orchestrator.integrations.github._get_gh_token`` (which returns
+    ``str | None``). Kept because callers in this module do
+    ``f"Bearer {tok}"`` and need a string fallback rather than ``None``.
+    Test patches that target ``orchestrator.github_client._get_auth_token``
+    continue to work unchanged.
     """
-    from orchestrator.integrations import github_app
-    return github_app.get_installation_token() or ""
+    from orchestrator.integrations.github import _get_gh_token
+    return _get_gh_token() or ""
 
 
 def _github_headers() -> dict:

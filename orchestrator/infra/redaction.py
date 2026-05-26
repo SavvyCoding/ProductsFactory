@@ -17,6 +17,11 @@ import re
 # is replaced with ***REDACTED*** before lines are sent to docker stdout or
 # POSTed to the PM API session log buffer. List grows as new auth schemes are
 # discovered in the wild — over-redaction is fine; under-redaction is not.
+#
+# This is the canonical list. ``orchestrator/ollama_agent.py`` previously kept
+# a near-duplicate copy that had already drifted (added the
+# ``x-access-token:`` pattern this list was missing); the drift-cleanup pass
+# merged that pattern in and made ollama_agent import from here.
 _SECRET_PATTERNS = [
     re.compile(r'gh[psoua]_[A-Za-z0-9]{20,}'),                                    # GitHub classic + variants
     re.compile(r'github_pat_[A-Za-z0-9_]{20,}'),                                  # GitHub fine-grained
@@ -25,11 +30,18 @@ _SECRET_PATTERNS = [
     re.compile(r'AKIA[A-Z0-9]{16}'),                                              # AWS access key id
     re.compile(r'xox[bpasr]-[A-Za-z0-9-]+'),                                      # Slack tokens
     re.compile(r'(Bearer\s+)[A-Za-z0-9_.\-=]{12,}', re.IGNORECASE),               # HTTP Bearer
+    re.compile(r'(x-access-token:)[^@\s\'"]{8,}'),                                # Embedded PAT in git remote URL
 ]
 
 
 def _redact_secrets(s: str) -> str:
-    """Strip credential-shaped substrings before logging."""
+    """Strip credential-shaped substrings before logging.
+
+    Returns the input unchanged when falsy (None / "") so callers don't
+    have to special-case empty tool-result strings.
+    """
+    if not s:
+        return s
     for pat in _SECRET_PATTERNS:
         s = pat.sub('***REDACTED***', s)
     return s

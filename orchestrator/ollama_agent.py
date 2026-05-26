@@ -56,34 +56,16 @@ class LLMInfraExhausted(RuntimeError):
 
 # ── Secret redaction for tool results ─────────────────────────────────────────
 # Tool output (bash stdout/stderr, file contents, HTTP responses) flows back
-# into the agent's conversation history and therefore reaches Ollama Cloud on
-# every subsequent turn. Strip credential-shaped substrings BEFORE the agent
-# sees them so they never leave this container.
+# into the agent's conversation history and reaches Ollama Cloud on every
+# subsequent turn. Strip credential-shaped substrings BEFORE the agent sees
+# them so they never leave this container.
 #
-# Mirrors orchestrator.docker_runner._SECRET_PATTERNS — keep in sync.
-_SECRET_PATTERNS = [
-    re.compile(r'gh[psoua]_[A-Za-z0-9]{20,}'),                                    # GitHub classic + variants
-    re.compile(r'github_pat_[A-Za-z0-9_]{20,}'),                                  # GitHub fine-grained
-    re.compile(r'sk-ant-(?:oat|ort|api|admin)[A-Za-z0-9_\-]{20,}'),               # Anthropic
-    re.compile(r'sk-[A-Za-z0-9]{20,}'),                                           # Generic OpenAI-shape
-    re.compile(r'AKIA[A-Z0-9]{16}'),                                              # AWS access key id
-    re.compile(r'xox[bpasr]-[A-Za-z0-9-]+'),                                      # Slack tokens
-    re.compile(r'(Bearer\s+)[A-Za-z0-9_.\-=]{12,}', re.IGNORECASE),                # HTTP Bearer
-    re.compile(r'(x-access-token:)[^@\s\'"]{8,}'),                                 # Embedded PAT in git remote URL
-]
-
-
-def _redact_secrets(s: str) -> str:
-    """Strip credential-shaped substrings before they reach the LLM context.
-
-    Returning the original on falsy input keeps None/'' working through the
-    tool-dispatch chain without special-casing each call site.
-    """
-    if not s:
-        return s
-    for pat in _SECRET_PATTERNS:
-        s = pat.sub('***REDACTED***', s)
-    return s
+# Patterns live in orchestrator.infra.redaction (the canonical list shared
+# with docker_runner's log redaction). This module previously kept a
+# near-duplicate local copy that had already drifted from the canonical;
+# the drift-cleanup pass dropped it and imported from there instead. New
+# patterns belong in infra/redaction.py.
+from orchestrator.infra.redaction import _SECRET_PATTERNS, _redact_secrets  # noqa: F401
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
