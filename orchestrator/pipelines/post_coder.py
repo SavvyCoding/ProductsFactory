@@ -1337,8 +1337,18 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
     # ---- detect framework from filesystem markers ----
     if (wd / "pytest.ini").exists() or (wd / "pyproject.toml").exists():
         framework = "pytest"
-        collect_cmd = ["pytest", "--collect-only", "-q"]
-        run_cmd     = ["pytest", "-q", "--no-header"]
+        # `-s` disables pytest's stdout/stderr capture. Required when the
+        # workspace lives on a Windows-bind-mounted Docker volume: pytest's
+        # capture cleanup calls `tmpfile.truncate()` on temp files in the
+        # mounted dir, which races against the Docker virtiofs layer and
+        # raises FileNotFoundError. The resulting partial cleanup makes
+        # pytest report `collected 0 items` even when tests exist and run
+        # fine. Canonical 2026-05-26 SmokeTest incident: feature #950 looped
+        # for ~12 sessions with "zero tests collected" while pytest -s
+        # actually collected 5 items and only failed coverage. Don't drop
+        # `-s` here — the capture path is unsafe on Windows hosts.
+        collect_cmd = ["pytest", "--collect-only", "-q", "-s"]
+        run_cmd     = ["pytest", "-q", "--no-header", "-s"]
     elif (wd / "package.json").exists():
         try:
             import json as _json
