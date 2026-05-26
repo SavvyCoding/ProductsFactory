@@ -47,7 +47,6 @@ REST API (used by poller — no auth on poller-only routes):
   GET  /api/products/{id}/sprints      — list sprints
   GET  /api/products/{id}/sprints/active — active sprint
   PATCH /api/sprints/{id}              — update sprint
-  GET  /api/products/{id}/open_pr_count — PR count gate (poller)
   GET  /api/system-config              — system config for poller (no auth)
   POST /api/recommend/features         — LLM-generated feature suggestions
   GET  /api/alerts/unread              — unread alerts for nav badge
@@ -75,7 +74,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse,
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import bcrypt as _bcrypt_lib
-from sqlalchemy import select, func, text, case, update, or_, and_
+from sqlalchemy import select, func, text, update, or_, and_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -88,7 +87,7 @@ from website.models import (
 )
 from website.auth import require_auth, verify_internal_signature
 from website import schemas
-from website.github import fetch_progress_md, fetch_architecture_md, count_open_prs, list_open_prs, merge_pr, close_pr
+from website.github import fetch_progress_md, fetch_architecture_md, list_open_prs, merge_pr, close_pr
 # 1-PR model: sprint integration branch / sprint PR were retired
 # 2026-05-15. Sprint completion no longer merges a PR — it just marks the
 # sprint completed and generates release notes from features already
@@ -133,7 +132,6 @@ templates.env.filters["as_feature_name"] = _as_feature_name
 # PRODUCTS_BASE_DIR env var holds the host-side path (e.g. C:/Users/you/Products).
 # We map product.working_dir → /workspace/{relative_part} to locate output/ videos.
 _HOST_PRODUCTS_BASE     = os.environ.get("PRODUCTS_BASE_DIR", "").rstrip("/\\").replace("\\", "/")
-STUCK_FEATURE_HOURS     = int(os.environ.get("STUCK_FEATURE_TIMEOUT_HOURS", "2"))
 SESSION_LOG_MAXLEN      = int(os.environ.get("SESSION_LOG_MAXLEN", "4000"))
 SESSION_LOG_WARN_AT     = int(SESSION_LOG_MAXLEN * 0.9)  # warn when buffer is 90% full
 
@@ -1883,22 +1881,6 @@ async def _generate_sprint_release_notes(sprint_id: int, product_id: int, db: As
         return None
 
 
-
-
-@app.post("/product/{product_id}/features/{feature_id}/assign-sprint")
-async def assign_sprint_form(
-    product_id: int, feature_id: int,
-    sprint_id: str = Form(""),
-    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
-):
-    """Assign or remove a feature from a sprint."""
-    feature = await _get_feature_or_404(feature_id, db)
-    new_sprint_id = int(sprint_id) if sprint_id.isdigit() else None
-    if new_sprint_id and new_sprint_id != feature.sprint_id:
-        await _check_sprint_capacity(new_sprint_id, 1, db)
-    feature.sprint_id = new_sprint_id
-    await db.flush()
-    return RedirectResponse(f"/product/{product_id}?tab=sprints", status_code=303)
 
 
 @app.post("/product/{product_id}/prompt")
@@ -4248,16 +4230,6 @@ async def api_flapping_features(
 # ══════════════════════════════════════════════════════════════════════════════
 # REST API — Misc
 # ══════════════════════════════════════════════════════════════════════════════
-
-@app.get("/api/products/{product_id}/open_pr_count")
-async def api_open_pr_count(product_id: int, db: AsyncSession = Depends(get_db)):
-    """Poller PR count gate. Fetches live from GitHub."""
-    product = await _get_product_or_404(product_id, db)
-    _cfg = await _get_system_config(db)
-    _tok = _github_token_from_config(_cfg)
-    count = count_open_prs(product.github_repo, token=_tok) if product.github_repo else 0
-    return {"product_id": product_id, "count": count}
-
 
 @app.get("/api/alerts/unread", response_model=list[schemas.AlertOut])
 async def api_unread_alerts(

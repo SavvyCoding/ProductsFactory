@@ -4,7 +4,7 @@ Separate from ORM models so the API contract is explicit.
 """
 
 from datetime import datetime, date
-from typing import Optional, List, Literal
+from typing import Optional, List
 from pydantic import BaseModel, field_validator
 
 # Valid status values — kept in sync with models.py constants
@@ -263,12 +263,6 @@ class PollerLockRequest(BaseModel):
     pid:  int
     host: str
 
-class PollerLockOut(BaseModel):
-    pid:          int
-    host:         str
-    locked_at:    datetime
-    heartbeat_at: datetime
-
 class PollerHeartbeatRequest(BaseModel):
     pid:  int
     host: str
@@ -287,53 +281,6 @@ class AlertOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# ── System Config ─────────────────────────────────────────────────────────────
-
-class SystemConfigOut(BaseModel):
-    products_root_dir:     Optional[str] = None
-    github_org:            Optional[str] = None
-    github_pat:            Optional[str] = None
-    github_ssh_key_name:   str = "productfactory-deploy"
-    slack_webhook_url:     Optional[str] = None
-    github_webhook_secret: Optional[str] = None
-    max_sessions_per_day:  Optional[int] = None
-
-    model_config = {"from_attributes": True}
-
-
-class ProductSchedule(BaseModel):
-    quiet_hours_start:    Optional[int] = None
-    quiet_hours_end:      Optional[int] = None
-    daily_session_cap:    Optional[int] = None
-    max_features_per_run: Optional[int] = None
-
-
-class BulkApprove(BaseModel):
-    feature_ids: List[int]
-
-
-# ── PM Users ──────────────────────────────────────────────────────────────────
-
-class PMUserCreate(BaseModel):
-    name:     str
-    username: str
-    password: str
-
-    @field_validator("password")
-    @classmethod
-    def password_min_length(cls, v: str) -> str:
-        if len(v) < 8:
-            raise ValueError("password must be at least 8 characters")
-        return v
-
-
-class PMUserOut(BaseModel):
-    id:         int
-    name:       str
-    username:   str
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
 
 
 # ── LLM Recommendations ───────────────────────────────────────────────────────
@@ -559,7 +506,3 @@ class SupervisorActionRequest(BaseModel):
 
 class SessionLogAppendRequest(BaseModel):
     lines: List[str]
-
-
-class SessionPersonaSetRequest(BaseModel):
-    persona: str

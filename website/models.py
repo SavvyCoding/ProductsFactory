@@ -160,17 +160,6 @@ class Session(Base):
     product: Mapped["Product"] = relationship("Product", back_populates="sessions")
 
 
-SESSION_STATUSES = (
-    "pending",    # DB row created, docker run not yet started
-    "starting",   # docker run launched, container not yet visible
-    "running",    # container live, agent working
-    "wrapping",   # agent exited, harvester applying results
-    "ended",      # clean close, exit_code=0
-    "killed",     # watchdog/timeout/external SIGKILL
-    "orphaned",   # DB says running but no container found; reconciler recovers
-)
-
-
 class SessionEvent(Base):
     """Lifecycle audit log — every transition + watchdog action written here."""
     __tablename__ = "session_events"

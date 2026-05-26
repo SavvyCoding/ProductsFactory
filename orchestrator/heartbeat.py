@@ -8,7 +8,7 @@ Stale session → kill container → relaunch on next cycle.
 
 import os
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 import httpx
 

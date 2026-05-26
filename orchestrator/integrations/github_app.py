@@ -188,7 +188,3 @@ def probe() -> tuple[bool, str]:
     return True, f"token minted, expires {datetime.fromtimestamp(fresh.expires_at, tz=timezone.utc).isoformat()}"
 
 
-def invalidate_cache() -> None:
-    """Drop all cached tokens — used by tests and after auth config changes."""
-    with _cache_lock:
-        _cache.clear()

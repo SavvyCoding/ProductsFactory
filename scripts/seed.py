@@ -15,7 +15,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from random import choice, randint, uniform
+from random import randint, uniform
 
 # ── Load .env if present ─────────────────────────────────────────────────────
 repo_root = Path(__file__).parent.parent

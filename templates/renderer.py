@@ -11,12 +11,10 @@ Stack selection priority:
   2. "default" if no known stack matches
 """
 
-import os
 import re
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 log = logging.getLogger("renderer")
 
@@ -303,6 +301,3 @@ def _write_file(
     return [str(dest)]
 
 
-def get_stack_defaults(stack: str) -> dict:
-    """Exposed for testing — returns defaults for a given stack."""
-    return STACK_DEFAULTS.get(stack, STACK_DEFAULTS["default"]).copy()

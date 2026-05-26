@@ -261,10 +261,6 @@ _SYSCFG_KEEP = {"auto_merge_enabled", "stuck_feature_timeout_hours",
                 "poll_interval", "session_timeout_minutes", "stale_threshold_minutes"}
 
 
-def get_system_config(args: dict, **kwargs) -> str:
-    return _slim_response(_pm("GET", "/api/system-config"), _SYSCFG_KEEP)
-
-
 def _discover_registered_products(products: list, **kwargs) -> int:
     """
     For every product in `registered` status, run discovery (reads working
@@ -761,16 +757,6 @@ def determine_next_action(args: dict, **kwargs) -> str:
         return _err(f"determine_next_action failed: {e}")
 
 
-def set_feature_status(args: dict, **kwargs) -> str:
-    feature_id = args.get("feature_id")
-    status = args.get("status")
-    pr_number = args.get("pr_number")
-    body: dict[str, Any] = {"status": status}
-    if pr_number is not None:
-        body["pr_number"] = pr_number
-    return _pm("PATCH", f"/api/features/{feature_id}", body)
-
-
 def reset_stuck_features(args: dict, **kwargs) -> str:
     return _pm("POST", "/api/features/reset_stuck")
 
@@ -907,22 +893,6 @@ def launch_session(args: dict, **kwargs) -> str:
             _LAUNCHING.discard(product_id)
         log.exception("launch_session failed")
         return _err(f"launch_session crashed: {e}")
-
-
-def kill_stale_container(args: dict, **kwargs) -> str:
-    product_id = args.get("product_id")
-    try:
-        result = subprocess.run(
-            ["docker", "ps", "--filter", f"name=pf-{product_id}-", "--format", "{{.Names}}"],
-            capture_output=True, text=True, timeout=10,
-        )
-        killed: list[str] = []
-        for name in result.stdout.strip().splitlines():
-            subprocess.run(["docker", "kill", name], capture_output=True, timeout=10)
-            killed.append(name)
-        return _ok({"killed": killed})
-    except Exception as e:
-        return _err(f"kill_stale_container failed: {e}")
 
 
 def check_stale_sessions(args: dict, **kwargs) -> str:
@@ -1316,61 +1286,3 @@ def _run_supervisor_pr_detectors(product: dict) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# GitHub
-# ---------------------------------------------------------------------------
-
-def _github_context(product_id: int) -> tuple[str, str] | None:
-    try:
-        with _pm_client() as client:
-            product = client.get(f"/api/products/{product_id}").json()
-        repo_url = product.get("github_repo") or ""
-        # App installation token (PAT fallback for transition release).
-        # Minted per call by _get_github_token; the App module caches with
-        # auto-refresh, so this is still effectively free.
-        pat = _get_github_token()
-        if not repo_url or not pat:
-            return None
-        slug = repo_url.rstrip("/").split("github.com/")[-1].replace(".git", "")
-        return slug, pat
-    except Exception:
-        return None
-
-
-def github_list_prs(args: dict, **kwargs) -> str:
-    product_id = args.get("product_id")
-    state = args.get("state", "open")
-    ctx = _github_context(product_id)
-    if ctx is None:
-        return _err("github context unavailable (missing repo or PAT)")
-    slug, pat = ctx
-    try:
-        resp = httpx.get(
-            f"https://api.github.com/repos/{slug}/pulls",
-            params={"state": state, "per_page": 30},
-            headers={"Authorization": f"token {pat}", "Accept": "application/vnd.github+json"},
-            timeout=20,
-        )
-        data = resp.json() if resp.is_success else []
-        return _ok([{"number": p["number"], "title": p["title"], "head": p["head"]["ref"]} for p in data])
-    except Exception as e:
-        return _err(f"github_list_prs failed: {e}")
-
-
-def github_merge_pr(args: dict, **kwargs) -> str:
-    product_id = args.get("product_id")
-    pr_number = args.get("pr_number")
-    ctx = _github_context(product_id)
-    if ctx is None:
-        return _err("github context unavailable")
-    slug, pat = ctx
-    try:
-        resp = httpx.put(
-            f"https://api.github.com/repos/{slug}/pulls/{pr_number}/merge",
-            headers={"Authorization": f"token {pat}", "Accept": "application/vnd.github+json"},
-            json={"merge_method": "squash"},
-            timeout=30,
-        )
-        return json.dumps({"ok": resp.is_success, "status": resp.status_code, "body": resp.text[:200]})
-    except Exception as e:
-        return _err(f"github_merge_pr failed: {e}")

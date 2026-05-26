@@ -3,7 +3,6 @@ GitHub helpers used by the PM website.
 Fetches progress.md content for the progress viewer.
 """
 
-import os
 import re
 import logging
 import httpx
@@ -154,21 +153,3 @@ def close_pr(github_repo: str, pr_number: int, token: str, reason: str = "") -> 
     return False
 
 
-def count_open_prs(github_repo: str, token: str | None = None) -> int:
-    """Returns the number of open PRs. Returns 0 on any error."""
-    slug = parse_repo_slug(github_repo)
-    if not slug:
-        return 0
-    owner, repo = slug
-    try:
-        resp = httpx.get(
-            f"https://api.github.com/repos/{owner}/{repo}/pulls",
-            params={"state": "open", "per_page": 10},
-            headers={**_headers(token), "Accept": "application/vnd.github+json"},
-            timeout=_TIMEOUT,
-        )
-        if resp.status_code == 200:
-            return len(resp.json())
-    except Exception as e:
-        log.warning(f"count_open_prs error: {e}")
-    return 0
