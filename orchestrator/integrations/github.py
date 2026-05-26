@@ -1,12 +1,10 @@
 """
 GitHub helpers used by the post-session pipelines.
 
-This module is intentionally narrow — it only houses the two helpers the
-pipelines need to call out to GitHub. Phase 5 will absorb the full
-``orchestrator.github_client`` module here under one consistent slug-parsing
-contract; today there are three different ``_parse_repo_slug`` definitions
-across the orchestrator (str / str|None / tuple[str,str]|None) which we'll
-unify when we tackle the per-feature reconciler.
+This module is the canonical home for ``_parse_repo_slug`` and ``_get_gh_token``.
+``orchestrator.github_client`` and ``orchestrator.auto_merge`` previously had
+their own copies with three different return shapes (``str`` / ``str|None`` /
+``tuple[str,str]|None``); the drift-cleanup pass collapsed them here.
 
 Extracted from docker_runner.py during Phase 2 of OrchestratorRefactor.
 """
@@ -24,10 +22,19 @@ log = logging.getLogger("poller.docker")
 PM_API_URL = os.environ["PM_API_URL"]
 
 
-def _parse_repo_slug(github_repo: str) -> str:
-    """Extract 'owner/repo' from a GitHub URL for API calls."""
+def _parse_repo_slug(github_repo: str) -> str | None:
+    """Extract 'owner/repo' from a GitHub URL, or None if unparseable.
+
+    Handles both HTTPS (`https://github.com/owner/repo.git`) and SSH
+    (`git@github.com:owner/repo.git`) forms via the `[:/]` prefix in the
+    regex. Returns None on an empty input or anything the regex can't
+    match — callers must guard, never blindly format the result into a
+    URL.
+    """
+    if not github_repo:
+        return None
     m = re.search(r"[:/]([^/]+/[^/]+?)(?:\.git)?$", github_repo)
-    return m.group(1) if m else github_repo
+    return m.group(1) if m else None
 
 
 def _get_gh_token() -> str | None:

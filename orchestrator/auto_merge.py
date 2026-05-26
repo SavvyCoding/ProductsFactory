@@ -25,20 +25,14 @@ import uuid
 
 import httpx
 
+from orchestrator.integrations.github import _parse_repo_slug
+
 log = logging.getLogger("auto_merge")
 
 PM_API_URL = os.environ.get("PM_API_URL", "http://pm-api:8080")
 
 # Mirrors dispatch.TERMINAL but kept local to avoid an import cycle.
 TERMINAL = frozenset({"Pushed", "Deferred", "Rejected", "Reverted"})
-
-
-def _parse_repo_slug(github_repo: str) -> str | None:
-    """Extract `owner/repo` from a GitHub URL. Returns None if unparseable."""
-    if not github_repo:
-        return None
-    slug = github_repo.rstrip("/").split("github.com/")[-1].replace(".git", "")
-    return slug or None
 
 
 def _try_merge_pr(repo_slug: str, pr_num: int, token: str) -> tuple[int, str]:

@@ -12,7 +12,8 @@ from datetime import datetime, timezone, timedelta
 
 import httpx
 
-from orchestrator.github_client import _parse_repo_slug, _github_headers
+from orchestrator.github_client import _github_headers
+from orchestrator.integrations.github import _parse_repo_slug
 from orchestrator.alerts import send_alert
 
 log = logging.getLogger("poller.heartbeat")
@@ -79,13 +80,12 @@ def _container_age_minutes(product: dict) -> int | None:
 
 def _get_progress_last_push(product: dict) -> datetime | None:
     """Fetch the last commit date of progress.md from GitHub."""
-    slug = _parse_repo_slug(product)
+    slug = _parse_repo_slug(product.get("github_repo", ""))
     if not slug:
         return None
-    owner, repo = slug
     try:
         resp = httpx.get(
-            f"https://api.github.com/repos/{owner}/{repo}/commits",
+            f"https://api.github.com/repos/{slug}/commits",
             params={"path": "progress.md", "per_page": 1},
             headers=_github_headers(),
             timeout=15,

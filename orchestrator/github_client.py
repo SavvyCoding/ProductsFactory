@@ -14,6 +14,8 @@ from pathlib import Path
 
 import httpx
 
+from orchestrator.integrations.github import _parse_repo_slug
+
 log = logging.getLogger("poller.github")
 
 # After this many "PR closed without merge" or "Reviewing → Implementing" reset
@@ -99,19 +101,6 @@ def _get_auth_token() -> str:
         return ""
 
 
-def _parse_repo_slug(product: dict) -> tuple[str, str] | None:
-    """Parse 'owner/repo' from github_repo URL."""
-    github_repo = product.get("github_repo", "")
-    if not github_repo:
-        return None
-    import re
-    match = re.search(r"[:/]([^/]+/[^/]+?)(?:\.git)?$", github_repo)
-    if match:
-        owner, repo = match.group(1).split("/", 1)
-        return owner, repo
-    return None
-
-
 def _github_headers() -> dict:
     headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
     tok = _get_auth_token()
@@ -122,13 +111,12 @@ def _github_headers() -> dict:
 
 def count_open_prs(product: dict) -> int:
     """Returns number of open PRs for this product's repo."""
-    slug = _parse_repo_slug(product)
+    slug = _parse_repo_slug(product.get("github_repo", ""))
     if not slug:
         return 0
-    owner, repo = slug
     try:
         resp = _gh_get(
-            f"https://api.github.com/repos/{owner}/{repo}/pulls",
+            f"https://api.github.com/repos/{slug}/pulls",
             params={"state": "open", "per_page": 10},
             headers=_github_headers(),
         )
@@ -148,14 +136,13 @@ def reconcile_merged_prs(product: dict):
 
     Also handles features where pr_number is null but pr_url contains the PR link.
     """
-    slug = _parse_repo_slug(product)
+    slug = _parse_repo_slug(product.get("github_repo", ""))
     if not slug:
         return
-    owner, repo = slug
 
     try:
         resp = _gh_get(
-            f"https://api.github.com/repos/{owner}/{repo}/pulls",
+            f"https://api.github.com/repos/{slug}/pulls",
             params={"state": "closed", "per_page": 20},
             headers=_github_headers(),
         )
@@ -255,10 +242,9 @@ def reconcile_in_flight_prs(product: dict):
     Called every poller cycle (coder path) so stuck features self-heal within
     one poll interval (~60s) instead of waiting up to 2 hours.
     """
-    slug = _parse_repo_slug(product)
+    slug = _parse_repo_slug(product.get("github_repo", ""))
     if not slug:
         return
-    owner, repo = slug
 
     import re as _re
 
@@ -325,7 +311,7 @@ def reconcile_in_flight_prs(product: dict):
                 fid = feature["id"]
                 try:
                     pr_resp = _gh_get(
-                        f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_n}",
+                        f"https://api.github.com/repos/{slug}/pulls/{pr_n}",
                         headers=gh_headers,
                     )
                     if pr_resp is None or pr_resp.status_code != 200:
@@ -443,13 +429,12 @@ def reconcile_orphaned_session_prs(product: dict):
     """
     ORPHAN_GRACE_SECONDS = 90
 
-    slug = _parse_repo_slug(product)
+    slug = _parse_repo_slug(product.get("github_repo", ""))
     if not slug:
         return
-    owner, repo = slug
 
     resp = _gh_get(
-        f"https://api.github.com/repos/{owner}/{repo}/pulls",
+        f"https://api.github.com/repos/{slug}/pulls",
         params={"state": "open", "per_page": 50},
         headers=_github_headers(),
     )
@@ -537,32 +522,32 @@ def reconcile_orphaned_session_prs(product: dict):
         )
         try:
             httpx.post(
-                f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_n}/comments",
+                f"https://api.github.com/repos/{slug}/issues/{pr_n}/comments",
                 json={"body": body}, headers=headers, timeout=15,
             )
             cresp = httpx.patch(
-                f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_n}",
+                f"https://api.github.com/repos/{slug}/pulls/{pr_n}",
                 json={"state": "closed"}, headers=headers, timeout=15,
             )
             if cresp.status_code == 200:
                 closed += 1
                 log.info(
                     f"reconcile_orphaned_session_prs: closed orphan PR #{pr_n} "
-                    f"({head_ref}) on {owner}/{repo}"
+                    f"({head_ref}) on {slug}"
                 )
             else:
                 log.warning(
                     f"reconcile_orphaned_session_prs: PATCH {cresp.status_code} "
-                    f"on PR #{pr_n} ({owner}/{repo})"
+                    f"on PR #{pr_n} ({slug})"
                 )
         except Exception as e:
             log.warning(
                 f"reconcile_orphaned_session_prs: error closing PR #{pr_n} "
-                f"on {owner}/{repo}: {e}"
+                f"on {slug}: {e}"
             )
 
     if closed:
         log.info(
             f"reconcile_orphaned_session_prs: closed {closed}/{len(orphans)} "
-            f"orphan PR(s) on product {product.get('id')} ({owner}/{repo})"
+            f"orphan PR(s) on product {product.get('id')} ({slug})"
         )
