@@ -46,7 +46,6 @@ Behaviors lost from the legacy dispatch.py (accepted for Option B):
 import json
 import logging
 import os
-from typing import Optional
 
 import httpx
 

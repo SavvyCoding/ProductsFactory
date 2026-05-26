@@ -12,7 +12,6 @@ from templates.renderer import (
     select_stack,
     build_context,
     install_templates,
-    get_stack_defaults,
     KNOWN_STACKS,
 )
 

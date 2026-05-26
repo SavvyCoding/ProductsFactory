@@ -95,6 +95,3 @@ def container_path(path) -> str:
     return str(path)
 
 
-def in_container_mode() -> bool:
-    """True if at least one host↔container mapping is configured."""
-    return bool(_C2H)
