@@ -76,6 +76,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import bcrypt as _bcrypt_lib
 from sqlalchemy import select, func, text, case, update, or_, and_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -3040,7 +3041,12 @@ async def api_create_label(body: schemas.LabelCreate, db: AsyncSession = Depends
     db.add(label)
     try:
         await db.flush()
-    except Exception:
+    except IntegrityError:
+        # uq_labels_product_id_name unique constraint violation.
+        # Other DB errors (connection dropped, transaction-aborted, NOT
+        # NULL on a different column from a future migration) used to
+        # be reported as "already exists" too, which lied to the client
+        # — now they propagate as 500s with a real traceback.
         raise HTTPException(status_code=409, detail=f"Label '{body.name}' already exists for this product")
     return label
 
@@ -3068,8 +3074,11 @@ async def api_add_label_to_feature(
     db.add(assoc)
     try:
         await db.flush()
-    except Exception:
-        pass  # Already applied — idempotent
+    except IntegrityError:
+        # Primary-key violation on (feature_id, label_id) — already applied.
+        # Used to ``except Exception: pass`` which silently swallowed FK
+        # failures, db hiccups, and aborted-transaction errors too.
+        pass
     return {"feature_id": feature_id, "label_id": body.label_id}
 
 
@@ -3527,7 +3536,11 @@ async def api_add_feature_link(
     db.add(link)
     try:
         await db.flush()
-    except Exception:
+    except IntegrityError:
+        # Unique-constraint violation on (source_id, target_id, link_type).
+        # Other DB errors used to surface as "Link already exists" too —
+        # now they propagate so the client can distinguish a real outage
+        # from an idempotent re-link.
         raise HTTPException(status_code=409, detail="Link already exists")
     return link
 
