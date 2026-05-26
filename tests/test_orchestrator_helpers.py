@@ -15,10 +15,17 @@ that both the legacy and live paths use: github_client, heartbeat, alerts.
 Strategy: unit tests with httpx and subprocess mocked. No live Docker or PM API required.
 """
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
 import httpx
+
+
+# Module-level: orchestrator.integrations.github reads PM_API_URL at import
+# time, and several tests in this file trigger that import via
+# `from orchestrator.github_client import ...` outside a monkeypatch context.
+os.environ.setdefault("PM_API_URL", "http://pm-api:8080")
 
 
 # ── github_client — count_open_prs ───────────────────────────────────────────
@@ -56,28 +63,45 @@ class TestCountOpenPrs:
         assert result == 0
 
 
-# ── github_client — _parse_repo_slug ─────────────────────────────────────────
+# ── integrations.github — _parse_repo_slug (canonical) ───────────────────────
+# Previously defined 3x with incompatible return shapes (tuple|None, str,
+# str|None) across github_client, integrations/github, and auto_merge.
+# Drift-cleanup pass collapsed them onto integrations.github with one
+# canonical contract: input is the URL string, output is "owner/repo" or None.
+# Re-exported from github_client / auto_merge / docker_runner for callers
+# that already imported it from those modules.
 
 class TestParseRepoSlug:
     def test_parses_https_url(self):
-        from orchestrator.github_client import _parse_repo_slug
-        product = {"github_repo": "https://github.com/myowner/myrepo.git"}
-        assert _parse_repo_slug(product) == ("myowner", "myrepo")
+        from orchestrator.integrations.github import _parse_repo_slug
+        assert _parse_repo_slug("https://github.com/myowner/myrepo.git") == "myowner/myrepo"
 
     def test_parses_https_url_without_git_suffix(self):
-        from orchestrator.github_client import _parse_repo_slug
-        product = {"github_repo": "https://github.com/myowner/myrepo"}
-        assert _parse_repo_slug(product) == ("myowner", "myrepo")
+        from orchestrator.integrations.github import _parse_repo_slug
+        assert _parse_repo_slug("https://github.com/myowner/myrepo") == "myowner/myrepo"
 
     def test_parses_ssh_url(self):
-        from orchestrator.github_client import _parse_repo_slug
-        product = {"github_repo": "git@github.com:myowner/myrepo.git"}
-        assert _parse_repo_slug(product) == ("myowner", "myrepo")
+        from orchestrator.integrations.github import _parse_repo_slug
+        assert _parse_repo_slug("git@github.com:myowner/myrepo.git") == "myowner/myrepo"
 
     def test_returns_none_for_empty(self):
-        from orchestrator.github_client import _parse_repo_slug
-        assert _parse_repo_slug({"github_repo": ""}) is None
-        assert _parse_repo_slug({}) is None
+        from orchestrator.integrations.github import _parse_repo_slug
+        assert _parse_repo_slug("") is None
+
+    def test_returns_none_for_unparseable(self):
+        from orchestrator.integrations.github import _parse_repo_slug
+        # Regression: previous integrations/github version returned the
+        # input verbatim on no-match, which silently corrupted callers'
+        # URL formatting. Now: None forces an explicit caller guard.
+        assert _parse_repo_slug("not-a-url") is None
+
+    def test_reexported_from_legacy_modules(self):
+        """Importers of the old locations still resolve to the canonical."""
+        from orchestrator.github_client import _parse_repo_slug as gc_slug
+        from orchestrator.auto_merge import _parse_repo_slug as am_slug
+        from orchestrator.integrations.github import _parse_repo_slug as canon
+        assert gc_slug is canon
+        assert am_slug is canon
 
 
 # ── github_client — reconcile_merged_prs ─────────────────────────────────────
