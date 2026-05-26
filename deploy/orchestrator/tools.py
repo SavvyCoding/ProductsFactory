@@ -91,30 +91,19 @@ def _pm_client() -> httpx.Client:
 
 
 def _get_github_token() -> str:
-    """Return a bearer token for GitHub API calls.
+    """Return a fresh GitHub App installation token, or ``""``.
 
-    Prefers a fresh GitHub App installation token (rotated hourly via the
-    App's PEM + Installation ID — see ``orchestrator.integrations.github_app``).
-    Falls back to ``system_config.github_pat`` only when the App is not
-    fully configured.
-
-    This is the canonical helper for ``orchestrator_runtime.py`` (the deployed
-    copy of this file). All call sites that previously read ``github_pat``
-    directly from ``/api/system-config`` now route through here so a single
-    PAT revocation no longer 401s the poller's PR-list and merge calls.
+    Per CLAUDE.md "Git auth: GitHub App only": the PAT fallback was
+    removed in the drift-cleanup pass. The App module caches the
+    installation token and auto-refreshes when <5 min of life remains;
+    on mint failure the empty string surfaces here so callers fail
+    visibly rather than silently degrade.
     """
     try:
         from orchestrator.integrations.github_app import get_installation_token
-        app_token = get_installation_token()
-        if app_token:
-            return app_token
-    except Exception:
-        pass
-    try:
-        with _pm_client() as client:
-            sc = client.get("/api/system-config").json() or {}
-            return sc.get("github_pat") or ""
-    except Exception:
+        return get_installation_token() or ""
+    except Exception as e:
+        log.warning("App token mint failed: %s", e)
         return ""
 
 

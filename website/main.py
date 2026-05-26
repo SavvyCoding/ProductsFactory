@@ -379,30 +379,31 @@ async def _get_system_config(db: AsyncSession) -> SystemConfig | None:
 
 
 def _github_token_from_config(sys_cfg: SystemConfig | None) -> str | None:
-    """Return a bearer token for GitHub API calls (App installation token,
-    PAT fallback during the transition release).
+    """Return a fresh GitHub App installation token, or None.
 
-    Counterpart to ``orchestrator.github_client._get_auth_token`` but reads
-    the App config directly off the SystemConfig row instead of via an HTTP
-    self-loopback to ``/api/system-config`` — we're already inside pm-api,
-    no need to call ourselves.
+    Counterpart to ``orchestrator.integrations.github._get_gh_token`` but
+    reads the App config directly off the SystemConfig row instead of via
+    an HTTP self-loopback to ``/api/system-config`` — we're already inside
+    pm-api, no need to call ourselves.
 
-    Returns None only when both the App and the legacy PAT are unconfigured.
+    Per CLAUDE.md "Auth & Security" → "Git auth: GitHub App only":
+    PAT fallback was removed in the drift-cleanup pass. If App-token mint
+    fails the failure surfaces here as None so the caller can report a real
+    misconfiguration instead of silently degrading to a PAT path the
+    security model no longer supports.
     """
     if sys_cfg is None:
         return None
     try:
         from orchestrator.integrations.github_app import get_installation_token_from_config
-        tok = get_installation_token_from_config(
+        return get_installation_token_from_config(
             sys_cfg.github_app_id,
             sys_cfg.github_app_private_key,
             sys_cfg.github_app_installation_id,
         )
-        if tok:
-            return tok
     except Exception as e:
-        log.warning("App token mint failed (%s) — falling back to legacy PAT", e)
-    return sys_cfg.github_pat or None
+        log.warning("App token mint failed: %s", e)
+        return None
 
 
 async def _sprint_cap(db: AsyncSession) -> int:
@@ -4220,8 +4221,8 @@ async def api_open_pr_count(product_id: int, db: AsyncSession = Depends(get_db))
     """Poller PR count gate. Fetches live from GitHub."""
     product = await _get_product_or_404(product_id, db)
     _cfg = await _get_system_config(db)
-    _pat = _cfg.github_pat if _cfg else None
-    count = count_open_prs(product.github_repo, token=_pat) if product.github_repo else 0
+    _tok = _github_token_from_config(_cfg)
+    count = count_open_prs(product.github_repo, token=_tok) if product.github_repo else 0
     return {"product_id": product_id, "count": count}
 
 
