@@ -45,12 +45,6 @@ def _get_webhook_url() -> str:
     return ALERT_WEBHOOK_URL
 
 
-def invalidate_webhook_cache():
-    """Call after admin saves new webhook URL."""
-    global _cached_webhook_url
-    _cached_webhook_url = None
-
-
 def send_alert(level: str, message: str, product_name: str = ""):
     """
     level: info | warning | error | critical

@@ -117,12 +117,6 @@ _DEFAULTS = {
     # then seen-and-block). Threshold=1 would block on the very first repeat.
     "supervisor_repeated_feedback_enabled":     True,
     "supervisor_repeated_feedback_threshold":   2,
-    # detect_invalid_status_combos: per-cycle sweep that auto-corrects
-    # features stuck in the hybrid Reviewed/Reviewing + changes_requested
-    # state (a reviewer-prompt-violation pattern). Demotes them to
-    # Implementing+changes_requested so the codeable filter picks them up.
-    # Belt-and-braces alongside the in-line normalizer in state_machine.py.
-    "supervisor_invalid_combos_enabled":        True,
 }
 
 
@@ -633,122 +627,6 @@ def detect_divergent_review_feedback(
         )
         return {"action": "no-op", "max_similarity": 1.0, "comparisons": 0,
                 "reason": "exception (logged)"}
-
-
-# ── Detector: invalid status/review_outcome combos (per-cycle sweep) ─────────
-# Per-cycle reactive layer for the same reviewer-prompt-violation that the
-# state_machine normalizer guards against in real time. Catches:
-#   - features that landed in `Reviewed + changes_requested` or
-#     `Reviewing + changes_requested` BEFORE the in-line normalizer was
-#     deployed (historical drift)
-#   - features that bypass _apply_session_entry (PATCHes via the website
-#     UI, manual scripts, future code paths) and end up in the hybrid state
-#
-# The action: demote `status` to `Implementing` while preserving
-# `review_outcome=changes_requested`. The next dispatcher cycle then
-# matches the codeable filter and a coder picks it up. Idempotent — a
-# feature in valid state is a no-op.
-
-def detect_invalid_status_combos(
-    products: list[dict] | None = None,
-    *,
-    dry_run: bool = False,
-) -> dict:
-    """Sweep all `ready` products for features in invalid hybrid status
-    combos. Demotes them to `Implementing+changes_requested`.
-
-    Honors `supervisor_invalid_combos_enabled` (default True) and the
-    global `supervisor_dry_run_only` kill switch. Returns a summary dict:
-        {"checked": <int>, "fixed": <int>, "errors": <int>}
-    Best-effort — never raises. Safe to call from any per-cycle hook.
-    """
-    cfg = _get_supervisor_config()
-    if cfg.get("supervisor_dry_run_only"):
-        dry_run = True
-    if not cfg.get("supervisor_invalid_combos_enabled", True):
-        return {"checked": 0, "fixed": 0, "errors": 0,
-                "skipped": "disabled in system_config"}
-
-    summary = {"checked": 0, "fixed": 0, "errors": 0}
-    try:
-        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-            # If caller didn't pass products, fetch the active set.
-            if products is None:
-                resp = client.get("/api/products")
-                if resp.status_code != 200:
-                    return summary
-                products = [p for p in resp.json()
-                            if isinstance(p, dict) and p.get("status") == "ready"]
-
-            for product in products:
-                pid = product.get("id")
-                if not pid:
-                    continue
-                try:
-                    feats_resp = client.get(f"/api/products/{pid}/features")
-                    if feats_resp.status_code != 200:
-                        continue
-                    features = feats_resp.json()
-                except Exception:
-                    summary["errors"] += 1
-                    continue
-
-                for feat in features:
-                    if not isinstance(feat, dict):
-                        continue
-                    summary["checked"] += 1
-                    status = feat.get("status")
-                    outcome = feat.get("review_outcome")
-                    fid = feat.get("id")
-                    # The two invalid combos we know about:
-                    #   - Reviewed + changes_requested (#374 incident)
-                    #   - Reviewing + changes_requested (#377 incident)
-                    if (status in ("Reviewed", "Reviewing")
-                            and outcome == "changes_requested"
-                            and fid):
-                        reason = (
-                            f"Auto-correcting hybrid combo: status={status} + "
-                            f"review_outcome=changes_requested → status=Implementing. "
-                            f"Belongs in the codeable queue, not the reviewer queue."
-                        )
-                        _record_action(
-                            detector="invalid_status_combos",
-                            product_id=pid,
-                            target_type="feature",
-                            target_id=fid,
-                            action="normalize_to_implementing",
-                            reason=reason,
-                            dry_run=dry_run,
-                        )
-                        if not dry_run:
-                            try:
-                                client.patch(
-                                    f"/api/features/{fid}",
-                                    json={
-                                        "status": "Implementing",
-                                        "review_outcome": "changes_requested",
-                                        "changed_by": "supervisor.invalid_status_combos",
-                                    },
-                                )
-                                summary["fixed"] += 1
-                            except Exception:
-                                summary["errors"] += 1
-                                log.exception(
-                                    f"[invalid_status_combos] PATCH failed for "
-                                    f"feature #{fid}"
-                                )
-                        else:
-                            summary["fixed"] += 1   # would-have-fixed in dry-run
-            if summary["fixed"]:
-                log.info(
-                    f"[invalid_status_combos] checked={summary['checked']} "
-                    f"fixed={summary['fixed']} errors={summary['errors']} "
-                    f"dry_run={dry_run}"
-                )
-    except Exception:
-        log.exception("detect_invalid_status_combos sweep crashed")
-        summary["errors"] += 1
-    return summary
 
 
 # ── Detector B: coder false-success ──────────────────────────────────────────

@@ -148,17 +148,6 @@ def git_fetch_authenticated(
     return _git_with_token("fetch", fetch_args, cwd=cwd, product_name=product_name, timeout=timeout)
 
 
-def git_pull_authenticated(
-    pull_args: list[str],
-    *,
-    cwd: str | Path,
-    product_name: str,
-    timeout: int = 120,
-) -> subprocess.CompletedProcess:
-    """``git pull <pull_args...>`` with App-token auth. See ``_git_with_token``."""
-    return _git_with_token("pull", pull_args, cwd=cwd, product_name=product_name, timeout=timeout)
-
-
 def safe_run(
     cmd: list[str],
     *,

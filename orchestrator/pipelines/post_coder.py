@@ -2280,12 +2280,14 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                     # Clear review_outcome on every Implementing→Reviewing
                     # transition. This is a fresh push that needs fresh review;
                     # last cycle's outcome no longer applies. Without this clear,
-                    # supervisor.detect_invalid_status_combos sees the stale
-                    # `Reviewing + changes_requested` combo and demotes the
-                    # feature back to Implementing within ~30s of every push,
-                    # blocking forward progress and bumping fix_attempts toward
-                    # auto-Block. Real incident 2026-05-10 01:21: feature #379
-                    # cycled coder→Reviewing→supervisor-demote 4 times in 50min.
+                    # state_machine's in-line hybrid-combo normalizer would
+                    # demote the feature back to Implementing within ~30s of
+                    # every push, blocking forward progress and bumping
+                    # fix_attempts toward auto-Block. Real incident 2026-05-10
+                    # 01:21: feature #379 cycled coder→Reviewing→demote 4 times
+                    # in 50min. (The redundant per-cycle sweep that used to
+                    # also catch this was deleted in the Tier-2 dead-code pass
+                    # — the state_machine normalizer is now the sole defense.)
                     r = client.patch(
                         f"/api/features/{fid}",
                         json={

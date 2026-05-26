@@ -98,7 +98,3 @@ def container_path(path) -> str:
 def in_container_mode() -> bool:
     """True if at least one host↔container mapping is configured."""
     return bool(_C2H)
-
-
-# Backwards-compat alias (some callers still use the hermes-era name).
-in_hermes_mode = in_container_mode
