@@ -50,3 +50,12 @@ pip freeze | grep <pkg> >> requirements.txt
 - Follow patterns in ARCHITECTURE.md exactly — same error handling, same naming, same structure
 - One module per feature file: `src/{feature_name}.py`
 - One test file per feature: `tests/test_{feature_name}.py`
+
+## Imports and test config
+
+`pytest.ini` is **pre-shipped and read-only** — do NOT write to it. It already configures `pythonpath = .` and `testpaths = tests`, so:
+
+- **Import style in tests**: `from src.{feature_name} import X` (not `from {feature_name} import X`, not `import sys; sys.path.insert(...)`)
+- **Do NOT create `conftest.py` to add paths** — `pythonpath = .` in `pytest.ini` handles it
+- **Do NOT create your own `pytest.ini`** — it's RO-mounted; your edit will be silently dropped
+- `src/__init__.py` should exist (empty is fine) so `src` is an importable package

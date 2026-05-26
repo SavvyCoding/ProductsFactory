@@ -225,6 +225,12 @@ _PM_CURATED_RO_FILES = (
     # RO so the coder can't tamper with the check to return clean — see
     # AGENT_WORKFLOW.md Step 5b and post_coder.py Guard 17.
     "check_deletion_safety.py",
+    # Pre-shipped pytest config (python stack only — other stacks have
+    # no host file at this path, so the conditional mount is a no-op).
+    # RO so the coder can't write a broken version (mismatched pythonpath
+    # vs `from src.X` import style → ModuleNotFoundError on collection).
+    # Canonical 2026-05-26 SmokeTest #950 incident — see renderer.py.
+    "pytest.ini",
 )
 
 
