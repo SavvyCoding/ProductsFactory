@@ -1802,6 +1802,18 @@ async def api_update_feature(
     for field, value in feature_fields.items():
         setattr(feature, field, value)
 
+    # Clear stale blocked_reason when the feature transitions OUT of Blocked.
+    # The column would otherwise linger as historical text (e.g.
+    # "Auto-routed: rapid status flap loop detected by supervisor") long
+    # after the PM/agent moved the feature back to Approved or Implementing,
+    # creating a "this looks Blocked" false-positive in the UI. Only fires
+    # when the PATCH itself moved status from Blocked → something-else AND
+    # blocked_reason wasn't explicitly set in this same PATCH.
+    if (prev_status == "Blocked"
+            and "status" in updates and updates["status"] != "Blocked"
+            and "blocked_reason" not in updates):
+        feature.blocked_reason = None
+
     # Auto-record review history + bump fix_attempts on rework cycles.
     # A "rework cycle" is a transition INTO review_outcome=changes_requested
     # from something else (None, approved, etc.). Idempotent re-writes of the

@@ -600,7 +600,7 @@
                 {{ f.name }}
                 {% if f.source == 'ai' %}<span class="ai-badge" title="AI-suggested">🤖</span>{% endif %}
               </div>
-              {% if f.blocked_reason %}<div class="fbt-blocked">⚠ {{ f.blocked_reason[:140] }}{% if f.blocked_reason|length > 140 %}…{% endif %}</div>{% endif %}
+              {% if f.blocked_reason and f.status == 'Blocked' %}<div class="fbt-blocked">⚠ {{ f.blocked_reason[:140] }}{% if f.blocked_reason|length > 140 %}…{% endif %}</div>{% endif %}
             </td>
             <td>
               {% if f.feature_type == 'bug' %}<span class="type-badge type-bug">🐛 Bug</span>
