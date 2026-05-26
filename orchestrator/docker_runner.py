@@ -87,11 +87,6 @@ _DEFAULT_SESSION_TIMEOUT_SECONDS = int(os.environ.get("SESSION_TIMEOUT_MINUTES",
 # Alias used by tests and legacy callers
 SESSION_TIMEOUT_SECONDS = _DEFAULT_SESSION_TIMEOUT_SECONDS
 
-# Deploy key filename inside SSH_DIR.
-# Each product repo has its own key: id_ed25519_{product_name}
-# The PM generates this key and adds it as a GitHub deploy key.
-DEPLOY_KEY_FILENAME = os.environ.get("DEPLOY_KEY_FILENAME", "id_ed25519_productfactory")
-
 # pf-verify-env.sh in the agent image exits 42 when a mechanical preflight
 # check fails (chrome-headless-shell missing/no-exec-bit, pytest unimportable,
 # etc.). _finalize_session and detect_kill_recovery special-case this so the
@@ -1618,8 +1613,6 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     if persona == "designer":
         effective_max_turns = min(effective_max_turns, 200)
     effective_bash_timeout   = int(sys_cfg.get("bash_timeout")   or os.environ.get("BASH_TIMEOUT",   "180"))
-    _raw_ssh_dir = sys_cfg.get("ssh_keys_dir") or str(SSH_DIR)
-    effective_ssh_dir = Path(_raw_ssh_dir) if _raw_ssh_dir else None
 
     # Enrich product dict with all computed values before building the prompt.
     product = dict(product)

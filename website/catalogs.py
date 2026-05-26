@@ -162,9 +162,3 @@ UI_TEMPLATES: list[UITemplate] = [
 ]
 
 UI_TEMPLATE_BY_ID: dict[str, UITemplate] = {tpl["id"]: tpl for tpl in UI_TEMPLATES}
-
-
-def stack_has_web_ui(stack_id: str) -> bool:
-    """True if the stack picker entry implies a frontend; controls Step 4."""
-    opt = STACK_BY_ID.get(stack_id)
-    return bool(opt and opt["has_web_ui"])
