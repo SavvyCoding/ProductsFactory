@@ -488,9 +488,23 @@ def _fetch_recent_review_comments(feature_id: int, limit: int = 25) -> list[dict
             # API may return newest-first OR oldest-first depending on impl;
             # sort defensively by created_at ascending and keep the tail.
             data.sort(key=lambda c: (c.get("created_at") or ""))
+            # Include lint-guard + post-coder:test-check comments too —
+            # under the phases→features flat model, the deterministic
+            # post-coder pipeline catches lint / test failures before the
+            # reviewer ever runs. Without these in the rework feedback the
+            # coder retries blind ("changes_requested but why?") and the
+            # lint-rework loop never converges. Real example surfaced by
+            # the 2026-05-26 SmokeTest smoke test: feature #950 cycled
+            # 1 → 2 → 1 violations across three coder runs because the
+            # specific "pytest.ini missing" and "skipped tests in
+            # tests/test_database.py" feedback was authored by lint-guard,
+            # not reviewer, and therefore excluded from the prompt.
+            _ALLOWED_AUTHORS = {
+                "reviewer", "security_auditor", "qa_tester",
+                "lint-guard", "post-coder:test-check",
+            }
             relevant = [c for c in data
-                        if (c.get("author") or "").lower()
-                        in ("reviewer", "security_auditor", "qa_tester")]
+                        if (c.get("author") or "").lower() in _ALLOWED_AUTHORS]
             return relevant[-limit:]
     except Exception as e:
         log.debug(f"[reviewer-feedback] could not fetch comments for #{feature_id}: {e}")
