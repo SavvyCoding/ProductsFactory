@@ -67,14 +67,27 @@ class AgentLoop:
         """Run the loop until done or max_turns.
 
         Return codes:
-          0 — dispatcher signalled done (task_done)
-          1 — backend error (exception) or max_turns exceeded
-          2 — model stopped without calling any tool (incomplete)
+          0  — dispatcher signalled done (task_done)
+          1  — backend error (exception) or max_turns exceeded
+          2  — model stopped without calling any tool (incomplete)
+          43 — LLM-infra exhaustion (quota / auth / network / all models 5xx).
+               Distinguished from 1 so docker_runner._finalize_session and
+               supervisor.detect_kill_recovery can skip charging fix_attempts —
+               the failure isn't the agent's fault, it's the backend. Imported
+               lazily to keep this module backend-agnostic.
         """
         messages: list[dict] = []
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
         messages.append({"role": "user", "content": initial_prompt})
+
+        # Backend-agnostic import: only Ollama defines LLMInfraExhausted today,
+        # but the convention (and the exit code) is generic. Any future backend
+        # signalling infra exhaustion can raise the same class.
+        try:
+            from orchestrator.ollama_agent import LLMInfraExhausted
+        except Exception:
+            LLMInfraExhausted = None  # type: ignore[assignment]
 
         for turn in range(1, self.max_turns + 1):
             self.log(f"Turn {turn}/{self.max_turns}")
@@ -82,6 +95,12 @@ class AgentLoop:
             try:
                 message = self.backend(messages, self.tool_specs)
             except Exception as e:
+                if LLMInfraExhausted is not None and isinstance(e, LLMInfraExhausted):
+                    self.log(
+                        f"ERROR: LLM infrastructure exhausted "
+                        f"(category={getattr(e, 'category', 'unknown')}): {e}"
+                    )
+                    return 43
                 self.log(f"ERROR: backend call failed: {e}")
                 return 1
 

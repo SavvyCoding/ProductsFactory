@@ -12,6 +12,7 @@ Security model:
 
 import json
 import os
+import re
 import shlex
 import shutil
 import tempfile
@@ -98,6 +99,15 @@ DEPLOY_KEY_FILENAME = os.environ.get("DEPLOY_KEY_FILENAME", "id_ed25519_productf
 # environmental, not the agent's fault. Operator gets an alert with the
 # failing-check string. See deploy/docker/pf-verify-env.sh.
 EXIT_ENV_NOT_READY = 42
+
+# orchestrator/agent_loop.py returns 43 when the LLM backend exhausts every
+# model in the chain for an infrastructure reason (quota/rate-limit/auth/
+# whole-chain 5xx). Like exit 42 the agent's feature work isn't to blame —
+# _finalize_session and detect_kill_recovery release the claim without
+# bumping fix_attempts so a quota window doesn't push every assigned
+# feature to Blocked at fa=5. Real incident: MyTracking 2026-05-22, where
+# 106 Ollama-Cloud 429s drove 47 features to Blocked over a single day.
+EXIT_LLM_INFRA = 43
 
 # ── Ollama backend config ─────────────────────────────────────────────────────
 # Set AGENT_BACKEND=ollama to use local Ollama instead of the Claude CLI.
@@ -1229,6 +1239,51 @@ def _finalize_session(
         _rollback_stuck_features(product["id"], persona)
         _cleanup_workspace_post_session(working_dir, product.get("name", str(working_dir)))
         return EXIT_ENV_NOT_READY
+
+    # exit 43 = LLM-infra exhaustion (quota / auth / whole-chain 5xx). Parallel
+    # to the env-not-ready path above: alert the operator with the failure
+    # category, release the feature claim without charging fix_attempts, skip
+    # the entire post-pipeline.
+    if exit_code == EXIT_LLM_INFRA:
+        category = "unknown"
+        log_tail = ""
+        try:
+            tail = subprocess.run(
+                ["docker", "logs", "--tail", "30", f"pf-{product['id']}-{session_uid}"],
+                capture_output=True, text=True, timeout=10,
+            )
+            log_tail = (tail.stdout + tail.stderr).strip()
+            # agent_loop.py logs `LLM infrastructure exhausted (category=X)`.
+            m = re.search(r"category=([a-z_]+)", log_tail)
+            if m:
+                category = m.group(1)
+        except Exception:
+            pass
+        try:
+            send_alert(
+                "error",
+                f"{product.get('name', '?')}: LLM backend exhausted "
+                f"(category={category}, exit 43) — agent could not reach a "
+                f"usable model. Features released without fix_attempt charge. "
+                f"Last lines:\n{log_tail[-500:]}",
+            )
+        except Exception:
+            log.exception("llm-infra alert failed")
+        if session_id is not None:
+            try:
+                with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                    client.patch(f"/api/sessions/{session_id}", json={
+                        "status":      "ended",
+                        "ended_at":    datetime.now(timezone.utc).isoformat(),
+                        "exit_code":   EXIT_LLM_INFRA,
+                        "kill_reason": f"llm_infra_{category}",
+                        "notes":       f"llm-infra exhausted (category={category})",
+                    })
+            except Exception as e:
+                log.warning(f"Could not update llm-infra session record: {e}")
+        _rollback_stuck_features(product["id"], persona)
+        _cleanup_workspace_post_session(working_dir, product.get("name", str(working_dir)))
+        return EXIT_LLM_INFRA
 
     # FSM transition: running → wrapping. The agent container has exited
     # (cleanly or otherwise); the orchestrator-side post-* pipeline is
