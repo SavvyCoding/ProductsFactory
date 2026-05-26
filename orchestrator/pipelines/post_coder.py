@@ -2228,8 +2228,19 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             return pushed_ids
         else:
             # Real test failure (or collection error). Bounce like lint guard.
-            reason = (f"collection errors ({collection_errors})"
-                      if collection_errors else "tests failed")
+            # Detect the "coder deleted skipped tests and shipped empty" loop:
+            # pytest exit 5 ("no tests ran" / "collected 0 items") gets a more
+            # targeted feedback message instead of "fix the failing test(s)",
+            # which doesn't actually match the failure (there ARE no tests).
+            no_tests_collected = (
+                "collected 0 items" in (output_excerpt or "")
+                or "no tests ran" in (output_excerpt or "")
+            )
+            if no_tests_collected:
+                reason = "zero tests collected"
+            else:
+                reason = (f"collection errors ({collection_errors})"
+                          if collection_errors else "tests failed")
             log.warning(
                 f"[post-coder] {pname}: {reason} — bouncing features to "
                 f"Implementing+changes_requested"
@@ -2238,14 +2249,30 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                 with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
                     for feat in assigned_features:
                         fid = feat["id"]
-                        body = (
-                            f"❌ post-coder test-check auto-reject ({reason}):\n"
-                            f"First failure: `{first_failure}`\n\n"
-                            f"```\n{output_excerpt[:800]}\n```\n"
-                            f"Fix the failing test(s) and re-push. If tests reference "
-                            f"symbols that don't exist (collection error), align the "
-                            f"test file with the actual code or delete the orphan test."
-                        )
+                        if no_tests_collected:
+                            body = (
+                                f"❌ post-coder test-check auto-reject "
+                                f"(zero tests collected):\n\n"
+                                f"```\n{output_excerpt[:800]}\n```\n"
+                                f"Your push contains NO tests for this story. "
+                                f"Empty test files are rejected the same as "
+                                f"`pytest.skip()`. You MUST land at least one "
+                                f"passing test that exercises an acceptance "
+                                f"criterion before this can be reviewed. "
+                                f"If a specific AC is impractical to test, "
+                                f"rewrite the test to exercise a different "
+                                f"part of the code that IS true — don't ship "
+                                f"the story with zero coverage."
+                            )
+                        else:
+                            body = (
+                                f"❌ post-coder test-check auto-reject ({reason}):\n"
+                                f"First failure: `{first_failure}`\n\n"
+                                f"```\n{output_excerpt[:800]}\n```\n"
+                                f"Fix the failing test(s) and re-push. If tests reference "
+                                f"symbols that don't exist (collection error), align the "
+                                f"test file with the actual code or delete the orphan test."
+                            )
                         try:
                             client.post(
                                 f"/api/features/{fid}/comments",
