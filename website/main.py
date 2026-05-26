@@ -264,8 +264,17 @@ async def _llm_call(prompt: str, db: AsyncSession, max_tokens: int = 3000) -> st
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()
-        except Exception:
-            pass  # fall through to SDK
+            # Non-zero or empty output — log so OAuth expiry / malformed
+            # output are visible. Previously this fell through silently to
+            # the SDK so operators saw "we used SDK today" with no signal
+            # that the CLI path was broken.
+            log.warning(
+                f"_llm_call: claude CLI returned rc={result.returncode}, "
+                f"stdout={result.stdout[:120]!r}, stderr={result.stderr[:200]!r} "
+                f"— falling back to SDK"
+            )
+        except Exception as e:
+            log.warning(f"_llm_call: claude CLI raised ({e!r}) — falling back to SDK")
 
     # 3) Fall back to Anthropic SDK with API key
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -1859,7 +1868,18 @@ async def _generate_sprint_release_notes(sprint_id: int, product_id: int, db: As
             db=db,
             max_tokens=800,
         )
-    except Exception:
+    except Exception as e:
+        # Previously swallowed silently — paired with the
+        # ``log.warning("...non-fatal")`` at the caller, this meant a
+        # real LLM-backend outage (quota, API key, network) was
+        # indistinguishable in the logs from a benign "model wrote
+        # garbage" event. Logging the exception type and message here
+        # lets operators distinguish them at a glance.
+        log.warning(
+            f"_generate_sprint_release_notes: LLM call failed for sprint "
+            f"#{sprint.id} ({type(e).__name__}: {e}) — release notes will "
+            f"be blank until next regeneration."
+        )
         return None
 
 

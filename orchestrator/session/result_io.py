@@ -145,13 +145,19 @@ def _delete_session_result(working_dir: str, product_name: str = "?") -> None:
     sr_path = Path(working_dir) / "session_result.json"
     if not sr_path.exists():
         return
+    # Best-effort chmod so unlink doesn't fail on root-owned files written by
+    # the agent container. unlink(missing_ok=True) doesn't raise on missing
+    # file; the only failure mode is a permission error, which is handled by
+    # the alpine sidecar fallback below. Previously this was wrapped in two
+    # nested ``try/except: pass`` layers that swallowed every possible error
+    # without benefit.
     try:
-        try:
-            os.chmod(sr_path, 0o666)
-        except Exception:
-            pass
+        os.chmod(sr_path, 0o666)
+    except OSError:
+        pass
+    try:
         sr_path.unlink(missing_ok=True)
-    except Exception:
+    except OSError:
         pass
     if not sr_path.exists():
         return

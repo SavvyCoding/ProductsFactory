@@ -189,14 +189,15 @@ def reconcile_merged_prs(product: dict):
             for feature in features_data:
                 if feature.get("status") in terminal:
                     continue
-                # Never reset a feature that was already Pushed (race condition guard)
-                # Re-fetch current status to avoid stale data
-                try:
-                    fresh = client.get(f"/api/features/{feature['id']}")
-                    if fresh.status_code == 200 and fresh.json().get("status") in terminal:
-                        continue
-                except Exception:
-                    pass
+                # Note: prior versions re-fetched the feature here as a
+                # "race condition guard" against the status moving to
+                # terminal between the bulk fetch above and reaching this
+                # row — the same ``terminal`` check on the same record
+                # ran 6 lines earlier and the re-fetch repeated it. The
+                # PATCH below is idempotent (a Pushed feature stays Pushed
+                # under both branches), so the duplicate guard was paying
+                # one extra API hit per non-terminal feature for no real
+                # safety. Removed in the drift-cleanup pass.
                 pr_n = _pr_number_for(feature)
                 if pr_n is None:
                     continue
