@@ -77,9 +77,19 @@ def _get_supervisor_config() -> dict:
         with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
             resp = client.get("/api/system-config")
             if resp.status_code != 200:
+                log.warning(
+                    "supervisor: /api/system-config returned HTTP %s — using "
+                    "default config this cycle; supervisor detectors run with "
+                    "build-time defaults until PM API recovers",
+                    resp.status_code,
+                )
                 return _DEFAULTS.copy()
             cfg = resp.json() or {}
-    except Exception:
+    except Exception as e:
+        log.warning(
+            "supervisor: PM API unreachable for /api/system-config (%s) — "
+            "using default config this cycle", e,
+        )
         return _DEFAULTS.copy()
     out = _DEFAULTS.copy()
     for key in _DEFAULTS:
@@ -129,8 +139,17 @@ def _resolve_max_fix_attempts() -> int:
                 val = (resp.json() or {}).get("max_fix_attempts")
                 if val and int(val) > 0:
                     return int(val)
-    except Exception:
-        pass
+            else:
+                log.warning(
+                    "supervisor: /api/system-config returned HTTP %s in "
+                    "_resolve_max_fix_attempts — falling back to env default",
+                    resp.status_code,
+                )
+    except Exception as e:
+        log.warning(
+            "supervisor: _resolve_max_fix_attempts could not reach PM API "
+            "(%s) — falling back to env default", e,
+        )
     return int(os.environ.get("MAX_FIX_ATTEMPTS", "5"))
 
 
