@@ -127,9 +127,6 @@ def pm_api(args: dict, **kwargs) -> str:
         if _FEATURE_ID_RE.match(path):
             return json.dumps({"ok": False, "error":
                 "Use get_features(product_id) instead of fetching individual features."})
-        if _SPRINT_ID_RE.match(path):
-            return json.dumps({"ok": False, "error":
-                "Use get_active_sprint(product_id) or get_sprints(product_id) instead."})
 
     try:
         with _pm_client() as client:
@@ -177,10 +174,10 @@ _ONDEMAND_PERSONAS = ("documenter", "analytics", "refactorer", "devops", "recomm
                       # run_persona_now="architect", or the cycle/persona gate
                       # fires it automatically every ~50 features pushed.
                       "architect")
-_FEATURE_KEEP = {"id", "product_id", "sprint_id", "name", "status", "feature_type",
-                 "design_doc_path", "pr_number", "pr_url", "fix_attempts"}
-_SPRINT_KEEP  = {"id", "product_id", "phase_id", "name", "status", "goal",
-                 "completed_at", "retro_doc_path", "dod_status"}
+_FEATURE_KEEP = {"id", "product_id", "phase_id", "parent_id", "name", "status",
+                 "feature_type", "design_doc_path", "pr_number", "pr_url",
+                 "fix_attempts", "merge_notes"}
+_PHASE_KEEP   = {"id", "product_id", "name", "goal", "order"}
 
 
 def _slim(obj: Any, keep: set) -> Any:
@@ -205,19 +202,13 @@ def _slim_response(raw: str, keep: set) -> str:
 
 
 def get_products(args: dict, **kwargs) -> str:
+    # Phases→features flat model (migration 043): no active-sprint augmentation;
+    # the cycle uses feature.status + feature.phase_id directly.
     raw = _slim_response(_pm("GET", "/api/products"), _PRODUCT_KEEP)
-    # Augment each ready product with its active_sprint_id so the orchestrator
-    # can call check-dod without a separate round-trip.
     try:
         parsed = json.loads(raw)
         products = parsed.get("data") if isinstance(parsed, dict) else parsed
         if isinstance(products, list):
-            with _pm_client() as client:
-                for p in products:
-                    if p.get("status") in ("ready", "running"):
-                        r = client.get(f"/api/products/{p['id']}/sprints/active")
-                        sprint = r.json() if r.is_success else None
-                        p["active_sprint_id"] = sprint["id"] if sprint else None
             if isinstance(parsed, dict):
                 parsed["data"] = products
                 return json.dumps(parsed)
@@ -227,14 +218,10 @@ def get_products(args: dict, **kwargs) -> str:
     return raw
 
 
-def get_active_sprint(args: dict, **kwargs) -> str:
+def get_phases(args: dict, **kwargs) -> str:
+    """List phases for a product (post migration 043, replaces get_sprints)."""
     product_id = args.get("product_id")
-    return _slim_response(_pm("GET", f"/api/products/{product_id}/sprints/active"), _SPRINT_KEEP)
-
-
-def get_sprints(args: dict, **kwargs) -> str:
-    product_id = args.get("product_id")
-    return _slim_response(_pm("GET", f"/api/products/{product_id}/sprints"), _SPRINT_KEEP)
+    return _slim_response(_pm("GET", f"/api/products/{product_id}/phases"), _PHASE_KEEP)
 
 
 def get_features(args: dict, **kwargs) -> str:
@@ -480,14 +467,8 @@ def run_cycle(args: dict, **kwargs) -> str:
 
         ready = [p for p in products if p.get("status") in ("ready", "running")]
 
-        with _pm_client() as client:
-            for p in ready:
-                sid = p.get("active_sprint_id")
-                if sid:
-                    try:
-                        client.post(f"/api/sprints/{sid}/check-dod")
-                    except Exception:
-                        pass
+        # Phases→features flat model (migration 043): no sprint DoD to
+        # check. DoD per-sprint is gone; per-feature shipping is the gate.
 
         for p in ready:
             try:
@@ -671,14 +652,11 @@ def run_cycle(args: dict, **kwargs) -> str:
         _bump_product_last_run(product_id)
 
         action = action_data.get("action")
-        if action == "plan_sprints":
-            # Capture + log the response so silent failures are visible.
-            # Pre-2026-05-21 the response was discarded — a 409 from the
-            # endpoint looked identical to a 201 in the cycle log, and the
-            # orchestrator looped on the same plan_sprints decision every
-            # cycle (e.g. MyDocusign 25+ min idle after the Blocked-sprint
-            # holdpen tripped the 409 guard).
-            plan_response = _pm("POST", f"/api/products/{product_id}/plan-sprints")
+        if action in ("plan_phases", "plan_sprints"):
+            # Both names accepted for backward compat — `plan_sprints` was the
+            # legacy decide_action name before migration 043 (phases→features
+            # flat model). The actual endpoint is now /plan-phases.
+            plan_response = _pm("POST", f"/api/products/{product_id}/plan-phases")
             try:
                 parsed = json.loads(plan_response)
                 # pm_api wraps successes as {"ok": True, "data": ...}; non-2xx
@@ -853,24 +831,21 @@ def launch_session(args: dict, **kwargs) -> str:
             return _err(f"product {product_id} not found", status=product_resp.status_code)
         product = product_resp.json()
 
-        # Guard: planner with unsprinted Approved features → call plan-sprints instead
+        # Guard: planner with unphased Approved features → call plan-phases instead.
+        # Phases→features flat model (migration 043): no active-sprint check;
+        # we look at unphased Approved features and call the new flat planner.
         if persona == "planner":
             with _pm_client() as client:
-                active_sprint_resp = client.get(f"/api/products/{product_id}/sprints/active")
                 features_resp = client.get(f"/api/products/{product_id}/features")
-            active_sprint = active_sprint_resp.json() if active_sprint_resp.is_success else None
-            if active_sprint is None:
-                features = features_resp.json() if features_resp.is_success else []
-                if isinstance(features, list):
-                    _TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted"}
-                    unsprinted = [f for f in features
-                                  if f.get("status") == "Approved" and f.get("sprint_id") is None
-                                  and f.get("status") not in _TERMINAL]
-                    if unsprinted:
-                        log.info("launch_session(planner) intercepted: calling plan-sprints for %d features", len(unsprinted))
-                        with _LAUNCH_LOCK:
-                            _LAUNCHING.discard(product_id)
-                        return _pm("POST", f"/api/products/{product_id}/plan-sprints")
+            features = features_resp.json() if features_resp.is_success else []
+            if isinstance(features, list):
+                unphased = [f for f in features
+                            if f.get("status") == "Approved" and f.get("phase_id") is None]
+                if unphased:
+                    log.info("launch_session(planner) intercepted: calling plan-phases for %d features", len(unphased))
+                    with _LAUNCH_LOCK:
+                        _LAUNCHING.discard(product_id)
+                    return _pm("POST", f"/api/products/{product_id}/plan-phases")
 
         # Fire and forget — run_claude_in_docker blocks for up to SESSION_TIMEOUT minutes.
         def _run():
@@ -1128,81 +1103,14 @@ def _check_architect_due(product: dict) -> None:
 
 
 def _route_unsprinted_security_bugs(product: dict) -> int:
-    """Phase 3 of PollerRevamp (INVARIANTS.md VIII.2). When the active sprint's
-    `security_clean` gate is False AND there are unsprinted bug features in
-    Approved/Designed state, PATCH them into the active sprint so the coder
-    predicate picks them up.
+    """Retired with migration 043 (phases→features flat model).
 
-    Returns the number of bugs routed (0 if none, or if the gate is already
-    clean). Standalone analog of dispatch._decide_route_unsprinted_security_bugs
-    — duplicated here because the deployed orchestrator (tools.py) doesn't run
-    the dispatch.py priority list. Same data-driven logic, same caveat: this
-    does NOT directly clear the gate (the website's _evaluate_dod recomputes
-    security_clean from sprint-bugs only); routing the bugs makes them visible
-    to the coder so they can ship and clear the gate via the recompute.
+    The legacy sprint-DoD security_clean gate is gone — bug features
+    ship through the same per-feature session-PR pipeline as any other
+    feature; no sprint routing needed. Kept as a no-op stub so callsites
+    (cycle/persona.py et al.) don't break.
     """
-    pid = product.get("id")
-    sid = product.get("active_sprint_id")
-    if not pid or not sid:
-        return 0
-    try:
-        with _pm_client() as client:
-            dod_resp = client.get(f"/api/sprints/{sid}/dod")
-            if not dod_resp.is_success:
-                return 0
-            dod_payload = dod_resp.json() or {}
-            dod = dod_payload.get("dod") or {}
-            if dod.get("security_clean") is True:
-                return 0  # gate already clean
-
-            blockers = (dod_payload.get("blockers") or {}).get("security_clean") or []
-            unsprinted = [b for b in blockers if not b.get("sprint_id")]
-            routable = [
-                b for b in unsprinted
-                if b.get("status") in ("Approved", "Designed")
-            ]
-            if not routable:
-                return 0
-
-            # Match website's _check_sprint_capacity: terminal features don't
-            # consume sprint slots.
-            sc_resp = client.get("/api/system-config")
-            sys_cfg = sc_resp.json() if sc_resp.is_success else {}
-            cap = int(sys_cfg.get("max_features_per_sprint") or 5)
-
-            feats_resp = client.get(f"/api/products/{pid}/features")
-            feats = feats_resp.json() if feats_resp.is_success else []
-            terminal = {"Pushed", "Deferred", "Rejected", "Reverted"}
-            in_sprint_active = sum(
-                1 for f in (feats if isinstance(feats, list) else [])
-                if f.get("sprint_id") == sid and f.get("status") not in terminal
-            )
-            slots = max(0, cap - in_sprint_active)
-            if slots == 0:
-                log.info(
-                    f"[bug-routing] product={pid} sprint={sid}: security_clean=False with "
-                    f"{len(routable)} unsprinted bug(s), but sprint at capacity ({cap}) — leaving in backlog"
-                )
-                return 0
-
-            moved = 0
-            for bug in routable[:slots]:
-                try:
-                    client.patch(
-                        f"/api/features/{bug['id']}",
-                        json={"sprint_id": sid, "changed_by": "orchestrator"},
-                    )
-                    log.info(
-                        f"[bug-routing] product={pid} sprint={sid}: routed bug "
-                        f"#{bug['id']} ({(bug.get('name') or '')[:40]}) into sprint"
-                    )
-                    moved += 1
-                except Exception as e:
-                    log.warning(f"[bug-routing] failed to route bug #{bug['id']}: {e}")
-            return moved
-    except Exception:
-        log.exception(f"[bug-routing] crashed for product {pid}")
-        return 0
+    return 0
 
 
 def _run_supervisor_pr_detectors(product: dict) -> None:
