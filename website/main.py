@@ -428,88 +428,6 @@ async def _sprint_cap(db: AsyncSession) -> int:
 _TERMINAL_FEATURE_STATUSES = ("Pushed", "Deferred", "Rejected", "Reverted")
 
 
-async def _check_sprint_capacity(sprint_id: int, additions: int, db: AsyncSession) -> None:
-    """
-    Raise 422 if assigning `additions` more features to `sprint_id` would push it
-    over the system-wide cap. Does nothing for falsy sprint_id (unassign path).
-
-    Terminal features (Pushed/Deferred/Rejected/Reverted) don't count — they're
-    committed history and shouldn't permanently consume sprint slots. Without
-    this filter, security_auditor's bug-fix endpoint 422s as soon as a sprint
-    has any merged features (sprint deadlock: security_clean stays false
-    because no bug feature ever lands on the sprint).
-
-    Race-safe (#8): locks the sprint row with SELECT...FOR UPDATE before
-    counting. Without the lock, two concurrent PATCHes that each saw
-    `current=4, cap=5` would both pass and commit, yielding `current=6`.
-    The lock serializes them: the second blocks until the first commits,
-    then sees `current=5` and 422s correctly.
-    """
-    if not sprint_id or additions <= 0:
-        return
-    # Lock the sprint row for the duration of the request transaction. This
-    # is the critical-section gate. The Blocked sprint is exempt from caps
-    # (holding pen) so we exit early without locking — saves contention on
-    # the busiest sprint in the system.
-    target_sprint_q = await db.execute(
-        select(Sprint).where(Sprint.id == sprint_id).with_for_update()
-    )
-    target_sprint = target_sprint_q.scalar_one_or_none()
-    if not target_sprint:
-        return
-    if target_sprint.kind == "blocked":
-        return
-    cap = await _sprint_cap(db)
-    cur = await db.execute(
-        select(func.count()).select_from(Feature).where(
-            Feature.sprint_id == sprint_id,
-            Feature.status.notin_(_TERMINAL_FEATURE_STATUSES),
-        )
-    )
-    current = cur.scalar() or 0
-    if current + additions > cap:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Sprint cap exceeded — would have {current + additions} open features (cap is {cap}).",
-        )
-
-
-async def _get_or_create_blocked_sprint(product_id: int, db: AsyncSession) -> Sprint:
-    """Return the per-product Blocked sprint (holding pen for stuck features),
-    creating it on first use.
-
-    The Blocked sprint is a delivery-pipeline-bypass: it has `kind="blocked"`,
-    no DoD gates, no sprint-PR provisioning, no cap enforcement, and is
-    excluded from active-sprint selection so the orchestrator never picks
-    it for coder/reviewer work. PMs review and either reroute features back
-    to a normal sprint after fixing the underlying issue, or Reject them.
-
-    Status is `planned` so it doesn't appear in /products/{id}/sprints/active
-    queries and doesn't conflict with the one-active-sprint convention.
-    """
-    result = await db.execute(
-        select(Sprint).where(
-            Sprint.product_id == product_id,
-            Sprint.kind == "blocked",
-        ).limit(1)
-    )
-    sprint = result.scalar_one_or_none()
-    if sprint:
-        return sprint
-    sprint = Sprint(
-        product_id=product_id,
-        name="Blocked",
-        goal="Features that exceeded max_fix_attempts and need PM triage. "
-             "Re-route a feature to a normal sprint after fixing the root "
-             "cause, or mark Rejected.",
-        kind="blocked",
-        status="planned",  # never auto-progressed; lives in parallel
-    )
-    db.add(sprint)
-    await db.flush()
-    return sprint
-
-
 async def _max_fix_attempts(db: AsyncSession) -> int:
     """Resolve max_fix_attempts from system_config with a default of 5."""
     cfg = await _get_system_config(db)
@@ -584,27 +502,6 @@ async def _close_blocked_feature_pr(
             "leaving pr_number/pr_url/branch_name in place for retry",
             pr_n, feature.id,
         )
-
-
-async def _next_planned_sprint(product_id: int, db: AsyncSession) -> Sprint | None:
-    """Return the lowest-id planned sprint for this product, or None.
-
-    Excludes kind=blocked — the holdpen sprint is `planned` to stay out of
-    /sprints/active queries, but it must NOT receive auto-assigned features
-    from bulk-approve / Approved-status flows. Approved features go to the
-    next normal planned sprint, never to the blocked sprint.
-    """
-    result = await db.execute(
-        select(Sprint)
-        .where(
-            Sprint.product_id == product_id,
-            Sprint.status == "planned",
-            Sprint.kind == "normal",
-        )
-        .order_by(Sprint.id.asc())
-        .limit(1)
-    )
-    return result.scalar_one_or_none()
 
 
 # Status rank guard for api_update_feature (INVARIANTS IV.1).
@@ -1463,424 +1360,6 @@ async def save_schedule(
     product.max_features_per_run = int(max_features_per_run) if max_features_per_run.strip().isdigit() else None
     await db.flush()
     return RedirectResponse(f"/product/{product_id}?tab=settings", status_code=303)
-
-
-@app.post("/api/sprints/bug-fix", response_model=schemas.SprintOut, status_code=201)
-async def api_create_bugfix_sprint(body: schemas.BugFixSprintCreate, db: AsyncSession = Depends(get_db)):
-    """
-    Assign bug features to the current active sprint (no sub-sprint created).
-    The parent_sprint_id field is used to locate the product's active sprint.
-    Bug features are auto-approved and assigned to it.
-    """
-    parent = await db.get(Sprint, body.parent_sprint_id)
-    if not parent:
-        raise HTTPException(status_code=404, detail="Sprint not found")
-
-    # Find the active sprint for this product (may be the same as parent)
-    active_result = await db.execute(
-        select(Sprint).where(
-            Sprint.product_id == body.product_id,
-            Sprint.status == "active",
-        ).order_by(Sprint.id.asc()).limit(1)
-    )
-    target = active_result.scalar_one_or_none() or parent
-
-    # Cap-check: count bugs not already in target so we don't double-count
-    new_assignments = 0
-    fetched: list[Feature] = []
-    for fid in body.bug_feature_ids:
-        feat = await db.get(Feature, fid)
-        if feat:
-            fetched.append(feat)
-            if feat.sprint_id != target.id:
-                new_assignments += 1
-    await _check_sprint_capacity(target.id, new_assignments, db)
-    for feat in fetched:
-        feat.sprint_id = target.id
-        feat.status = "Approved"
-
-    return target
-
-
-@app.get("/api/sprints/{sprint_id}/report")
-async def api_sprint_report(sprint_id: int, db: AsyncSession = Depends(get_db)):
-    """Sprint report: DoD gates, agent sign-offs with notes, feature summary, sessions."""
-    sprint = await db.get(Sprint, sprint_id)
-    if not sprint:
-        raise HTTPException(status_code=404, detail="Sprint not found")
-
-    dod = sprint.dod_status or {}
-
-    # Feature summary
-    feat_result = await db.execute(
-        select(Feature).where(Feature.sprint_id == sprint_id)
-    )
-    sprint_features = feat_result.scalars().all()
-    terminal = {"Pushed", "Deferred", "Rejected"}
-
-    # Sessions that touched this sprint's features
-    feature_ids = [f.id for f in sprint_features]
-    sessions = []
-    if feature_ids:
-        sess_result = await db.execute(
-            select(DBSession)
-            .where(DBSession.product_id == sprint.product_id)
-            .order_by(DBSession.started_at.desc())
-            .limit(50)
-        )
-        sessions = [
-            {
-                "persona": s.persona,
-                "started_at": s.started_at.isoformat() if s.started_at else None,
-                "exit_code": s.exit_code,
-                "features_attempted": s.features_attempted,
-                "features_pushed": s.features_pushed,
-                "notes": s.notes,
-            }
-            for s in sess_result.scalars().all()
-            if s.persona  # skip null persona sessions
-        ]
-
-    return {
-        "sprint": {
-            "id": sprint.id,
-            "name": sprint.name,
-            "goal": sprint.goal,
-            "status": sprint.status,
-            "completed_at": sprint.completed_at.isoformat() if sprint.completed_at else None,
-            "release_notes": sprint.release_notes,
-            "retro_doc_path": sprint.retro_doc_path,
-        },
-        "gates": {
-            # Phase 4 simplification (2026-05-06): qa_passed and
-            # security_clean were retired alongside the qa_tester +
-            # security_auditor → reviewer merge (Phase 2). Tests +
-            # security are now reviewed per-feature in the merged
-            # reviewer's tri-section review. Persisted gate values
-            # remain in dod_status for historical sprints; new sprints
-            # don't need them.
-            "all_features_done": {
-                "passed": all(f.status in terminal for f in sprint_features) if sprint_features else False,
-                "detail": f"{sum(1 for f in sprint_features if f.status in terminal)}/{len(sprint_features)} features completed",
-            },
-            "retro_done": {
-                "passed": bool(dod.get("retro_done")),
-                "notes": dod.get("retro_done_notes", ""),
-            },
-        },
-        "features": [
-            {"id": f.id, "name": f.name, "status": f.status, "feature_type": f.feature_type, "pr_number": f.pr_number}
-            for f in sprint_features
-        ],
-        "sessions": sessions,
-    }
-
-
-@app.get("/api/sprints/{sprint_id}/dod")
-async def api_get_dod(sprint_id: int, db: AsyncSession = Depends(get_db)):
-    """Read-only DoD evaluation. Returns the same gate breakdown as
-    POST /check-dod but without any side-effect (no auto-completion).
-
-    Phase 3 of PollerRevamp: the orchestrator dispatcher consumes this to
-    reason about WHY a sprint is stuck (which gate is failing, which
-    blocking bug features exist) and route corrective work — see
-    INVARIANTS.md VIII.2.
-    """
-    sprint = await db.get(Sprint, sprint_id)
-    if not sprint:
-        raise HTTPException(status_code=404, detail="Sprint not found")
-    dod = await _evaluate_dod(sprint_id, sprint.product_id, db)
-
-    # Surface the *blocking* features so callers don't need to re-derive them.
-    # Phase 4 (2026-05-06): security_clean gate retired, but the
-    # blocking-bugs list stays useful for the dashboard ("what's
-    # blocking sprint completion") so we keep computing it.
-    terminal = {"Pushed", "Deferred", "Rejected"}
-    feat_result = await db.execute(
-        select(Feature).where(Feature.product_id == sprint.product_id)
-    )
-    all_product_features = feat_result.scalars().all()
-
-    sprint_non_terminal = [
-        {"id": f.id, "name": f.name, "status": f.status, "feature_type": f.feature_type}
-        for f in all_product_features
-        if f.sprint_id == sprint_id and f.status not in terminal
-    ]
-    open_bugs = [
-        {"id": f.id, "name": f.name, "status": f.status, "sprint_id": f.sprint_id}
-        for f in all_product_features
-        if f.feature_type == "bug" and f.status not in terminal
-    ]
-
-    return {
-        "sprint_id": sprint_id,
-        "dod": dod,
-        "blockers": {
-            "all_features_done": sprint_non_terminal,
-            "open_bugs":         open_bugs,
-        },
-    }
-
-
-@app.post("/api/sprints/{sprint_id}/check-dod")
-async def api_check_dod(sprint_id: int, db: AsyncSession = Depends(get_db)):
-    """
-    Poller calls this every cycle. Evaluates gates; if all pass, auto-completes sprint.
-    Does NOT modify any gate state — only triggers completion.
-    """
-    sprint = await db.get(Sprint, sprint_id)
-    if not sprint or sprint.status == "completed":
-        return {"action": "skipped"}
-    dod = await _evaluate_dod(sprint_id, sprint.product_id, db)
-    # Phase 4 simplification (2026-05-06): qa_passed and security_clean
-    # were retired alongside the qa_tester + security_auditor → reviewer
-    # merge (Phase 2). Test + security review now happens PER FEATURE in
-    # the merged reviewer's tri-section review; per-feature
-    # `review_outcome=approved` is the gate. Sprint-level completion
-    # only requires the structural gates: all_features_done + no_open_prs.
-    # retro_done is intentionally NOT a completion gate (it's a post-
-    # completion deliverable).
-    all_pass = (
-        dod["all_features_done"]
-        and dod["no_open_prs"]
-    )
-    if all_pass:
-        await _do_complete_sprint(sprint, sprint.product_id, db)
-        return {"action": "auto_completed", "dod": dod}
-    return {"action": "gates_pending", "dod": dod}
-
-
-async def _evaluate_dod(sprint_id: int, product_id: int, db: AsyncSession) -> dict:
-    """
-    Compute DoD gate states for a sprint:
-      all_features_done — all sprint features are Pushed or Deferred
-      no_open_prs       — no sprint features have an open PR
-      retro_done        — Retrospective has completed (stored in dod_status)
-
-    Phase 4 simplification (2026-05-06): qa_passed and security_clean
-    were retired with the qa_tester + security_auditor → reviewer merge
-    (Phase 2). Test + security checks moved into the merged reviewer's
-    tri-section per-feature review.
-    """
-    sprint = await db.get(Sprint, sprint_id)
-    if not sprint:
-        return {}
-
-    # Persisted sign-offs (set by agents)
-    persisted = sprint.dod_status or {}
-
-    # Compute live gates
-    feat_result = await db.execute(
-        select(Feature).where(Feature.sprint_id == sprint_id)
-    )
-    sprint_features = feat_result.scalars().all()
-
-    terminal = {"Pushed", "Deferred", "Rejected"}
-    # Empty sprint = nothing to do = vacuously done. Without this, sprints
-    # whose features all moved to the Blocked-sprint holdpen (or were
-    # individually rejected/deleted) get stuck active forever — no work
-    # to advance, no completion path.
-    all_features_done = all(f.status in terminal for f in sprint_features)
-    no_open_prs = all(f.pr_number is None or f.status == "Pushed" for f in sprint_features)
-
-    return {
-        "all_features_done": all_features_done,
-        "no_open_prs":       no_open_prs,
-        # Phase 4 (2026-05-06): qa_passed + security_clean retired with
-        # the qa_tester + security_auditor → reviewer merge. Surfaced
-        # here as the historical persisted value (True if a pre-Phase-4
-        # sprint signed it, False otherwise) so the dashboard can still
-        # render archaeology, but they no longer participate in the
-        # all_pass calculation in /check-dod.
-        "qa_passed":         bool(persisted.get("qa_passed")),
-        "security_clean":    bool(persisted.get("security_clean")),
-        "retro_done":        bool(persisted.get("retro_done")),
-        "feature_count":     len(sprint_features),
-        "features_terminal": sum(1 for f in sprint_features if f.status in terminal),
-    }
-
-
-async def _do_complete_sprint(sprint: Sprint, product_id: int, db: AsyncSession) -> None:
-    """Mark sprint completed, generate release notes, activate next sprint.
-
-    1-PR model: sprints are planning buckets, not delivery vehicles —
-    individual features ship through their own session PRs (`coder/<uid>` →
-    `main`) merged by `auto_merge_reviewer`/`sweep_product`. By the time
-    this function runs the sprint's `all_features_done` gate has already
-    passed, meaning every feature in the sprint is Pushed/Deferred/
-    Rejected. Nothing for us to merge — just close out the sprint and
-    activate the next one.
-    """
-    from datetime import datetime as _dt, timezone as _tz
-
-    # 1. Mark completed.
-    sprint.status = "completed"
-    sprint.completed_at = _dt.now(_tz.utc)
-    await db.flush()
-
-    # 2. Generate release notes against the just-shipped feature set. Best-
-    #    effort: a release-notes failure shouldn't undo the completion.
-    try:
-        notes = await _generate_sprint_release_notes(sprint.id, product_id, db)
-        if notes:
-            sprint.release_notes = notes
-            await db.flush()
-    except Exception:
-        log.warning(f"sprint #{sprint.id} release-notes generation failed (non-fatal)")
-
-    # 3. Activate the next sprint in the same phase, or next phase's first sprint.
-    await _activate_next_sprint(sprint, product_id, db)
-
-
-# _attempt_merge_completed_sprint_pr and _maybe_provision_sprint_pr were
-# retired with the 1-PR model (2026-05-15). Sprints no longer have their
-# own branch / PR; features ship via session PRs (coder/<uid> → main).
-
-
-async def _activate_next_sprint(completed: Sprint, product_id: int, db: AsyncSession) -> None:
-    """Find and activate the next planned sprint after the completed one."""
-    # Same phase first
-    if completed.phase_id:
-        next_result = await db.execute(
-            select(Sprint).where(
-                Sprint.product_id == product_id,
-                Sprint.phase_id == completed.phase_id,
-                Sprint.status == "planned",
-                Sprint.id > completed.id,
-            ).order_by(Sprint.id).limit(1)
-        )
-        nxt = next_result.scalar_one_or_none()
-        if nxt:
-            nxt.status = "active"
-            await db.flush()
-            return
-
-        # No more sprints in this phase — check if phase should be completed
-        phase = await db.get(Phase, completed.phase_id)
-        if phase:
-            rem_result = await db.execute(
-                select(func.count()).where(
-                    Sprint.phase_id == completed.phase_id,
-                    Sprint.status.in_(["planned", "active"]),
-                )
-            )
-            if (rem_result.scalar() or 0) == 0:
-                phase.status = "completed"
-                await db.flush()
-
-    # Move to next phase's first planned sprint — but ONLY if every
-    # feature in the current phase has reached a terminal state. Features
-    # left Pending/Approved/Designing/Designed/Implementing/Implemented/
-    # Reviewing/Testing/Committed/Reviewed are unfinished work the PM
-    # never resolved (most commonly: sprints PM-overridden to complete
-    # with non-terminal features still attached, or unsprinted Approved
-    # features in this phase). Skipping past them silently buries work;
-    # holding the phase forces a PM resolution (re-sprint in current phase,
-    # Reject, Defer, or move to Blocked).
-    if completed.phase_id:
-        unfinished_in_phase = await db.execute(
-            select(func.count()).select_from(Feature).join(
-                Sprint, Feature.sprint_id == Sprint.id
-            ).where(
-                Sprint.phase_id == completed.phase_id,
-                Feature.status.notin_(_TERMINAL_FEATURE_STATUSES + ("Blocked",)),
-            )
-        )
-        unfinished_count = unfinished_in_phase.scalar() or 0
-        if unfinished_count > 0:
-            log.info(
-                f"[phase-gate] Holding phase {completed.phase_id}: "
-                f"{unfinished_count} feature(s) still non-terminal. "
-                f"Next phase will NOT activate until they reach a terminal status."
-            )
-            return
-
-        phase = await db.get(Phase, completed.phase_id)
-        if phase:
-            next_phase_result = await db.execute(
-                select(Phase).where(
-                    Phase.product_id == product_id,
-                    Phase.status == "planned",
-                    Phase.order > phase.order,
-                ).order_by(Phase.order).limit(1)
-            )
-            next_phase = next_phase_result.scalar_one_or_none()
-            if next_phase:
-                next_phase.status = "active"
-                await db.flush()
-                first_sprint_result = await db.execute(
-                    select(Sprint).where(
-                        Sprint.phase_id == next_phase.id,
-                        Sprint.status == "planned",
-                    ).order_by(Sprint.id).limit(1)
-                )
-                first = first_sprint_result.scalar_one_or_none()
-                if first:
-                    first.status = "active"
-                    await db.flush()
-
-
-@app.post("/product/{product_id}/sprints/{sprint_id}/complete")
-async def complete_sprint_form(
-    product_id: int, sprint_id: int,
-    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
-):
-    """PM override — complete sprint regardless of DoD gate state."""
-    sprint = await db.get(Sprint, sprint_id)
-    if sprint and sprint.product_id == product_id and sprint.status != "completed":
-        await _do_complete_sprint(sprint, product_id, db)
-    return RedirectResponse(f"/product/{product_id}?tab=sprints", status_code=303)
-
-
-async def _generate_sprint_release_notes(sprint_id: int, product_id: int, db: AsyncSession) -> str | None:
-    """Call Claude to write release notes for all Pushed features in a sprint."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return None
-    sprint = await db.get(Sprint, sprint_id)
-    if not sprint:
-        return None
-    product = await db.get(Product, product_id)
-
-    feat_result = await db.execute(
-        select(Feature).where(
-            Feature.sprint_id == sprint_id,
-            Feature.status == "Pushed",
-        ).order_by(Feature.priority.desc())
-    )
-    pushed = feat_result.scalars().all()
-    if not pushed:
-        return None
-
-    feature_list = "\n".join(f"- {f.name}: {f.description or ''}" for f in pushed)
-    try:
-        return await _llm_call(
-            f"Write concise release notes for {product.name if product else 'this product'} "
-            f"— {sprint.name}.\n\n"
-            f"Shipped features:\n{feature_list}\n\n"
-            "Format as Markdown with:\n"
-            "- A one-sentence summary of what this release delivers\n"
-            "- A '## What's New' section with bullet points grouped by theme\n"
-            "- Keep it short and user-facing — no internal jargon\n"
-            "Return only the Markdown, nothing else.",
-            db=db,
-            max_tokens=800,
-        )
-    except Exception as e:
-        # Previously swallowed silently — paired with the
-        # ``log.warning("...non-fatal")`` at the caller, this meant a
-        # real LLM-backend outage (quota, API key, network) was
-        # indistinguishable in the logs from a benign "model wrote
-        # garbage" event. Logging the exception type and message here
-        # lets operators distinguish them at a glance.
-        log.warning(
-            f"_generate_sprint_release_notes: LLM call failed for sprint "
-            f"#{sprint.id} ({type(e).__name__}: {e}) — release notes will "
-            f"be blank until next regeneration."
-        )
-        return None
-
-
 
 
 @app.post("/product/{product_id}/prompt")
@@ -3145,314 +2624,161 @@ async def api_update_phase(phase_id: int, body: schemas.PhaseUpdate, db: AsyncSe
     return phase
 
 
-@app.post("/api/sprints", response_model=schemas.SprintOut, status_code=201)
-async def api_create_sprint(body: schemas.SprintCreate, db: AsyncSession = Depends(get_db)):
-    """Create a sprint for a product."""
-    await _get_product_or_404(body.product_id, db)
-    sprint = Sprint(**body.model_dump())
-    db.add(sprint)
-    await db.flush()
-    return sprint
+# ── Phase → feature tree / planner / release notes (post migration 043) ──────
 
-
-@app.get("/api/products/{product_id}/sprints", response_model=list[schemas.SprintOut])
-async def api_list_sprints(product_id: int, db: AsyncSession = Depends(get_db)):
-    """List all sprints for a product (active first, then by id)."""
-    await _get_product_or_404(product_id, db)
+@app.get("/api/phases/{phase_id}/features", response_model=list[schemas.FeatureOut])
+async def api_phase_features(phase_id: int, db: AsyncSession = Depends(get_db)):
+    """List all features in a phase, ordered by priority desc + id asc."""
+    phase = await db.get(Phase, phase_id)
+    if not phase:
+        raise HTTPException(status_code=404, detail="Phase not found")
     result = await db.execute(
-        select(Sprint)
-        .where(Sprint.product_id == product_id)
-        .order_by(Sprint.status == "active", Sprint.id.desc())
+        select(Feature).where(Feature.phase_id == phase_id)
+        .order_by(Feature.priority.desc(), Feature.id.asc())
     )
     return result.scalars().all()
 
 
-@app.get("/api/products/{product_id}/sprints/active", response_model=schemas.SprintOut | None)
-async def api_active_sprint(product_id: int, db: AsyncSession = Depends(get_db)):
-    """Return the single active sprint for a product (lowest id wins if multiple).
-
-    Excludes kind=blocked even though that sprint's status is `planned` —
-    defensive belt-and-suspenders in case a future code path accidentally
-    flips it to active.
+@app.get("/api/features/{feature_id}/tree")
+async def api_feature_tree(feature_id: int, db: AsyncSession = Depends(get_db)):
+    """Return the feature plus its immediate ancestors and descendants.
+    Useful for the UI to render a sizing-gate split tree under a parent.
     """
-    result = await db.execute(
-        select(Sprint)
-        .where(
-            Sprint.product_id == product_id,
-            Sprint.status == "active",
-            Sprint.kind == "normal",
-        )
-        .order_by(Sprint.id.asc())
-        .limit(1)
+    feature = await _get_feature_or_404(feature_id, db)
+    # Ancestors: walk up parent_id chain.
+    ancestors: list[Feature] = []
+    cur: Feature | None = feature
+    seen: set[int] = {feature.id}
+    while cur and cur.parent_id and cur.parent_id not in seen:
+        parent = await db.get(Feature, cur.parent_id)
+        if not parent:
+            break
+        ancestors.append(parent)
+        seen.add(parent.id)
+        cur = parent
+    # Children: single-level pull (recursive trees are uncommon for sizing splits).
+    children_q = await db.execute(
+        select(Feature).where(Feature.parent_id == feature_id)
+        .order_by(Feature.id.asc())
     )
-    return result.scalar_one_or_none()
+    children = children_q.scalars().all()
+    return {
+        "feature":   schemas.FeatureOut.model_validate(feature, from_attributes=True),
+        "ancestors": [schemas.FeatureOut.model_validate(a, from_attributes=True) for a in ancestors],
+        "children":  [schemas.FeatureOut.model_validate(c, from_attributes=True) for c in children],
+    }
 
 
-@app.post("/api/products/{product_id}/sprints/blocked/route", status_code=200)
-async def api_route_to_blocked_sprint(
-    product_id: int, body: schemas.BlockedRouteRequest,
+@app.get("/api/products/{product_id}/release-notes")
+async def api_release_notes(
+    product_id: int,
+    since: str | None = None,
     db: AsyncSession = Depends(get_db),
-    _: None = Depends(verify_internal_signature),
 ):
-    """Move stuck features into the per-product Blocked sprint.
+    """Aggregate merge_notes from features Pushed since `since` (ISO date,
+    e.g. 2026-05-01). Without `since`, returns all Pushed features.
 
-    Called by the orchestrator's reconcile sweep when a feature's
-    fix_attempts crosses max_fix_attempts. Also creates the Blocked sprint
-    on first use if it doesn't exist. Idempotent — re-routing a feature
-    that's already there is a no-op.
-
-    Closes the feature's open GitHub PR (if any) as a side effect. Pre-fix
-    (2026-05-19) the route handler only updated DB state and left the GitHub
-    PR open — that's why StockAnalysis accumulated open PRs #67 / #77 on
-    Blocked-routed features. The reconcile-sweep callsite in github_client
-    fires only when a PR was *already closed*, so this is the chokepoint
-    for "PR still open at the moment of Blocked routing." On close success,
-    pr_number/pr_url/branch_name are cleared on the feature; on failure they
-    are left in place so a subsequent retry has the PR number.
+    Replaces per-sprint release notes — the new model emits notes
+    per-feature and aggregates by time window on demand.
     """
-    feature_ids = body.feature_ids
-    reason = body.reason or "auto-escalated after exceeding max_fix_attempts"
-    if not feature_ids:
-        return {"moved": 0, "sprint_id": None}
-    blocked = await _get_or_create_blocked_sprint(product_id, db)
-    moved: list[int] = []
-    # (feature_obj, pr_number) pairs captured before the status flip so we can
-    # close the PR after the DB updates land — close happens out-of-transaction
-    # because PATCHing GitHub is a multi-hundred-millisecond network call.
-    pr_close_targets: list[tuple[Feature, int]] = []
-    for fid in feature_ids:
-        feat = await db.get(Feature, fid)
-        if not feat or feat.product_id != product_id:
-            continue
-        if feat.sprint_id == blocked.id and feat.status == "Blocked":
-            continue  # already routed
-        if feat.pr_number:
-            pr_close_targets.append((feat, int(feat.pr_number)))
-        feat.sprint_id = blocked.id
-        feat.status = "Blocked"
-        if not feat.blocked_reason:
-            feat.blocked_reason = reason
-        moved.append(fid)
-
-    # Close GitHub PRs for newly-routed features. Best-effort — a failure
-    # here must not fail the route, because the DB is already mutated and
-    # the next reconcile cycle would re-attempt the routing as a no-op.
-    if pr_close_targets:
-        product = await db.get(Product, product_id)
-        github_repo = (product.github_repo or "") if product else ""
-        for feat, _pr_n in pr_close_targets:
-            await _close_blocked_feature_pr(feat, github_repo, reason, db)
-
-    return {"moved": len(moved), "sprint_id": blocked.id, "feature_ids": moved}
-
-
-@app.patch("/api/sprints/{sprint_id}", response_model=schemas.SprintOut)
-async def api_update_sprint(sprint_id: int, body: schemas.SprintUpdate, db: AsyncSession = Depends(get_db)):
-    """Update sprint fields (name, goal, dates, status)."""
-    sprint = await db.get(Sprint, sprint_id)
-    if not sprint:
-        raise HTTPException(status_code=404, detail="Sprint not found")
-    for field, value in body.model_dump(exclude_unset=True).items():
-        setattr(sprint, field, value)
-    await db.flush()
-    return sprint
-
-
-@app.post("/api/sprints/{sprint_id}/sign-off")
-async def api_sprint_sign_off(
-    sprint_id: int,
-    body: schemas.SprintSignOffRequest,
-    db: AsyncSession = Depends(get_db),
-    _: None = Depends(verify_internal_signature),
-):
-    """
-    Agent sign-off endpoint — merges gate values into sprint.dod_status.
-    After each sign-off, check if all gates pass → auto-complete sprint.
-    """
-    sprint = await db.get(Sprint, sprint_id)
-    if not sprint:
-        raise HTTPException(status_code=404, detail="Sprint not found")
-    if sprint.status == "completed":
-        return {"status": "already_completed"}
-
-    gate  = body.gate
-    value = body.value
-
-    current = dict(sprint.dod_status or {})
-    current[gate] = bool(value)
-    if body.notes:
-        current[f"{gate}_notes"] = body.notes
-    if gate == "retro_done" and body.retro_doc_path:
-        sprint.retro_doc_path = body.retro_doc_path
-    sprint.dod_status = current
-    await db.flush()
-
-    # Re-evaluate all gates — if all pass, auto-complete sprint.
-    # Phase 4 (2026-05-06): qa_passed + security_clean retired from
-    # the all_pass check (matches /check-dod above).
-    dod = await _evaluate_dod(sprint_id, sprint.product_id, db)
-    all_pass = (
-        dod["all_features_done"]
-        and dod["no_open_prs"]
+    await _get_product_or_404(product_id, db)
+    q = select(Feature).where(
+        Feature.product_id == product_id,
+        Feature.status == "Pushed",
+        Feature.merge_notes.is_not(None),
     )
-    auto_completed = False
-    if all_pass and sprint.status != "completed":
-        await _do_complete_sprint(sprint, sprint.product_id, db)
-        auto_completed = True
+    if since:
+        try:
+            from datetime import datetime as _dt
+            since_dt = _dt.fromisoformat(since)
+            q = q.where(Feature.updated_at >= since_dt)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid `since` (expected ISO date): {since}")
+    q = q.order_by(Feature.updated_at.desc())
+    rows = (await db.execute(q)).scalars().all()
+    return {
+        "product_id": product_id,
+        "since": since,
+        "count": len(rows),
+        "features": [
+            {
+                "id": f.id, "name": f.name, "phase_id": f.phase_id,
+                "merge_notes": f.merge_notes,
+                "pushed_at": f.updated_at.isoformat() if f.updated_at else None,
+            }
+            for f in rows
+        ],
+    }
 
-    return {"dod": dod, "auto_completed": auto_completed}
 
-
-@app.delete("/api/sprints/{sprint_id}", status_code=204)
-async def api_delete_sprint(sprint_id: int, db: AsyncSession = Depends(get_db), _: str = Depends(require_auth)):
-    """Delete a sprint. Unassigns any features still pointing at it."""
-    sprint = await db.get(Sprint, sprint_id)
-    if not sprint:
-        raise HTTPException(status_code=404, detail="Sprint not found")
-    await db.execute(update(Feature).where(Feature.sprint_id == sprint_id).values(sprint_id=None))
-    await db.delete(sprint)
-
-
-@app.post("/product/{product_id}/plan-sprints")
-async def plan_sprints_form(
+@app.post("/api/products/{product_id}/plan-phases")
+async def api_plan_phases(
     product_id: int,
     db: AsyncSession = Depends(get_db),
     _: str = Depends(require_auth),
 ):
-    """Form-style wrapper around api_plan_sprints used by the product detail
-    page's "Auto-Plan Phases" button. Redirects back to the product page on
-    success; FastAPI's default error rendering handles 4xx from the wrapped
-    endpoint so the PM still sees the reason if planning is rejected."""
-    try:
-        await api_plan_sprints(product_id, db, "")
-    except HTTPException:
-        raise
-    return RedirectResponse(f"/product/{product_id}", status_code=303)
+    """LLM plans phases + assigns features directly. Flat phase→feature
+    model — no sprints layer. Each phase is a coherent grouping of
+    features by theme; features keep their own lifecycle.
 
-
-@app.post("/api/products/{product_id}/plan-sprints")
-async def api_plan_sprints(
-    product_id: int,
-    db: AsyncSession = Depends(get_db),
-    _: str = Depends(require_auth),
-):
-    """
-    LLM auto-plans phasewise implementation from all Approved features.
-    Generates phases (e.g. Foundation, Core, Enhancements) each with 1-3 sprints.
-    Creates Phase + Sprint rows and assigns feature.sprint_id for each.
+    Re-planning is allowed at any time — there are no sprint-cap
+    constraints. Features already assigned to a phase keep their
+    phase unless the LLM moves them.
     """
     product = await db.get(Product, product_id)
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    # Block re-planning if there are any active or planned sprints — those already
-    # have features assigned and changing them would conflict. Completed sprints are
-    # fine; we just create new phases/sprints for the unsprinted features.
-    #
-    # Exclude `kind='blocked'`: the per-product Blocked holdpen sprint has
-    # status='planned' by design (so /sprints/active queries skip it) but it's
-    # semantically a parking lot, not a real planned sprint. Without this
-    # filter the holdpen trips the 409 guard and re-planning is permanently
-    # impossible once any feature gets routed to Blocked. Real failure mode:
-    # MyDocusign 2026-05-21 — 21 unsprinted Approved features, 0 active
-    # sprints, but the orchestrator's plan_sprints action looped 25+ minutes
-    # silently 409'ing because Blocked sprint 216 had status='planned'.
-    active_check = await db.execute(
-        select(Sprint.id).where(
-            Sprint.product_id == product_id,
-            Sprint.status.in_(("active", "planned")),
-            Sprint.kind != "blocked",
-        ).limit(1)
-    )
-    if active_check.scalar_one_or_none() is not None:
-        raise HTTPException(
-            status_code=409,
-            detail="Cannot re-plan: an active or planned sprint exists. Complete it first, or assign features to the planned sprint.",
-        )
-
-    # Read max features per sprint from DB config
-    max_per_sprint = await _sprint_cap(db)
-
-    # Only sprint features that actually want a sprint assignment.
-    #
-    # Eligible:
-    #   - Approved: PM-approved, no design yet
-    #   - Designed: has design doc, ready for coder
-    # Both can be moved into a fresh sprint without disrupting in-flight work.
-    #
-    # Explicitly NOT eligible (and the bug we're fixing here — before this
-    # 2026-05-21 fix the filter was just `notin (Pushed/Rejected/Reverted/
-    # Deferred)`, which caught everything else):
-    #   - Pending: recommender's draft list, not yet PM-approved
-    #   - Blocked: deliberately parked (by supervisor or PM); re-sprinting
-    #     would resurrect features that were explicitly held out
-    #   - Designing/Implementing/Reviewing/Reviewed: in flight with an
-    #     active session or open PR; rewriting sprint_id would orphan
-    #     that work
-    #
-    # Plus only features with sprint_id IS NULL — completed-sprint
-    # leftovers stay in their completed sprint (PM can move them via the
-    # web UI if they want to retry).
-    sprintable_statuses = ("Approved", "Designed")
+    # Eligible features for planning: Approved or Designed, unphased.
+    # In-flight statuses (Designing/Implementing/Reviewing/Reviewed),
+    # terminal statuses (Pushed/Deferred/Rejected/Reverted), and the
+    # PM-only Pending state are excluded.
     feat_result = await db.execute(
         select(Feature).where(
             Feature.product_id == product_id,
-            Feature.status.in_(sprintable_statuses),
-            Feature.sprint_id.is_(None),
+            Feature.status.in_(("Approved", "Designed")),
+            Feature.phase_id.is_(None),
         ).order_by(Feature.priority.desc())
     )
-    approved = feat_result.scalars().all()
-    if not approved:
-        raise HTTPException(status_code=400, detail="No features to plan")
+    eligible = feat_result.scalars().all()
+    if not eligible:
+        raise HTTPException(status_code=400, detail="No features to plan (need status=Approved|Designed and phase_id=NULL)")
 
     features_list = [
         {"id": f.id, "name": f.name, "description": f.description or "",
          "feature_type": f.feature_type, "priority": f.priority}
-        for f in approved
+        for f in eligible
     ]
 
     try:
         raw = await _llm_call(
-            f"You are a senior product manager doing implementation planning for: {product.name}\n"
-            f"Vision: {getattr(product, 'vision', None) or (product.config or {}).get('vision') or 'Not specified'}\n\n"
-            f"Backlog items (= Stories) to plan ({len(features_list)} total):\n"
+            f"You are a senior product manager doing phase planning for: {product.name}\n"
+            f"Vision: {(product.config or {}).get('vision') or 'Not specified'}\n\n"
+            f"Backlog features to plan ({len(features_list)} total):\n"
             f"{json.dumps(features_list, indent=2)}\n\n"
-            "## Vocabulary (read once, then apply)\n"
-            "- A **Feature** = one user-facing chunk like 'Calculator UI' or 'Auth System'. "
-            "It will be stored as a `sprint` row (legacy column name) and ships as one PR.\n"
-            "- A **Story** = an implementation chunk that fits one coder session "
-            "(≤1 dev-day, ≤4 acceptance-criteria bullets, ≤6 files). "
-            "It's stored as a `feature` row (legacy column name).\n"
-            "- A **Phase** = high-level theme grouping multiple Features.\n\n"
-            "Your job: organise the backlog Stories into Features (sprints), grouped into Phases.\n\n"
-            "## Hard rules (enforce strictly)\n"
-            "1. **Each Feature (sprint) MUST be coherent** — all Stories inside it must serve the SAME user-want. "
-            "Example coherent Feature: 'Calculator Display' with stories {keypad UI, expression display, decimal handling}. "
-            "Example INCOHERENT (do not produce): 'Sprint 1' with stories {SvelteKit scaffold, GitHub CI, ESLint config, README, Dependabot} — these are 5 different concerns.\n"
-            "2. **Name each Feature by its user-want**, not 'Sprint 1' / 'Sprint 2'. "
-            "Names like 'Calculator UI Foundation', 'Arithmetic Engine', 'Mobile Responsive Layout' — each is a clear deliverable.\n"
-            f"3. Each Feature contains at most {max_per_sprint} Stories. If you find more than {max_per_sprint} coherent stories for one user-want, split them into two Features.\n"
-            "4. Every backlog Story must land in exactly one Feature.\n"
-            "5. Respect dependencies: foundational Features (data models, auth) go in Phase 1.\n"
-            "6. Only create Phases that have Features to put in them.\n\n"
-            "## Phase structure (use these names or close variants)\n"
-            "- Phase 1: Foundation — infrastructure, auth, CI/CD, core data models, dev tooling\n"
-            "- Phase 2: Core Product — main user-facing value, primary workflows\n"
-            "- Phase 3: Growth & Polish — integrations, analytics, UX improvements, API\n"
-            "- Phase 4: Scale & Ops — performance, observability, security hardening (if enough)\n\n"
-            "Return ONLY a JSON array of phases, no other text. The `sprint_name` is the Feature name "
-            "(human-readable user-want), the `feature_ids` are the Story ids assigned to that Feature:\n"
+            "## Vocabulary\n"
+            "- A **Feature** = one shippable unit, designed and built in one session, "
+            "ships as its own PR direct to main.\n"
+            "- A **Phase** = a coherent theme/milestone grouping multiple features. "
+            "Pure UI grouping — no completion gates, no DoD, no ordering enforcement.\n\n"
+            "## Rules\n"
+            "1. **Group features into coherent phases** by theme. Each phase tells a story "
+            "(e.g. 'Foundation', 'Core Workflow', 'Integrations', 'Polish').\n"
+            "2. **Every feature lands in exactly one phase.** No feature left orphaned.\n"
+            "3. **Foundational features go in earliest phases.** Auth, data models, CI go before user-facing flows.\n"
+            "4. **No per-phase size limit.** A phase can hold 1 feature or 50. Group by theme, not by size.\n"
+            "5. **Phase names are user-facing labels.** 'Authentication & User Management' beats 'Phase 1'.\n\n"
+            "Return ONLY a JSON array, no other text:\n"
             '[\n'
             '  {\n'
-            '    "phase_name": "Phase 1: Foundation",\n'
-            '    "phase_goal": "Set up infrastructure and core data models",\n'
-            '    "sprints": [\n'
-            '      {"sprint_name": "Calculator UI Foundation", "sprint_goal": "Users see a clean, '
-                  'responsive calculator interface that works on desktop and mobile", '
-                  '"feature_ids": [338, 340, 347]},\n'
-            '      {"sprint_name": "Arithmetic Engine", "sprint_goal": "Users can perform basic and '
-                  'compound arithmetic operations with correct precision", "feature_ids": [337, 341, 343, 351]}\n'
-            '    ]\n'
+            '    "phase_name": "Foundation",\n'
+            '    "phase_goal": "Establish auth, data layer, and CI",\n'
+            '    "feature_ids": [101, 102, 103]\n'
+            '  },\n'
+            '  {\n'
+            '    "phase_name": "Core Workflow",\n'
+            '    "phase_goal": "End-to-end primary user journey",\n'
+            '    "feature_ids": [104, 105, 106, 107]\n'
             '  }\n'
             ']',
             db=db,
@@ -3462,69 +2788,41 @@ async def api_plan_sprints(
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
-        phase_plan = json.loads(raw.strip())
+        plan = json.loads(raw.strip())
     except json.JSONDecodeError:
         raise HTTPException(status_code=502, detail="LLM returned malformed JSON — try again")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"LLM error: {e}")
 
     # Count existing phases so new ones get sequential order values.
-    existing_phase_count_result = await db.execute(
+    existing_count = (await db.execute(
         select(func.count()).select_from(Phase).where(Phase.product_id == product_id)
-    )
-    phase_order_offset = existing_phase_count_result.scalar() or 0
+    )).scalar() or 0
 
-    # Check whether there are any non-completed sprints (active/planned) — they
-    # would conflict with a fresh plan. If so, we already blocked above; this is
-    # just a belt-and-suspenders flush before creating new phases/sprints.
-    # We do NOT delete completed sprints or their features — history is immutable.
-
-    # Create phases → sprints → assign features
     phases_created = 0
-    sprints_created = 0
     features_assigned = 0
-    first_sprint_overall = True
-
-    for phase_idx, ph in enumerate(phase_plan):
+    for phase_idx, ph in enumerate(plan):
         phase = Phase(
             product_id=product_id,
-            name=ph.get("phase_name", f"Phase {phase_idx + 1}"),
-            goal=ph.get("phase_goal", ""),
-            order=phase_order_offset + phase_idx,
-            status="active" if (phase_order_offset == 0 and phase_idx == 0) else "planned",
+            name=ph.get("phase_name") or f"Phase {existing_count + phase_idx + 1}",
+            goal=ph.get("phase_goal") or "",
+            order=existing_count + phase_idx,
         )
         db.add(phase)
         await db.flush()
         phases_created += 1
 
-        for sprint_idx, sp in enumerate(ph.get("sprints", [])):
-            sprint = Sprint(
-                product_id=product_id,
-                phase_id=phase.id,
-                name=sp.get("sprint_name", f"Sprint {sprints_created + 1}"),
-                goal=sp.get("sprint_goal", ""),
-                status="active" if first_sprint_overall else "planned",
+        for fid in (ph.get("feature_ids") or []):
+            feat_row = await db.execute(
+                select(Feature).where(Feature.id == fid, Feature.product_id == product_id)
             )
-            db.add(sprint)
-            await db.flush()
-            sprints_created += 1
-            first_sprint_overall = False
+            feat = feat_row.scalar_one_or_none()
+            if feat:
+                feat.phase_id = phase.id
+                features_assigned += 1
+        await db.flush()
 
-            # Clamp the LLM's feature_ids to the per-sprint cap; extras drop
-            # back to the unsprinted pool and can be planned in a later round.
-            for fid in (sp.get("feature_ids") or [])[:max_per_sprint]:
-                feat_row = await db.execute(
-                    select(Feature).where(Feature.id == fid, Feature.product_id == product_id)
-                )
-                feat = feat_row.scalar_one_or_none()
-                if feat:
-                    feat.sprint_id = sprint.id
-                    features_assigned += 1
-
-            await db.flush()
-            # 1-PR model: no sprint integration branch / PR to provision.
-
-    return {"phases_created": phases_created, "sprints_created": sprints_created, "features_assigned": features_assigned}
+    return {"phases_created": phases_created, "features_assigned": features_assigned}
 
 
 @app.post("/api/features/{feature_id}/links", response_model=schemas.FeatureLinkOut, status_code=201)
