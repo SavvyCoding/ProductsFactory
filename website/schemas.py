@@ -91,7 +91,8 @@ class FeatureCreate(BaseModel):
     depends_on:   Optional[int] = None
     source:       str = "pm"
     feature_type: str = "feature"
-    sprint_id:    Optional[int] = None
+    phase_id:     Optional[int] = None
+    parent_id:    Optional[int] = None  # sizing-gate splits point children back
     story_points: Optional[int] = None
     due_date:     Optional[date] = None
     status:       str = "Pending"
@@ -141,7 +142,9 @@ class FeatureUpdate(BaseModel):
     last_changes_signature: Optional[str] = None  # supervisor.detect_repeated_review_feedback
     repeated_changes_count: Optional[int] = None  # ditto
     session_uid:     Optional[str]  = None  # review authorship — stored in feature_reviews, not on feature
-    sprint_id:       Optional[int]  = None  # reassign to a different sprint
+    phase_id:        Optional[int]  = None  # reassign to a different phase
+    parent_id:       Optional[int]  = None  # sizing-gate split tree
+    merge_notes:     Optional[str]  = None  # per-feature release-notes draft
     expected_version: Optional[int] = None  # optimistic lock — if provided, update is rejected on mismatch
     # Caller-supplied attribution: who/what is making this change. Read by
     # the rank-guard handler in main.py to allow trusted internal callers
@@ -189,7 +192,9 @@ class FeatureOut(BaseModel):
     review_notes:    Optional[str] = None
     last_changes_signature: Optional[str] = None
     repeated_changes_count: int = 0
-    sprint_id:       Optional[int] = None
+    phase_id:        Optional[int] = None
+    parent_id:       Optional[int] = None
+    merge_notes:     Optional[str] = None
     story_points:    Optional[int] = None
     due_date:        Optional[date] = None
     created_at:      datetime
@@ -365,7 +370,6 @@ class PhaseCreate(BaseModel):
     name:       str
     goal:       Optional[str] = None
     order:      int = 0
-    status:     str = "planned"
 
 
 class PhaseUpdate(BaseModel):
@@ -381,67 +385,8 @@ class PhaseOut(BaseModel):
     name:       str
     goal:       Optional[str]
     order:      int
-    status:     str
 
     model_config = {"from_attributes": True}
-
-
-class SprintCreate(BaseModel):
-    product_id: int
-    phase_id:   Optional[int] = None
-    name:       str
-    goal:       Optional[str] = None
-    start_date: Optional[date] = None
-    end_date:   Optional[date] = None
-    status:     str = "active"
-
-
-class SprintUpdate(BaseModel):
-    phase_id:    Optional[int]  = None
-    name:        Optional[str]  = None
-    goal:        Optional[str]  = None
-    start_date:  Optional[date] = None
-    end_date:    Optional[date] = None
-    status:      Optional[str]  = None
-    # Sprint-PR-mode metadata. These were missing from the schema so PATCH
-    # /api/sprints/{id} silently dropped them — every attempt to update the
-    # sprint's branch/PR pointer no-op'd at HTTP level (returned 200 with
-    # the OLD values intact). Real incident 2026-05-06: PR #1 on DigitalSign
-    # got closed unmerged but the sprint metadata still pointed at it; the
-    # orchestrator manual-recovery PATCH to swap to PR #2 succeeded HTTP-wise
-    # but did nothing, requiring a direct DB UPDATE. Mirrors the
-    # FeatureUpdate.changed_by gap fixed earlier on the OrchestratorRefactor
-    # branch.
-    branch_name: Optional[str]  = None
-    pr_number:   Optional[int]  = None
-    pr_url:      Optional[str]  = None
-
-
-class SprintOut(BaseModel):
-    id:             int
-    product_id:     int
-    phase_id:       Optional[int]
-    name:           str
-    goal:           Optional[str]
-    start_date:     Optional[date]
-    end_date:       Optional[date]
-    status:         str
-    release_notes:  Optional[str] = None
-    dod_status:     Optional[dict] = None
-    retro_doc_path: Optional[str] = None
-    completed_at:   Optional[datetime] = None
-    branch_name:    Optional[str] = None
-    pr_number:      Optional[int] = None
-    pr_url:         Optional[str] = None
-    kind:           str           = "normal"
-
-    model_config = {"from_attributes": True}
-
-
-class BugFixSprintCreate(BaseModel):
-    product_id:       int
-    parent_sprint_id: int
-    bug_feature_ids:  list[int]
 
 
 class FeatureLinkCreate(BaseModel):
@@ -469,25 +414,6 @@ class FeatureLinkOut(BaseModel):
 # ── Internal /api/* request bodies (Phase #9) ────────────────────────────────
 # Pydantic shapes for endpoints that previously took body: dict — replaces
 # silent no-op-on-typo behavior with a 422 on malformed payloads.
-
-class BlockedRouteRequest(BaseModel):
-    feature_ids: List[int]
-    reason:      Optional[str] = None
-
-
-class SprintSignOffRequest(BaseModel):
-    gate:           str
-    value:          bool = True
-    notes:          Optional[str] = None
-    retro_doc_path: Optional[str] = None
-
-    @field_validator("gate")
-    @classmethod
-    def gate_valid(cls, v: str) -> str:
-        valid = {"qa_passed", "security_clean", "retro_done"}
-        if v not in valid:
-            raise ValueError(f"gate must be one of {sorted(valid)}")
-        return v
 
 
 class SessionKillRequest(BaseModel):

@@ -43,41 +43,39 @@ If ANY of these is true → **SPLIT before designing**:
   - You cannot honestly answer "yes" to #5
 
 Splitting workflow (see §SPLIT below). After splitting, the parent
-story is **Rejected as "Replaced"** (terminal — not Blocked) and the
-children inherit the parent's sprint with `status=Approved` so the
-next designer session picks one of them up immediately.
+story is **Rejected as "Replaced"** (terminal — not Blocked), and the
+children inherit the parent's `phase_id` plus a `parent_id` pointing
+back to the original story — so the next designer session picks one of
+them up immediately and the audit trail captures the tree.
 
 ---
 
 ## SPLIT — when a story is too large
 
 When the sizing gate trips, **create child stories in the parent's
-sprint with `status=Approved`**, then mark the parent **Rejected** with
-a "Replaced by …" reason. Do NOT design the oversized story. Do NOT
-mark the parent Blocked — Blocked keeps it in the active set and pins a
-sprint slot; Rejected retires it cleanly while preserving the audit
-trail (the comment + feature_links + changelog still tell the story).
+phase with `status=Approved` and `parent_id=<original>`**, then mark
+the parent **Rejected** with a "Replaced by …" reason. Do NOT design
+the oversized story. Do NOT mark the parent Blocked — Blocked keeps it
+in the active set and is meant only for stuck-state triage; Rejected
+retires it cleanly while preserving the parent_id audit trail so the
+tree can be reconstructed later.
 
-Sprint-cap math: the parent occupies 1 slot until your Rejected write
-lands. The default cap is 5 features per sprint. So you can safely
-create **up to 4** children at once. If your split needs more than 4
-children, create the first 4 in this session and leave a comment on the
-parent listing the rest as future-split candidates — a follow-up
-session will pick the parent back up only if it isn't Rejected, so
-instead include the over-flow children in the same Rejected note (the
-PM will reassign them to a future sprint).
+No per-phase cap. Create as many children as the story honestly needs
+(typical: 2-4). Each child must individually pass the sizing gate;
+recursive splits aren't supported in one session, so size each child
+correctly when you create it.
 
 ```bash
 PARENT_ID={feature_id}
 
-# 0. Read the parent's sprint_id so children land in the same sprint.
-PARENT_SPRINT_ID=$(curl -sS $PM_API_URL/api/features/$PARENT_ID \
-  | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('sprint_id') or '')")
+# 0. Read the parent's phase_id so children land in the same phase.
+PARENT_PHASE_ID=$(curl -sS $PM_API_URL/api/features/$PARENT_ID \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('phase_id') or '')")
 
-# 1. Create each child story IN THE PARENT'S SPRINT, auto-Approved so the
-#    NEXT designer session picks one up without PM intervention.
-#    Description must be a tight, specific scope — not "implement the X
-#    feature" but the slice you're carving off.
+# 1. Create each child story IN THE PARENT'S PHASE, auto-Approved + with
+#    parent_id pointing back to the original. Description must be a tight,
+#    specific scope — not "implement the X feature" but the slice you're
+#    carving off.
 CHILD1=$(curl -sS -X POST $PM_API_URL/api/features \
   -H 'Content-Type: application/json' \
   -d "{
@@ -87,37 +85,31 @@ CHILD1=$(curl -sS -X POST $PM_API_URL/api/features \
     \"priority\": 50,
     \"source\": \"ai\",
     \"status\": \"Approved\",
-    \"sprint_id\": $PARENT_SPRINT_ID
+    \"parent_id\": $PARENT_ID,
+    \"phase_id\": $PARENT_PHASE_ID
   }" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
-# … repeat for CHILD2, CHILD3, CHILD4 (max 4 — see sprint-cap math above)
+# … repeat for CHILD2, CHILD3, ... as needed
 
-# 2. Link children to parent for audit trail (the coder/reviewer don't
-#    depend on this; future PMs reading the history do).
-for child in $CHILD1 $CHILD2 $CHILD3 $CHILD4; do
-  curl -sS -X POST $PM_API_URL/api/features/$PARENT_ID/links \
-    -H 'Content-Type: application/json' \
-    -d "{\"target_id\": $child, \"link_type\": \"blocks\"}"
-done
-
-# 3. Post a "replaced by" comment on the parent so the corrections trail
+# 2. Post a "replaced by" comment on the parent so the corrections trail
 #    on the feature page reads naturally to anyone scanning history.
+#    (parent_id on the children is the source of truth; the comment is
+#    human-readable narration.)
 curl -sS -X POST $PM_API_URL/api/features/$PARENT_ID/comments \
   -H 'Content-Type: application/json' \
   -d "{
     \"author\": \"designer\",
-    \"body\": \"Replaced by children #$CHILD1, #$CHILD2, #$CHILD3, #$CHILD4 — original story exceeded sizing gate (>4 ACs / >6 files / >3 subsystems). Children inherit sprint $PARENT_SPRINT_ID with status=Approved.\"
+    \"body\": \"Replaced by children #$CHILD1, #$CHILD2, ... — original story exceeded sizing gate (>4 ACs / >6 files / >3 subsystems). Children carry parent_id=$PARENT_ID and inherit phase $PARENT_PHASE_ID with status=Approved.\"
   }"
 
-# 4. Append parent Rejected entry to session_result.json — terminal,
-#    frees the sprint slot for the children, and prevents future
-#    designer sessions from re-picking this story.
-printf '{"id":%s,"status":"Rejected","blocked_reason":"Replaced by children #%s, #%s, #%s, #%s — split for sizing"}\n' \
-  $PARENT_ID $CHILD1 $CHILD2 $CHILD3 $CHILD4 >> /workspace/session_result.json
+# 3. Append parent Rejected entry to session_result.json — terminal,
+#    prevents future designer sessions from re-picking this story.
+printf '{"id":%s,"status":"Rejected","blocked_reason":"Replaced by children #%s, #%s — split for sizing"}\n' \
+  $PARENT_ID $CHILD1 $CHILD2 >> /workspace/session_result.json
 ```
 
 Then move to the next assigned story. (The next designer session will
-naturally pick the first child since it's already Approved and in the
-same sprint — no PM action required.)
+naturally pick the first child since it's already Approved in the same
+phase — no PM action required.)
 
 If the assigned story is the LAST child of an earlier split and now sized
 correctly, design it normally — don't recursively split.
