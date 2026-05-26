@@ -659,11 +659,16 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
                 continue
             debris_hits.append(f"{f} (in scratch dir — template forbids commits here)")
             continue
-        # 13c: empty source file
+        # 13c: empty source file — but allow empty __init__.py (standard
+        # Python package marker idiom). Surfaced by 2026-05-26 SmokeTest
+        # smoke test: greenfield Python product was bounced for
+        # `src/__init__.py`, `tests/__init__.py`, `migrations/__init__.py`,
+        # all of which are intentional, standard, and required by Python.
         try:
             full = _PP(working_dir) / f
             if (any(f.endswith(ext) for ext in _SOURCE_EXTENSIONS)
-                    and full.is_file() and full.stat().st_size == 0):
+                    and full.is_file() and full.stat().st_size == 0
+                    and fname != "__init__.py"):
                 debris_hits.append(f"{f} (empty source file)")
                 continue
         except Exception:
