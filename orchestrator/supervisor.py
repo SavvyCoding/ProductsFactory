@@ -888,7 +888,15 @@ def detect_kill_recovery(
     # fix_attempts here would bin features for an environmental issue that no
     # in-container code change can repair. _finalize_session already alerted
     # the operator and released the claims via _rollback_stuck_features.
-    if exit_code == 42:
+    #
+    # exit 43 = LLM-infrastructure exhaustion (quota / auth / whole-chain 5xx)
+    # raised by agent_loop.py via ollama_agent.LLMInfraExhausted. Same logic:
+    # the agent never got a usable LLM turn, so no work was attempted and
+    # there's nothing for the agent to "fix" on retry. _finalize_session
+    # already alerted + released the claim. Real incident: MyTracking
+    # 2026-05-22 lost 47 features to Blocked when 106 Ollama-Cloud 429s
+    # ground every designer/coder session through 5 fix_attempts each.
+    if exit_code in (42, 43):
         return 0
 
     # Reviewer kills are not feature failures. The reviewer's decision

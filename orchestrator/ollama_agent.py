@@ -32,6 +32,28 @@ from pathlib import Path
 import httpx
 
 
+# ── LLM-infrastructure failures ───────────────────────────────────────────────
+# Raised when the backend cannot reach a usable model through any retry/fallback
+# — i.e. the failure is in the LLM infrastructure (rate-limit / quota / auth /
+# all models 5xx-ing / network partition), not in the work the agent was doing.
+# docker_runner translates a session ending with this exception into exit code
+# 43 (`EXIT_LLM_INFRA`); supervisor.detect_kill_recovery and _finalize_session
+# treat 43 the same as the existing exit-42 env-not-ready path — release the
+# feature claim without charging fix_attempts. See orchestrator/docker_runner.py
+# and orchestrator/supervisor.py.
+class LLMInfraExhausted(RuntimeError):
+    """All models in the backend chain failed for infrastructure reasons.
+
+    `category` is one of: 'quota', 'auth', 'network', 'unknown'. Used by the
+    operator alert so the message names the actual root cause (quota reset
+    is hours; auth rotation is minutes; network is a deploy problem).
+    """
+
+    def __init__(self, message: str, category: str = "unknown") -> None:
+        super().__init__(message)
+        self.category = category
+
+
 # ── Secret redaction for tool results ─────────────────────────────────────────
 # Tool output (bash stdout/stderr, file contents, HTTP responses) flows back
 # into the agent's conversation history and therefore reaches Ollama Cloud on
@@ -829,7 +851,14 @@ class _OllamaBackend:
                     last_err = f"{model}: HTTP {code}: {body}"
                     if code in _CHAIN_FATAL_STATUS:
                         # Auth-class failure — same chain key, won't help to swap models.
-                        raise RuntimeError(f"Ollama non-retryable {code}: {body}")
+                        # This is an infra problem (rotate the API key), not an
+                        # agent-side failure. Raise LLMInfraExhausted so the
+                        # session exits with the dedicated exit code and the
+                        # supervisor skips bumping fix_attempts.
+                        raise LLMInfraExhausted(
+                            f"Ollama auth failure {code} on {model!r}: {body[:200]}",
+                            category="auth",
+                        )
                     if code == 404:
                         # Model not found / not pulled — break out of retry loop
                         # and fall through to the next model in the chain.
@@ -856,9 +885,22 @@ class _OllamaBackend:
                 _log(f"WARNING: {model!r} exhausted 5 retries — falling back to {next_model!r}")
                 self.fallback_log.append(f"{model_idx}→{model}: exhausted, switching to {next_model}")
         if data is None:
-            raise RuntimeError(
+            # Whole-chain failure — by definition an infra problem (every
+            # model fell over, swapping models won't help). Categorize from
+            # last_err so the operator alert names the actual root cause.
+            err_text = (last_err or "").lower()
+            if "429" in err_text or "usage limit" in err_text or "rate limit" in err_text:
+                category = "quota"
+            elif "network" in err_text or "connect" in err_text or "timeout" in err_text:
+                category = "network"
+            elif "401" in err_text or "403" in err_text or "auth" in err_text:
+                category = "auth"
+            else:
+                category = "unknown"
+            raise LLMInfraExhausted(
                 f"Ollama failed across all {len(self.models)} models in chain: "
-                f"{', '.join(self.models)} — last error: {last_err}"
+                f"{', '.join(self.models)} — last error: {last_err}",
+                category=category,
             )
 
         # Track token usage for session-end metrics PATCH. Ollama's OpenAI-
