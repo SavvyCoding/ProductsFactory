@@ -4315,22 +4315,6 @@ async def serve_product_video(
     return FileResponse(str(file_path), media_type="video/mp4")
 
 
-@app.delete("/api/products/{product_id}/sessions", status_code=200)
-async def api_clear_sessions(
-    product_id: int,
-    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
-):
-    """Delete all session history for a product."""
-    await _get_product_or_404(product_id, db)
-    result = await db.execute(
-        select(DBSession).where(DBSession.product_id == product_id)
-    )
-    sessions = result.scalars().all()
-    for s in sessions:
-        await db.delete(s)
-    return {"deleted": len(sessions)}
-
-
 @app.get("/api/products/{product_id}/sessions", response_model=list[schemas.SessionOut])
 async def api_product_sessions(
     product_id: int, limit: int = 20,

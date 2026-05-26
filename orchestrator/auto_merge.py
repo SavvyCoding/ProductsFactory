@@ -31,9 +31,6 @@ log = logging.getLogger("auto_merge")
 
 PM_API_URL = os.environ.get("PM_API_URL", "http://pm-api:8080")
 
-# Mirrors dispatch.TERMINAL but kept local to avoid an import cycle.
-TERMINAL = frozenset({"Pushed", "Deferred", "Rejected", "Reverted"})
-
 
 def _try_merge_pr(repo_slug: str, pr_num: int, token: str) -> tuple[int, str]:
     """Attempt squash-merge of a single PR. Returns (status_code, body_excerpt).
