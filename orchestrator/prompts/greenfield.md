@@ -48,7 +48,7 @@ After you exit, the orchestrator cuts a fresh **session branch** (`coder/<sessio
 The reviewer flags these same items every cycle — handling them now saves a rework round (each adds 20–60 min and bumps `fix_attempts` toward the auto-block cap of 5). For each implemented story:
 
 - [ ] **Acceptance criteria covered** — re-read `docs/story_<id>.md`; every numbered AC has both a code path and a non-skipped test exercising it.
-- [ ] **No `.skip` / `.todo` / `xit(` / `xdescribe(`** in the tests you touched — un-skip and make it pass, or delete it. Reviewers treat skip as missing coverage.
+- [ ] **HARD STOP: NO `.skip` / `.todo` / `@pytest.mark.skip` / `pytest.skip()` / `xit(` / `xdescribe(`** in the tests you touched. The post-coder lint-guard auto-rejects any commit containing these and bounces the feature back with `fix_attempts++`. **If you cannot implement a test, DELETE it from the file entirely.** Do not leave a skipped placeholder hoping a later cycle will fill it in — the next cycle hits the same wall and you burn through `fix_attempts` until the feature auto-Blocks at 5. Reviewers treat skip as missing coverage.
 - [ ] **No raw `error.message` / `err.message` in HTTP responses** on touched files. Replace with generic ("Service unavailable", "Internal error") and log the raw error server-side. Info disclosure is the #1 security flag.
 - [ ] **No hardcoded secrets** — grep changed files for `(api[_-]?key|password|secret|token)\s*[:=]\s*["']`. Move matches to env vars.
 - [ ] **Tests still pass** — re-run them after the last edit; a green test before refactor doesn't guarantee green now.
