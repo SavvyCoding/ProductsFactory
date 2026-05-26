@@ -82,7 +82,7 @@ from sqlalchemy.orm import selectinload
 from website.database import get_db
 from website.models import (
     Product, Feature, FeatureReview, Session as DBSession, Alert, SystemConfig, PMUser,
-    FeatureComment, FeatureChangelog, Label, FeatureLabel, Phase, Sprint, FeatureLink,
+    FeatureComment, FeatureChangelog, Label, FeatureLabel, Phase, FeatureLink,
     SupervisorAction,
 )
 from website.auth import require_auth, verify_internal_signature
