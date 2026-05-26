@@ -13,8 +13,6 @@ import logging
 import os
 import re
 
-import httpx
-
 from orchestrator.integrations import github_app
 
 log = logging.getLogger("poller.docker")
@@ -38,27 +36,11 @@ def _parse_repo_slug(github_repo: str) -> str | None:
 
 
 def _get_gh_token() -> str | None:
-    """Return a token usable as GH_TOKEN for git pushes and GitHub API calls.
+    """Return a fresh GitHub App installation token, or None.
 
-    Preference order:
-      1. Fresh GitHub App installation token (the new path).
-      2. system_config.github_pat (legacy fallback during transition).
-
-    Returns None only if both paths are unconfigured. Per-call rather than
-    cached at this layer — the App module owns its own caching with proper
-    expiry handling; the PAT branch is rarely hit and cheap to re-read.
+    Per CLAUDE.md "Git auth: GitHub App only": the PAT fallback was
+    removed in the drift-cleanup pass. The App module (github_app.py)
+    owns its own short-lived cache; on mint failure the None surfaces
+    here so callers can fail visibly rather than silently degrade.
     """
-    app_token = github_app.get_installation_token()
-    if app_token:
-        return app_token
-
-    try:
-        with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
-            resp = client.get("/api/system-config")
-            resp.raise_for_status()
-            if "application/json" not in resp.headers.get("content-type", ""):
-                return None
-            data = resp.json()
-            return data.get("github_pat") or None if isinstance(data, dict) else None
-    except Exception:
-        return None
+    return github_app.get_installation_token() or None
