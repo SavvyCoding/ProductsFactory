@@ -653,16 +653,15 @@ async def dashboard(
         elif row.status == "Pending":
             fc["pending"] += row.cnt
 
-    # Active phase + sprint per product for dashboard cards
+    # Phases→features flat model (migration 043): no "active phase" concept;
+    # surface the earliest-ordered phase per product if the UI wants a hint.
     phases_result = await db.execute(
-        select(Phase).where(Phase.status == "active")
+        select(Phase).order_by(Phase.product_id, Phase.order, Phase.id)
     )
-    active_phases: dict[int, Phase] = {p.product_id: p for p in phases_result.scalars().all()}
-
-    sprints_result = await db.execute(
-        select(Sprint).where(Sprint.status == "active")
-    )
-    active_sprints: dict[int, Sprint] = {s.product_id: s for s in sprints_result.scalars().all()}
+    active_phases: dict[int, Phase] = {}
+    for p in phases_result.scalars().all():
+        active_phases.setdefault(p.product_id, p)
+    active_sprints: dict[int, "object"] = {}  # legacy template key — empty under flat model
 
     # Last session persona per product
     sessions_result = await db.execute(
@@ -756,17 +755,15 @@ async def product_detail(
     open_prs_list = list_open_prs(product.github_repo or "", token=_gh_pat) if product.github_repo else []
     open_prs = len(open_prs_list)
 
-    # Phase + Sprint + label data for the Sprints tab
+    # Phases→features flat model (migration 043): phases are pure UI groupings,
+    # no sprints layer. Legacy template keys (`sprints`, `active_sprint`) kept
+    # empty for backward compat until the product.html template is rewritten.
     phase_result = await db.execute(
         select(Phase).where(Phase.product_id == product_id).order_by(Phase.order, Phase.id)
     )
     phases = phase_result.scalars().all()
-
-    sprint_result = await db.execute(
-        select(Sprint).where(Sprint.product_id == product_id).order_by(Sprint.phase_id.nulls_last(), Sprint.id)
-    )
-    sprints = sprint_result.scalars().all()
-    active_sprint = next((s for s in sprints if s.status == "active"), None)
+    sprints: list = []
+    active_sprint = None
 
     label_result = await db.execute(
         select(Label).where(Label.product_id == product_id).order_by(Label.name)
@@ -1009,14 +1006,14 @@ async def change_feature_status_form(
     feature.status = status
     if status == "Approved" and feature.fix_attempts > 0:
         feature.fix_attempts = 0
-    # PM-initiated "park for later consideration": clear sprint membership and
-    # review-cycle artifacts so the feature is a clean slate when re-picked-up.
+    # PM-initiated "park for later consideration": clear review-cycle
+    # artifacts so the feature is a clean slate when re-picked-up.
     # design_doc_path is preserved (the design itself may still be reusable);
     # pr_number is preserved (Pushed → Pending isn't allowed, so any pr_number
     # here is stale state from an earlier cycle and the auto-merge sweep
-    # already won't merge it once status≠Reviewed).
+    # already won't merge it once status≠Reviewed). phase_id is preserved
+    # for now — the feature still belongs to its phase grouping.
     if status == "Pending":
-        feature.sprint_id = None
         feature.review_outcome = None
         if feature.fix_attempts > 0:
             feature.fix_attempts = 0
@@ -1432,22 +1429,8 @@ async def bulk_approve(
     result = await db.execute(
         select(Feature).where(Feature.product_id == product_id, Feature.id.in_(ids), Feature.status == "Pending")
     )
-    next_sprint = await _next_planned_sprint(product_id, db)
-    cap = await _sprint_cap(db)
-    used = 0
-    if next_sprint:
-        cur = await db.execute(
-            select(func.count()).select_from(Feature).where(
-                Feature.sprint_id == next_sprint.id,
-                Feature.status.notin_(_TERMINAL_FEATURE_STATUSES),
-            )
-        )
-        used = cur.scalar() or 0
     for f in result.scalars().all():
         f.status = "Approved"
-        if f.sprint_id is None and next_sprint and used < cap:
-            f.sprint_id = next_sprint.id
-            used += 1
     await db.flush()
     return RedirectResponse(f"/product/{product_id}?tab=board&phase=Approved", status_code=303)
 
@@ -1478,22 +1461,8 @@ async def bulk_approve_all(
     result = await db.execute(
         select(Feature).where(Feature.product_id == product_id, Feature.status == "Pending")
     )
-    next_sprint = await _next_planned_sprint(product_id, db)
-    cap = await _sprint_cap(db)
-    used = 0
-    if next_sprint:
-        cur = await db.execute(
-            select(func.count()).select_from(Feature).where(
-                Feature.sprint_id == next_sprint.id,
-                Feature.status.notin_(_TERMINAL_FEATURE_STATUSES),
-            )
-        )
-        used = cur.scalar() or 0
     for f in result.scalars().all():
         f.status = "Approved"
-        if f.sprint_id is None and next_sprint and used < cap:
-            f.sprint_id = next_sprint.id
-            used += 1
     await db.flush()
     return RedirectResponse(f"/product/{product_id}?tab=board&phase=Approved", status_code=303)
 
@@ -1680,8 +1649,6 @@ def _validate_story_size(
 async def api_create_feature(body: schemas.FeatureCreate, db: AsyncSession = Depends(get_db)):
     """PM or Claude (AI-recommended) creates a new feature."""
     await _get_product_or_404(body.product_id, db)
-    if body.sprint_id:
-        await _check_sprint_capacity(body.sprint_id, 1, db)
     # Story-size cap (see futureplan_v2.md, INVARIANTS.md Vocabulary).
     # Bypass: PM-initiated creates set source="pm"; everything else (planner,
     # recommender, refactorer, devops, analytics) goes through the gate.
@@ -1721,35 +1688,26 @@ async def api_update_feature(
             },
         )
 
-    # Enforce per-sprint cap BEFORE any mutation. Running the count query while
-    # the session is clean keeps autoflush from firing an UPDATE (and expiring
-    # server-side `onupdate=func.now()` columns the response model needs).
-    if "sprint_id" in updates and updates["sprint_id"] and updates["sprint_id"] != feature.sprint_id:
-        await _check_sprint_capacity(int(updates["sprint_id"]), 1, db)
-
-    # Quarantine Blocked-sprint features from agent writes. Once a feature
-    # has been routed to the per-product Blocked sprint (kind=blocked), only
-    # PMs can change it — reroute via sprint_id (the kind=normal switch
-    # implicitly accepts re-engagement) or Reject. Without this, reviewers
-    # PATCH features back into the agent pipeline as soon as they spot the
-    # `[feature-NN]` commit prefix on the sprint PR, defeating the holdpen.
+    # Quarantine Blocked features from agent writes — only PMs can re-engage
+    # a Blocked feature (set status to Approved/Designed/etc). Without this,
+    # reviewers would PATCH features back into the agent pipeline as soon as
+    # they spot the `[feature-NN]` commit prefix, defeating the block. Replaces
+    # the legacy Blocked-sprint holdpen with a simple status check (phases→
+    # features flat model — no sprint layer).
     _peek_changed_by = updates.get("changed_by", "agent")
-    if feature.sprint_id and _peek_changed_by != "pm":
-        _cur_sprint = await db.get(Sprint, feature.sprint_id)
-        if _cur_sprint and _cur_sprint.kind == "blocked":
-            # Allow patches that ROUTE THE FEATURE OUT of the Blocked sprint
-            # (changing sprint_id) — those are how PMs re-engage. Block any
-            # other write from non-PM callers.
-            _exits_blocked = "sprint_id" in updates and updates["sprint_id"] != feature.sprint_id
-            if not _exits_blocked:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"Feature #{feature_id} is in a Blocked sprint — agents "
-                        f"can't modify it. Reroute via PATCH sprint_id (PM-driven) "
-                        f"to put it back in the agent pipeline."
-                    ),
-                )
+    if feature.status == "Blocked" and _peek_changed_by != "pm":
+        # Allow patches that move OUT of Blocked status — those are how PMs
+        # re-engage. Block any other write from non-PM callers.
+        _exits_blocked = "status" in updates and updates["status"] != "Blocked"
+        if not _exits_blocked:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Feature #{feature_id} is Blocked — agents can't modify it. "
+                    f"PM must PATCH status to Approved/Designed/Implementing to "
+                    f"re-engage."
+                ),
+            )
 
     # IV.1 rank guard (#4): status never silently downgrades. Previously
     # enforced only in the agent harness (orchestrator/docker_runner.py:
@@ -1823,7 +1781,7 @@ async def api_update_feature(
     # Auto-record changelog for tracked fields before applying the update
     _CHANGELOG_FIELDS = frozenset({
         "status", "priority", "pr_number", "blocked_reason",
-        "sprint_id", "story_points", "due_date", "fix_attempts",
+        "phase_id", "parent_id", "story_points", "due_date", "fix_attempts",
     })
     changed_by = updates.pop("changed_by", "agent")
     for field in _CHANGELOG_FIELDS:
@@ -1908,11 +1866,9 @@ async def api_update_feature(
         # not actually a cap.
         max_fix = await _max_fix_attempts(db)
         if new_attempts >= max_fix:
-            blocked_sprint = await _get_or_create_blocked_sprint(
-                feature.product_id, db
-            )
-            prev_sprint_id = feature.sprint_id
-            feature.sprint_id = blocked_sprint.id
+            # Phases→features flat model (migration 043): no more Blocked
+            # holdpen sprint — just set the feature status to Blocked. PMs
+            # re-engage by PATCHing status back to Approved/Designed.
             feature.status = "Blocked"
             if not feature.blocked_reason:
                 feature.blocked_reason = (
@@ -1922,24 +1878,13 @@ async def api_update_feature(
                 )
             db.add(FeatureChangelog(
                 feature_id=feature_id,
-                field="sprint_id",
-                old_value=str(prev_sprint_id) if prev_sprint_id else None,
-                new_value=str(blocked_sprint.id),
-                changed_by=f"{changed_by} (auto-blocked at cap)",
-            ))
-            db.add(FeatureChangelog(
-                feature_id=feature_id,
                 field="status",
                 old_value=str(new_status) if new_status else str(prev_status),
                 new_value="Blocked",
                 changed_by=f"{changed_by} (auto-blocked at cap)",
             ))
-            # Close the open GitHub PR for this feature (if any). Same
-            # chokepoint api_route_to_blocked_sprint uses — both Blocked-
-            # routing paths must close the PR or we get the 2026-05-19
-            # PR #81 shape (StockAnalysis feature 594 Blocked via this
-            # inline path; PR left open because the close hook only ran
-            # in api_route_to_blocked_sprint).
+            # Close the open GitHub PR for this feature (if any) — Blocked
+            # features shouldn't keep an in-flight PR open against main.
             _product_for_pr = await db.get(Product, feature.product_id)
             _gh_repo = (_product_for_pr.github_repo or "") if _product_for_pr else ""
             await _close_blocked_feature_pr(
@@ -1989,35 +1934,9 @@ async def api_pm_status_update(
     if body.status == "Approved" and feature.fix_attempts > 0:
         feature.fix_attempts = 0
 
-    # Auto-assign to the next planned sprint when PM approves an unsprinted feature.
-    # Avoids approved features becoming invisible while an active sprint is running.
-    if body.status == "Approved" and feature.sprint_id is None:
-        next_sprint_result = await db.execute(
-            select(Sprint)
-            .where(Sprint.product_id == feature.product_id)
-            .where(Sprint.status == "planned")
-            .where(Sprint.kind == "normal")
-            .order_by(Sprint.id.asc())
-            .limit(1)
-        )
-        next_sprint = next_sprint_result.scalar_one_or_none()
-        if next_sprint:
-            cap = await _sprint_cap(db)
-            cur = await db.execute(
-                select(func.count()).select_from(Feature).where(
-                Feature.sprint_id == next_sprint.id,
-                Feature.status.notin_(_TERMINAL_FEATURE_STATUSES),
-            )
-            )
-            if (cur.scalar() or 0) < cap:
-                feature.sprint_id = next_sprint.id
-                db.add(FeatureChangelog(
-                    feature_id=feature_id,
-                    field="sprint_id",
-                    old_value=None,
-                    new_value=str(next_sprint.id),
-                    changed_by="pm",
-                ))
+    # Phases→features flat model (migration 043): no sprint auto-assignment.
+    # Features ship via their own session PR; PMs (or the LLM planner) can
+    # group features into phases later via PATCH phase_id.
 
     if old_status != body.status:
         db.add(FeatureChangelog(
