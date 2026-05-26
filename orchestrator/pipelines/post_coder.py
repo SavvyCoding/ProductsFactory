@@ -1323,6 +1323,7 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
     Best-effort: any unexpected exception → passed=True (skip the gate).
     """
     from pathlib import Path as _PP
+    import re as _re
     wd = _PP(working_dir)
     result = {
         "passed": True, "env_broken": False, "collection_errors": 0,
