@@ -103,16 +103,32 @@ def _apply_session_entry(client: httpx.Client, entry: dict) -> bool:
             log.info(f"[progress] Feature #{fid}: extracted pr_number={entry['pr_number']} from pr_url")
         else:
             log.warning(f"[progress] REJECTING feature #{fid} — Reviewing without pr_number (agent contract violation)")
+            # Bump fix_attempts so repeated violations auto-Block at 5.
+            # Previously this whole block was wrapped in ``try/except: pass``
+            # which made the enforcement theatrical — if the PATCH failed,
+            # the agent's contract violation evaporated silently and the
+            # auto-Block guarantee no-op'd. Now: log at WARNING on any
+            # failure mode (GET, PATCH) so PM-API hiccups are visible in
+            # the orchestrator log. The function still returns False on
+            # any path so the contract-violation reject behavior is
+            # unchanged regardless of whether the bump succeeded.
             try:
-                cur = client.get(f"/api/features/{fid}").json()
+                resp = client.get(f"/api/features/{fid}")
+                resp.raise_for_status()
+                cur = resp.json()
                 attempts = int(cur.get("fix_attempts") or 0) + 1
-                patch = {"fix_attempts": attempts}
+                patch: dict = {"fix_attempts": attempts}
                 if attempts >= 5:
                     patch.update({"status": "Blocked",
                                   "blocked_reason": "Agent kept marking Reviewing without a real PR number"})
-                client.patch(f"/api/features/{fid}", json=patch)
-            except Exception:
-                pass
+                patch_resp = client.patch(f"/api/features/{fid}", json=patch)
+                patch_resp.raise_for_status()
+            except Exception as e:
+                log.warning(
+                    f"[progress] Feature #{fid}: could not bump fix_attempts "
+                    f"after contract-violation reject ({type(e).__name__}: {e}). "
+                    f"Auto-Block-at-5 invariant may be off by one this cycle."
+                )
             return False
 
     # Contract: Reviewed entries MUST carry review_outcome. Without it the
