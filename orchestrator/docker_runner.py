@@ -1627,12 +1627,11 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             log.debug("Phase 7 pre-coder context build failed (non-fatal)", exc_info=True)
     product["_active_sprint"] = active_sprint or {}
 
-    # 1-PR model: `sprint_pr_mode` now toggles "open a session PR per coder
-    # run" (head=coder/<uid>, base=main). Sprints have no branch or PR.
-    # Off by default for legacy products → the bare-branch fallback in
-    # post_coder warns + bails.
-    _cfg_flags = (product.get("config") or {})
-    product["_sprint_pr_mode"] = bool(_cfg_flags.get("sprint_pr_mode"))
+    # Phases→features flat model (migration 043): every coder run opens a
+    # session PR (head=coder/<uid>, base=main). The legacy `sprint_pr_mode`
+    # toggle is forced True — the bare-branch fallback path in post_coder
+    # is dead under the new model. Field kept for prompt-template compat.
+    product["_sprint_pr_mode"] = True
     # `_sprint_branch` / `_sprint_pr_*` are kept as empty strings for
     # backwards-compat with prompt templates that still reference them
     # (they render as empty in the prompt under 1-PR; the new
