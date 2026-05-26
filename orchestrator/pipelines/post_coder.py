@@ -1380,6 +1380,11 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
         r"can't load package: package",
         r"pytest: command not found",
         r"ModuleNotFoundError: No module named 'pytest'",
+        # pytest reports "unrecognized arguments: --cov..." when a plugin in
+        # the product's pytest.ini addopts isn't installed in the env running
+        # the post-coder check (pytest-cov, pytest-xdist, etc.). That's a
+        # missing-tool problem, not a code bug — coder shouldn't be punished.
+        r"unrecognized arguments:\s*--(cov|xdist|benchmark|mock|django|sugar)",
     ]
     _ENV_BROKEN_RE = _re.compile("|".join(_ENV_BROKEN_PATTERNS))
 
