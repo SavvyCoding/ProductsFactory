@@ -338,71 +338,49 @@ def _read_session_summary(working_dir: str) -> str:
 def _fetch_assigned_features(product_id: int, persona: str | None, max_count: int = MAX_FEATURES_PER_SPRINT) -> tuple[list[dict], str | None, dict | None]:
     """
     Pre-fetch features the agent should work on this session.
-    Sprint-aware: when an active sprint exists, picks ALL eligible features in
-    that sprint (up to MAX_FEATURES_PER_SPRINT) so the entire sprint is planned
-    and implemented together.
-    Returns ([], None, None) for personas that manage their own work (qa_tester, recommender, etc.).
 
-    Tuple shape: (features, active_sprint_name, active_sprint_dict).
-    `active_sprint_dict` is the full sprint payload (id, name, branch_name,
-    pr_number, pr_url, ...) so callers can wire sprint-PR-mode context into
-    prompts and the post-coder pipeline without an extra round trip.
+    Phases→features flat model (migration 043): no sprint scoping. We pick
+    eligible features by status + persona-specific filters, ordered by
+    priority. Each feature ships as its own session PR.
+
+    Returns ([], None, None) for personas that manage their own work
+    (qa_tester, recommender, etc.).
+
+    Tuple shape: (features, sprint_name, sprint_dict) — sprint_name and
+    sprint_dict are kept as None for callsite compatibility; the new model
+    has no sprint context.
     """
     if persona not in ("coder", "designer", "reviewer"):
         return [], None, None
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-            # Check for active sprint — if one exists, scope to its features
-            active_sprint_id = None
-            active_sprint_name = None
-            active_sprint: dict | None = None
-            active_resp = client.get(f"/api/products/{product_id}/sprints/active")
-            if active_resp.status_code == 200 and active_resp.json():
-                active_sprint = active_resp.json()
-                active_sprint_id = active_sprint.get("id")
-                active_sprint_name = active_sprint.get("name")
-
             resp = client.get(f"/api/products/{product_id}/features")
             resp.raise_for_status()
             all_features = resp.json()
             all_features = all_features if isinstance(all_features, list) else []
 
-            if not active_sprint_id:
-                log.info(f"[assign] No active sprint for product {product_id} — skipping feature assignment")
-                features = []
-            elif persona == "coder":
+            if persona == "coder":
                 # Match the API's /next-for-persona?persona=coder rules so the
                 # orchestrator's persona dispatch and the agent's actually-
-                # assigned features stay in sync. Without the third clause,
-                # determine_next_action picks coder for `Implementing +
-                # changes_requested` features but _fetch_assigned_features
-                # returns 0 → agent task_done's in 3 seconds.
-                candidates = [f for f in all_features
-                              if f.get("status") == "Designed"
-                              or (f.get("status") == "Approved" and f.get("design_doc_path"))
-                              or (f.get("status") == "Implementing"
-                                  and f.get("review_outcome") == "changes_requested")]
-                features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
+                # assigned features stay in sync.
+                features = [f for f in all_features
+                            if f.get("status") == "Designed"
+                            or (f.get("status") == "Approved" and f.get("design_doc_path"))
+                            or (f.get("status") == "Implementing"
+                                and f.get("review_outcome") == "changes_requested")]
             elif persona == "reviewer":
-                # Reviewer follows the SESSION PR (two-tier model): every
-                # reviewer session reviews exactly one open session PR's
-                # worth of features. Group by `pr_number` and pick the
-                # oldest session PR (lowest pr_number — GitHub assigns
-                # them monotonically per repo) so older work doesn't
-                # starve waiting on newer session PRs.
-                # Scope to active sprint first, fall back to any sprint so
-                # open PRs aren't left hanging if a sprint rolled over
-                # mid-review.
+                # Reviewer follows the SESSION PR: every reviewer session
+                # reviews exactly one open session PR's worth of features.
+                # Group by pr_number, pick the oldest (GitHub assigns
+                # monotonically per repo) so older work doesn't starve
+                # waiting on newer session PRs.
                 candidates = [f for f in all_features
                               if f.get("status") == "Reviewing"
-                              and f.get("pr_number")
-                              and f.get("sprint_id") is not None]
-                in_active = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
-                pool = in_active or candidates
-                if pool:
+                              and f.get("pr_number")]
+                if candidates:
                     from collections import defaultdict as _dd
                     by_pr: dict = _dd(list)
-                    for _f in pool:
+                    for _f in candidates:
                         by_pr[_f["pr_number"]].append(_f)
                     oldest_pr = min(by_pr.keys())
                     features = by_pr[oldest_pr]
@@ -414,15 +392,13 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                 else:
                     features = []
             elif persona == "designer":
-                # product_planner was merged into designer 2026-05-06 (Phase 1
-                # of futureplan.md). They shared this same filter and wrote
-                # near-identical per-feature docs.
-                candidates = [f for f in all_features
-                              if f.get("status") == "Approved" and not f.get("design_doc_path")]
-                features = [f for f in candidates if f.get("sprint_id") == active_sprint_id]
+                features = [f for f in all_features
+                            if f.get("status") == "Approved" and not f.get("design_doc_path")]
             else:
                 features = []
 
+        # Sort by priority desc so highest-priority features ship first.
+        features.sort(key=lambda f: (-(f.get("priority") or 0), f.get("id") or 0))
         selected = features[:max_count]
         log.info(f"[assign] persona={persona} assigned {len(selected)}/{len(features)} features")
         return [
@@ -434,22 +410,15 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                 "design_doc_path": f.get("design_doc_path"),
                 "pr_number": f.get("pr_number"),
                 "pr_url": f.get("pr_url"),
-                # Session branch name written by post_coder when the
-                # session PR was opened. Reviewer dispatch + the two-tier
-                # session-context block in docker_runner read this to
-                # find the branch under review without an extra GitHub call.
                 "branch_name": f.get("branch_name"),
                 "fix_attempts": f.get("fix_attempts", 0),
                 "blocked_reason": f.get("blocked_reason"),
-                # `review_outcome` lets the prompt-builder distinguish a fresh
-                # rework cycle (changes_requested) from a normal first-pass
-                # assignment, and so we know when to fetch the reviewer's
-                # per-feature feedback below. Stripping it here used to be
-                # the reason the rework coder had no idea WHY it was running.
                 "review_outcome": f.get("review_outcome"),
+                "phase_id": f.get("phase_id"),
+                "parent_id": f.get("parent_id"),
             }
             for f in selected
-        ], active_sprint_name, active_sprint
+        ], None, None
     except Exception as e:
         log.warning(f"[assign] Could not pre-fetch features for {persona}: {e} — agent will get empty list")
         return [], None, None
