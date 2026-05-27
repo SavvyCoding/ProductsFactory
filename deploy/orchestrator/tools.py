@@ -177,7 +177,6 @@ _ONDEMAND_PERSONAS = ("documenter", "analytics", "refactorer", "devops", "recomm
 _FEATURE_KEEP = {"id", "product_id", "phase_id", "parent_id", "name", "status",
                  "feature_type", "design_doc_path", "pr_number", "pr_url",
                  "fix_attempts", "merge_notes"}
-_PHASE_KEEP   = {"id", "product_id", "name", "goal", "order"}
 
 
 def _slim(obj: Any, keep: set) -> Any:
@@ -216,12 +215,6 @@ def get_products(args: dict, **kwargs) -> str:
     except Exception:
         pass
     return raw
-
-
-def get_phases(args: dict, **kwargs) -> str:
-    """List phases for a product (post migration 043, replaces get_sprints)."""
-    product_id = args.get("product_id")
-    return _slim_response(_pm("GET", f"/api/products/{product_id}/phases"), _PHASE_KEEP)
 
 
 def get_features(args: dict, **kwargs) -> str:
