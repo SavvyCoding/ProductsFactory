@@ -1,4 +1,23 @@
-# futureplan v2 — Feature/Story relabel
+# futureplan v2 — Feature/Story relabel (SUPERSEDED)
+
+> ⚠️ **SUPERSEDED 2026-05-26 by migration 043 (`feat/phases-features-flat`).**
+>
+> This document describes the relabel-without-schema-change plan that
+> preceded the actual flat-model migration. The migration that landed
+> took a different, more aggressive approach: it *dropped* the `sprints`
+> table entirely and made `features` rows the user-facing unit, with
+> phases as pure UI groupings (no DoD, no status). The vocabulary in
+> this doc — "a Feature is a `sprints` row" — is therefore historical
+> only.
+>
+> Kept for reference because the **reasoning** about the sizing cap
+> (~ "the gate that prevents #224"), the **planner output spec**, and
+> the **out-of-scope** discussion remain useful when thinking about
+> how the current planner prompt evolved. See `CLAUDE.md` →
+> "Phases & Features" and `orchestrator/INVARIANTS.md` Vocabulary for
+> the current model.
+
+---
 
 This is the canonical contract for the next architectural step. Read this
 **before** changing any code in the planner / cap / UI / persona layers

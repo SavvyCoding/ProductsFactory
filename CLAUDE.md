@@ -72,20 +72,20 @@ python scripts/build_pf_video.py
 
 ## Architecture
 
-### 1-PR merge flow (session PR → main)
+### Session-PR merge flow (1-PR-per-feature → main)
 
-When `product.config.sprint_pr_mode = true` (default for new products) — the flag name is legacy; under this model it just means "open a session PR per coder run":
+Every coder session opens its own session PR direct to `main`. There is no integration branch and no batch merge — features ship one PR at a time. (Migration 043 retired the sprints layer; what used to be a sprint is now just a `phases` row that groups features for UI/release-notes purposes.)
 
 1. **Coder session**: agent edits files on the default branch; `orchestrator/pipelines/post_coder.py` cuts a fresh `coder/<session_uid>` branch off the default branch's tip (stash → checkout `-B` → stash-pop; **stash-pop conflicts block the assigned features** with a clear reason rather than force-resolving), commits with `[feature-N]` tags, pushes, and opens a **session PR** (`coder/<uid>` → `main`). The feature row's `pr_number`/`pr_url`/`branch_name` point at the session PR/branch.
 2. **Reviewer session**: scoped to a single open session PR (`docker_runner._fetch_assigned_features` groups Reviewing features by `pr_number` and picks the oldest). Reviewer reviews `git log origin/main..{session_branch}` and writes per-feature decisions to `session_result.json`.
 3. **Auto-merge** (per-reviewer-session in `auto_merge_reviewer.py` + per-cycle sweep in `auto_merge.py`) squash-merges every Reviewed+approved session PR directly to `main`.
-4. **Sprint completion**: planning bucket only. When DoD's `all_features_done` gate passes (all features in the sprint are Pushed/Deferred/Rejected), `_do_complete_sprint` marks the sprint completed, generates release notes from features already Pushed, and activates the next sprint. No PR is merged at sprint completion — features have already shipped to `main` individually through their session PRs.
+4. **Release notes**: each feature carries its own `merge_notes` (set by the coder on push); the release-notes endpoint (`GET /api/phases/{id}/release-notes`) collates the `merge_notes` of all Pushed features in a phase on demand. No sprint-completion ceremony, no DoD gates.
 
 Pre-checkout (`docker_runner.py`): reviewer lands on the session branch under review; coder/designer stay on the default branch (`_reset_workspace` left them on `main`/`master`). Designer commits design docs straight to `main` (`post_doc.py`).
 
 Rework path: when reviewer rejects features in a session PR, `post_coder.py` detects on the next coder cycle that the rejected features share an open PR (the original session PR) and force-pushes fresh commits to its branch, preserving the reviewer's comment thread.
 
-Retired with the 1-PR model (2026-05-15): the sprint integration branch (`sprint/<id>`) and sprint PR; `provision_sprint_pr` / `merge_sprint_pr`; `_maybe_provision_sprint_pr` / `_attempt_merge_completed_sprint_pr`; `reconcile_sprint_pr_state`; supervisor's `_check_sprint_provisioned` / `_fix_sprint_provisioned`; `check_open_pr_invariant`.
+Retired by migration 043 (2026-05-26): the entire sprints layer — `sprints` table, `sprint_pr_mode` config flag, sprint integration branch (`sprint/<id>`) and sprint PR; `provision_sprint_pr` / `merge_sprint_pr`; `_maybe_provision_sprint_pr` / `_attempt_merge_completed_sprint_pr`; `reconcile_sprint_pr_state`; supervisor's `_check_sprint_provisioned` / `_fix_sprint_provisioned`; `check_open_pr_invariant`; the DoD machinery (`/api/sprints/{id}/sign-off`, `/api/sprints/{id}/check-dod`); the Blocked-sprint holdpen (supervisor now PATCHes `status=Blocked` directly).
 
 ### Post-coder quality pipeline
 
@@ -128,21 +128,17 @@ Feature states: `Pending → Approved → [Designing → Designed →] Implement
 
 **Status transition authority**: PMs (via the website) are restricted to a whitelist in `website/schemas.py` (`PM_ALLOWED_TRANSITIONS`). Agents calling the internal REST API bypass this gate entirely and can move features to any valid state.
 
-### Sprint Lifecycle
+### Phases & Features
 
-**Phases** (optional) group sprints for large products. Sprints contain features and have a **Definition of Done (DoD)** with 5 gates:
+Under the flat phases→features model (migration 043), **phases are pure UI groupings** — no DoD, no completion gate, no cap. Features own their own lifecycle and ship as their own PR (see Session-PR merge flow above). A phase is just a `phases` row (`name`, `goal`, `order`) and a parent for some number of `features` rows via `features.phase_id`.
 
-1. **all_features_done** — All sprint features are Pushed/Deferred/Rejected (auto-computed)
-2. **no_open_prs** — No open PRs against sprint features (auto-computed)
-3. **qa_passed** — QA Tester calls `POST /api/sprints/{id}/sign-off` with `gate=qa_passed`
-4. **security_clean** — Security Auditor calls sign-off with `gate=security_clean`
-5. **retro_done** — Retrospective agent calls sign-off with `gate=retro_done` + `retro_doc_path`
+A "Feature" in product-speak (e.g. "Contact Management") is usually a `phases` row in the DB; each individual Story under it is a `features` row that ships as one PR. The designer's sizing gate splits an oversized Story into children via `features.parent_id`.
 
-When all gates pass (`POST /api/sprints/{id}/check-dod`): sprint marked `completed`, `completed_at` set, release notes auto-generated into `sprints.release_notes`, and the next planned sprint in the phase is activated. A phase is marked completed when it has no more planned/active sprints.
+**Auto-planning**: `POST /api/products/{id}/plan-phases` (LLM call) groups unphased `Approved`/`Designed` features into phases by theme. **Eligibility filter**: only features with `status IN ('Approved', 'Designed') AND phase_id IS NULL` are passed to the planner. Pending (PM hasn't approved), Blocked, Designing/Implementing/Reviewing/Reviewed (in-flight) are excluded.
 
-**Blocked holdpen** (`sprints.kind='blocked'`): per-product parking sprint for features the agent has Blocked. It has `status='planned'` by design (so `/sprints/active` queries skip it) but is NOT a real planned sprint for re-planning gating. Any query that checks "does an active/planned sprint already exist?" must include `Sprint.kind != "blocked"` in its WHERE clause, otherwise the holdpen permanently blocks future re-planning once any feature lands in it (2026-05-21 MyDocusign incident in `850d153`).
+**Blocking**: when the supervisor's repeated-feedback detector trips, it PATCHes `features.status='Blocked'` directly with a `blocked_reason`; no Blocked-sprint holdpen exists. PMs unblock by transitioning out of `Blocked`; `blocked_reason` auto-clears.
 
-`POST /api/products/{id}/plan-sprints` — LLM auto-plans phases + sprints. **Eligibility filter**: only features with `status IN ('Approved', 'Designed') AND sprint_id IS NULL` are passed to the planner. Pending (PM hasn't approved), Blocked, Designing/Implementing/Reviewing/Reviewed (in-flight work tied to their current sprint) are excluded — moving `sprint_id` on those states orphans sessions or strands non-terminal features in a DoD that can never close (2026-05-21 incident in `f17fbce`). The orchestrator's cycle loop must also parse the `ok` field of the plan-sprints response — a 409 (active sprint exists) silently returning OK was the observability gap that hid the bug.
+**Release notes**: `GET /api/phases/{id}/release-notes` collates the `merge_notes` field of all Pushed features in the phase. Each coder session writes `features.merge_notes` on push (set in `post_coder.py`).
 
 ### Per-Product Configuration
 
@@ -151,7 +147,7 @@ When all gates pass (`POST /api/sprints/{id}/check-dod`): sprint marked `complet
 - `quiet_hours_start` / `quiet_hours_end` — Hour of day (0–23) to suppress sessions
 - `daily_session_cap` — Max sessions per day for this product
 - `max_features_per_run` — Per-product override for the global `MAX_FEATURES_PER_RUN`
-- `sprint_pr_mode` — Legacy flag name; under the **1-PR (session-PR) model** introduced on the `feat/pr-per-session` branch (see ARCHITECTURE → 1-PR merge flow above), this flag toggles "open a session PR per coder run". When true, every coder session cuts a `coder/<session_uid>` branch off the default branch and opens its own session PR (head=`coder/<uid>`, base=`main`); the reviewer reviews the session PR, and the per-reviewer / per-cycle auto-merge squash-merges approved session PRs directly to `main`. Sprints are planning buckets — no sprint branch, no sprint PR. With `sprint_pr_mode=false`, the coder pipeline bare-branches without opening a PR (dead path; the per-feature `gh pr create` was removed in Phase 6.2, and the bare-branch path warns + bails). **Default true for new products** as of Phase 6.4 (set via `_seed_product_config` in `website/main.py`); existing products keep their setting and must be migrated explicitly via PATCH on `product.config`.
+(Under the flat phases→features model the legacy `sprint_pr_mode` flag is retired. Every coder session opens its own session PR unconditionally — `docker_runner._sprint_pr_mode` is forced to `True` and the bare-branch fallback was removed.)
 
 Additionally, a `product_config.json` file in the product working directory (read by `setup_product.py` on discovery) can seed:
 - `preferred_stack` — Selects which `templates/stacks/` variant to install
@@ -163,19 +159,26 @@ Additionally, a `product_config.json` file in the product working directory (rea
 - **Website runtime** uses async SQLAlchemy + asyncpg
 - **Alembic migrations** use psycopg2 (sync) — driver is swapped in `db/migrations/env.py`
 - PostgreSQL runs in Docker (`docker-compose.yml`); PM website connects via `productfactory-net` bridge network
-- Key tables: `products`, `features`, `sessions`, `alerts`, `feature_reviews`, `sprints`, `phases`
+- Key tables: `products`, `features`, `sessions`, `alerts`, `feature_reviews`, `phases` (no `sprints` — dropped by migration 043)
 - JIRA-like tracking tables: `feature_comments` (per-feature discussion), `feature_changelog` (auto-tracked field-level audit trail), `labels` + `feature_labels` (product-scoped color tags, many-to-many), `feature_links` (directed relationships: blocks/is_blocked_by/relates_to/duplicates)
-- Notable columns: `features.skip_design`, `features.design_doc`, `features.design_doc_path`, `features.review_outcome`, `features.review_notes`, `features.feature_type` (`feature | bug | chore`), `features.due_date`, `features.story_points`, `features.fix_attempts`, `features.blocked_reason`; `sprints.dod_status` (JSONB — gate booleans + agent notes), `sprints.phase_id`, `sprints.release_notes`, `sprints.completed_at`, `sprints.retro_doc_path`, `sprints.kind` (`normal | blocked`)
+- Notable columns on `features`: `skip_design`, `design_doc`, `design_doc_path`, `review_outcome`, `review_notes`, `feature_type` (`feature | bug | chore`), `due_date`, `story_points`, `fix_attempts`, `blocked_reason`, **`phase_id`** (FK→phases; SET NULL on phase delete), **`parent_id`** (self-FK for designer-sizing splits), **`merge_notes`** (free-text, written by the coder on push; collated by `/api/phases/{id}/release-notes`)
+- `phases` columns: `name`, `goal`, `order` — no `status`, no `completed_at`, no DoD JSONB
 - Tests use real PostgreSQL (not mocks) — each test runs inside a rolled-back transaction for isolation. **`TEST_DATABASE_URL` is required and must contain `test` in the database name.** No fallback to `DATABASE_URL`; conftest aborts the session on a banned name (`productfactory`, `postgres`) or any name without a `test` substring. Engine teardown does NOT call `drop_all` — per-test rollback is the only cleanup. Set up the test DB once with `createdb productfactory_test` then `alembic upgrade head` against it.
 
 **Feature tracking REST endpoints** (agents and PM can call these):
 - Comments: `POST/GET /api/features/{id}/comments` — author field: `pm`, `poller`, or persona name
-- Changelog: `GET /api/features/{id}/changelog` — auto-populated on every status/priority/sprint mutation; no manual writes needed
+- Changelog: `GET /api/features/{id}/changelog` — auto-populated on every status/priority/phase mutation; no manual writes needed
 - Labels: `POST /api/labels`, `GET /api/products/{id}/labels`, `POST/DELETE /api/features/{id}/labels/{label_id}`
 - Links: `POST/GET /api/features/{id}/links`, `DELETE /api/features/{id}/links/{link_id}`
 - Search: `GET /api/features/search?q=...&product_id=...` (PostgreSQL tsvector full-text)
 - Overdue: `GET /api/features/overdue` (past due_date, not Pushed/Rejected/Deferred)
 - Sync: `POST /api/products/{id}/sync-features` — reads `features.md` and reconciles statuses into DB; useful after a DB volume wipe
+
+**Phase endpoints** (added by migration 043):
+- `GET /api/phases/{id}/features` — features in this phase
+- `GET /api/products/{id}/feature-tree` — full features tree, parents-first (parent_id graph)
+- `GET /api/phases/{id}/release-notes` — collated `merge_notes` of Pushed features
+- `POST /api/products/{id}/plan-phases` — LLM auto-plans phases from unphased Approved/Designed features
 
 ### Docker Network Model
 
@@ -265,7 +268,7 @@ See `.env.example` for all variables. Critical ones:
 - `STALE_THRESHOLD_MINUTES` — Alert if progress.md not pushed in N minutes (default: 45)
 - `BROWNFIELD_FILE_THRESHOLD` — Source file count above which a product is treated as brownfield (default: 10)
 - `MAX_FEATURES_PER_RUN` — Max features an agent attempts per session (default: 1; per-product override in DB)
-- `system_config.max_features_per_sprint` — Hard cap on features assignable to one sprint (default: 5). Enforced by all feature-to-sprint assignment endpoints; the LLM sprint planner clamps each sprint's plan at this value.
+(Retired by migration 043: `system_config.max_features_per_sprint` and the per-sprint feature-count cap. Under the phases→features flat model, phases are unbounded UI groupings — features have their own per-PR sizing instead.)
 - `OLLAMA_HOST` — Ollama base URL (default: `http://host.docker.internal:11434` inside Docker, `http://localhost:11434` for local runs)
 - `DESIGNER_MODEL` / `CODER_MODEL` — Ollama model names (defaults: `gemma3:27b` / `qwen3-coder:30b`)
 - `MAX_TURNS` — Hard cap on Ollama agent turns per session (default: 80)

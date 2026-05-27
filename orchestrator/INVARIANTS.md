@@ -4,22 +4,16 @@ This document is the behavioral spec for the orchestrator. Every invariant liste
 
 ## Vocabulary — domain ↔ code mapping
 
-The user-facing PM dashboard, persona prompts to LLMs, and external observers
-use **Feature** and **Story** as the primary unit terms. The DB schema and
-internal code use the legacy names **sprint** and **feature**. This is a
-deliberate, documented gap — see `futureplan_v2.md` Phase 0:
+Migration 043 collapsed the old two-tier (Feature ↔ Story) model into a flat one. Vocabulary is now direct:
 
 | Domain term (UI, prompts, PM-speak) | Code / DB term | Role |
 |---|---|---|
-| **Feature** | `sprints` row | The user-facing chunk of work ("Contact Management"). Ships as one PR. |
-| **Story** | `features` row | An implementation chunk ≤1 dev-day, fits one coder session. |
-| Phase / Epic | `phases` row | Optional grouping of Features. |
+| **Story** | `features` row | An implementation chunk ≤1 dev-day, fits one coder session. Ships as one session PR. |
+| **Phase** | `phases` row | Pure UI grouping (no status, no DoD). `phases.name`, `phases.goal`, `phases.order`. |
 
-Two consequences when reading code:
-1. Anywhere code refers to "the sprint", the domain meaning is "the Feature being shipped".
-2. Anywhere code refers to "a feature row", the domain meaning is "a Story within a Feature".
+Older docs and PR descriptions still refer to "Feature" as the user-facing chunk and "Story" as the implementation chunk — under the flat model a Story IS the Feature. Designer sizing splits an oversize Story into children via `features.parent_id`.
 
-Branch names (`sprint/N`), API URLs (`/api/sprints/...`), and the `_sprint_branch` / `_sprint_pr_*` product fields keep the legacy names — those are internal-only identifiers; renaming would churn webhooks and external integrations for no real win. Engineers should mentally translate when reading.
+The `sprints` table, `sprint/N` branches, the `_sprint_branch`/`_sprint_pr_*` product fields, `/api/sprints/*` endpoints, and the DoD machinery (qa_tester / security_auditor / retro sign-offs) are all retired. Any code or doc still referencing them is dead.
 
 ---
 
@@ -67,7 +61,7 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 
 **II.4 ✅ `run_trainer_now` bypasses persona selection entirely.**
 - *How*: `tools.run_cycle` Priority 0 scans `ready` products for `run_trainer_now` (and `run_persona_now`) before reviewer preemption or round-robin and forces `persona = "product_trainer"` (or the queued maintenance persona). The flag is cleared up front; on a non-error launch deferral (`already_active`/`already_launching`), it is restored so the next cycle retries.
-- *Why*: Showcase video generation is on-demand; running it through the normal sprint-aware flow would queue behind feature delivery. The restore-on-deferral protects against the request being silently dropped when a coder happens to be running.
+- *Why*: Showcase video generation is on-demand; running it through the normal feature-delivery flow would queue behind regular features. The restore-on-deferral protects against the request being silently dropped when a coder happens to be running.
 
 **II.5 ✅ Reviewer work preempts everything except trainer.**
 - *How*: `tools.run_cycle` Priority 1 calls `/api/features/next-for-persona?persona=reviewer`. If a product has a `Reviewing` feature with a PR, the reviewer session launches before round-robin.
@@ -143,36 +137,36 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 
 ---
 
-## VI. Fix-attempt budget & Blocked sprint route
+## VI. Fix-attempt budget & Blocked transition
 
 **VI.1 ✅ `fix_attempts` is bumped on every changes-requested rework cycle, false-success detection, and killed-session recovery.**
 - *How*: Bumps in (a) website on `Reviewing→Implementing` transition with `review_outcome=changes_requested`, (b) `supervisor.detect_false_success`, (c) `supervisor.detect_kill_recovery`, (d) `github_client.reconcile_in_flight_prs` on closed-unmerged PRs.
 - *Why*: Without a counter, a feature that fails in a reproducible way recurs forever. The counter forces a finite budget.
 
-**VI.2 ✅ When `fix_attempts ≥ max_fix_attempts` (default 5), the feature is routed to the per-product Blocked sprint.**
-- *How*: `github_client.reconcile_in_flight_prs` calls `POST /api/products/{id}/sprints/blocked/route`. Sets `status=Blocked`, clears PR fields, sets `blocked_reason`.
+**VI.2 ✅ When `fix_attempts ≥ max_fix_attempts` (default 5), the feature is PATCHed to `status=Blocked` with a `blocked_reason`.**
+- *How*: `github_client.reconcile_in_flight_prs` and `supervisor._route_to_blocked_if_at_cap` both PATCH `/api/features/{id}` with `{"status": "Blocked", "blocked_reason": "...", "pr_number": null}`. (Migration 043 retired the per-product Blocked-sprint holdpen — a single status PATCH carries the full transition now.)
 - *Why*: Caps the loop. PMs see the stuck feature on the dashboard; the agent pipeline stops wasting cycles.
 
-**VI.3 ✅ Blocked-sprint features are quarantined from agent writes.**
-- *How*: PATCH guard in `website.main.api_update_feature` — non-PM PATCHes against features whose current sprint has `kind="blocked"` are rejected with 422 unless the patch changes `sprint_id` (the PM-driven exit path).
-- *Why*: Without the guard, reviewers re-engage Blocked features as soon as they spot the `[feature-NN]` commit prefix on the sprint PR, and the loop resumes.
+**VI.3 ✅ Blocked features are quarantined from agent writes by status check, not sprint membership.**
+- *How*: The website's persona-selection endpoints (`/api/features/next-for-persona`, `/api/features/approved`) filter `status != "Blocked"`. The post-coder pipeline also explicitly skips features whose current status is Blocked.
+- *Why*: Without the filter, a reviewer that reopens an old session PR with `[feature-NN]` commits re-engages the Blocked feature and the loop resumes.
 
-**VI.4 ✅ Blocked sprints are excluded from active-sprint selection, DoD gates, sprint capacity caps, and sprint-PR provisioning.**
-- *How*: `kind="blocked"` filter in `website.main` — `_check_sprint_capacity`, `api_active_sprint`, `_get_or_create_blocked_sprint`, etc.
-- *Why*: A holding pen must not affect delivery metrics — otherwise stuck features would eternally fail "all features done" and stall every sprint.
+**VI.4 ✅ Transitioning out of `Blocked` clears `blocked_reason` automatically.**
+- *How*: `website.main.api_update_feature` clears `blocked_reason` whenever a PATCH moves status away from `Blocked`. UI gates the badge render on `status == "Blocked"` so stale `blocked_reason` text never leaks visually if a race occurs.
+- *Why*: Without auto-clear, an old `blocked_reason` lingers on a feature the PM has manually un-blocked, confusing both PM and agents.
 
-**VI.5 ✅ Features that exhaust `max_fix_attempts` get routed to the Blocked sprint regardless of whether they ever opened a PR.**
-- *How*: `supervisor._route_to_blocked_if_at_cap` is called after every `fix_attempts` bump in `supervisor.detect_false_success` and `supervisor.detect_kill_recovery`. When the new value crosses `max_fix_attempts`, it POSTs to `/api/products/{id}/sprints/blocked/route` directly. Pairs with the existing route in `github_client.reconcile_in_flight_prs` which only fires for closed-unmerged PRs.
-- *Why*: Without this, a feature whose coder is repeatedly killed before ever pushing a PR (e.g. Ollama agent stalls, container OOMs, watchdog timeouts) accumulates `fix_attempts` indefinitely without an escape route. The github_client's PR-state-based route never sees it because there's no PR to inspect. Real example: webcalculator bug 126 reached `fix_attempts=5` (= cap) via four kill_recovery bumps and stayed stuck in `status=Implementing` in the active sprint until a manual DB UPDATE moved it. VI.5 closes that gap so kill loops terminate at the cap as VI.2's contract intends.
+**VI.5 ✅ Features that exhaust `max_fix_attempts` reach `status=Blocked` regardless of whether they ever opened a PR.**
+- *How*: `supervisor._route_to_blocked_if_at_cap` is called after every `fix_attempts` bump in `supervisor.detect_false_success` and `supervisor.detect_kill_recovery`. When the new value crosses `max_fix_attempts`, it PATCHes status=Blocked directly. Pairs with the github_client path which only fires for closed-unmerged PRs.
+- *Why*: Without this, a feature whose coder is repeatedly killed before ever pushing a PR (Ollama stalls, container OOMs, watchdog timeouts) accumulates `fix_attempts` indefinitely with no escape route. The github_client's PR-state-based route never sees it because there's no PR to inspect.
 
 ---
 
 ## VII. Auto-merge
 
-**VII.1 ✅ Auto-merge fires for any Reviewed+approved+pr_number feature with `auto_merge_enabled` set, regardless of sprint membership.**
+**VII.1 ✅ Auto-merge fires for any Reviewed+approved+pr_number feature with `auto_merge_enabled` set.**
 - *How*: `auto_merge.sweep_all` (called from `tools.run_cycle` after the per-cycle reconcile pass) iterates every `ready` product per cycle. For each product it walks `(status=Reviewed AND pr_number AND review_outcome=approved)` features and attempts squash-merge against GitHub. The post-reviewer-session `docker_runner._auto_merge_approved` path is still in place as a belt-and-braces second layer for the reviewer-session-specific flow (it does PR `update-branch` before merge, which the sweep doesn't).
-- *Why*: Approved PRs must move to Pushed within bounded time (1-2 cycles), or the sprint can't complete.
-- *Historical context*: Pre-Phase-1 there were two paths, both bound to a session ever launching — when an active sprint had only Reviewed features (no Reviewing), neither path fired and PRs stranded. The webcalculator class of deadlock. Phase 1 added the per-cycle sweep to cut that dependency.
+- *Why*: Approved PRs must move to Pushed within bounded time (1-2 cycles).
+- *Historical context*: Pre-Phase-1 there were two paths, both bound to a session ever launching — when only Reviewed features existed (no Reviewing), neither path fired and PRs stranded. The webcalculator class of deadlock. Phase 1 added the per-cycle sweep to cut that dependency.
 
 **VII.2 ✅ A 405 (not mergeable) response on auto-merge is logged and skipped.**
 - *How*: `auto_merge.sweep_product` and `docker_runner._auto_merge_approved` both branch on `code == 405`, log warning, increment conflict counter, and continue.
@@ -186,34 +180,19 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 - *How*: `auto_merge.sweep_product` includes `changed_by` in every Pushed PATCH so `feature_changelog` rows record the sweep as the author rather than the default "agent".
 - *Why*: Auditability. Without explicit attribution, the audit trail can't distinguish merges done by the sweep from merges done by a reviewer session or by a human via the UI.
 
-**VII.5 ✅ In sprint-PR mode, a sprint PR is merged ONLY when every feature in the sprint is merge-eligible.**
-- *How*: `auto_merge.sweep_product` detects sprint-PR mode at sweep time by checking whether the feature's `pr_number` equals its sprint's `pr_number`. If yes, it iterates every feature in that sprint and verifies each is either terminal (Pushed/Deferred/Rejected/Reverted) or `Reviewed+approved` pointing at the same PR (`_is_merge_eligible` helper). If any feature is in a pre-shipping state (Pending/Approved/Designed/Implementing/Reviewing/Reviewed-changes-requested), the merge is held this cycle and the PR is added to `held_sprint_prs` so subsequent features pointing at the same PR don't re-check or re-call GitHub. Per-feature mode (default) never enters this branch — feature pr_number won't match sprint pr_number.
-- *Why*: In sprint-PR mode the PR contains every feature in the sprint. Merging on the first `Reviewed+approved` feature would ship the whole sprint while later features are still being implemented or reviewed — a premature ship of incomplete work. The sprint PR's natural unit is the whole sprint, not the individual feature, so the merge gate must reflect that.
-- *Detection is data-driven, not flag-driven*: nothing reads `config.sprint_pr_mode` at sweep time. The signal is the actual data shape (feature/sprint pr_number alignment), so the same code is correct for hybrid states (e.g. a product mid-migration with some sprint-PR-mode sprints and some per-feature-mode sprints).
+**VII.5 (withdrawn 2026-05-26)** — In the previous sprint-PR mode this invariant required that a multi-feature sprint PR only merge when every feature in the sprint was merge-eligible. Migration 043 retired sprint PRs; every PR now carries exactly one session's worth of feature commits (`coder/<session_uid>` → `main`), and the per-feature merge gate (VII.1) is the only one that applies. The `_is_merge_eligible` helper and the `held_sprint_prs` cache that supported this invariant were deleted alongside the sprint endpoints.
 
 ---
 
-## VIII. Sprint-aware persona selection
+## VIII. Persona selection (flat model)
 
-**VIII.1 ✅ When an active sprint exists, persona selection considers ONLY features in that sprint.**
-- *How*: `dispatch.Context.sprint_features` filters `f.sprint_id == active_sprint.id`. Every active-sprint decision (`_decide_product_planner`, `_decide_coder`, `_decide_reviewer`) reads from this filtered list.
-- *Why*: Without this, a product with 3 active sprints would see agents fighting for features across them. The active sprint defines current scope.
-
-**VIII.2 ✅ Unsprinted security bugs are auto-routed into the active sprint when the `security_clean` gate is currently False.**
-- *How*: `dispatch._decide_route_unsprinted_security_bugs` reads the live DoD breakdown from `GET /api/sprints/{id}/dod`. When `security_clean` is False and there are unsprinted bugs (`status in (Approved, Designed)` AND `sprint_id IS NULL`), it PATCHes them into the active sprint up to `max_features_per_sprint` capacity (excluding terminal features from the count, matching website's `_check_sprint_capacity`).
-- *Why*: The legacy filter VIII.1 had no escape. Security bugs filed by `security_auditor` are typically unsprinted; they sat forever invisible to the coder.
-- *Honest caveat*: This decision does NOT directly clear the gate. The website's `_evaluate_dod` recomputes `security_clean` from *sprint-bugs only* — unsprinted bugs are not part of the calculation. What this routing achieves: pulls the bugs out of invisibility so the coder can ship them; once shipped (terminal in the sprint), they count toward the gate via the recompute. Two-step unblock, not one.
-
-**VIII.3 ✅ A sprint with all features terminal triggers retrospective before completion.**
-- *How*: `dispatch._decide_complete_sprint` returns `"retrospective"` if all sprint features are in `TERMINAL = {Pushed, Deferred, Rejected, Reverted}` and `retro_doc_path` is unset.
-- *Why*: Retro must run while sprint context is fresh, before the next sprint activates.
-
-**VIII.4 ❌ A sprint with retro complete is force-completed via API.**
-- *Status*: Both the dispatcher (`dispatch._decide_complete_sprint`) and the website endpoint (`POST /api/sprints/{id}/force-complete`) were retired 2026-05-19 with the dead-code sweep. The natural sprint-completion path now is the DoD check (`POST /api/sprints/{id}/check-dod`) which runs the full gate evaluation. Legacy sprints whose qa_passed/security_clean gates were retired (Phase 4, 2026-05-06) need the operator to call `/check-dod` to flip them to completed; the auto-force path is gone.
-- *Why retired*: With the dispatcher and the legacy poller both deleted, the only caller of force-complete was gone, and the endpoint's purpose (bypass DoD on ancient sprints) was already moot once qa_passed/security_clean stopped blocking.
+**VIII.1–VIII.4 (withdrawn 2026-05-26 with migration 043)** — These invariants codified the sprint-active-scope filter, security-bug routing into the active sprint, retrospective-before-completion gating, and sprint force-complete. All four depended on the sprints layer, which migration 043 dropped. Under the flat phases→features model:
+- Persona selection considers ALL product features (filtered by status and persona-specific gates in `website.main.api_next_for_persona`), not sprint-scoped.
+- Security bugs filed by `security_auditor` (retired persona; no longer scheduled) and any unphased Approved/Designed feature are picked up directly by the coder when ready — no routing step.
+- There is no retrospective ceremony and no force-complete path because phases have no completion state.
 
 **VIII.5 ✅ Features in agent states with no active session are reset.**
-- *How*: `dispatch._decide_reset_orphan_agents` checks `/api/sessions/active` per product; if no live session, resets `(Designing, Implementing, Reviewing)` features in the active sprint to their prior ready state (Designed if `design_doc_path` exists, else Approved).
+- *How*: The per-cycle stale-feature reset in `website.main.reset_stuck` checks last-mutation age per feature; if no live session exists and the feature has been in `(Designing, Implementing, Reviewing)` past the stale threshold, it resets to prior ready state (Designed if `design_doc_path` exists, else Approved).
 - *Why*: Crashed sessions outside V.1's timeout window. Belt + braces.
 
 ---
@@ -222,7 +201,7 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 
 The in-memory `_LoopDetector` that enforced IX.1–IX.3 lived only in the host-mode `poller.py`. The containerized orchestrator never had an equivalent and was the lock-holder for an extended period without the detector running, with no observed incidents traceable to its absence. IX.1–IX.3 were withdrawn with the deletion of `orchestrator/cycle/loop_detector.py`.
 
-The active loop guard is now **Section VI**: `fix_attempts` is bumped on every changes-requested rework, false-success detection, killed-session recovery, and closed-unmerged PR; on reaching `max_fix_attempts` (default 5) the feature routes to the per-product Blocked sprint. That cap catches reviewer-coder ping-pongs in a strict-budget way that does not depend on in-memory state surviving container restarts.
+The active loop guard is now **Section VI**: `fix_attempts` is bumped on every changes-requested rework, false-success detection, killed-session recovery, and closed-unmerged PR; on reaching `max_fix_attempts` (default 5) the feature is PATCHed to `status=Blocked`. That cap catches reviewer-coder ping-pongs in a strict-budget way that does not depend on in-memory state surviving container restarts.
 
 If real-time persona-alternation detection ever becomes necessary again, the natural home is `tools.run_cycle` rather than back inside the orchestrator package — it needs a single-process scope, which the container model already enforces.
 
