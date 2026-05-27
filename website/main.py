@@ -595,7 +595,6 @@ def _config_as_dict(config: SystemConfig | None) -> dict:
     base = {
         "products_root_dir":          (config.products_root_dir          if config else "") or "",
         "github_org":                 (config.github_org                 if config else "") or "",
-        "github_pat":                 (config.github_pat                 if config else "") or "",
         "github_app_id":              (config.github_app_id              if config else None),
         "github_app_private_key":     (config.github_app_private_key     if config else "") or "",
         "github_app_installation_id": (config.github_app_installation_id if config else None),
@@ -884,20 +883,16 @@ async def register_greenfield_form(
     from website.catalogs import STACK_BY_ID, DATABASE_BY_ID, UI_TEMPLATE_BY_ID
 
     config = await _get_system_config(db)
-    # Accept either the App credentials (preferred, post-#9 migration) OR
-    # the legacy PAT during transition. Refuse only when BOTH are missing.
     _has_app = bool(
         config and config.github_app_id and config.github_app_private_key
         and config.github_app_installation_id
     )
-    _has_pat = bool(config and config.github_pat)
-    if not config or not config.products_root_dir or not config.github_org or not (_has_app or _has_pat):
+    if not config or not config.products_root_dir or not config.github_org or not _has_app:
         raise HTTPException(
             status_code=422,
             detail=(
                 "Admin configuration incomplete. Required: products root dir, "
-                "GitHub org, and either a GitHub App (App ID + PEM + Installation ID) "
-                "or the legacy PAT."
+                "GitHub org, and GitHub App credentials (App ID + PEM + Installation ID)."
             ),
         )
 
@@ -1066,11 +1061,6 @@ async def admin_save_settings(
     db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
 ):
     """Save system configuration (upsert single row id=1).
-
-    GitHub App fields replaced the legacy PAT + SSH-deploy-key inputs in the
-    UI on 2026-05-14. The PAT column stays in the DB as a deprecation cushion
-    but is no longer editable from this form — operators who need to roll
-    back can `UPDATE system_config SET github_pat = '...'` via psql.
 
     PEM textarea preserves embedded newlines and BEGIN/END markers; whitespace
     around the block is trimmed but interior content is left intact.

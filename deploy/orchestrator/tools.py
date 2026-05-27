@@ -309,7 +309,7 @@ def _scaffold_greenfield_pending(products: list, **kwargs) -> int:
         log.error("[scaffold] SSH_DIR=%s does not exist — cannot generate deploy keys", ssh_dir)
         return 0
 
-    # system_config supplies github_org / github_pat / github_ssh_key_name.
+    # system_config supplies github_org / GitHub App credentials.
     try:
         with _pm_client() as client:
             sys_cfg = client.get("/api/system-config").json()

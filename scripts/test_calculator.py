@@ -104,15 +104,13 @@ def main():
     except Exception as e:
         sys.exit(f"  PM API not reachable: {e}")
 
-    # ── 1. Fetch system config (need PAT + org) ───────────────────────────────
+    # ── 1. Fetch system config (need GitHub App credentials + org) ───────────
     step("1 / Fetch system config")
     sys_cfg = api("get", "/api/system-config")
     github_org = sys_cfg.get("github_org") or ""
-    github_pat = sys_cfg.get("github_pat") or ""
-    if not github_org or not github_pat:
-        sys.exit("ERROR: github_org and github_pat must be set in Admin → System settings.")
+    if not github_org or not sys_cfg.get("github_app_id") or not sys_cfg.get("github_app_installation_id"):
+        sys.exit("ERROR: github_org + GitHub App credentials must be set in Admin → System settings.")
     print(f"  GitHub org: {github_org}")
-    print(f"  PAT       : {github_pat[:12]}…")
 
     # ── 2. Register Calculator product ───────────────────────────────────────
     step("2 / Register Calculator product")
