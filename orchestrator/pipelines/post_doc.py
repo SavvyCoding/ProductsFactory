@@ -59,6 +59,14 @@ _DESIGNER_ADD_ALLOWLIST = _DESIGNER_MODIFY_ALLOWLIST + (
     "ARCHITECTURE.md",
     ".gitignore",
     "quality_gates.json",
+    # The pre-commit deletion-safety helper, installed by the renderer
+    # alongside the other templates and RO-mounted into the agent container
+    # (see orchestrator/docker_runner._PM_CURATED_RO_FILES). Without this
+    # the designer's first commit on a greenfield product fails post-doc
+    # lint with `check_deletion_safety.py` flagged as out-of-scope, even
+    # though the designer never touched it — surfaced by 2026-05-26
+    # SmokeTest smoke test.
+    "check_deletion_safety.py",
     # `.gitkeep` markers planted by the renderer in the empty src/, tests/,
     # Results/, Temp/ dirs on greenfield products (see templates/renderer.py:
     # the loop around line 230). One pattern matches them anywhere in the

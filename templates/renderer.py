@@ -244,6 +244,22 @@ def install_templates(
             context, force,
         )
 
+    # 3c2. pytest.ini — stack-specific. Ships only when the stack has one
+    # (currently python). RO-mounted via _PM_CURATED_RO_FILES so the coder
+    # can't overwrite it with a half-broken hand-rolled version. Canonical
+    # 2026-05-26 SmokeTest incident: coder kept writing pytest.ini with
+    # mismatched `pythonpath` vs the import style in test files
+    # (`from src.X` vs `from X`), causing ModuleNotFoundError on every
+    # collection. Pre-shipping a canonical one with `pythonpath = .` plus
+    # `from src.X` import style eliminates that whole class of failure.
+    stack_pytest_ini = STACKS_DIR / stack / "pytest.ini"
+    if stack_pytest_ini.exists():
+        written += _write_file(
+            working_dir / "pytest.ini",
+            stack_pytest_ini,
+            context, force,
+        )
+
     # 3d. check_deletion_safety.py — stack-agnostic. Standalone helper the
     # coder runs pre-commit (Step 5b in AGENT_WORKFLOW.md) to catch removed
     # top-level Python symbols that other files still reference. Mirrors
