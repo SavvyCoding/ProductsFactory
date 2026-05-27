@@ -534,13 +534,12 @@ def detect_divergent_review_feedback(
             if not isinstance(comments, list):
                 comments = []
 
-            # Reviewer/QA/security-auditor authored only, newest-first then
-            # take the last `lookback`. Tokenize each into a set of words.
+            # Reviewer-authored only, newest-first then take the last
+            # `lookback`. Tokenize each into a set of words.
             comments.sort(key=lambda c: (c.get("created_at") or ""))
             reviewer_only = [
                 (c.get("body") or "") for c in comments
-                if (c.get("author") or "").lower()
-                in ("reviewer", "security_auditor", "qa_tester")
+                if (c.get("author") or "").lower() == "reviewer"
             ]
             recent = reviewer_only[-lookback:]
             if len(recent) < lookback:

@@ -462,9 +462,10 @@ def _write_sprint_features_md(working_dir: str, features: list[dict], sprint_nam
 
 def _fetch_recent_review_comments(feature_id: int, limit: int = 25) -> list[dict]:
     """
-    Pull the last `limit` reviewer/security_auditor/qa_tester comments for a
-    feature from the PM API. Returns oldest-first within the slice so the
-    prompt-renderer can stack them in chronological order under the feature.
+    Pull the last `limit` reviewer/lint-guard/post-coder:test-check comments
+    for a feature from the PM API. Returns oldest-first within the slice so
+    the prompt-renderer can stack them in chronological order under the
+    feature.
 
     Used by `_format_reviewer_feedback` to bridge the reviewer→coder feedback
     gap. Until 2026-05-06 the rework coder had no signal for WHY it was
@@ -506,8 +507,7 @@ def _fetch_recent_review_comments(feature_id: int, limit: int = 25) -> list[dict
             # tests/test_database.py" feedback was authored by lint-guard,
             # not reviewer, and therefore excluded from the prompt.
             _ALLOWED_AUTHORS = {
-                "reviewer", "security_auditor", "qa_tester",
-                "lint-guard", "post-coder:test-check",
+                "reviewer", "lint-guard", "post-coder:test-check",
             }
             relevant = [c for c in data
                         if (c.get("author") or "").lower() in _ALLOWED_AUTHORS]
