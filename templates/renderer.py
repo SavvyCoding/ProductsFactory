@@ -260,6 +260,24 @@ def install_templates(
             context, force,
         )
 
+    # 3c3. requirements.txt — stack-specific. Ships only when the stack has
+    # one (currently python). Pre-seeded with the test toolchain (pytest,
+    # pytest-cov) so a fresh greenfield product can ship its first test
+    # commit without tripping Guard 18 (deps-coherence) on `import pytest`.
+    # Canonical 2026-05-27 Calculator incident: every coder session imported
+    # pytest in tests/, no requirements.txt existed, Guard 18 fired, the
+    # agent's rework removed the import instead of adding the dep, the
+    # bounce repeated, supervisor's flap detector blocked all three
+    # features. The coder agent is expected to APPEND runtime deps here;
+    # the pre-seeded test deps stay.
+    stack_requirements = STACKS_DIR / stack / "requirements.txt"
+    if stack_requirements.exists():
+        written += _write_file(
+            working_dir / "requirements.txt",
+            stack_requirements,
+            context, force,
+        )
+
     # 3d. check_deletion_safety.py — stack-agnostic. Standalone helper the
     # coder runs pre-commit (Step 5b in AGENT_WORKFLOW.md) to catch removed
     # top-level Python symbols that other files still reference. Mirrors
