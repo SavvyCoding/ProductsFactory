@@ -89,7 +89,11 @@ def _build_jwt(app_id: int, pem: str) -> str:
     payload = {
         "iat": now - 60,   # back-date to absorb clock skew vs GitHub
         "exp": now + _JWT_LIFETIME_SECONDS,
-        "iss": app_id,
+        # GitHub spec requires `iss` to be the App ID as a string. PyJWT
+        # historically accepted ints here; current versions (and stricter
+        # validators on the GitHub side) reject them with
+        # "Issuer (iss) must be a string."
+        "iss": str(app_id),
     }
     return jwt.encode(payload, pem, algorithm="RS256")
 

@@ -350,11 +350,11 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
     priority. Each feature ships as its own session PR.
 
     Returns ([], None, None) for personas that manage their own work
-    (qa_tester, recommender, etc.).
+    (recommender, architect, etc.).
 
     Tuple shape: (features, sprint_name, sprint_dict) — sprint_name and
-    sprint_dict are kept as None for callsite compatibility; the new model
-    has no sprint context.
+    sprint_dict are kept as None for callsite + test-stub compatibility;
+    the flat model has no sprint context.
     """
     if persona not in ("coder", "designer", "reviewer"):
         return [], None, None
@@ -462,9 +462,10 @@ def _write_sprint_features_md(working_dir: str, features: list[dict], sprint_nam
 
 def _fetch_recent_review_comments(feature_id: int, limit: int = 25) -> list[dict]:
     """
-    Pull the last `limit` reviewer/security_auditor/qa_tester comments for a
-    feature from the PM API. Returns oldest-first within the slice so the
-    prompt-renderer can stack them in chronological order under the feature.
+    Pull the last `limit` reviewer/lint-guard/post-coder:test-check comments
+    for a feature from the PM API. Returns oldest-first within the slice so
+    the prompt-renderer can stack them in chronological order under the
+    feature.
 
     Used by `_format_reviewer_feedback` to bridge the reviewer→coder feedback
     gap. Until 2026-05-06 the rework coder had no signal for WHY it was
@@ -506,8 +507,7 @@ def _fetch_recent_review_comments(feature_id: int, limit: int = 25) -> list[dict
             # tests/test_database.py" feedback was authored by lint-guard,
             # not reviewer, and therefore excluded from the prompt.
             _ALLOWED_AUTHORS = {
-                "reviewer", "security_auditor", "qa_tester",
-                "lint-guard", "post-coder:test-check",
+                "reviewer", "lint-guard", "post-coder:test-check",
             }
             relevant = [c for c in data
                         if (c.get("author") or "").lower() in _ALLOWED_AUTHORS]
@@ -666,7 +666,7 @@ def _get_claude_profile(sys_cfg: dict, persona: str | None = None) -> tuple[str,
 # (and any future callers) keep the same import path.
 from orchestrator.integrations.git_ops import (
     _reset_workspace,
-    _checkout_sprint_branch,
+    _checkout_branch,
     _cleanup_workspace_post_session,
 )
 
@@ -1170,11 +1170,8 @@ def _finalize_session(
       5. _rollback_stuck_features for non-zero exits or zero-progress runs
          (coder/designer only); _cleanup_workspace_post_session
 
-    On a successful coder run, recursively launches qa_tester then
-    security_auditor before returning. Returns the final exit_code (or 2
-    propagated unchanged when the agent reported a non-retryable error).
-
-    Extracted from run_claude_in_docker during Phase 3 of OrchestratorRefactor.
+    Returns the final exit_code (or 2 propagated unchanged when the agent
+    reported a non-retryable error).
     """
     _session_features: list = []
     attempted = 0
@@ -1609,7 +1606,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     # Poller-driven feature assignment: pre-fetch and claim features before launch.
     # Agent receives an explicit task list — no self-discovery inside the container.
-    assigned_features, active_sprint_name, active_sprint = _fetch_assigned_features(product["id"], persona, effective_max_features)
+    assigned_features, active_sprint_name, _ = _fetch_assigned_features(product["id"], persona, effective_max_features)
     _claim_features(assigned_features, persona)
     product["_assigned_features"] = assigned_features
     product["_assigned_features_md"] = _format_assigned_features(assigned_features, persona)
@@ -1645,21 +1642,6 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             )
         except Exception:
             log.debug("Phase 7 pre-coder context build failed (non-fatal)", exc_info=True)
-    product["_active_sprint"] = active_sprint or {}
-
-    # Phases→features flat model (migration 043): every coder run opens a
-    # session PR (head=coder/<uid>, base=main). The legacy `sprint_pr_mode`
-    # toggle is forced True — the bare-branch fallback path in post_coder
-    # is dead under the new model. Field kept for prompt-template compat.
-    product["_sprint_pr_mode"] = True
-    # `_sprint_branch` / `_sprint_pr_*` are kept as empty strings for
-    # backwards-compat with prompt templates that still reference them
-    # (they render as empty in the prompt under 1-PR; the new
-    # session-context block below is the live signal).
-    product["_sprint_branch"] = ""
-    product["_sprint_pr_number"] = ""
-    product["_sprint_pr_url"] = ""
-
     # Session-PR context (1-PR model). Reviewer assignments are already
     # grouped by `pr_number` in _fetch_assigned_features, so the set of
     # session pr_numbers across assigned_features should be singleton. The
@@ -1695,7 +1677,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # integration branch to switch to, and post_coder cuts the session
     # branch off main itself.
     if persona == "reviewer" and product.get("_session_branch"):
-        _checkout_sprint_branch(  # noqa — helper name is legacy; it checks out any branch
+        _checkout_branch(
             working_dir,
             product["_session_branch"],
             product.get("name", str(working_dir)),

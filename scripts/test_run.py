@@ -190,6 +190,7 @@ def fetch_batch_features(product_id: int, persona: str) -> list[dict]:
         data = pm_get(f"/api/features/approved?product_id={product_id}")
         if data:
             data = [f for f in data
+                    if not f.get("design_doc_path") and not f.get("skip_design")]
     elif persona == "reviewer":
         data = pm_get(f"/api/products/{product_id}/features")
         if data:

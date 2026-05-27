@@ -3,10 +3,10 @@ Path B planner/designer post-session pipeline.
 
 The agent only writes docs/ files and appends Designed entries to
 session_result.json (the live-poll thread has already PATCHed the DB by the
-time this runs). Here we commit those docs and push to the right branch:
-sprint_branch when sprint_pr_mode is on, otherwise main. On any failure we
-roll the affected features back to Approved + clear design_doc_path so the
-next cycle re-plans them rather than coders running against missing docs.
+time this runs). Here we commit those docs and push to main. On any failure
+we roll the affected features back to Approved + clear design_doc_path so
+the next cycle re-plans them rather than coders running against missing
+docs.
 
 Extracted from docker_runner.py during Phase 2 of OrchestratorRefactor.
 """
@@ -166,10 +166,9 @@ def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
     Path B: orchestrator owns ALL git for planner/designer too. Agents only
     write docs/ files and append `Designed` entries to session_result.json
     (the live-poll has already PATCHed the DB by the time this runs). Here we
-    commit those docs and push to the sprint branch (sprint_pr_mode) or main
-    (legacy). On push failure we PATCH the affected features back to Approved
-    + clear design_doc_path so the next cycle re-plans them rather than
-    coders running against missing docs.
+    commit those docs and push to main. On push failure we PATCH the affected
+    features back to Approved + clear design_doc_path so the next cycle
+    re-plans them rather than coders running against missing docs.
     """
     pname = product.get("name", "?")
     if not assigned_features:
