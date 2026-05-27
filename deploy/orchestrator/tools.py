@@ -177,7 +177,6 @@ _ONDEMAND_PERSONAS = ("documenter", "analytics", "refactorer", "devops", "recomm
 _FEATURE_KEEP = {"id", "product_id", "phase_id", "parent_id", "name", "status",
                  "feature_type", "design_doc_path", "pr_number", "pr_url",
                  "fix_attempts", "merge_notes"}
-_PHASE_KEEP   = {"id", "product_id", "name", "goal", "order"}
 
 
 def _slim(obj: Any, keep: set) -> Any:
@@ -216,12 +215,6 @@ def get_products(args: dict, **kwargs) -> str:
     except Exception:
         pass
     return raw
-
-
-def get_phases(args: dict, **kwargs) -> str:
-    """List phases for a product (post migration 043, replaces get_sprints)."""
-    product_id = args.get("product_id")
-    return _slim_response(_pm("GET", f"/api/products/{product_id}/phases"), _PHASE_KEEP)
 
 
 def get_features(args: dict, **kwargs) -> str:
@@ -316,7 +309,7 @@ def _scaffold_greenfield_pending(products: list, **kwargs) -> int:
         log.error("[scaffold] SSH_DIR=%s does not exist — cannot generate deploy keys", ssh_dir)
         return 0
 
-    # system_config supplies github_org / github_pat / github_ssh_key_name.
+    # system_config supplies github_org / GitHub App credentials.
     try:
         with _pm_client() as client:
             sys_cfg = client.get("/api/system-config").json()
@@ -767,13 +760,7 @@ _PERSONA_ALIASES = {
     "coding": "coder",
     "programmer": "coder",
     "writer": "documenter",
-    "retro": "retrospective",
     "design": "designer",
-    "planner": "planner",
-    "qa": "qa_tester",
-    "tester": "qa_tester",
-    "security": "security_auditor",
-    "auditor": "security_auditor",
 }
 
 # Launch-lock: prevents duplicate launches for the same product while

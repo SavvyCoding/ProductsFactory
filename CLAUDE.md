@@ -7,16 +7,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ProductFactory is a 24/7 autonomous development system. It orchestrates Claude Code agents inside isolated Docker containers to implement features across multiple product repos, monitored by a FastAPI PM dashboard.
 
 **Three independent subsystems:**
-- **Orchestrator** (`orchestrator/` + `deploy/orchestrator/`) — long-running process inside the `pf-orchestrator` container. The cycle loop is `deploy/orchestrator/orchestrate.py` calling `tools.run_cycle` every ~60s; per-cycle decisions live in `orchestrator/cycle/persona.py`. See module docstrings (`orchestrator/auto_merge.py`, `reconcile.py`, `supervisor.py`, `docker_runner.py`) and `orchestrator/INVARIANTS.md` for the behavioral contract. (The host-mode `orchestrator/poller.py` and `orchestrator/dispatch.py` were retired 2026-05-18.)
+- **Orchestrator** (`orchestrator/` + `deploy/orchestrator/`) — long-running process inside the `pf-orchestrator` container. The cycle loop is `deploy/orchestrator/orchestrate.py` calling `tools.run_cycle` every ~60s. **Two layers of cycle logic**: `deploy/orchestrator/tools.py` holds the ~700-line `run_cycle` body (Priority 0 trainer/run_persona_now → Priority 1 reviewer preempt → Priority 2 round-robin + launch dispatch), and delegates per-product persona choice to `orchestrator/cycle/persona._decide_action`. See module docstrings (`orchestrator/auto_merge.py`, `reconcile.py`, `supervisor.py`, `docker_runner.py`) and `orchestrator/INVARIANTS.md` for the behavioral contract. (The host-mode `orchestrator/poller.py` and `orchestrator/dispatch.py` were retired 2026-05-18.)
 - **PM Website** (`website/`) — FastAPI dashboard + REST API for managing products and features
 - **Agent Image** (`deploy/docker/Dockerfile`) — Docker image Claude runs inside per product session
 
 **Orchestrator subpackage layout** (not obvious from a top-level `ls`):
 - `orchestrator/pipelines/` — per-persona post-session pipelines: `post_coder.py` (cut session branch, run lint guards + test execution, commit, push, open PR), `post_doc.py` (designer commits to main), `post_maintenance.py`, `auto_merge_reviewer.py` (per-reviewer-session squash-merge of approved session PRs)
 - `orchestrator/session/` — the session FSM. `state_machine.py` defines lifecycle states (incl. the "wrapping" state wired up in `04c4282`); `reconciler.py` reconciles DB session rows against Docker reality; `result_io.py` reads/writes `session_result.json`; `context_builder.py` (Phase 7) builds the pre-coder "related code" context from ARCHITECTURE.md MODULES/ENTRY POINTS/DEPRECATED to stop parallel-module drift. The agent loop is hardened against shape drift / hallucinated tool calls here (`d1bf9a9`).
-- `orchestrator/cycle/` — cycle-level helpers: `selection.py` (which product/persona this cycle), `persona.py` (gating per maintenance persona), `locks.py` (per-product mutex), `loop_detector.py` (catches planner spirals like the `kimi-k2.6` pattern).
+- `orchestrator/cycle/` — currently just `persona.py` (per-product deterministic decision tree, called by `deploy/orchestrator/tools.run_cycle`). The sibling helpers `selection.py` / `locks.py` / `loop_detector.py` were retired together with the host-mode poller (2026-05-18); product selection and per-product mutex now live in the website / `tools.py`.
 - `orchestrator/integrations/` — outbound integrations: `github_app.py` (JWT sign + installation-token minting, single chokepoint for all git auth), `github.py`, `git_ops.py` (authenticated push via one-shot credential helper, no token in `.git/config`), `docker_cli.py`.
 - `orchestrator/infra/` — `redaction.py` (token redaction in logs).
+- `orchestrator/slice/` and `orchestrator/workflow/` — **empty dead packages** (only stale `__pycache__/` from removed modules). No live imports anywhere; safe to delete on the next cleanup pass.
 
 ## Commands
 
@@ -69,6 +70,15 @@ python scripts/test_run.py \
 # Generate ProductFactory showcase video (requires Pillow, edge-tts, moviepy, playwright)
 python scripts/build_pf_video.py
 ```
+
+### CI
+
+`.github/workflows/ci.yml` runs on every push/PR to `master`/`main`:
+- `pytest tests/ -v --tb=short` against a Postgres service container (`TEST_DATABASE_URL=postgresql://productfactory:ci_test_password@localhost:5432/productfactory_test`). The job currently tolerates a known band of fixture-related failures from `/home/user/...` paths that don't resolve on Windows — don't add new failing tests under that umbrella.
+- `pip-audit` (transitive CVE scan) and `bandit` (Python static security) — both `continue-on-error: true` for now; surface findings, don't block.
+- Trivy CRITICAL/HIGH scan of the agent image (`exit-code: 0` — report-only until baseline is clean).
+
+Local pytest is authoritative for development, but CI catches Windows-vs-Linux path/encoding regressions that don't surface on the host. "Green locally" ≠ "green in CI."
 
 ## Architecture
 
@@ -140,6 +150,8 @@ A "Feature" in product-speak (e.g. "Contact Management") is usually a `phases` r
 
 **Release notes**: `GET /api/phases/{id}/release-notes` collates the `merge_notes` field of all Pushed features in the phase. Each coder session writes `features.merge_notes` on push (set in `post_coder.py`).
 
+**Historical planning docs in the repo root** (`futureplan.md`, `futureplan_v2.md`) are SUPERSEDED — `futureplan_v2.md`'s own header (line 3) marks it superseded by migration 043. Read them for *reasoning* (sizing-cap rationale, planner output spec) but **do not** treat them as live specs; the current model is documented here and in `orchestrator/INVARIANTS.md` Vocabulary.
+
 ### Per-Product Configuration
 
 `product.config` (JSONB column) stores per-product runtime state and overrides:
@@ -147,7 +159,7 @@ A "Feature" in product-speak (e.g. "Contact Management") is usually a `phases` r
 - `quiet_hours_start` / `quiet_hours_end` — Hour of day (0–23) to suppress sessions
 - `daily_session_cap` — Max sessions per day for this product
 - `max_features_per_run` — Per-product override for the global `MAX_FEATURES_PER_RUN`
-(Under the flat phases→features model the legacy `sprint_pr_mode` flag is retired. Every coder session opens its own session PR unconditionally — `docker_runner._sprint_pr_mode` is forced to `True` and the bare-branch fallback was removed.)
+(Under the flat phases→features model the legacy `sprint_pr_mode` toggle and its bare-branch False branch are retired. Every coder session opens its own session PR unconditionally.)
 
 Additionally, a `product_config.json` file in the product working directory (read by `setup_product.py` on discovery) can seed:
 - `preferred_stack` — Selects which `templates/stacks/` variant to install
@@ -172,7 +184,7 @@ Additionally, a `product_config.json` file in the product working directory (rea
 - Links: `POST/GET /api/features/{id}/links`, `DELETE /api/features/{id}/links/{link_id}`
 - Search: `GET /api/features/search?q=...&product_id=...` (PostgreSQL tsvector full-text)
 - Overdue: `GET /api/features/overdue` (past due_date, not Pushed/Rejected/Deferred)
-- Sync: `POST /api/products/{id}/sync-features` — reads `features.md` and reconciles statuses into DB; useful after a DB volume wipe
+- Sync: `POST /api/products/{id}/sync-features` — **deprecated no-op stub**; returns a "Disabled — DB is source of truth" payload. Kept so old bookmarks don't 404. After a DB volume wipe, restore from `backups/` via `scripts/recover_db.py`.
 
 **Phase endpoints** (added by migration 043):
 - `GET /api/phases/{id}/features` — features in this phase

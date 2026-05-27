@@ -193,7 +193,6 @@ class SystemConfig(Base):
     id:                    Mapped[int]           = mapped_column(Integer, primary_key=True, default=1)
     products_root_dir:     Mapped[Optional[str]] = mapped_column(Text)
     github_org:            Mapped[Optional[str]] = mapped_column(Text)
-    github_pat:            Mapped[Optional[str]] = mapped_column(Text)  # deprecated, scheduled for removal once App-token path is verified end-to-end
     github_app_id:                 Mapped[Optional[int]] = mapped_column(BigInteger)
     github_app_private_key:        Mapped[Optional[str]] = mapped_column(Text)
     github_app_installation_id:    Mapped[Optional[int]] = mapped_column(BigInteger)

@@ -2,14 +2,14 @@
 
 Two properties this file covers:
 
-1. `auto_merge_reviewer._auto_merge_approved` no longer short-circuits when
-   `product._sprint_pr_mode` is True. Under the 1-PR model the feature's
-   `pr_number` is the **session** PR (base=main), so merging it ships
-   one session's stories directly to main — no shared-PR coordination.
+1. `auto_merge_reviewer._auto_merge_approved` does not short-circuit —
+   under the 1-PR model the feature's `pr_number` is the **session** PR
+   (base=main), so merging it ships one session's stories directly to
+   main with no shared-PR coordination.
 
-2. `auto_merge.sweep_product` no longer holds back any approved PR — the
-   `_is_merge_eligible` "wait for whole sprint" gate is gone, and there
-   is no sprint integration PR to special-case.
+2. `auto_merge.sweep_product` does not hold back any approved PR — the
+   pre-flat-model "wait for whole sprint" gate is gone, and there is no
+   sprint integration PR to special-case.
 """
 
 from unittest.mock import MagicMock, patch
@@ -25,7 +25,7 @@ def _set_pm_url() -> None:
 class TestReviewerAutoMergeNoSprintShortCircuit:
     """The pre-1-PR defer-to-sweep skip is gone."""
 
-    def test_runs_merge_under_sprint_pr_mode(self):
+    def test_runs_merge_on_approved_session_pr(self):
         _set_pm_url()
         from orchestrator.pipelines import auto_merge_reviewer
 
@@ -33,8 +33,6 @@ class TestReviewerAutoMergeNoSprintShortCircuit:
             "id": 9,
             "name": "P",
             "github_repo": "https://github.com/o/r.git",
-            "_sprint_pr_mode":   True,
-            "_sprint_pr_number": 100,  # legacy field, ignored under 1-PR
         }
         features = [{
             "id": 1, "review_outcome": "approved", "pr_number": 200,  # session PR

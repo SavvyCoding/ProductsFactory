@@ -414,13 +414,6 @@ def _github_token_from_config(sys_cfg: SystemConfig | None) -> str | None:
         return None
 
 
-async def _sprint_cap(db: AsyncSession) -> int:
-    """Resolve the system-wide max_features_per_sprint with a default of 5."""
-    cfg = await _get_system_config(db)
-    val = getattr(cfg, "max_features_per_sprint", None) if cfg else None
-    return val if (val and val > 0) else 5
-
-
 # Statuses that terminate a feature's lifecycle. Such features are committed
 # history; they no longer compete for in-flight sprint capacity. Used both by
 # the cap check and the bulk-approve auto-assign code below to keep the cap
@@ -538,7 +531,6 @@ _CFG_DEFAULTS = {
     "auth_check_timeout":          30,
     "stuck_feature_timeout_hours": 0.75,  # 45 minutes — matches stale session threshold
     "max_features_per_run":        5,
-    "max_features_per_sprint":     5,
     "max_fix_attempts":            5,
     "brownfield_file_threshold":   10,
     "auto_merge_enabled":            False,
@@ -603,7 +595,6 @@ def _config_as_dict(config: SystemConfig | None) -> dict:
     base = {
         "products_root_dir":          (config.products_root_dir          if config else "") or "",
         "github_org":                 (config.github_org                 if config else "") or "",
-        "github_pat":                 (config.github_pat                 if config else "") or "",
         "github_app_id":              (config.github_app_id              if config else None),
         "github_app_private_key":     (config.github_app_private_key     if config else "") or "",
         "github_app_installation_id": (config.github_app_installation_id if config else None),
@@ -849,18 +840,11 @@ async def progress_view(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _seed_product_config(user_config: dict | None) -> dict:
-    """Merge new-product defaults with user-supplied config. User wins on conflict.
-
-    Sprint-PR mode is the default for every new product as of Phase 6.4 — the
-    coder/reviewer/qa/security pipeline only supports the sprint-PR flow now,
-    and the per-feature gh pr create path was removed in Phase 6.2. Existing
-    products keep whatever setting they had; this helper only affects products
-    created after the flip.
+    """Return a fresh dict of user-supplied config (or empty), suitable for
+    seeding `Product.config` on registration. Helper exists so callsites
+    don't pass `None` into the JSONB column.
     """
-    cfg = {"sprint_pr_mode": True}
-    if user_config:
-        cfg.update(user_config)
-    return cfg
+    return dict(user_config) if user_config else {}
 
 
 @app.post("/product/register")
@@ -899,20 +883,16 @@ async def register_greenfield_form(
     from website.catalogs import STACK_BY_ID, DATABASE_BY_ID, UI_TEMPLATE_BY_ID
 
     config = await _get_system_config(db)
-    # Accept either the App credentials (preferred, post-#9 migration) OR
-    # the legacy PAT during transition. Refuse only when BOTH are missing.
     _has_app = bool(
         config and config.github_app_id and config.github_app_private_key
         and config.github_app_installation_id
     )
-    _has_pat = bool(config and config.github_pat)
-    if not config or not config.products_root_dir or not config.github_org or not (_has_app or _has_pat):
+    if not config or not config.products_root_dir or not config.github_org or not _has_app:
         raise HTTPException(
             status_code=422,
             detail=(
                 "Admin configuration incomplete. Required: products root dir, "
-                "GitHub org, and either a GitHub App (App ID + PEM + Installation ID) "
-                "or the legacy PAT."
+                "GitHub org, and GitHub App credentials (App ID + PEM + Installation ID)."
             ),
         )
 
@@ -1082,11 +1062,6 @@ async def admin_save_settings(
 ):
     """Save system configuration (upsert single row id=1).
 
-    GitHub App fields replaced the legacy PAT + SSH-deploy-key inputs in the
-    UI on 2026-05-14. The PAT column stays in the DB as a deprecation cushion
-    but is no longer editable from this form — operators who need to roll
-    back can `UPDATE system_config SET github_pat = '...'` via psql.
-
     PEM textarea preserves embedded newlines and BEGIN/END markers; whitespace
     around the block is trimmed but interior content is left intact.
     """
@@ -1131,7 +1106,6 @@ _POLLER_INT_BOUNDS: dict[str, tuple[int, int]] = {
     "auth_check_timeout":          (5,    120),
     "stuck_feature_timeout_hours": (0.25,  48),
     "max_features_per_run":        (1,     10),
-    "max_features_per_sprint":     (1,     50),
     "max_fix_attempts":            (1,     20),
     "brownfield_file_threshold":   (1,    100),
     "ollama_timeout":              (30,  1800),
@@ -1191,7 +1165,6 @@ async def admin_save_poller_settings(
     config.auth_check_timeout          = _int("auth_check_timeout")
     config.stuck_feature_timeout_hours = _float("stuck_feature_timeout_hours")
     config.max_features_per_run        = _int("max_features_per_run")
-    config.max_features_per_sprint     = _int("max_features_per_sprint")
     config.max_fix_attempts            = _int("max_fix_attempts")
     config.brownfield_file_threshold       = _int("brownfield_file_threshold")
     config.auto_merge_enabled              = form.get("auto_merge_enabled") == "1"
@@ -1603,44 +1576,28 @@ _AC_BULLET_PATTERN = re.compile(r"^\s*[-*]\s+\S", re.MULTILINE)
 
 def _validate_story_size(
     description: str | None,
-    files_to_create: list | None = None,
     *,
     max_ac: int = 4,
-    max_files: int = 6,
 ) -> str | None:
-    """Return an error message if the description / files violate the story
-    size cap; None if it fits.
+    """Return an error message if the description violates the story size
+    cap; None if it fits.
 
-    A "story" (= a `features` row in code, see INVARIANTS.md vocabulary) must
-    be sized so one coder session can complete it. The cap counts:
-      - acceptance-criteria bullets in `description` (lines starting with
-        `- ` or `* `)
-      - structured `files_to_create` entries if the planner provides them
+    A "story" (= a `features` row, see INVARIANTS.md vocabulary) must be
+    sized so one coder session can complete it. The cap counts
+    acceptance-criteria bullets in `description` (lines starting with `- `
+    or `* `).
 
-    Caps are conservative; planner output is generally far below them. The
-    gate exists to catch the #224-shaped failure where one row is 13+
+    The cap exists to catch the #224-shaped failure where one row is 13+
     reviewer-rejection-cycles worth of work. A row violating the cap is
-    rejected at /api/features so the planner has to decompose further.
-
-    PM creates (changed_by="pm") bypass via the caller; this validator runs
-    on every POST regardless and returns the message — caller decides
-    whether to block.
+    rejected at /api/features so the planner has to decompose further. PM
+    creates (source="pm") bypass via the caller.
     """
     if description:
         ac_count = len(_AC_BULLET_PATTERN.findall(description))
         if ac_count > max_ac:
             return (
                 f"story too big: {ac_count} acceptance-criteria bullets in "
-                f"description (max {max_ac}). Split into smaller stories — "
-                f"see futureplan_v2.md Phase 1."
-            )
-    if files_to_create and isinstance(files_to_create, list):
-        file_count = len(files_to_create)
-        if file_count > max_files:
-            return (
-                f"story too big: {file_count} files in files_to_create "
-                f"(max {max_files}). Split into smaller stories — see "
-                f"futureplan_v2.md Phase 1."
+                f"description (max {max_ac}). Split into smaller stories."
             )
     return None
 
@@ -1653,10 +1610,7 @@ async def api_create_feature(body: schemas.FeatureCreate, db: AsyncSession = Dep
     # Bypass: PM-initiated creates set source="pm"; everything else (planner,
     # recommender, refactorer, devops, analytics) goes through the gate.
     if (body.source or "").lower() != "pm":
-        violation = _validate_story_size(
-            body.description,
-            getattr(body, "files_to_create", None),
-        )
+        violation = _validate_story_size(body.description)
         if violation:
             raise HTTPException(status_code=422, detail=violation)
     feature = Feature(**body.model_dump())

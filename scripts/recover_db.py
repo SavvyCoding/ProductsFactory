@@ -208,7 +208,6 @@ def main():
     print("\n── Restoring system_config ──")
     cfg = {}
     for key, env_var in [
-        ("github_pat", "GITHUB_PAT"),
         ("github_org", "GITHUB_ORG"),
         ("products_root_dir", "PRODUCTS_BASE_DIR"),
     ]:
@@ -223,7 +222,7 @@ def main():
             if resp.status_code not in (200, 303):
                 # Try patching system_config directly via an internal endpoint if available
                 pass
-        print(f"  Note: re-enter github_pat and other secrets via http://localhost:8080/admin")
+        print(f"  Note: re-enter GitHub App credentials (App ID, PEM, Installation ID) via http://localhost:8080/admin")
     else:
         print("  Note: re-enter all settings via http://localhost:8080/admin")
 
@@ -252,7 +251,7 @@ def main():
 
     print("\n── Done ──")
     print("Next steps:")
-    print("  1. Open http://localhost:8080/admin and re-enter github_pat, github_org")
+    print("  1. Open http://localhost:8080/admin and re-enter GitHub App credentials + github_org")
     print("  2. Review features at http://localhost:8080 — Pushed features are already marked done")
     print("  3. Approve the features you want the agents to work on next")
 

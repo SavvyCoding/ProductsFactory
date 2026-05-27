@@ -1,46 +1,23 @@
 """
-Canonical persona decision tree (Phase 5 of OrchestratorRefactor — Option B).
+Per-product persona decision tree — the single source of truth for "what
+should this product do next."
 
-Adopts ``deploy/orchestrator/tools.determine_next_action`` as the single
-implementation. Both the legacy poller (``orchestrator.poller``) and the
-deployed orchestrator (``deploy/orchestrator/tools``) now delegate here.
+`deploy/orchestrator/tools.determine_next_action` wraps `_decide_action`
+and supplies a signing httpx.Client; tools.run_cycle calls into here
+after its Priority 0/1 trainer+reviewer-preempt branches resolve the
+product to look at.
 
-API surface:
-  _decide_action(product_id, client) -> dict
-        The core decision tree. Returns one of:
-          {"action": "launch_session", "persona": ..., "product_id": ..., "reason": ...}
-          {"action": "plan_sprints",   "product_id": ..., "reason": ...}
-          {"action": "exit",           "reason": ...}
-        Caller provides the httpx.Client (poller uses plain client; the
-        deployed orchestrator passes its signing client).
+Returns one of:
+    {"action": "launch_session", "persona": ..., "product_id": ..., "reason": ...}
+    {"action": "exit",           "reason": ...}
 
-  _decide_action(product_id, client) -> dict  (single source of truth)
-        Adapter for orchestrator.poller. Calls _decide_action and collapses
-        the response: returns persona name on launch_session, None otherwise
-        (exit, plan_sprints, etc.). Manages its own httpx.Client lifecycle.
-
-Behavior changes vs legacy ``orchestrator.dispatch`` (which this replaces
-on the poller path):
-  + Implementing+changes_requested counts as codeable (was: stuck for 45m)
-  + Explicit DoD-gate dispatch: qa_passed → qa_tester, security_clean →
-    security_auditor (was: inferred from feature states)
-  + max_pending_approved backpressure (default 10): planner skipped when
-    Approved backlog is already deep
-  + auto_completed sprint detection via /api/sprints/{id}/check-dod
-  + Inline supervisor.detect_merge_stall + detect_auto_plan calls
-
-Behaviors lost from the legacy dispatch.py (accepted for Option B):
-  - _decide_flip_reviewed_no_pr: opportunistic Reviewed-no-PR → Pushed flip.
-    Now redundant with auto_merge.sweep_all + reconcile_in_flight_prs which
-    already detect closed-on-GitHub PRs and update the feature accordingly.
-  - _decide_route_unsprinted_security_bugs: dispatch.py routed unsprinted
-    bugs into the active sprint during persona selection. The deployed path
-    already does this in tools.run_cycle's per-cycle hook
-    (_route_unsprinted_security_bugs); the poller path will need an
-    equivalent call site (TODO Phase 5b).
-  - _decide_reset_orphan_agents: aggressive immediate reset of agent-state
-    features when no live session exists. Now relies on the slower
-    /api/features/reset_stuck (45-min threshold) called per cycle.
+Behavior notes:
+  - Implementing+changes_requested counts as codeable immediately (no
+    45-minute stuck timer needed — the reviewer explicitly bounced it).
+  - max_pending_approved backpressure (default 10): planner skipped when
+    the Approved backlog is already deep, so the system completes
+    pending work before adding more.
+  - Inline supervisor.detect_merge_stall + detect_auto_plan calls.
 """
 
 import json
