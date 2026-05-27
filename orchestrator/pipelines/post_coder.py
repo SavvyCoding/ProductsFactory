@@ -1304,9 +1304,20 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
                     + sample + more
                     + ". The agent image masks this because it pre-installs "
                     "common Python libs; the reviewer and any fresh `pip "
-                    "install -r requirements.txt && pytest` will fail. Add "
-                    "the missing packages to requirements.txt (or "
-                    "requirements-dev.txt for test-only deps)."
+                    "install -r requirements.txt && pytest` will fail.\n"
+                    "\n"
+                    "CORRECT FIX: append the missing package(s) to "
+                    "requirements.txt (or requirements-dev.txt for "
+                    "test-only deps). Pin a version range, e.g. "
+                    "`pytest>=8.0,<10`.\n"
+                    "\n"
+                    "WRONG FIX (do NOT do this): removing the import "
+                    "from the source file, or deleting tests that "
+                    "trigger the check. The check is purely static — "
+                    "AST-walk imports vs requirements.txt. A passing "
+                    "`pip install && pytest` locally does not satisfy "
+                    "it; the violating import must remain AND the "
+                    "package must appear in a requirements file."
                 )
     except Exception:
         log.debug("Guard 18 deps-coherence raised", exc_info=True)

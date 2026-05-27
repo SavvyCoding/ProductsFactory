@@ -67,6 +67,19 @@ _DESIGNER_ADD_ALLOWLIST = _DESIGNER_MODIFY_ALLOWLIST + (
     # though the designer never touched it — surfaced by 2026-05-26
     # SmokeTest smoke test.
     "check_deletion_safety.py",
+    # Renderer ships pytest.ini on the python stack (templates/renderer.py
+    # step 3c2). Designer's first-session `git add -A` picks it up
+    # legitimately. Without this entry, every python greenfield first
+    # session bounced with "Designer commit attempts to add pytest.ini"
+    # even though the renderer wrote it, not the designer (canonical
+    # 2026-05-27 Calculator incident — three features blocked, the lint
+    # message even cited the designer as the culprit).
+    "pytest.ini",
+    # Same story for requirements.txt — pre-seeded by the renderer (step
+    # 3c3) with the test toolchain so Guard 18 (deps-coherence) doesn't
+    # fire on `import pytest` from the first test file. Designer would
+    # otherwise inherit it on first `git add -A` and bounce.
+    "requirements.txt",
     # `.gitkeep` markers planted by the renderer in the empty src/, tests/,
     # Results/, Temp/ dirs on greenfield products (see templates/renderer.py:
     # the loop around line 230). One pattern matches them anywhere in the
