@@ -659,11 +659,16 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
                 continue
             debris_hits.append(f"{f} (in scratch dir — template forbids commits here)")
             continue
-        # 13c: empty source file
+        # 13c: empty source file — but allow empty __init__.py (standard
+        # Python package marker idiom). Surfaced by 2026-05-26 SmokeTest
+        # smoke test: greenfield Python product was bounced for
+        # `src/__init__.py`, `tests/__init__.py`, `migrations/__init__.py`,
+        # all of which are intentional, standard, and required by Python.
         try:
             full = _PP(working_dir) / f
             if (any(f.endswith(ext) for ext in _SOURCE_EXTENSIONS)
-                    and full.is_file() and full.stat().st_size == 0):
+                    and full.is_file() and full.stat().st_size == 0
+                    and fname != "__init__.py"):
                 debris_hits.append(f"{f} (empty source file)")
                 continue
         except Exception:
@@ -1323,6 +1328,7 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
     Best-effort: any unexpected exception → passed=True (skip the gate).
     """
     from pathlib import Path as _PP
+    import re as _re
     wd = _PP(working_dir)
     result = {
         "passed": True, "env_broken": False, "collection_errors": 0,
@@ -1331,8 +1337,18 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
     # ---- detect framework from filesystem markers ----
     if (wd / "pytest.ini").exists() or (wd / "pyproject.toml").exists():
         framework = "pytest"
-        collect_cmd = ["pytest", "--collect-only", "-q"]
-        run_cmd     = ["pytest", "-q", "--no-header"]
+        # `-s` disables pytest's stdout/stderr capture. Required when the
+        # workspace lives on a Windows-bind-mounted Docker volume: pytest's
+        # capture cleanup calls `tmpfile.truncate()` on temp files in the
+        # mounted dir, which races against the Docker virtiofs layer and
+        # raises FileNotFoundError. The resulting partial cleanup makes
+        # pytest report `collected 0 items` even when tests exist and run
+        # fine. Canonical 2026-05-26 SmokeTest incident: feature #950 looped
+        # for ~12 sessions with "zero tests collected" while pytest -s
+        # actually collected 5 items and only failed coverage. Don't drop
+        # `-s` here — the capture path is unsafe on Windows hosts.
+        collect_cmd = ["pytest", "--collect-only", "-q", "-s"]
+        run_cmd     = ["pytest", "-q", "--no-header", "-s"]
     elif (wd / "package.json").exists():
         try:
             import json as _json
@@ -1374,6 +1390,11 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
         r"can't load package: package",
         r"pytest: command not found",
         r"ModuleNotFoundError: No module named 'pytest'",
+        # pytest reports "unrecognized arguments: --cov..." when a plugin in
+        # the product's pytest.ini addopts isn't installed in the env running
+        # the post-coder check (pytest-cov, pytest-xdist, etc.). That's a
+        # missing-tool problem, not a code bug — coder shouldn't be punished.
+        r"unrecognized arguments:\s*--(cov|xdist|benchmark|mock|django|sugar)",
     ]
     _ENV_BROKEN_RE = _re.compile("|".join(_ENV_BROKEN_PATTERNS))
 
@@ -2217,8 +2238,19 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             return pushed_ids
         else:
             # Real test failure (or collection error). Bounce like lint guard.
-            reason = (f"collection errors ({collection_errors})"
-                      if collection_errors else "tests failed")
+            # Detect the "coder deleted skipped tests and shipped empty" loop:
+            # pytest exit 5 ("no tests ran" / "collected 0 items") gets a more
+            # targeted feedback message instead of "fix the failing test(s)",
+            # which doesn't actually match the failure (there ARE no tests).
+            no_tests_collected = (
+                "collected 0 items" in (output_excerpt or "")
+                or "no tests ran" in (output_excerpt or "")
+            )
+            if no_tests_collected:
+                reason = "zero tests collected"
+            else:
+                reason = (f"collection errors ({collection_errors})"
+                          if collection_errors else "tests failed")
             log.warning(
                 f"[post-coder] {pname}: {reason} — bouncing features to "
                 f"Implementing+changes_requested"
@@ -2227,14 +2259,30 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                 with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
                     for feat in assigned_features:
                         fid = feat["id"]
-                        body = (
-                            f"❌ post-coder test-check auto-reject ({reason}):\n"
-                            f"First failure: `{first_failure}`\n\n"
-                            f"```\n{output_excerpt[:800]}\n```\n"
-                            f"Fix the failing test(s) and re-push. If tests reference "
-                            f"symbols that don't exist (collection error), align the "
-                            f"test file with the actual code or delete the orphan test."
-                        )
+                        if no_tests_collected:
+                            body = (
+                                f"❌ post-coder test-check auto-reject "
+                                f"(zero tests collected):\n\n"
+                                f"```\n{output_excerpt[:800]}\n```\n"
+                                f"Your push contains NO tests for this story. "
+                                f"Empty test files are rejected the same as "
+                                f"`pytest.skip()`. You MUST land at least one "
+                                f"passing test that exercises an acceptance "
+                                f"criterion before this can be reviewed. "
+                                f"If a specific AC is impractical to test, "
+                                f"rewrite the test to exercise a different "
+                                f"part of the code that IS true — don't ship "
+                                f"the story with zero coverage."
+                            )
+                        else:
+                            body = (
+                                f"❌ post-coder test-check auto-reject ({reason}):\n"
+                                f"First failure: `{first_failure}`\n\n"
+                                f"```\n{output_excerpt[:800]}\n```\n"
+                                f"Fix the failing test(s) and re-push. If tests reference "
+                                f"symbols that don't exist (collection error), align the "
+                                f"test file with the actual code or delete the orphan test."
+                            )
                         try:
                             client.post(
                                 f"/api/features/{fid}/comments",

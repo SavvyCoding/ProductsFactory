@@ -164,18 +164,12 @@ def _route_to_blocked_if_at_cap(
     extra_reason: str,
     dry_run: bool,
 ) -> bool:
-    """When fix_attempts has just crossed `max_attempts`, route the feature
-    to the per-product Blocked sprint regardless of whether it has a PR.
+    """When fix_attempts has just crossed `max_attempts`, set the feature
+    status to Blocked directly. Phases→features flat model (migration 043)
+    replaced the Blocked-sprint holdpen with a simple status flag.
 
-    Bridges the gap that the existing Blocked-sprint route in
-    `github_client.reconcile_in_flight_prs` only fires for features with
-    a closed-unmerged PR on GitHub. Never-pushed features that exhaust
-    their budget via repeated kills/false-success would otherwise sit in
-    the active sprint forever — bug 126 in webcalculator was the canonical
-    example: fix_attempts=5, status=Implementing, no pr_number, no escape.
-
-    Idempotent: the website endpoint short-circuits if the feature is
-    already in the Blocked sprint. Best-effort — never raises.
+    Idempotent: a PATCH to status='Blocked' on an already-Blocked feature
+    is a no-op (the website's status guard accepts it).
 
     Returns True if the route was attempted (regardless of HTTP outcome).
     """
@@ -191,30 +185,31 @@ def _route_to_blocked_if_at_cap(
         product_id=product_id,
         target_type="feature",
         target_id=feature_id,
-        action="route_to_blocked_sprint",
+        action="set_status_blocked",
         reason=full_reason,
         dry_run=dry_run,
     )
     if dry_run:
         return True
     try:
-        resp = client.post(
-            f"/api/products/{product_id}/sprints/blocked/route",
-            json={"feature_ids": [feature_id], "reason": full_reason},
+        resp = client.patch(
+            f"/api/features/{feature_id}",
+            json={"status": "Blocked", "blocked_reason": full_reason,
+                  "changed_by": "supervisor"},
         )
         if resp.is_success:
             log.warning(
-                f"[{detector}] Feature #{feature_id} -> Blocked sprint "
+                f"[{detector}] Feature #{feature_id} -> Blocked status "
                 f"(fix_attempts={new_attempts} >= {max_attempts})"
             )
         else:
             log.warning(
-                f"[{detector}] route to Blocked sprint failed for "
+                f"[{detector}] PATCH status=Blocked failed for "
                 f"#{feature_id}: HTTP {resp.status_code} {resp.text[:120]}"
             )
     except Exception as e:
         log.warning(
-            f"[{detector}] route to Blocked sprint failed for #{feature_id}: {e}"
+            f"[{detector}] PATCH status=Blocked failed for #{feature_id}: {e}"
         )
     return True
 
@@ -470,9 +465,12 @@ def detect_repeated_review_feedback(
             try:
                 pid = product_id or feat.get("product_id")
                 if pid:
-                    client.post(
-                        f"/api/products/{pid}/sprints/blocked/route",
-                        json={"feature_ids": [feature_id], "reason": block_reason},
+                    # Phases→features flat model: PATCH status=Blocked instead
+                    # of routing into the legacy Blocked-sprint holdpen.
+                    client.patch(
+                        f"/api/features/{feature_id}",
+                        json={"status": "Blocked", "blocked_reason": block_reason,
+                              "changed_by": "supervisor"},
                     )
             except Exception as e:
                 log.warning(
@@ -624,9 +622,12 @@ def detect_divergent_review_feedback(
             try:
                 pid = product_id or feat.get("product_id")
                 if pid:
-                    client.post(
-                        f"/api/products/{pid}/sprints/blocked/route",
-                        json={"feature_ids": [feature_id], "reason": block_reason},
+                    # Phases→features flat model: PATCH status=Blocked instead
+                    # of routing into the legacy Blocked-sprint holdpen.
+                    client.patch(
+                        f"/api/features/{feature_id}",
+                        json={"status": "Blocked", "blocked_reason": block_reason,
+                              "changed_by": "supervisor"},
                     )
             except Exception as e:
                 log.warning(
@@ -1043,94 +1044,53 @@ def detect_dirty_prs(
 def detect_auto_plan(
     *,
     product_id: int,
-    active_sprint_has_codeable: bool,
-    unsprinted_approved_count: int,
+    unphased_approved_count: int,
+    active_sprint_has_codeable: bool = False,   # legacy kwarg, ignored under flat model
 ) -> bool:
-    """Caller has already determined whether the active sprint has codeable
-    work and how many unsprinted Approved features exist. We just decide
-    whether to call /plan-sprints. Returns True if we did (or would have
-    in dry-run).
+    """When enough Approved features are unphased, call /plan-phases.
+
+    Phases→features flat model (migration 043): replaces the legacy sprint
+    auto-plan trigger. Calls plan-phases instead of plan-sprints; cooldown
+    + dry-run honored as before. The `active_sprint_has_codeable` kwarg
+    is kept for callsite compatibility but ignored.
     """
     cfg = _get_supervisor_config()
     if not cfg["supervisor_auto_plan_enabled"]:
         return False
-    if active_sprint_has_codeable:
-        return False
     threshold = cfg["supervisor_auto_plan_min_unsprinted"]
-    if unsprinted_approved_count < threshold:
+    if unphased_approved_count < threshold:
         return False
     if _recent_action(product_id=product_id, detector="auto_plan",
                       target_type="product", target_id=product_id, within_hours=4):
         return False
     dry_run = cfg["supervisor_dry_run_only"]
     reason = (
-        f"Active sprint has no codeable features but {unsprinted_approved_count} "
-        f"Approved features are unsprinted (threshold {threshold}). Calling "
-        f"/plan-sprints to bring them into a new sprint."
+        f"{unphased_approved_count} Approved features are unphased "
+        f"(threshold {threshold}). Calling /plan-phases to group them."
     )
     _record_action(detector="auto_plan", product_id=product_id,
                    target_type="product", target_id=product_id,
-                   action="plan_sprints", reason=reason, dry_run=dry_run)
+                   action="plan_phases", reason=reason, dry_run=dry_run)
     if dry_run:
         return True
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=120) as client:
-            client.post(f"/api/products/{product_id}/plan-sprints")
+            client.post(f"/api/products/{product_id}/plan-phases")
     except Exception:
-        log.exception(f"auto_plan: plan-sprints call failed for product {product_id}")
+        log.exception(f"auto_plan: plan-phases call failed for product {product_id}")
     return True
 
 
-# ── Detector D: merge-stall alert ────────────────────────────────────────────
-# Active sprint, all non-terminal features are Reviewed, and no PR merge
-# happened for ≥merge_stall_min_min. Doesn't auto-mutate (multiple causes
-# possible: CI flake, human reviewer needed, auto-merge disabled, conflicts).
-# Just writes an audit row + Alert so PMs see it on the dashboard.
+# ── Detector D: merge-stall alert (sprint-aware variant — retired) ──────────
+# The sprint-aware merge-stall detector was retired in migration 043
+# (phases→features flat model). Under the new model there are no sprints to
+# stall — each feature ships as its own session PR. A per-feature merge-stall
+# equivalent could be reintroduced later (alert if a feature has been
+# Reviewed-approved with PR open for > N minutes).
 
-def detect_merge_stall(
-    *,
-    product_id: int,
-    sprint_id: int,
-    sprint_features: list[dict],
-    last_merge_ts: float | None,
-) -> bool:
-    cfg = _get_supervisor_config()
-    if not cfg["supervisor_merge_stall_enabled"]:
-        return False
-    threshold = cfg["supervisor_merge_stall_min_min"] * 60
-    non_terminal = [f for f in sprint_features
-                    if f.get("status") not in ("Pushed", "Rejected", "Reverted", "Deferred")]
-    if not non_terminal:
-        return False
-    if not all(f.get("status") == "Reviewed" for f in non_terminal):
-        return False
-    now = datetime.now(timezone.utc).timestamp()
-    if last_merge_ts is not None and (now - last_merge_ts) < threshold:
-        return False
-    if _recent_action(product_id=product_id, detector="merge_stall",
-                      target_type="sprint", target_id=sprint_id, within_hours=24):
-        return False
-    reason = (
-        f"Sprint {sprint_id} has {len(non_terminal)} feature(s) at Reviewed/approved "
-        f"but no PR merge has happened for ≥{cfg['supervisor_merge_stall_min_min']}min. "
-        f"Possible causes: dirty PR, CI flake, human reviewer needed, auto-merge disabled."
-    )
-    _record_action(detector="merge_stall", product_id=product_id,
-                   target_type="sprint", target_id=sprint_id,
-                   action="alert", reason=reason,
-                   dry_run=cfg["supervisor_dry_run_only"])
-    # Always-write Alert row (alerts are non-mutating informational by design).
-    try:
-        with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
-            client.post("/api/alerts", json={
-                "product_id": product_id,
-                "category":   "supervisor",
-                "severity":   "warning",
-                "message":    reason[:500],
-            })
-    except Exception:
-        log.debug("merge_stall: alert post failed", exc_info=True)
-    return True
+def detect_merge_stall(*args, **kwargs) -> bool:
+    """No-op stub retained for callsite compatibility. Returns False."""
+    return False
 
 
 # ── Detector E: overlap-PR detector ──────────────────────────────────────────
@@ -1255,7 +1215,7 @@ def detect_orphan_approved(
     orphans = [
         f for f in features
         if f.get("status") == "Approved"
-        and not f.get("sprint_id")
+        and not f.get("phase_id")
         and (now - _ts(f.get("updated_at"))) >= min_age
     ]
     if len(orphans) < threshold:
@@ -1265,21 +1225,21 @@ def detect_orphan_approved(
         return False
     dry_run = cfg["supervisor_dry_run_only"]
     reason = (
-        f"{len(orphans)} Approved feature(s) unsprinted for "
+        f"{len(orphans)} Approved feature(s) unphased for "
         f">={cfg['supervisor_orphan_approved_min_age_hours']}h "
-        f"(threshold {threshold}). Calling /plan-sprints — orphan IDs: "
+        f"(threshold {threshold}). Calling /plan-phases — orphan IDs: "
         f"{[f.get('id') for f in orphans[:10]]}."
     )
     _record_action(detector="orphan_approved", product_id=product_id,
                    target_type="product", target_id=product_id,
-                   action="plan_sprints", reason=reason, dry_run=dry_run)
+                   action="plan_phases", reason=reason, dry_run=dry_run)
     if dry_run:
         return True
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=120) as client:
-            client.post(f"/api/products/{product_id}/plan-sprints")
+            client.post(f"/api/products/{product_id}/plan-phases")
     except Exception:
-        log.exception(f"orphan_approved: plan-sprints call failed for product {product_id}")
+        log.exception(f"orphan_approved: plan-phases call failed for product {product_id}")
     return True
 
 
@@ -1320,26 +1280,32 @@ def detect_rapid_flap(
         reason = (
             f"Feature #{fid} cycled status {n} times in {win}h "
             f"(threshold {cfg['supervisor_rapid_flap_min_transitions']}). "
-            f"Routing to Blocked sprint for PM triage — agent pipeline is "
-            f"stuck in a flap loop with no progress."
+            f"Setting status=Blocked for PM triage — agent pipeline is stuck "
+            f"in a flap loop with no progress."
         )
         _record_action(detector="rapid_flap", product_id=product_id,
                        target_type="feature", target_id=fid,
-                       action="route_to_blocked", reason=reason, dry_run=dry_run)
+                       action="set_status_blocked", reason=reason, dry_run=dry_run)
         routed += 1
         if not dry_run:
             feature_ids.append(int(fid))
             reasons.append(reason)
     if feature_ids and not dry_run:
+        # Phases→features flat model: PATCH each flapping feature's status
+        # to Blocked directly. No more blocked-sprint holdpen.
         try:
             with httpx.Client(base_url=PM_API_URL, timeout=15) as client:
-                client.post(
-                    f"/api/products/{product_id}/sprints/blocked/route",
-                    json={"feature_ids": feature_ids,
-                          "reason": "Auto-routed: rapid status flap loop detected by supervisor"},
-                )
+                for fid in feature_ids:
+                    client.patch(
+                        f"/api/features/{fid}",
+                        json={
+                            "status": "Blocked",
+                            "blocked_reason": "Auto-routed: rapid status flap loop detected by supervisor",
+                            "changed_by": "supervisor",
+                        },
+                    )
         except Exception:
-            log.exception(f"rapid_flap: blocked-route call failed for product {product_id}")
+            log.exception(f"rapid_flap: status=Blocked PATCH failed for product {product_id}")
     return routed
 
 

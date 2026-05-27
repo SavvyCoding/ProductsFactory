@@ -600,7 +600,7 @@
                 {{ f.name }}
                 {% if f.source == 'ai' %}<span class="ai-badge" title="AI-suggested">🤖</span>{% endif %}
               </div>
-              {% if f.blocked_reason %}<div class="fbt-blocked">⚠ {{ f.blocked_reason[:140] }}{% if f.blocked_reason|length > 140 %}…{% endif %}</div>{% endif %}
+              {% if f.blocked_reason and f.status == 'Blocked' %}<div class="fbt-blocked">⚠ {{ f.blocked_reason[:140] }}{% if f.blocked_reason|length > 140 %}…{% endif %}</div>{% endif %}
             </td>
             <td>
               {% if f.feature_type == 'bug' %}<span class="type-badge type-bug">🐛 Bug</span>
@@ -775,278 +775,104 @@
 </div><!-- /tab-board -->
 
 
-<!-- ══ TAB: SPRINTS ══════════════════════════════════════════ -->
+<!-- ══ TAB: PHASES ══════════════════════════════════════════ -->
+<!-- Phases→features flat model (migration 043): pure UI grouping; features
+     ship via their own session PR direct to main. -->
 <div class="tab-content" id="tab-sprints" {% if active_tab != 'sprints' %}style="display:none"{% endif %}>
 
-  {% set approved_features = features | selectattr('status', 'equalto', 'Approved') | list %}
-  {% if approved_features | length > 0 and not phases %}
+  {% set approved_features = features | selectattr('status', 'equalto', 'Approved') | rejectattr('phase_id') | list %}
+  {% if approved_features | length > 0 %}
   <div class="notice notice-blue" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
-    <span>🤖 <strong>{{ approved_features | length }} approved feature{{ 's' if approved_features | length != 1 else '' }} ready to plan.</strong>
-    Let the AI organise them into phases and sprints automatically.</span>
-    <form method="post" action="/product/{{ product.id }}/plan-sprints" style="display:inline">
+    <span>🤖 <strong>{{ approved_features | length }} approved feature{{ 's' if approved_features | length != 1 else '' }} not yet grouped into a phase.</strong>
+    Let the AI organise them into themed phases.</span>
+    <form method="post" action="/product/{{ product.id }}/plan-phases" style="display:inline">
       <button class="pf-btn pf-btn--sm pf-btn--accent">Auto-Plan Phases</button>
     </form>
   </div>
   {% endif %}
 
-  {# Blocked sprint — per-product holding pen for features that exhausted
-     max_fix_attempts. Always shown on the Sprints tab so PMs know the
-     feature exists; renders as a calm empty state when nothing's stuck.
-     Populated state uses a red alert tone to draw attention. #}
-  {% set blocked_sprint = sprints | selectattr('kind', 'equalto', 'blocked') | first %}
-  {% set blocked_features = (features | selectattr('sprint_id', 'equalto', blocked_sprint.id) | list) if blocked_sprint else [] %}
-  {% set is_populated = blocked_features | length > 0 %}
-  <div class="blocked-sprint-card {% if is_populated %}is-populated{% endif %}">
-    <div class="blocked-sprint-header">
-      <div>
-        <div class="blocked-sprint-eyebrow">
-          🚫 BLOCKED SPRINT{% if is_populated %} — needs human triage{% endif %}
+  {% set blocked_features = features | selectattr('status', 'equalto', 'Blocked') | list %}
+  {% if blocked_features %}
+  <div class="card" style="margin-bottom:16px;border-left:4px solid var(--red);background:var(--surface)">
+    <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:6px;color:var(--red)">🚫 Blocked — needs human triage ({{ blocked_features | length }})</div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">Features that exceeded max_fix_attempts. PM can re-engage by PATCHing status to Approved/Designed.</div>
+    {% for f in blocked_features %}
+    <div class="phase-card" data-feature-id="{{ f.id }}" style="margin-bottom:6px;padding:8px;border-radius:6px;background:var(--bg);border:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;cursor:pointer">
+      <div style="min-width:0;flex:1">
+        <div style="font-size:13px;font-weight:600;color:var(--text)">
+          {% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
         </div>
-        <div class="blocked-sprint-headline">
-          {% if is_populated %}
-            {{ blocked_features | length }} feature{{ 's' if blocked_features | length != 1 else '' }} exceeded max_fix_attempts
-          {% else %}
-            No features awaiting triage
-          {% endif %}
-        </div>
-        <div class="blocked-sprint-sub">
-          {% if is_populated %}
-            Re-route a feature to a normal sprint after fixing the root cause, or mark Rejected.
-          {% else %}
-            Features that fail their PR cycle <strong>{{ max_fix_attempts or 5 }}</strong> times are auto-routed here for human triage.
-          {% endif %}
-        </div>
+        {% if f.blocked_reason %}<div style="font-size:11px;color:var(--text-muted);margin-top:2px">{{ f.blocked_reason }}</div>{% endif %}
       </div>
+      <span style="font-size:10px;background:var(--red);color:#fff;padding:1px 6px;border-radius:8px;margin-left:8px;flex-shrink:0">fix_attempts {{ f.fix_attempts or 0 }}</span>
     </div>
-    {% if is_populated %}
-    <div class="blocked-sprint-list">
-      {% for f in blocked_features %}
-      <div class="phase-card blocked-sprint-row" data-feature-id="{{ f.id }}">
-        <div style="min-width:0;flex:1">
-          <div class="blocked-sprint-row-name">
-            {% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
-          </div>
-          {% if f.blocked_reason %}
-          <div class="blocked-sprint-row-reason">{{ f.blocked_reason }}</div>
-          {% endif %}
-        </div>
-        <span class="blocked-sprint-row-attempts">fix_attempts: {{ f.fix_attempts or 0 }}</span>
-      </div>
-      {% endfor %}
-    </div>
-    {% endif %}
+    {% endfor %}
   </div>
+  {% endif %}
 
-  <div>
-
-    <!-- LEFT: Phases → Sprints roadmap (right column reserved for future labels/manual-create UI) -->
-    <div>
-
-      {% if phases %}
-      <!-- Phasewise Roadmap -->
-      {% for phase in phases %}
-      {% set phase_sprints = sprints | selectattr('phase_id', 'equalto', phase.id) | list %}
-      {% set phase_feats   = [] %}
-      {% for s in phase_sprints %}{% set _ = phase_feats.extend(features | selectattr('sprint_id', 'equalto', s.id) | list) %}{% endfor %}
-      {% set phase_pushed  = phase_feats | selectattr('status', 'equalto', 'Pushed') | list %}
-
-      <div class="card" style="margin-bottom:16px;border-left:4px solid {% if phase.status == 'active' %}var(--green){% elif phase.status == 'completed' %}var(--text-muted){% else %}var(--blue){% endif %}">
-
-        <!-- Phase header -->
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
-          <div>
-            <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:2px;color:{% if phase.status == 'active' %}var(--green){% elif phase.status == 'completed' %}var(--text-muted){% else %}#1d4ed8{% endif %}">
-              {{ phase.status | upper }}
-            </div>
-            <div style="font-size:15px;font-weight:700;color:var(--text)">{{ phase.name }}</div>
-            {% if phase.goal %}<div style="font-size:12px;color:var(--text-muted);margin-top:2px">{{ phase.goal }}</div>{% endif %}
-          </div>
-          <div style="text-align:right;flex-shrink:0;margin-left:12px">
-            <div style="font-size:12px;color:var(--text-muted)">{{ phase_pushed | length }}/{{ phase_feats | length }} shipped</div>
-            {% if phase_feats | length > 0 %}
-            <div style="background:var(--border);border-radius:4px;height:4px;width:80px;overflow:hidden;margin-top:4px">
-              <div style="background:var(--green);height:100%;width:{{ ((phase_pushed | length / phase_feats | length) * 100) | int }}%;transition:width .3s"></div>
-            </div>
-            {% endif %}
-          </div>
-        </div>
-
-        <!-- Sprints within this phase -->
-        {% for sprint in phase_sprints %}
-        {% set sf = features | selectattr('sprint_id', 'equalto', sprint.id) | list %}
-        {% set sp = sf | selectattr('status', 'equalto', 'Pushed') | list %}
-        <div style="margin-left:12px;margin-bottom:10px;padding:10px;background:var(--surface);border-radius:8px;border:1px solid var(--border){% if sprint.status == 'active' %};border-color:var(--green);box-shadow:0 0 0 1px var(--green)33{% endif %}">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:{% if sf %}6px{% else %}0{% endif %}">
-            <div>
-              <span style="font-size:13px;font-weight:600;color:var(--text)">{{ sprint.name | as_feature_name }}</span>
-              {% if sprint.status == 'active' %}<span style="font-size:10px;background:var(--green);color:#fff;padding:1px 6px;border-radius:8px;margin-left:6px;font-weight:600">ACTIVE</span>{% endif %}
-              {% if sprint.status == 'completed' %}<button class="sprint-report-btn" onclick="openSprintReport({{ sprint.id }}, '{{ sprint.name | as_feature_name }}')" style="font-size:10px;background:var(--surface);color:var(--text-muted);padding:1px 6px;border-radius:8px;margin-left:6px;border:1px solid var(--border);cursor:pointer" title="View feature report">DONE ▶</button>{% endif %}
-              {% if sprint.goal %}<div style="font-size:11px;color:var(--text-muted);margin-top:1px">{{ sprint.goal }}</div>{% endif %}
-            </div>
-            <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
-              <span style="font-size:11px;color:var(--text-muted)">{{ sp | length }}/{{ sf | length }}</span>
-              {% if sprint.status in ('active', 'completed') %}
-              {# Exclude Rejected/Reverted from progress display — they're
-                 out-of-scope. Gate math below uses raw sprint membership
-                 so a sprint where every story is Pushed-or-Rejected still
-                 completes. #}
-              {% set sf_planned_card = features | selectattr('sprint_id', 'equalto', sprint.id) | rejectattr('status', 'in', ['Rejected','Reverted']) | list %}
-              {% set sf_count = sf_planned_card | length %}
-              {% set sf_terminal = sf_planned_card | selectattr('status', 'in', ['Pushed','Deferred']) | list | length %}
-              {% set sf_total_raw = features | selectattr('sprint_id', 'equalto', sprint.id) | list | length %}
-              {% set sf_terminal_raw = features | selectattr('sprint_id', 'equalto', sprint.id) | selectattr('status', 'in', ['Pushed','Deferred','Rejected']) | list | length %}
-              {% set gate_features = (sf_total_raw == 0 or sf_terminal_raw == sf_total_raw) %}
-              {# Active completion gates (Phase 4 dropped qa_passed + security_clean):
-                 all_features_done + no_open_prs. Both are auto-computed; no agent
-                 sign-off required. Retro is generated post-completion (templated)
-                 and not a gate. #}
-              {% set all_gates = gate_features %}
-              <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
-                <!-- DoD checklist (visible for both active and completed sprints) -->
-                <div style="font-size:10px;display:flex;flex-direction:column;gap:2px;text-align:right"
-                     title="{% if sprint.status == 'active' %}Feature auto-completes when all stories are Pushed/Deferred/Rejected and no open PRs remain{% else %}DoD gate state at completion{% endif %}">
-                  <span style="color:{% if gate_features %}var(--green){% else %}var(--text-muted){% endif %}">{% if gate_features %}✓{% else %}○{% endif %} Stories done ({{ sf_terminal }}/{{ sf_count }})</span>
-                </div>
-                {% if sprint.status == 'active' %}
-                  {% if all_gates %}
-                  <form method="post" action="/product/{{ product.id }}/sprints/{{ sprint.id }}/complete" style="display:inline">
-                    <button class="btn btn-sm btn-green" style="font-size:11px;padding:3px 10px">✓✓ Complete Feature</button>
-                  </form>
-                  {% else %}
-                  <form method="post" action="/product/{{ product.id }}/sprints/{{ sprint.id }}/complete" style="display:inline">
-                    <button class="btn btn-sm btn-outline" onclick="return confirm('Not all DoD gates have passed. Complete sprint anyway?')" style="font-size:11px;padding:2px 8px;opacity:.7">Override → Done</button>
-                  </form>
-                  {% endif %}
-                {% endif %}
-              </div>
-              {% endif %}
-            </div>
-          </div>
-          {# `sf_display` hides Rejected/Reverted from the per-sprint
-             feature list — those stories are out-of-scope and live in
-             the "All Features" backlog + "Rejected / Reverted" archived
-             block. Progress bar uses the same filtered set. #}
-          {% set sf_display = sf | rejectattr('status', 'in', ['Rejected','Reverted']) | list %}
-          {% set sp_display = sf_display | selectattr('status', 'equalto', 'Pushed') | list %}
-          {% if sf_display %}
-          <!-- Progress bar -->
-          {% if sf_display | length > 0 %}
-          <div style="background:var(--border);border-radius:3px;height:3px;overflow:hidden;margin-bottom:6px">
-            <div style="background:var(--green);height:100%;width:{{ ((sp_display | length / sf_display | length) * 100) | int }}%"></div>
-          </div>
-          {% endif %}
-          <!-- Feature list -->
-          <div style="display:flex;flex-direction:column;gap:4px">
-            {% for f in sf_display %}
-            <div class="phase-card sprint-feature-row" data-feature-id="{{ f.id }}" style="display:flex;justify-content:space-between;align-items:center;padding:4px 6px;border-radius:4px;cursor:pointer;{% if f.status == 'Pushed' %}opacity:.8{% endif %}">
-              <div style="font-size:12px;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">
-                {% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
-              </div>
-              <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;margin-left:6px">
-                <span class="badge badge-status-{{ f.status | lower }}" style="font-size:10px">{{ f.status }}</span>
-                {% if f.status == 'Pushed' %}<span style="font-size:11px;color:var(--text-muted)" title="View activity">&#x25B6;</span>{% endif %}
-                {# "Move back to Pending" — only show when the transition is
-                   PM-allowed (excludes Pushed/Pending itself). Submits a
-                   regular form post; onclick stops propagation so the
-                   surrounding row's click handler doesn't also fire. #}
-                {% if f.status in ['Approved','Designed','Implementing','Reviewing','Reviewed','Blocked','Rejected','Reverted','Deferred'] %}
-                <form method="post" action="/product/{{ product.id }}/features/{{ f.id }}/status"
-                      style="display:inline;margin:0;padding:0"
-                      onclick="event.stopPropagation()"
-                      onsubmit="return confirm('Move story #{{ f.id }} back to Pending? This clears the feature assignment and resets fix_attempts and review_outcome. The design doc is kept.');">
-                  <input type="hidden" name="status" value="Pending">
-                  <button type="submit"
-                          title="Move back to Pending (remove from feature)"
-                          style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:11px;padding:0 2px;line-height:1">↩</button>
-                </form>
-                {% endif %}
-              </div>
-            </div>
-            {% endfor %}
-          </div>
-          {% else %}
-          {# Distinguish "no stories ever" from "all stories rejected" so
-             the PM knows whether the sprint is empty or just dead. #}
-          {% if sf %}
-          <div style="font-size:11px;color:var(--text-muted);text-align:center;padding:6px 0">All {{ sf | length }} stor{% if sf | length == 1 %}y was{% else %}ies were{% endif %} Rejected/Reverted — see archived</div>
-          {% else %}
-          <div style="font-size:11px;color:var(--text-muted);text-align:center;padding:6px 0">No stories assigned</div>
-          {% endif %}
-          {% endif %}
-          {% if sprint.release_notes %}
-          <details style="margin-top:8px">
-            <summary style="font-size:11px;color:var(--blue);cursor:pointer;user-select:none">📋 Release Notes</summary>
-            <div style="font-size:11px;color:var(--text);margin-top:6px;padding:8px;background:var(--bg);border-radius:6px;border:1px solid var(--border);white-space:pre-wrap;line-height:1.5">{{ sprint.release_notes }}</div>
-          </details>
-          {% endif %}
-        </div>
-        {% else %}
-        <div style="margin-left:12px;font-size:12px;color:var(--text-muted);padding:8px 0">No features in this phase yet.</div>
-        {% endfor %}
-
+  {% if phases %}
+  <!-- Phase listing — each phase shows its features inline -->
+  {% for phase in phases %}
+  {% set phase_feats   = features | selectattr('phase_id', 'equalto', phase.id) | list %}
+  {% set phase_pushed  = phase_feats | selectattr('status', 'equalto', 'Pushed') | list %}
+  {% set phase_display = phase_feats | rejectattr('status', 'in', ['Rejected','Reverted']) | list %}
+  <div class="card" style="margin-bottom:16px;border-left:4px solid var(--blue)">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
+      <div>
+        <div style="font-size:15px;font-weight:700;color:var(--text)">{{ phase.name }}</div>
+        {% if phase.goal %}<div style="font-size:12px;color:var(--text-muted);margin-top:2px">{{ phase.goal }}</div>{% endif %}
       </div>
-      {% endfor %}
-
-      {# Orphan sprints — phase_id IS NULL. Defensive rendering so a sprint
-         created without a phase (e.g. legacy quarantine sprint, manual API
-         create, bug-fix sprint endpoint) is still visible in the UI. Without
-         this, an active orphan sprint silently blocks plan-sprints and is
-         invisible to the operator. #}
-      {% set orphan_sprints = sprints | selectattr('phase_id', 'none') | list %}
-      {% if orphan_sprints %}
-      <div class="card" style="margin-bottom:16px;border-left:4px solid var(--text-muted);background:var(--surface)">
-        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:6px;color:var(--text-muted)">No phase</div>
-        <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px">Features without a phase ({{ orphan_sprints | length }})</div>
-        {% for sprint in orphan_sprints %}
-        {% set sf = features | selectattr('sprint_id', 'equalto', sprint.id) | list %}
-        {% set sp = sf | selectattr('status', 'equalto', 'Pushed') | list %}
-        <div style="margin-left:0;margin-bottom:8px;padding:10px;background:var(--bg);border-radius:8px;border:1px solid var(--border){% if sprint.status == 'active' %};border-color:var(--green);box-shadow:0 0 0 1px var(--green)33{% endif %}">
-          <div style="display:flex;justify-content:space-between;align-items:center">
-            <div>
-              <span style="font-size:13px;font-weight:600;color:var(--text)">{{ sprint.name | as_feature_name }}</span>
-              {% if sprint.status == 'active' %}<span style="font-size:10px;background:var(--green);color:#fff;padding:1px 6px;border-radius:8px;margin-left:6px;font-weight:600">ACTIVE</span>{% endif %}
-              {% if sprint.status == 'planned' %}<span style="font-size:10px;background:var(--blue);color:#fff;padding:1px 6px;border-radius:8px;margin-left:6px;font-weight:600">PLANNED</span>{% endif %}
-              {% if sprint.status == 'completed' %}<span style="font-size:10px;background:var(--text-muted);color:#fff;padding:1px 6px;border-radius:8px;margin-left:6px;font-weight:600">COMPLETED</span>{% endif %}
-            </div>
-            <span style="font-size:11px;color:var(--text-muted)">{{ sp | length }}/{{ sf | length }} shipped</span>
-          </div>
-          {% if sprint.goal %}<div style="font-size:11px;color:var(--text-muted);margin-top:4px">{{ sprint.goal }}</div>{% endif %}
+      <div style="text-align:right;flex-shrink:0;margin-left:12px">
+        <div style="font-size:12px;color:var(--text-muted)">{{ phase_pushed | length }}/{{ phase_feats | length }} shipped</div>
+        {% if phase_feats | length > 0 %}
+        <div style="background:var(--border);border-radius:4px;height:4px;width:80px;overflow:hidden;margin-top:4px">
+          <div style="background:var(--green);height:100%;width:{{ ((phase_pushed | length / phase_feats | length) * 100) | int }}%;transition:width .3s"></div>
         </div>
-        {% endfor %}
-      </div>
-      {% endif %}
-
-      {% else %}
-      <!-- No phases yet — show backlog -->
-      {% set backlog = features | selectattr('status', 'equalto', 'Pending') | selectattr('sprint_id', 'none') | list %}
-      {% set approved_unplanned = features | selectattr('status', 'equalto', 'Approved') | selectattr('sprint_id', 'none') | list %}
-      {% set unplanned = (backlog + approved_unplanned) | sort(attribute='priority', reverse=True) %}
-      <div class="card">
-        <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px">
-          📋 Unplanned Backlog
-          <span style="color:var(--text-muted);font-weight:400;margin-left:6px">({{ unplanned | length }} features)</span>
-        </div>
-        {% if unplanned %}
-        <div style="display:flex;flex-direction:column;gap:5px">
-          {% for f in unplanned %}
-          <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;background:var(--surface);border-radius:6px;border:1px solid var(--border)">
-            <div style="min-width:0;flex:1">
-              <div style="font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-                {% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
-              </div>
-              <div style="font-size:11px;color:var(--text-muted)">{{ f.status }} · p{{ f.priority }}</div>
-            </div>
-          </div>
-          {% endfor %}
-        </div>
-        {% else %}
-        <div style="color:var(--text-muted);font-size:13px;text-align:center;padding:16px 0">Backlog is empty.</div>
         {% endif %}
       </div>
-      {% endif %}
     </div>
 
+    {% if phase_display %}
+    <div style="display:flex;flex-direction:column;gap:4px">
+      {% for f in phase_display %}
+      <div class="phase-card sprint-feature-row" data-feature-id="{{ f.id }}" style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;border-radius:6px;background:var(--surface);border:1px solid var(--border);cursor:pointer;{% if f.status == 'Pushed' %}opacity:.8{% endif %}">
+        <div style="font-size:12px;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">
+          {% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
+          {% if f.parent_id %}<span style="font-size:10px;color:var(--text-muted);margin-left:6px" title="Split child of #{{ f.parent_id }}">↳ child of #{{ f.parent_id }}</span>{% endif %}
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;margin-left:6px">
+          <span class="badge badge-status-{{ f.status | lower }}" style="font-size:10px">{{ f.status }}</span>
+          {% if f.pr_number %}<a href="{{ f.pr_url }}" target="_blank" style="font-size:11px;color:var(--blue);text-decoration:none" title="View PR">#{{ f.pr_number }}</a>{% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div style="font-size:11px;color:var(--text-muted);text-align:center;padding:6px 0">No features in this phase yet.</div>
+    {% endif %}
   </div>
+  {% endfor %}
+  {% else %}
+  <div style="color:var(--text-muted);font-size:13px;text-align:center;padding:32px 0">No phases yet. Add features and click <em>Auto-Plan Phases</em> above to group them.</div>
+  {% endif %}
+
+  {# Unphased features — features without a phase_id. Usually transient
+     (Pending awaiting approval, or Approved waiting for the next plan-phases
+     LLM call). Defensive rendering so they're never invisible. #}
+  {% set unphased = features | rejectattr('phase_id') | rejectattr('status', 'in', ['Pushed','Rejected','Reverted','Deferred','Blocked']) | list %}
+  {% if unphased %}
+  <div class="card" style="margin-bottom:16px;border-left:4px solid var(--text-muted);background:var(--surface)">
+    <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:6px;color:var(--text-muted)">No phase ({{ unphased | length }})</div>
+    {% for f in unphased %}
+    <div class="phase-card" data-feature-id="{{ f.id }}" style="margin-bottom:4px;padding:6px 8px;border-radius:6px;background:var(--bg);border:1px solid var(--border);display:flex;justify-content:space-between;cursor:pointer">
+      <div style="font-size:12px;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">
+        {% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
+      </div>
+      <span class="badge badge-status-{{ f.status | lower }}" style="font-size:10px;flex-shrink:0">{{ f.status }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
 </div>
 
 
