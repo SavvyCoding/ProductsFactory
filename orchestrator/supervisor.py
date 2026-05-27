@@ -1301,12 +1301,9 @@ def detect_rapid_flap(
 # has a *structural* problem that isn't going to fix itself — the next coder
 # will hit the same wall and burn another 30 minutes of LLM. The known
 # patterns are all deterministic plumbing issues:
-#   - SSH alias `Host github.com-<repo>` missing from ~/.ssh/config
-#     (greenfield_scaffold pre-2026-05-12 didn't append it automatically)
-#   - product.config.sprint_pr_mode missing (legacy products created
-#     before Phase 6.4 default; per-feature PR mode was removed)
-#   - active sprint has no branch_name/pr_number (provision step skipped
-#     or failed when sprint was activated)
+#   - GitHub App installation token cannot be minted (App removed, PEM
+#     rotated, installation id changed) — surfaces as auth-denied pushes
+#     across every product on that App.
 #
 # Each is detectable with a 5-line check and fixable deterministically.
 # So: pause the product the instant we see the symptom, run the checklist,
@@ -1412,24 +1409,11 @@ def auto_heal_unproductive_coder(
                 fixes_applied.append(f)
                 _record_fix(f)
 
-        # Check B: sprint_pr_mode flag on product.config.
-        c = _check_sprint_pr_mode(product)
-        checks_run.append(c)
-        if not c["ok"]:
-            f = _fix_sprint_pr_mode(pid)
-            if f:
-                fixes_applied.append(f)
-                _record_fix(f)
-
-        # (1-PR model: no sprint integration branch/PR to provision —
-        # _check_sprint_provisioned was retired with the model change.)
-
-        # 3. Re-verify after fixes — fresh fetch of product + sprint.
+        # 3. Re-verify after fixes — fresh fetch of product.
         fresh_product = _fetch_product(pid) or product
         remaining: list[dict] = []
         for fn, kind in (
             (_check_app_token, "product"),
-            (_check_sprint_pr_mode, "product"),
         ):
             recheck = fn(fresh_product) if kind == "product" else fn(pid)
             if not recheck["ok"]:
@@ -1560,31 +1544,8 @@ def _fix_app_token(product: dict) -> dict | None:
     return None
 
 
-def _check_sprint_pr_mode(product: dict) -> dict:
-    cfg = product.get("config") or {}
-    if cfg.get("sprint_pr_mode"):
-        return {"label": "sprint_pr_mode", "ok": True, "detail": "true"}
-    return {"label": "sprint_pr_mode", "ok": False,
-            "detail": "missing or false on product.config"}
-
-
-def _fix_sprint_pr_mode(pid: int) -> dict | None:
-    try:
-        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-            r = client.get(f"/api/products/{pid}")
-            if r.status_code != 200:
-                return None
-            cfg = dict(r.json().get("config") or {})
-            cfg["sprint_pr_mode"] = True
-            client.patch(f"/api/products/{pid}", json={"config": cfg})
-        return {"label": "sprint_pr_mode",
-                "detail": "set product.config.sprint_pr_mode = true"}
-    except Exception as e:
-        log.exception(f"auto-heal: sprint_pr_mode fix failed: {e}")
-        return None
-
-
-# _check_sprint_provisioned + _fix_sprint_provisioned were retired with
-# the 1-PR model (2026-05-15). Sprints no longer have their own branch
-# or PR; features ship via session PRs opened by post_coder per coder
-# run, so there's nothing for auto-heal to provision at the sprint level.
+# _check_sprint_pr_mode / _fix_sprint_pr_mode and
+# _check_sprint_provisioned / _fix_sprint_provisioned were retired with
+# the 1-PR model (2026-05-15) and migration 043 (2026-05-26). Sprints no
+# longer exist; the orchestrator force-sets the equivalent in-memory flag
+# at every launch, so auto-healing the DB column was a no-op.
