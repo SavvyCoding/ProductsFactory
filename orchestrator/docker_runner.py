@@ -666,7 +666,7 @@ def _get_claude_profile(sys_cfg: dict, persona: str | None = None) -> tuple[str,
 # (and any future callers) keep the same import path.
 from orchestrator.integrations.git_ops import (
     _reset_workspace,
-    _checkout_sprint_branch,
+    _checkout_branch,
     _cleanup_workspace_post_session,
 )
 
@@ -1677,7 +1677,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # integration branch to switch to, and post_coder cuts the session
     # branch off main itself.
     if persona == "reviewer" and product.get("_session_branch"):
-        _checkout_sprint_branch(  # noqa — helper name is legacy; it checks out any branch
+        _checkout_branch(
             working_dir,
             product["_session_branch"],
             product.get("name", str(working_dir)),

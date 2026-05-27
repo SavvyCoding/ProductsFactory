@@ -310,52 +310,53 @@ def _reset_workspace(working_dir: str, product_name: str) -> None:
     log.info(f"[{product_name}] Workspace synced to origin/{main_branch} (hard reset)")
 
 
-def _checkout_sprint_branch(working_dir: str, sprint_branch: str, product_name: str) -> bool:
+def _checkout_branch(working_dir: str, branch: str, product_name: str) -> bool:
     """
-    Pre-checkout the sprint branch before launching the agent so the agent's
+    Pre-checkout the given branch before launching the agent so the agent's
     very first tool call lands on the right branch regardless of whether it
     follows the prompt's MANDATORY-FIRST-ACTION instruction.
 
-    Runs after `_reset_workspace` (which leaves us on main) and assumes the
-    sprint branch already exists on origin (provisioned by
-    `orchestrator.sprint_pr.provision_sprint_pr` at sprint activation time).
+    Under the 1-PR model this is the reviewer's session branch (the head of
+    the open session PR they're reviewing). Runs after `_reset_workspace`
+    (which leaves us on main) and assumes the branch already exists on
+    origin.
 
     Returns True on success. On failure logs a warning and returns False —
     caller should leave the agent on `main` and rely on the post-coder
     pipeline's own checkout to recover, but flag this loudly so the operator
-    knows the sprint branch wasn't pre-set.
+    knows the branch wasn't pre-set.
     """
-    if not sprint_branch:
+    if not branch:
         return False
     wd = Path(working_dir)
     if not (wd / ".git").exists():
-        log.warning(f"[{product_name}] sprint pre-checkout: not a git repo, skipping")
+        log.warning(f"[{product_name}] pre-checkout: not a git repo, skipping")
         return False
 
     # Fetch first so the remote ref is current. _reset_workspace already
-    # fetched, but it was for origin/main with --prune; the sprint ref may
-    # not have existed at fetch time if just provisioned.
+    # fetched, but it was for origin/main with --prune; the target ref may
+    # not have existed at fetch time if just opened.
     r = git_fetch_authenticated(
-        ["origin", sprint_branch], cwd=wd, product_name=product_name, timeout=60,
+        ["origin", branch], cwd=wd, product_name=product_name, timeout=60,
     )
     if r.returncode != 0:
         log.warning(
-            f"[{product_name}] sprint pre-checkout: fetch origin {sprint_branch} failed: "
+            f"[{product_name}] pre-checkout: fetch origin {branch} failed: "
             f"{r.stderr.strip()[:200]}"
         )
         return False
 
     # Check it out as a tracking branch. -B forces creation/reset so we always
-    # end up on a clean local branch tracking origin/<sprint_branch>.
-    r = safe_run(["git", "checkout", "-B", sprint_branch, f"origin/{sprint_branch}"], cwd=wd)
+    # end up on a clean local branch tracking origin/<branch>.
+    r = safe_run(["git", "checkout", "-B", branch, f"origin/{branch}"], cwd=wd)
     if r.returncode != 0:
         log.warning(
-            f"[{product_name}] sprint pre-checkout: checkout {sprint_branch} failed: "
+            f"[{product_name}] pre-checkout: checkout {branch} failed: "
             f"{r.stderr.strip()[:200]}"
         )
         return False
 
-    log.info(f"[{product_name}] sprint pre-checkout: now on {sprint_branch}")
+    log.info(f"[{product_name}] pre-checkout: now on {branch}")
     return True
 
 
