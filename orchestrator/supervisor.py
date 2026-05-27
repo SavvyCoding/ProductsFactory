@@ -449,6 +449,10 @@ def detect_repeated_review_feedback(
                         "reason": "dry-run: would block + clear pr_number + route to Blocked sprint"}
 
             # Block: status=Blocked, pr_number cleared, blocked_reason set.
+            # Phases→features flat model (043): no Blocked-sprint route; a
+            # single PATCH carries the full transition. Pre-migration this
+            # block emitted two PATCHes (the second was the dead remnant of
+            # the legacy sprint-route call) — kept the test's len==1 broken.
             client.patch(
                 f"/api/features/{feature_id}",
                 json={
@@ -459,24 +463,6 @@ def detect_repeated_review_feedback(
                     "changed_by": "supervisor.repeated_review_feedback",
                 },
             )
-            # Route to per-product Blocked sprint via the same endpoint
-            # _route_to_blocked_if_at_cap uses. Idempotent — the website
-            # endpoint short-circuits if already there.
-            try:
-                pid = product_id or feat.get("product_id")
-                if pid:
-                    # Phases→features flat model: PATCH status=Blocked instead
-                    # of routing into the legacy Blocked-sprint holdpen.
-                    client.patch(
-                        f"/api/features/{feature_id}",
-                        json={"status": "Blocked", "blocked_reason": block_reason,
-                              "changed_by": "supervisor"},
-                    )
-            except Exception as e:
-                log.warning(
-                    f"[repeated_review_feedback] route-to-Blocked-sprint failed "
-                    f"for #{feature_id}: {e}"
-                )
             log.warning(
                 f"[repeated_review_feedback] Feature #{feature_id} -> Blocked "
                 f"(same fingerprint {new_count + 1}× in a row)"

@@ -176,15 +176,18 @@ class TestInstallTemplatesPositive:
         p = make_product(product_dir)
         install_templates(p, PM_API)
         agent_wf = (product_dir / "AGENT_WORKFLOW.md").read_text(encoding='utf-8')
+        # Migration 043 + cleanups removed the {PM_API_URL} reference from
+        # AGENT_WORKFLOW.md (the agent doesn't need to know the URL — its
+        # curl helpers have it baked in). The remaining placeholder we
+        # care about is {PRODUCT_NAME}.
         assert "Test Product" in agent_wf
-        assert PM_API in agent_wf
         assert "{PRODUCT_NAME}" not in agent_wf   # all resolved
-        assert "{PM_API_URL}" not in agent_wf
 
-    def test_features_md_created(self, product_dir):
-        p = make_product(product_dir)
-        install_templates(p, PM_API)
-        assert (product_dir / "features.md").exists()
+    # test_features_md_created removed: features.md is no longer created
+    # by install_templates — the DB is the single source of truth for
+    # feature status under the phases→features flat model (renderer.py
+    # explicitly skips it; AGENT_WORKFLOW.md line 241 also forbids the
+    # agent from writing it).
 
     def test_greenfield_directories_created(self, product_dir):
         p = make_product(product_dir, type="greenfield")
