@@ -226,11 +226,7 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
             max_features if max_features is not None else int(os.environ.get("MAX_FEATURES_PER_SPRINT", "5"))
         ),
         "{auto_merge_enabled}": str(product.get("_auto_merge_enabled", False)),
-        "{sprint_pr_mode}": str(product.get("_sprint_pr_mode", False)),
-        "{sprint_branch}": str(product.get("_sprint_branch", "")),
-        "{sprint_pr_number}": str(product.get("_sprint_pr_number", "")),
-        "{sprint_pr_url}": str(product.get("_sprint_pr_url", "")),
-        # Session-PR context (two-tier model). Populated for the reviewer
+        # Session-PR context (1-PR model). Populated for the reviewer
         # only — coder/designer don't use them. Empty string falls through
         # cleanly when the substitution isn't relevant (e.g. designer).
         "{session_branch}": str(product.get("_session_branch", "") or ""),

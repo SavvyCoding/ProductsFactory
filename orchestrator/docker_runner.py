@@ -1609,7 +1609,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     # Poller-driven feature assignment: pre-fetch and claim features before launch.
     # Agent receives an explicit task list — no self-discovery inside the container.
-    assigned_features, active_sprint_name, active_sprint = _fetch_assigned_features(product["id"], persona, effective_max_features)
+    assigned_features, active_sprint_name, _ = _fetch_assigned_features(product["id"], persona, effective_max_features)
     _claim_features(assigned_features, persona)
     product["_assigned_features"] = assigned_features
     product["_assigned_features_md"] = _format_assigned_features(assigned_features, persona)
@@ -1645,21 +1645,6 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             )
         except Exception:
             log.debug("Phase 7 pre-coder context build failed (non-fatal)", exc_info=True)
-    product["_active_sprint"] = active_sprint or {}
-
-    # Phases→features flat model (migration 043): every coder run opens a
-    # session PR (head=coder/<uid>, base=main). The legacy `sprint_pr_mode`
-    # toggle is forced True — the bare-branch fallback path in post_coder
-    # is dead under the new model. Field kept for prompt-template compat.
-    product["_sprint_pr_mode"] = True
-    # `_sprint_branch` / `_sprint_pr_*` are kept as empty strings for
-    # backwards-compat with prompt templates that still reference them
-    # (they render as empty in the prompt under 1-PR; the new
-    # session-context block below is the live signal).
-    product["_sprint_branch"] = ""
-    product["_sprint_pr_number"] = ""
-    product["_sprint_pr_url"] = ""
-
     # Session-PR context (1-PR model). Reviewer assignments are already
     # grouped by `pr_number` in _fetch_assigned_features, so the set of
     # session pr_numbers across assigned_features should be singleton. The
