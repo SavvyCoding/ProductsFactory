@@ -453,11 +453,36 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
             continue
         auth_missing.append(f)
     if auth_missing:
+        # Pick the comment syntax for the worked example based on the first
+        # offending file's extension — `.py` files take `# PUBLIC_ROUTE:`,
+        # everything else takes `// PUBLIC_ROUTE:`. The guard's own
+        # recognizer at line 444 looks for the literal `PUBLIC_ROUTE:`
+        # substring so both syntaxes pass; the example just has to match
+        # the file the agent is editing or it gets ignored as not-applicable.
+        _is_py = any(f.endswith(".py") for f in auth_missing)
+        _ann = "# PUBLIC_ROUTE:" if _is_py else "// PUBLIC_ROUTE:"
         violations.append(
             f"state-changing route(s) without recognized auth check: "
-            f"{', '.join(auth_missing[:3])}{'...' if len(auth_missing) > 3 else ''}. "
-            f"Add verifyAuth / verify_auth / equivalent (see ARCHITECTURE.md "
-            f"REFERENCE PATTERNS) or annotate first line with `// PUBLIC_ROUTE: <reason>`."
+            f"{', '.join(auth_missing[:3])}{'...' if len(auth_missing) > 3 else ''}.\n"
+            f"\n"
+            f"CORRECT FIX — pick ONE based on whether the endpoint should "
+            f"require auth:\n"
+            f"  (a) Endpoint genuinely needs no auth (public/anonymous "
+            f"use, e.g. health probe, unauthenticated calculator). Add "
+            f"this as the literal FIRST non-empty line of the file:\n"
+            f"        {_ann} <one-sentence justification>\n"
+            f"      Example: `{_ann} arithmetic endpoints have no user "
+            f"state`.\n"
+            f"  (b) Endpoint should require auth. Import and call a "
+            f"recognized auth helper (verify_auth, require_api_key, "
+            f"Depends(verify_...), etc.) at the start of each handler. "
+            f"See ARCHITECTURE.md REFERENCE PATTERNS for the canonical "
+            f"snippet on this stack.\n"
+            f"\n"
+            f"WRONG FIX (do NOT do this): change POST/PUT/PATCH/DELETE to "
+            f"GET to dodge the check. The guard inspects the method names "
+            f"but the architecture's auth contract still requires the "
+            f"annotation; the reviewer will reject."
         )
 
     # --- Guard 7: ESM/CJS module-system mismatch ---
