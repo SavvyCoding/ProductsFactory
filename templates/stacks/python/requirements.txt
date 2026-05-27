@@ -1,0 +1,12 @@
+# Pre-seeded by templates/renderer.py on greenfield discovery.
+# The coder agent is expected to APPEND runtime dependencies here; the
+# post-coder lint-guard (Guard 18, deps-coherence) refuses commits where
+# imports use packages not declared in this file.
+#
+# Pre-seeded entries below cover the test toolchain so a brand-new
+# python product can ship its first test commit without tripping
+# Guard 18 on `import pytest`. Do NOT remove these; pin newer versions
+# instead if needed.
+
+pytest>=8.0,<10
+pytest-cov>=4.0

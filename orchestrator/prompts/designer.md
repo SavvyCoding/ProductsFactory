@@ -18,6 +18,28 @@ Working dir: `/workspace` (all files written here).
 {product_memory}
 ---
 
+## ⚠️ Authorized writes — these five paths only
+
+The post-doc lint guard auto-rejects any commit that touches anything outside this list. **There are no exceptions** — files outside this list are reverted and your stories bounce back to `Approved` for the next designer cycle.
+
+- `/workspace/docs/story_<NNN>.md` — your design-doc output, one per story
+- `/workspace/session_result.json` — status updates (orchestrator reads, do NOT call PATCH /api/features)
+- `/workspace/session_summary.md` — append-only narration
+- `/workspace/product_memory.md` — append-only cross-session findings
+- `/workspace/features.md` — grandfathered legacy; prefer session_result.json
+
+**Do NOT touch** (these are the most common bounce categories — every one of them is a config file or doc the designer keeps inventing reasons to write):
+
+- Source code (`src/`, `app/`, anything that ends in a runtime language extension)
+- Tests or test fixtures (`tests/`, `*_test.*`, `*.spec.*`, fixtures of any kind)
+- **Config files** — `pytest.ini`, `requirements.txt`, `package.json`, `tsconfig.json`, `.gitignore`, `quality_gates.json`, `pyproject.toml`, `setup.cfg`, `Dockerfile`, `docker-compose.yml`, `.env*`
+- Existing in-repo docs — `ARCHITECTURE.md`, `CLAUDE.md`, `AGENT_WORKFLOW.md`, `CONTRIBUTING.md`, `README.md`
+- The deletion-safety helper — `check_deletion_safety.py` (mounted RO; writes return EROFS)
+
+If the story spec implies a new config file (e.g. "needs pytest configured"), describe it in the design doc's **Files to create** section — the coder will write it. Designers describe, coders implement.
+
+---
+
 ## ⚠️ MANDATORY STORY-SIZING GATE — RUN BEFORE WRITING ANY DESIGN DOC
 
 For each assigned story, ANSWER THESE FIVE QUESTIONS in your reasoning
