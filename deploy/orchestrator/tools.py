@@ -767,13 +767,7 @@ _PERSONA_ALIASES = {
     "coding": "coder",
     "programmer": "coder",
     "writer": "documenter",
-    "retro": "retrospective",
     "design": "designer",
-    "planner": "planner",
-    "qa": "qa_tester",
-    "tester": "qa_tester",
-    "security": "security_auditor",
-    "auditor": "security_auditor",
 }
 
 # Launch-lock: prevents duplicate launches for the same product while
