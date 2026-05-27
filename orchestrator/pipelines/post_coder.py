@@ -1450,6 +1450,51 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
     _ENV_BROKEN_RE = _re.compile("|".join(_ENV_BROKEN_PATTERNS))
 
     try:
+        # ---- install product deps so pytest can import them ----
+        # Without this, the orchestrator container's site-packages only has
+        # what was pre-baked at image-build time. Any product import of
+        # flask/django/sqlalchemy/etc. then fails with ModuleNotFoundError
+        # during pytest collection → 0 items collected → bounce, even when
+        # the agent shipped clean code that passes locally.
+        #
+        # Canonical 2026-05-27 product-23 (CalcV2) incident: agent shipped a
+        # correct Flask calculator (PUBLIC_ROUTE annotation, 5/5 tests pass
+        # locally at 97% coverage). Post-coder's pytest ran in
+        # pf-orchestrator which doesn't have flask, hit ImportError on
+        # `from src.main import create_app`, reported 0 collected, bounced.
+        # Same root cause behind every "zero tests collected" bounce we
+        # debugged on products 17/18/20/21/22 — system was rejecting
+        # correct code because it couldn't run the tests.
+        #
+        # Trade-off: this pollutes the orchestrator's global Python env
+        # across product runs (operator-cleanup nuisance, not data loss).
+        # Cleaner long-term: spawn an ephemeral container with the agent
+        # image to run tests; deferred to a follow-up.
+        if framework == "pytest":
+            for req_name in ("requirements.txt", "requirements-dev.txt"):
+                if not (wd / req_name).exists():
+                    continue
+                ri = _run(
+                    ["pip", "install", "--quiet", "--disable-pip-version-check",
+                     "--no-input", "-r", req_name],
+                    timeout=min(180, timeout),
+                )
+                if ri.returncode != 0:
+                    install_out = (ri.stdout or "") + "\n" + (ri.stderr or "")
+                    # All pip install failures classified env_broken:
+                    # operator alert fires, fix_attempts not bumped. If the
+                    # agent put a bogus package in requirements.txt, the
+                    # operator sees it. Better than bouncing forever on a
+                    # transient network issue or wheel-unavailable case.
+                    result["env_broken"] = True
+                    result["passed"] = False
+                    result["output"] = (
+                        f"pip install -r {req_name} failed "
+                        f"(exit={ri.returncode}):\n{install_out[:2000]}"
+                    )
+                    result["first_failure"] = f"pip install -r {req_name} failed"
+                    return result
+
         # ---- collection check (pytest only — surfaces import errors fast) ----
         if collect_cmd:
             r = _run(collect_cmd, timeout=min(60, timeout))
