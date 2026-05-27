@@ -42,7 +42,6 @@ PROMPT_INVARIANTS: dict[str, list[str]] = {
         "sed -i",                     # must remind model NOT to use sed/awk -i
         "git",                        # the no-git prohibition must mention git
         "gh ",                        # ditto for gh
-        "sprint_pr_mode",             # sprint behavior toggle must be present
         "self-verification",          # the pre-exit checklist (saves rework)
         "session_summary.md",         # blocked-reason fallback path
     ],
@@ -55,7 +54,6 @@ PROMPT_INVARIANTS: dict[str, list[str]] = {
         "sed -i",
         "git",
         "gh ",
-        "sprint_pr_mode",
         "session_summary.md",
     ],
 

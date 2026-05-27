@@ -1380,7 +1380,7 @@ def auto_heal_unproductive_coder(
 
         # 2. Run the diagnostic checklist + apply fixes for failing checks.
         # Re-fetch the latest product dict between phases so the checks see
-        # any fixes we just applied (e.g. sprint_pr_mode flag now present).
+        # any fixes we just applied.
         checks_run: list[dict] = []
         fixes_applied: list[dict] = []
 

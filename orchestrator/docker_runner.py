@@ -1642,15 +1642,6 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             )
         except Exception:
             log.debug("Phase 7 pre-coder context build failed (non-fatal)", exc_info=True)
-
-    # Phases→features flat model (migration 043): every coder run opens a
-    # session PR (head=coder/<uid>, base=main). post_coder.py still gates
-    # PR creation on this in-memory flag — its bare-branch False branch
-    # at post_coder.py:2114-2120 fires when the flag is missing/False.
-    # Force True here so runtime matches the model. Deleting the False
-    # branch in post_coder is tracked as a follow-up.
-    product["_sprint_pr_mode"] = True
-
     # Session-PR context (1-PR model). Reviewer assignments are already
     # grouped by `pr_number` in _fetch_assigned_features, so the set of
     # session pr_numbers across assigned_features should be singleton. The

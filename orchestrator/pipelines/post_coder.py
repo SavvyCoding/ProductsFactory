@@ -1697,12 +1697,11 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     # Per-feature mode (default): cut a fresh `coder/<session_uid>` branch and
     # later open a new PR for it.
     feat_ids = [f["id"] for f in assigned_features]
-    # 1-PR model: every coder session opens its own session PR with
-    # base=<default branch>. There is no sprint integration branch and no
-    # sprint PR. The `sprint_pr_mode` flag retains its old name for
-    # backwards compatibility but now means "open a session PR per coder
-    # run"; with it off, the bare-branch-no-PR legacy path warns + bails.
-    sprint_pr_mode = bool(product.get("_sprint_pr_mode"))
+    # 1-PR model (migration 043): every coder session opens its own session
+    # PR with base=<default branch>. There is no sprint integration branch
+    # and no sprint PR. The legacy `sprint_pr_mode` toggle and its
+    # bare-branch-no-PR False branch were retired with this cleanup —
+    # behavior is unconditional now.
 
     # Resolve the repo's true default branch via origin refs — do NOT trust
     # the local HEAD. A prior _reset_workspace that silently failed (stale
@@ -1763,9 +1762,8 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     # prior coder cycle produced a session PR that the reviewer rejected and
     # bounced back. Force-push fresh commits to that session PR's head branch
     # so the reviewer sees the new diff on the same PR (preserves the comment
-    # thread). Applies under sprint_pr_mode AND legacy per-feature mode
-    # because under the two-tier model the feature's `pr_number` is the
-    # session PR (its base is the sprint branch), not the sprint PR itself.
+    # thread). The feature's `pr_number` always points at the session PR
+    # under the 1-PR model.
     rework_pr_mode = False
     rework_pr_number: int | None = None
     rework_branch_name: str = ""
@@ -1835,15 +1833,13 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                 except Exception as e:
                     log.warning(f"[post-coder] {pname}: rework lookup for PR #{candidate} failed: {e} — opening a fresh session PR")
 
-    # Branch resolution. Three modes, evaluated in priority order:
+    # Branch resolution. Two modes, evaluated in priority order:
     #   1. rework_pr_mode — features share an open session PR, force-push to
     #      its branch so the reviewer's existing comment thread carries over.
-    #   2. sprint_pr_mode — cut a fresh `coder/<session_uid>` from the
-    #      default branch tip and open a session PR (base=default_branch,
-    #      head=coder/<uid>). Each coder session ships ONE session PR
-    #      directly to main on merge. Sprint is a planning bucket only.
-    #   3. legacy bare-branch — push coder/<session_uid> with no PR.
-    #      Dead path; the PR-resolution step below warns + bails.
+    #   2. fresh session — cut `coder/<session_uid>` from the default branch
+    #      tip and open a new session PR (base=default_branch, head=coder/
+    #      <uid>). Each coder session ships ONE session PR directly to main
+    #      on merge.
     if rework_pr_mode:
         # Stay on whatever branch we're on (HEAD = origin/main +
         # agent's edits) and reset a local branch with the rework branch
@@ -1854,7 +1850,7 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         if co.returncode != 0:
             log.warning(f"[post-coder] {pname}: rework `git checkout -B {branch}` failed — {_fmt_err(co)}")
             return pushed_ids
-    elif sprint_pr_mode:
+    else:
         # Cut a fresh session branch from the default branch tip. The
         # agent has been editing files in the working tree (`_reset_workspace`
         # left it on main/master); we stash those edits, switch to a
@@ -1927,12 +1923,6 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                 except Exception:
                     pass
                 return pushed_ids
-    else:
-        branch = f"coder/{session_uid}"
-        co = _run(["git", "checkout", "-b", branch])
-        if co.returncode != 0:
-            log.warning(f"[post-coder] {pname}: git checkout -b {branch} failed — {_fmt_err(co)}")
-            return pushed_ids
 
     # 3. Add + commit + push.
     # Use the soft denylist stager so the coder's modifications to PM-curated
@@ -2023,11 +2013,9 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         # fresh commits. --force-with-lease aborts if the remote was touched
         # by anyone else since our last fetch.
         push_args = ["--no-verify", "--force-with-lease", "origin", branch]
-    elif sprint_pr_mode:
+    else:
         # Fresh session branch — set upstream so subsequent rework cycles can
         # detect it via the rework path above.
-        push_args = ["--no-verify", "-u", "origin", branch]
-    else:
         push_args = ["--no-verify", "-u", "origin", branch]
     from orchestrator.integrations.git_ops import git_push_authenticated
     push_result = git_push_authenticated(push_args, cwd=working_dir, product_name=pname, timeout=180)
@@ -2036,19 +2024,17 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         return pushed_ids
     log.info(f"[post-coder] {pname}: pushed branch {branch}")
 
-    # 4. PR resolution. Three paths:
+    # 4. PR resolution. Two paths:
     #   - rework_pr_mode: reuse the existing open session PR we just force-
     #     pushed to (preserves the reviewer's comment thread).
-    #   - sprint_pr_mode (fresh session): open a new session PR with
-    #     base=<default branch>, head=coder/<session_uid>. The session PR
-    #     is the reviewable unit; on approval auto-merge merges it
-    #     directly into main. Sprint is a planning bucket only.
-    #   - legacy bare-branch: dead path. Warn + bail.
+    #   - fresh session: open a new session PR with base=<default branch>,
+    #     head=coder/<session_uid>. The session PR is the reviewable unit;
+    #     on approval auto-merge merges it directly into main.
     if rework_pr_mode:
         pr_number = int(rework_pr_number)  # type: ignore[arg-type]
         pr_url = rework_pr_url
         log.info(f"[post-coder] {pname}: reusing rework PR #{pr_number} — {pr_url}")
-    elif sprint_pr_mode:
+    else:
         # Open a new session PR targeting the default branch.
         gh_token_pr = _get_gh_token()
         github_repo_pr = product.get("github_repo", "")
@@ -2063,9 +2049,8 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         feat_bullets = "\n".join(
             f"- `[feature-{f['id']}]` {f.get('name','')}" for f in assigned_features
         ) or f"- session {session_uid}"
-        _sprint_ctx = (product.get('_active_sprint') or {}).get('name') or "(no active sprint)"
         pr_body = (
-            f"Session `{session_uid}` — sprint: {_sprint_ctx}\n\n"
+            f"Session `{session_uid}`\n\n"
             f"## Stories in this session\n{feat_bullets}\n\n"
             f"Targets `{default_branch}`; merges on reviewer approval."
         )
@@ -2111,13 +2096,6 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                 f"branch {branch} pushed but no PR linked"
             )
             return pushed_ids
-    else:
-        log.warning(
-            f"[post-coder] {pname}: bare-branch mode (sprint_pr_mode=False) "
-            f"no longer supported — branch {branch} was pushed but no PR "
-            f"will be opened. Flip sprint_pr_mode=True on the product."
-        )
-        return pushed_ids
 
     # 4.5 Lint guards — auto-reject obviously-broken commits before they hit
     # the LLM reviewer. Per the 2026-05-07 audit, ~80% of reviewer rejections

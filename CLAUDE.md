@@ -159,7 +159,7 @@ A "Feature" in product-speak (e.g. "Contact Management") is usually a `phases` r
 - `quiet_hours_start` / `quiet_hours_end` — Hour of day (0–23) to suppress sessions
 - `daily_session_cap` — Max sessions per day for this product
 - `max_features_per_run` — Per-product override for the global `MAX_FEATURES_PER_RUN`
-(Under the flat phases→features model the legacy `sprint_pr_mode` flag is retired. Every coder session opens its own session PR unconditionally — `docker_runner._sprint_pr_mode` is forced to `True` and the bare-branch fallback was removed.)
+(Under the flat phases→features model the legacy `sprint_pr_mode` toggle and its bare-branch False branch are retired. Every coder session opens its own session PR unconditionally.)
 
 Additionally, a `product_config.json` file in the product working directory (read by `setup_product.py` on discovery) can seed:
 - `preferred_stack` — Selects which `templates/stacks/` variant to install
