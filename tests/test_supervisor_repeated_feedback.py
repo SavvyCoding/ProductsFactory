@@ -239,8 +239,10 @@ class TestDetectRepeatedReviewFeedback:
 
     def test_threshold_met_blocks_and_routes(self, patch_client):
         """Same signature reaches threshold (count goes 1→2 with default
-        threshold=2): feature is blocked, pr_number cleared, routed to
-        the per-product Blocked sprint."""
+        threshold=2): feature is PATCHed to status=Blocked, pr_number
+        cleared. Under the phases→features flat model (migration 043)
+        there is no Blocked sprint — a single PATCH carries the full
+        transition; no sprint-route call is made."""
         comments = [
             {"author": "reviewer", "body": "❌ tests: e2e timeout"},
             {"author": "reviewer", "body": "❌ functional: divide-by-zero crash"},
@@ -272,10 +274,8 @@ class TestDetectRepeatedReviewFeedback:
         assert body["pr_number"] is None
         assert "Auto-blocked" in body["blocked_reason"]
         assert body["repeated_changes_count"] == 2
-        # AND the feature was routed to the per-product Blocked sprint.
-        assert len(routes) == 1
-        assert routes[0]["path"] == "/api/products/8/sprints/blocked/route"
-        assert routes[0]["body"]["feature_ids"] == [100]
+        # Phases→features flat model: no sprint route call.
+        assert routes == []
 
     def test_different_signature_resets_counter(self, patch_client):
         """The coder addressed something — signature differs from prior →
