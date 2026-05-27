@@ -184,7 +184,7 @@ Additionally, a `product_config.json` file in the product working directory (rea
 - Links: `POST/GET /api/features/{id}/links`, `DELETE /api/features/{id}/links/{link_id}`
 - Search: `GET /api/features/search?q=...&product_id=...` (PostgreSQL tsvector full-text)
 - Overdue: `GET /api/features/overdue` (past due_date, not Pushed/Rejected/Deferred)
-- Sync: `POST /api/products/{id}/sync-features` — reads `features.md` and reconciles statuses into DB; useful after a DB volume wipe
+- Sync: `POST /api/products/{id}/sync-features` — **deprecated no-op stub**; returns a "Disabled — DB is source of truth" payload. Kept so old bookmarks don't 404. After a DB volume wipe, restore from `backups/` via `scripts/recover_db.py`.
 
 **Phase endpoints** (added by migration 043):
 - `GET /api/phases/{id}/features` — features in this phase

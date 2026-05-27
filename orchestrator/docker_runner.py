@@ -350,11 +350,11 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
     priority. Each feature ships as its own session PR.
 
     Returns ([], None, None) for personas that manage their own work
-    (qa_tester, recommender, etc.).
+    (recommender, architect, etc.).
 
     Tuple shape: (features, sprint_name, sprint_dict) — sprint_name and
-    sprint_dict are kept as None for callsite compatibility; the new model
-    has no sprint context.
+    sprint_dict are kept as None for callsite + test-stub compatibility;
+    the flat model has no sprint context.
     """
     if persona not in ("coder", "designer", "reviewer"):
         return [], None, None
@@ -1170,11 +1170,8 @@ def _finalize_session(
       5. _rollback_stuck_features for non-zero exits or zero-progress runs
          (coder/designer only); _cleanup_workspace_post_session
 
-    On a successful coder run, recursively launches qa_tester then
-    security_auditor before returning. Returns the final exit_code (or 2
-    propagated unchanged when the agent reported a non-retryable error).
-
-    Extracted from run_claude_in_docker during Phase 3 of OrchestratorRefactor.
+    Returns the final exit_code (or 2 propagated unchanged when the agent
+    reported a non-retryable error).
     """
     _session_features: list = []
     attempted = 0

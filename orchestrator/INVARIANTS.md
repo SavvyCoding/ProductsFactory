@@ -258,8 +258,8 @@ If real-time persona-alternation detection ever becomes necessary again, the nat
 - *Why*: A poller restart re-runs discovery; non-idempotency would corrupt registered products.
 
 **XII.3 ❌ `features.md` is reconciled into the DB on orchestrator startup.**
-- *How*: Was previously enforced by `poller._startup_sync_features`. That call was a no-op stub by the time it was deleted in 2026-05-19, and the containerized orchestrator has no equivalent. After a DB volume wipe today, the operator must call `POST /api/products/{id}/sync-features` manually per product.
-- *Why*: After a DB volume wipe, the feature backlog must be recoverable from the source-of-truth file in the product repo. The manual endpoint exists; the automatic-on-boot wiring does not. Tracked as follow-up.
+- *How*: Previously enforced by `poller._startup_sync_features` (no-op stub by the time it was deleted in 2026-05-19). `POST /api/products/{id}/sync-features` survives as a deprecated no-op so old bookmarks don't 404. The containerized orchestrator has no equivalent and the manual endpoint no longer works. After a DB volume wipe today, restore from `backups/` via `scripts/recover_db.py`.
+- *Why*: After a DB volume wipe, the feature backlog must be recoverable. Source-of-truth has effectively moved to the Postgres backup file; the in-repo `features.md` is now downstream of the DB. The original "reconcile from .md" path is unlikely to come back. Tracked as follow-up.
 
 ---
 
