@@ -35,6 +35,16 @@ htmlcov/
 .env
 .env.local
 
+# Local databases (test data / dev fixtures). Canonical 2026-05-26 SmokeTest
+# incident: smoketest.db was committed to main by a coder session — bloats
+# repo, leaks test data, and gets re-overwritten every session.
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
 # OS / editor
 .DS_Store
 *.swp
