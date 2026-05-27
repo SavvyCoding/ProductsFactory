@@ -1053,6 +1053,39 @@ def _check_architect_due(product: dict) -> None:
         # for the delta threshold.
         reasons.append("first architect run for this product")
 
+    # Retry-on-failure override (2026-05-26): when the cadence says "skip" but
+    # the most recent architect session for this product ended badly
+    # (exit_code != 0 OR status in {killed, orphaned}), re-queue immediately.
+    # Without this, the counter-advances-at-queue-time policy below silently
+    # consumes the architect's budget on a failed run — e.g. an Ollama 429
+    # rate-limit cascade kills the architect, the counter still advances,
+    # and ARCHITECTURE.md MODULES stays empty for 7 days until the fallback
+    # fires. Canonical 2026-05-26 SmokeTest incident: the architect ran
+    # exactly once on the new product, MODULES never got populated, and the
+    # post-coder drift defenses were left with no source-of-truth registry.
+    if not reasons:
+        try:
+            with _pm_client() as client:
+                r = client.get(f"/api/products/{pid}/sessions?limit=10")
+            sessions = r.json() if r.is_success else []
+            last_arch = next(
+                (s for s in sessions if s.get("persona") == "architect"),
+                None,
+            )
+            if last_arch is not None:
+                bad_exit = (last_arch.get("exit_code") or 0) != 0
+                bad_status = (last_arch.get("status") or "") in (
+                    "killed", "orphaned",
+                )
+                if bad_exit or bad_status:
+                    reasons.append(
+                        f"previous architect session #{last_arch.get('id','?')} "
+                        f"failed (exit={last_arch.get('exit_code')}, "
+                        f"status={last_arch.get('status')}) — retrying"
+                    )
+        except Exception:
+            pass  # any error → defer to next cycle, don't loop on API issues
+
     if not reasons:
         return
 

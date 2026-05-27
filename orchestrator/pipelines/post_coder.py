@@ -683,13 +683,27 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
                     continue
             except Exception:
                 pass
-        # 13e: test_X_qa.py pair when test_X.py already exists
-        m = _re.match(r"^(.*?test_[A-Za-z0-9_]+)_qa(\.[A-Za-z]+)$", fname)
+        # 13e: test_X_<suffix>.py sibling pair when test_X.py already exists.
+        # Older form (_qa.py) was the canonical case; broadened 2026-05-26
+        # after SmokeTest shipped both `tests/test_database.py` AND
+        # `tests/test_database_manager.py` from two different coder sessions
+        # — same `DatabaseManager` class tested in both, no review caught it.
+        # The blocklist is a closed set of suffixes; legitimate per-method
+        # splits (`_async`, `_sync`, `_unit`, `_integration`, `_e2e`) pass
+        # through unchanged.
+        _SIBLING_SUFFIX_RE = _re.compile(
+            r"^(.*?test_[A-Za-z0-9_]+)"
+            r"_(qa|manager|class|cases|extra|additional|more|new|v2)"
+            r"(\.[A-Za-z]+)$"
+        )
+        m = _SIBLING_SUFFIX_RE.match(fname)
         if m:
-            base = m.group(1) + m.group(2)
+            base = m.group(1) + m.group(3)
             try:
                 if ((_PP(working_dir) / f).parent / base).exists():
-                    qa_pair_hits.append(f"{f} (paired with existing {base})")
+                    qa_pair_hits.append(
+                        f"{f} (sibling of existing {base})"
+                    )
             except Exception:
                 pass
     if debris_hits:
@@ -704,11 +718,12 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
         )
     if qa_pair_hits:
         violations.append(
-            f"test_X_qa.py pair(s) when test_X.py already exists: "
+            f"sibling test file pair(s) — test_X.py already exists: "
             f"{', '.join(qa_pair_hits[:3])}{'...' if len(qa_pair_hits) > 3 else ''}. "
-            f"The QA reviewer should EDIT the existing test file, not create a "
-            f"parallel _qa.py. Merge the new assertions into the original test "
-            f"and delete the _qa file."
+            f"Don't create `test_X_qa.py` / `test_X_manager.py` / `test_X_cases.py` "
+            f"alongside `test_X.py`. Merge the new assertions into the original "
+            f"file and delete the sibling. (Per-method splits like `_async`, "
+            f"`_sync`, `_unit`, `_integration`, `_e2e` are allowed.)"
         )
 
     # --- Guard 14: config-as-gate integrity (Phase 4 of quality-specs) ---
