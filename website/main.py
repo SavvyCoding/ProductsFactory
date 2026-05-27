@@ -515,7 +515,14 @@ _FEATURE_PROGRESS_RANK = {
     "Implementing": 4, "Implemented":  4,
     "Reviewing":    5, "Testing":      5, "Committed":    5,
     "Reviewed":     6, "Pushed":       7,
-    "Blocked":      2, "Deferred":     7, "Rejected":     7, "Reverted":     0,
+    # Blocked sits at terminal rank alongside Deferred/Rejected so the
+    # rank guard rejects Blocked→Implementing demotes as downgrades.
+    # Defense-in-depth on top of the explicit "only PM exits Blocked"
+    # check above. Was 2 (sprint-era holdpen rank) until 2026-05-27,
+    # which made the post-coder:lint-guard PATCH read as a forward
+    # move, defeating the supervisor's flap-detector Block on
+    # product 18 (37 lint bounces before RCA caught it).
+    "Blocked":      7, "Deferred":     7, "Rejected":     7, "Reverted":     0,
 }
 _FEATURE_ALLOWED_BACKWARD = frozenset({
     ("Reviewing",  "Implementing"),  # reviewer requests changes
@@ -1644,24 +1651,28 @@ async def api_update_feature(
 
     # Quarantine Blocked features from agent writes — only PMs can re-engage
     # a Blocked feature (set status to Approved/Designed/etc). Without this,
-    # reviewers would PATCH features back into the agent pipeline as soon as
-    # they spot the `[feature-NN]` commit prefix, defeating the block. Replaces
-    # the legacy Blocked-sprint holdpen with a simple status check (phases→
-    # features flat model — no sprint layer).
+    # the post-coder:lint-guard's status=Implementing PATCH after a Block can
+    # revert the supervisor's protective Block within seconds — canonical
+    # 2026-05-27 product 18 incident: supervisor Blocked feature 973 at
+    # 17:37:38, post-coder:lint-guard reverted it at 17:37:43, 35 more
+    # bounce-cycles ran on the unblocked feature. The earlier carve-out
+    # ("allow patches that move OUT of Blocked") was an inversion bug —
+    # it permitted ANY non-PM caller to un-block, which is exactly what
+    # broke the supervisor's terminator. The fix is strict: any non-PM
+    # PATCH against a Blocked feature is rejected, regardless of what
+    # fields the PATCH carries. The rank guard below is the
+    # belt-and-suspenders backup (Blocked is now rank 7, so demotes are
+    # rejected there too).
     _peek_changed_by = updates.get("changed_by", "agent")
     if feature.status == "Blocked" and _peek_changed_by != "pm":
-        # Allow patches that move OUT of Blocked status — those are how PMs
-        # re-engage. Block any other write from non-PM callers.
-        _exits_blocked = "status" in updates and updates["status"] != "Blocked"
-        if not _exits_blocked:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"Feature #{feature_id} is Blocked — agents can't modify it. "
-                    f"PM must PATCH status to Approved/Designed/Implementing to "
-                    f"re-engage."
-                ),
-            )
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Feature #{feature_id} is Blocked — only PM can re-engage "
+                f"(PATCH with changed_by=pm and a target status of "
+                f"Approved/Designed/Implementing)."
+            ),
+        )
 
     # IV.1 rank guard (#4): status never silently downgrades. Previously
     # enforced only in the agent harness (orchestrator/docker_runner.py:

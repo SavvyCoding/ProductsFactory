@@ -718,6 +718,63 @@ class TestResetStuck:
         assert f.status == "Blocked"
 
 
+class TestBlockedQuarantine:
+    """Regression suite for the 2026-05-27 Blocked-state inversion bug.
+
+    Supervisor PATCHes feature status=Blocked on rapid-flap detection.
+    The intent was: only PM can move OUT of Blocked. Previous logic had
+    an `_exits_blocked` carve-out that actually permitted ANY non-PM
+    caller to un-block as long as the PATCH carried a different status,
+    which is exactly what post-coder:lint-guard does in its bounce
+    path. Result: supervisor's Block on feature 973 lasted 5 seconds
+    before post-coder reverted it, then 35 more bounce cycles ran on
+    the unblocked feature.
+    """
+
+    def test_post_coder_lint_guard_cannot_unblock(self, client, db):
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Blocked")
+        r = client.patch(
+            f"/api/features/{f.id}",
+            json={"status": "Implementing", "changed_by": "post-coder:lint-guard"},
+        )
+        assert r.status_code == 422
+        assert "Blocked" in r.json()["detail"]
+
+    def test_supervisor_cannot_unblock(self, client, db):
+        # Even the supervisor itself can't re-engage — only PM closes the loop.
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Blocked")
+        r = client.patch(
+            f"/api/features/{f.id}",
+            json={"status": "Implementing", "changed_by": "supervisor"},
+        )
+        assert r.status_code == 422
+
+    def test_pm_can_unblock(self, client, db):
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Blocked")
+        r = client.patch(
+            f"/api/features/{f.id}",
+            json={"status": "Implementing", "changed_by": "pm"},
+        )
+        assert r.status_code == 200
+        assert r.json()["status"] == "Implementing"
+
+    def test_blocked_rank_rejects_demote_as_downgrade(self, client, db):
+        # Defense-in-depth: even if the Blocked-state guard above ever
+        # regresses, Blocked is rank 7, so the rank guard catches the
+        # demote independently. Bypass entries (rollback, kill_recovery,
+        # etc.) still pass — but any new non-bypassed caller is rejected.
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Blocked")
+        r = client.patch(
+            f"/api/features/{f.id}",
+            json={"status": "Implementing", "changed_by": "some-new-agent"},
+        )
+        assert r.status_code == 422
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # REST API — Sessions
 # ══════════════════════════════════════════════════════════════════════════════
