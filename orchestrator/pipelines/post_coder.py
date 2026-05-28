@@ -2264,6 +2264,24 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     # bumping fix_attempts — broken-env is not the coder's fault. Calculator's
     # feature 594 cascade was driven by missing jest/dev-deps, which iterations
     # of coder rework can't fix.
+    # Drift-scanner: deterministic detectors that catch the patterns the
+    # architect persona would catch but doesn't run every cycle. Findings
+    # are posted as feature_comments with author="drift-scanner" and surface
+    # in the next coder's {reviewer_feedback} block alongside lint-guard
+    # output. Best-effort — never raises, never bounces the feature.
+    try:
+        from orchestrator import drift_detectors as _drift
+        _drift_findings = _drift.run_all(working_dir, assigned_features)
+        if _drift_findings:
+            log.info(
+                f"[drift-scanner] {pname}: {len(_drift_findings)} finding(s) "
+                f"on session {session_uid}"
+            )
+            with httpx.Client(base_url=PM_API_URL, timeout=10) as _drift_client:
+                _drift.post_findings(_drift_findings, _drift_client, pname)
+    except Exception as _drift_e:
+        log.warning(f"[post-coder] {pname}: drift-scanner raised {_drift_e}; continuing")
+
     test_result = _post_coder_test_check(working_dir, _run, pname)
     if test_result.get("framework") != "none" and not test_result.get("passed"):
         env_broken = test_result.get("env_broken", False)
