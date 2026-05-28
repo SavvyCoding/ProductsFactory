@@ -43,21 +43,18 @@ Do NOT call `GET /api/features/approved`. Use the assigned list from the prompt 
 
 ## 3. Per-feature loop (repeat for each feature in batch)
 
-### Step 3 — Branch
+### You write code only — the orchestrator owns all git
 
-The poller has already set your features to `Implementing` before launching this session.
-Do NOT call `PATCH /api/features/{id}` to claim — go straight to creating the branch:
+You are already on the default branch (`main`/`master`). **Do NOT run `git` or `gh`** — never `checkout`, `branch`, `fetch`, `pull`, `commit`, `push`, or `gh pr create`. Just edit files in `/workspace`.
 
-```
-git checkout -b feature/{feature_name}
-```
+After you exit cleanly, the orchestrator's post-coder pipeline:
+- cuts a fresh session branch `coder/<session-uid>` from the default branch tip,
+- stages your edits (PM-curated files are stripped automatically),
+- commits with a `[feature-<id>]` tag per assigned story,
+- pushes and opens a **Session PR** (`coder/<uid>` → default branch),
+- runs the lint guards + test execution, and bounces the feature back to you with `changes_requested` if any fail.
 
-**If an open PR already exists for this feature** (re-queued due to merge conflicts):
-```
-gh pr close <pr_number> --comment "Closing to rebase and reopen — merge conflict detected."
-git push origin --delete feature/{feature_name} 2>/dev/null || true
-git checkout -b feature/{feature_name}
-```
+The poller already set your features to `Implementing` before launch — do NOT `PATCH /api/features/{id}` to claim them. Report outcomes only via `session_result.json` (Step 6).
 
 ### Step 4 — Implement
 
@@ -103,7 +100,7 @@ Write a **Verification Note** to `session_summary.md`:
 
 ### Step 5b — Deletion safety self-review
 
-Before staging or committing, run:
+Before you exit, run:
 
 ```
 python check_deletion_safety.py
@@ -111,40 +108,30 @@ python check_deletion_safety.py
 
 This script (shipped read-only into your working directory) catches the case where you removed a top-level Python `def`, `async def`, `class`, or module-level assignment that another file still references. It compares HEAD vs the working tree, AST-parses both, and word-greps surviving callers.
 
-- **Exit 0** → continue to Step 6.
+- **Exit 0** → continue.
 - **Exit 1** → the script prints a list of dangling deletions. For each one, you must pick a forced choice:
   - **Restore** the removed symbol in its original file, OR
   - **Update the caller(s)** listed to no longer reference it.
 
-Do not commit until the script exits 0. The orchestrator runs the same check (Guard 17) after push; failing it bounces the feature back to `Implementing` with `changes_requested` and burns a `fix_attempts`.
+Fix until the script exits 0. The orchestrator runs the same check (Guard 17) after it pushes your work; failing it bounces the feature back to `Implementing` with `changes_requested` and burns a `fix_attempts`.
 
 This is a deterministic check, not a vibes review — false positives on common names (`name`, `run`, `get`) are possible. If the report names a caller you genuinely don't recognize, verify by opening the file before deciding the script is wrong.
 
-### Step 6 — Commit + push + PR
+### Step 6 — Report the outcome (no git)
 
-Stage only:
-- `{SOURCE_PATH}/{feature_name}.*`
-- `{TEST_PATH}/test_{feature_name}.*`
-- `Results/{feature_name}_*`
+You do not commit, push, or open a PR — the orchestrator does that after you exit. Your only output channel for status is `/workspace/session_result.json`. Append **one JSON line per story** — no arrays, no `{"features": [...]}` wrapper. `status` must be exactly `"Implemented"` or `"Blocked"` — **never** `"Reviewing"` (that's the orchestrator's downstream state, set when it opens the Session PR):
 
-**Never stage:** `Temp/` · `*.log` · `__pycache__` · `node_modules/` · `session.lock`
-
-```
-git fetch origin && git rebase origin/main
-git commit -m "feat({feature_name}): {one_line_description} [ProductFactory]"
-git push origin feature/{feature_name}
-gh pr create --title "feat: {description}" --base main
+```bash
+echo '{"id": <feature_id>, "status": "Implemented"}' >> /workspace/session_result.json
+# or, if you genuinely could not finish after honest attempts:
+echo '{"id": <feature_id>, "status": "Blocked", "blocked_reason": "<reason>"}' >> /workspace/session_result.json
 ```
 
-**Push failure** → `PATCH status → Blocked`, note reason in `session_summary.md`, never exit 0 silently.
+Do NOT call `PATCH /api/features/{id}` and do NOT set `pr_number` — the orchestrator fills those in when it opens the Session PR. The poller reads `session_result.json` every 30 s and applies each new line to the DB.
 
-On success, append **one JSON line** to `/workspace/session_result.json`:
-```
-{"id": <feature_id>, "status": "Reviewing", "pr_number": <n>, "pr_url": "<url>"}
-```
-Use `echo '{"id":...}' >> /workspace/session_result.json`. The poller polls this file every 30 s and applies each new line to the DB in real-time. Do NOT call `PATCH /api/features/{id}`.
+Files you should NOT edit (the orchestrator strips them from the commit anyway, but editing them wastes turns and they're often read-only mounted): `Temp/`, `*.log`, `__pycache__`, `node_modules/`, `session.lock`, and the PM-curated docs (`CLAUDE.md`, `AGENT_WORKFLOW.md`, `ARCHITECTURE.md`, `quality_gates.json`, `.gitignore`, `check_deletion_safety.py`).
 
-Append **Session State Summary** to `session_summary.md`:
+Append a **Session State Summary** to `session_summary.md`:
 > Key decisions made, patterns introduced, anything the next session must know about this feature.
 
 ---
@@ -190,11 +177,13 @@ Read `product_config.json` before any implementation. It defines:
 
 ## 7. Hard rules — never break these
 
-- ❌ Push directly to `main` (Analysis Run is the only exception — one commit, one time)
+- ❌ Run `git` or `gh` — no `checkout`, `branch`, `commit`, `push`, `gh pr create`. The orchestrator owns all git; you only edit files.
+- ❌ Call `PATCH /api/features/{id}` — report via `session_result.json` only.
+- ❌ Write `status: "Reviewing"` (or set `pr_number`) in `session_result.json` — your statuses are `Implemented` / `Blocked` only; the orchestrator sets Reviewing + PR fields.
 - ❌ Write or update `features.md` (DB is the single source of truth for feature status)
-- ❌ Exit 0 after a push failure
+- ❌ Edit PM-curated files: `CLAUDE.md`, `AGENT_WORKFLOW.md`, `ARCHITECTURE.md`, `quality_gates.json`, `.gitignore`, `check_deletion_safety.py` (read-only mounted — writes fail or get stripped)
 - ❌ Introduce a new architectural pattern without PM approval
-- ❌ Stage `session_result.json`, `session.lock`, `Temp/`, `*.log`, `__pycache__/`, `node_modules/`
+- ❌ `.skip` / `pytest.skip()` / empty test files — ship at least one real passing test per story (post-coder rejects skips and zero-collected)
 - ❌ Start more than {MAX_BATCH_SIZE} features in one session
 - ❌ Touch existing source files in a brownfield product without an explicit requirement
 - ❌ Regenerate a lock file from scratch
