@@ -2293,6 +2293,26 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                     f"on session {session_uid} (scope={len(_all_features)} feature(s))"
                 )
                 _drift.post_findings(_drift_findings, _drift_client, pname)
+
+            # Reconciler-as-controller (opt-in via RECONCILER_CHORES_ENABLED).
+            # Objective code-drift detectors (separate _CHORE_DETECTORS registry,
+            # not the comment-path _DETECTORS above) emit high-severity findings
+            # that get filed as Approved chore features. The existing
+            # coder→guard→reviewer pipeline is the actuator, so corrections run
+            # through the same verification as any feature. Default OFF — flip
+            # the flag per-environment to A/B on a product. Best-effort: failure
+            # here never bounces the feature.
+            if os.environ.get("RECONCILER_CHORES_ENABLED", "").strip().lower() \
+                    in ("1", "true", "yes", "on"):
+                _chore_findings = _drift.run_chore_detectors(working_dir, _all_features)
+                if _chore_findings:
+                    _filed = _drift.file_corrective_chores(
+                        _chore_findings, _drift_client, _product_id, pname,
+                    )
+                    log.info(
+                        f"[reconciler] {pname}: {len(_chore_findings)} chore-eligible "
+                        f"finding(s), filed {_filed} corrective chore(s)"
+                    )
     except Exception as _drift_e:
         log.warning(f"[post-coder] {pname}: drift-scanner raised {_drift_e}; continuing")
 
