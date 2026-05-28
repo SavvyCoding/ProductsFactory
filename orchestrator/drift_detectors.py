@@ -350,6 +350,27 @@ def run_all(working_dir: str | Path, features: list[dict]) -> list[Finding]:
     return out
 
 
+def _recent_drift_comments(pm_client, feature_id: int) -> list[str]:
+    """Return the bodies of drift-scanner-authored comments on a feature.
+    Used by post_findings to dedupe. Best-effort: GET failure → empty
+    list (will let the finding through). The PM API returns comments
+    newest-first; we take all of them since the comments table is
+    typically small per feature."""
+    try:
+        resp = pm_client.get(f"/api/features/{feature_id}/comments")
+        if not (200 <= resp.status_code < 300):
+            return []
+        data = resp.json()
+        if not isinstance(data, list):
+            return []
+        return [
+            c.get("body", "") for c in data
+            if isinstance(c, dict) and c.get("author") == "drift-scanner"
+        ]
+    except Exception:
+        return []
+
+
 def post_findings(
     findings: Iterable[Finding],
     pm_client,
@@ -360,21 +381,40 @@ def post_findings(
     Returns the count of successfully posted findings. Best-effort —
     individual POST failures are logged and don't abort the loop.
 
-    Dedupe is deferred to a follow-up: re-running the same detectors
-    will post the same findings again on the next cycle. For the spike,
-    rely on the comment being a duplicate the reader can ignore;
-    real dedupe (by category + target_id within a 24h window) wants a
-    PM API query we don't have yet.
+    Dedupe: before posting, GET the feature's existing comments and
+    skip the finding if a drift-scanner-authored comment with the
+    SAME exact body already exists. The finding body has a stable
+    deterministic structure (category, severity, target, detail,
+    fix_hint — none depend on timestamps), so byte-equal duplicates
+    are real duplicates. This prevents noise when the same feature
+    cycles through coder sessions repeatedly with the same drift
+    still uncleared.
+
+    Cache the per-feature comment list across findings in the same
+    cycle so we make 1 GET per affected feature, not 1 per finding.
     """
     posted = 0
+    skipped_dupe = 0
+    _per_feature_cache: dict[int, list[str]] = {}
     for f in findings:
+        body = f.as_comment_body()
+        existing = _per_feature_cache.get(f.feature_id)
+        if existing is None:
+            existing = _recent_drift_comments(pm_client, f.feature_id)
+            _per_feature_cache[f.feature_id] = existing
+        if body in existing:
+            skipped_dupe += 1
+            continue
         try:
             resp = pm_client.post(
                 f"/api/features/{f.feature_id}/comments",
-                json={"author": "drift-scanner", "body": f.as_comment_body()},
+                json={"author": "drift-scanner", "body": body},
             )
             if 200 <= resp.status_code < 300:
                 posted += 1
+                # Remember our own post so a second finding with the
+                # same body in the same cycle doesn't double-post.
+                existing.append(body)
                 log.info(
                     "[drift-scanner] %s: filed %s on feature #%s",
                     product_name, f.category, f.feature_id,
@@ -390,4 +430,9 @@ def post_findings(
                 "[drift-scanner] %s: post finding raised %s; skipping",
                 product_name, e,
             )
+    if skipped_dupe:
+        log.info(
+            "[drift-scanner] %s: deduped %s finding(s) already on feature(s)",
+            product_name, skipped_dupe,
+        )
     return posted

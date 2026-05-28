@@ -2269,15 +2269,29 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     # are posted as feature_comments with author="drift-scanner" and surface
     # in the next coder's {reviewer_feedback} block alongside lint-guard
     # output. Best-effort — never raises, never bounces the feature.
+    #
+    # Scope: fetch ALL features for the product, not just session-assigned.
+    # Cross-feature drift (e.g. design_doc_path set but the doc file
+    # never landed — canonical calcv2 features 995/996/1001/1002) only
+    # surfaces if every feature's state is visible to the detectors. With
+    # only session_assigned, drift on inactive features stays hidden
+    # until those features happen to be picked up again. Dedupe in
+    # post_findings keeps the noise bounded across cycles.
     try:
         from orchestrator import drift_detectors as _drift
-        _drift_findings = _drift.run_all(working_dir, assigned_features)
-        if _drift_findings:
-            log.info(
-                f"[drift-scanner] {pname}: {len(_drift_findings)} finding(s) "
-                f"on session {session_uid}"
-            )
-            with httpx.Client(base_url=PM_API_URL, timeout=10) as _drift_client:
+        _product_id = product.get("id")
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as _drift_client:
+            try:
+                _resp = _drift_client.get(f"/api/products/{_product_id}/features")
+                _all_features = _resp.json() if (200 <= _resp.status_code < 300) else assigned_features
+            except Exception:
+                _all_features = assigned_features
+            _drift_findings = _drift.run_all(working_dir, _all_features)
+            if _drift_findings:
+                log.info(
+                    f"[drift-scanner] {pname}: {len(_drift_findings)} finding(s) "
+                    f"on session {session_uid} (scope={len(_all_features)} feature(s))"
+                )
                 _drift.post_findings(_drift_findings, _drift_client, pname)
     except Exception as _drift_e:
         log.warning(f"[post-coder] {pname}: drift-scanner raised {_drift_e}; continuing")
