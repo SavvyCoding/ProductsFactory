@@ -33,12 +33,7 @@ The source-of-truth registry. Pre-coder context reads this section; when your fe
 
 | Concern | Canonical module | Owns | Notes |
 |---|---|---|---|
-| _(populated as features land)_ | | | |
-
-Example rows (replace as the product grows):
-- `User persistence` | `src/users/user_store.py` | `User`, `create_user`, `get_user_by_id` | Single store; do not create `user_repository.py` etc.
-- `Authentication` | `src/auth/verify.py` | `verify_auth(request) → User` | Raises `Unauthorized`; do not hand-roll per-route.
-- `HTTP client` | `src/lib/http_client.py` | `get_session()` | Configures retries/timeouts; do not call `requests.get()` directly.
+| _(populated by the architect persona as features land — do not edit by hand)_ | | | |
 
 ## RULES
 

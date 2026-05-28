@@ -32,11 +32,7 @@ The source-of-truth registry. Pre-coder context reads this section; when your fe
 
 | Concern | Canonical package | Owns | Notes |
 |---|---|---|---|
-| _(populated as features land)_ | | | |
-
-Example rows:
-- `User persistence` | `internal/users` | `User`, `UserStore`, `NewUserStore` | Single store interface; concrete impl in same package.
-- `Authentication` | `internal/auth` | `VerifyAuth(ctx, *http.Request) (User, error)` | Sentinel error `ErrUnauthorized`.
+| _(populated by the architect persona as features land — do not edit by hand)_ | | | |
 
 ## RULES
 
