@@ -303,42 +303,26 @@ def _get_system_config_sync() -> dict:
 
 def _read_session_summary(working_dir: str) -> str:
     """
-    Read context from the previous agent session.
-    Primary: session_summary.md (incremental log written throughout the session).
-    Fallback: last 50 lines of progress.md if summary is absent (first session, or crash
-    before any summary lines were written).
-    Returns empty string if neither file exists.
+    Read context from the previous agent session via session_summary.md
+    (the incremental log written throughout the session). Returns empty
+    string if the file doesn't exist (first session).
+
+    The legacy progress.md fallback was removed 2026-05-28 — agents stopped
+    writing progress.md, so the fallback never fired; session_summary.md is
+    the sole continuity channel now.
     """
     summary_file = Path(working_dir) / "session_summary.md"
-    progress_file = Path(working_dir) / "progress.md"
-
-    def _read_truncated(path: Path, max_chars: int = 2000) -> str:
-        try:
-            content = path.read_text(encoding="utf-8").strip()
-            if len(content) > max_chars:
-                content = content[:max_chars - 50] + "\n...[truncated]"
-            return content
-        except Exception as e:
-            log.warning(f"Could not read {path.name}: {e}")
-            return ""
-
-    if summary_file.exists():
-        content = _read_truncated(summary_file)
-        if content:
-            return content
-
-    # Fallback: last 50 lines of progress.md (already written incrementally by coder)
-    if progress_file.exists():
-        try:
-            lines = progress_file.read_text(encoding="utf-8").splitlines()
-            tail = "\n".join(lines[-50:])
-            if tail.strip():
-                log.info("[context] session_summary.md absent — falling back to progress.md tail")
-                return f"[From progress.md — last session]\n\n{tail}"
-        except Exception as e:
-            log.warning(f"Could not read progress.md fallback: {e}")
-
-    return ""
+    if not summary_file.exists():
+        return ""
+    try:
+        content = summary_file.read_text(encoding="utf-8").strip()
+        max_chars = 2000
+        if len(content) > max_chars:
+            content = content[:max_chars - 50] + "\n...[truncated]"
+        return content
+    except Exception as e:
+        log.warning(f"Could not read session_summary.md: {e}")
+        return ""
 
 
 def _fetch_assigned_features(product_id: int, persona: str | None, max_count: int = MAX_FEATURES_PER_SPRINT) -> tuple[list[dict], str | None, dict | None]:

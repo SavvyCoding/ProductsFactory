@@ -21,7 +21,7 @@ from typing import Any
 import httpx
 
 # The orchestrator package lives at /app/orchestrator inside the Hermes container.
-# Insert /app so lazy imports (launch_session, check_stale_sessions, etc.) resolve.
+# Insert /app so lazy imports (launch_session, run_cycle, etc.) resolve.
 if "/app" not in sys.path:
     sys.path.insert(0, "/app")
 
@@ -857,15 +857,12 @@ def launch_session(args: dict, **kwargs) -> str:
         return _err(f"launch_session crashed: {e}")
 
 
-def check_stale_sessions(args: dict, **kwargs) -> str:
-    try:
-        from orchestrator.heartbeat import check_stale_sessions as _check  # type: ignore
-        with _pm_client() as client:
-            products = client.get("/api/products").json()
-        _check(products)
-        return _ok({"checked": len(products)})
-    except Exception as e:
-        return _err(f"check_stale_sessions failed: {e}")
+# check_stale_sessions (the progress.md-push-timestamp heartbeat) was
+# removed 2026-05-28. It was never called from the cycle loop — the
+# per-cycle watchdog (/api/sessions/watchdog/targets + docker-ps
+# presence check) replaced it. Agents stopped writing progress.md, so
+# the timestamp it keyed on never advanced. orchestrator/heartbeat.py
+# was deleted in the same change.
 
 
 # ---------------------------------------------------------------------------

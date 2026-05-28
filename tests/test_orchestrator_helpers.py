@@ -218,70 +218,9 @@ class TestReconcileMergedPrs:
         assert patch_calls == []
 
 
-# ── heartbeat — check_stale_sessions ─────────────────────────────────────────
-
-class TestCheckStaleSessions:
-    def test_kills_stale_session(self, monkeypatch):
-        monkeypatch.setenv("PM_API_URL", "http://pm-api:8080")
-        monkeypatch.setenv("STALE_THRESHOLD_MINUTES", "45")
-
-        from orchestrator import heartbeat
-        from datetime import datetime, timezone, timedelta
-
-        # Session is 60 minutes old (above 45m threshold)
-        stale_time = datetime.now(timezone.utc) - timedelta(minutes=60)
-
-        kill_calls = []
-
-        def fake_get_progress(product):
-            return stale_time
-
-        def fake_kill(product):
-            kill_calls.append(product["id"])
-
-        monkeypatch.setattr(heartbeat, "_get_progress_last_push", fake_get_progress)
-        monkeypatch.setattr(heartbeat, "_kill_container", fake_kill)
-        monkeypatch.setattr(heartbeat, "send_alert", lambda *a, **kw: None)
-
-        products = [{"id": "1", "name": "Stale", "status": "ready"}]
-        heartbeat.check_stale_sessions(products)
-
-        assert "1" in kill_calls
-
-    def test_skips_non_ready_products(self, monkeypatch):
-        monkeypatch.setenv("PM_API_URL", "http://pm-api:8080")
-
-        from orchestrator import heartbeat
-
-        kill_calls = []
-        monkeypatch.setattr(heartbeat, "_kill_container", lambda p: kill_calls.append(p))
-        monkeypatch.setattr(heartbeat, "send_alert", lambda *a, **kw: None)
-
-        products = [
-            {"id": "2", "name": "Paused", "status": "paused"},
-            {"id": "3", "name": "Registered", "status": "registered"},
-        ]
-        heartbeat.check_stale_sessions(products)
-        assert kill_calls == []
-
-    def test_does_not_kill_fresh_session(self, monkeypatch):
-        monkeypatch.setenv("PM_API_URL", "http://pm-api:8080")
-        monkeypatch.setenv("STALE_THRESHOLD_MINUTES", "45")
-
-        from orchestrator import heartbeat
-        from datetime import datetime, timezone, timedelta
-
-        # Session is only 10 minutes old (below threshold)
-        recent_time = datetime.now(timezone.utc) - timedelta(minutes=10)
-
-        kill_calls = []
-        monkeypatch.setattr(heartbeat, "_get_progress_last_push", lambda p: recent_time)
-        monkeypatch.setattr(heartbeat, "_kill_container", lambda p: kill_calls.append(p))
-        monkeypatch.setattr(heartbeat, "send_alert", lambda *a, **kw: None)
-
-        products = [{"id": "4", "name": "Fresh", "status": "ready"}]
-        heartbeat.check_stale_sessions(products)
-        assert kill_calls == []
+# The progress.md-push-timestamp heartbeat (orchestrator/heartbeat.py,
+# check_stale_sessions) was removed 2026-05-28 — never wired into the
+# cycle loop, superseded by the watchdog. Its tests went with it.
 
 
 # ── alerts ────────────────────────────────────────────────────────────────────

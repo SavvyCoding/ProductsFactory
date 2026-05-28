@@ -1,6 +1,6 @@
 """
 GitHub helpers used by the PM website.
-Fetches progress.md content for the progress viewer.
+Fetches repo file content (session_summary.md, ARCHITECTURE.md) for the viewers.
 """
 
 import re
@@ -31,10 +31,10 @@ def parse_repo_slug(github_repo: str) -> tuple[str, str] | None:
     return None
 
 
-def fetch_progress_md(github_repo: str, token: str | None = None) -> str | None:
+def fetch_repo_file(github_repo: str, path: str, token: str | None = None) -> str | None:
     """
-    Fetch the raw content of progress.md from the default branch.
-    Returns None if the repo has no github_repo set or the file doesn't exist yet.
+    Fetch the raw content of a file at `path` from the repo's default branch.
+    Returns None if the repo has no github_repo set or the file doesn't exist.
     """
     slug = parse_repo_slug(github_repo)
     if not slug:
@@ -42,38 +42,31 @@ def fetch_progress_md(github_repo: str, token: str | None = None) -> str | None:
     owner, repo = slug
     try:
         resp = httpx.get(
-            f"https://api.github.com/repos/{owner}/{repo}/contents/progress.md",
+            f"https://api.github.com/repos/{owner}/{repo}/contents/{path}",
             headers=_headers(token),
             timeout=_TIMEOUT,
         )
         if resp.status_code == 200:
             return resp.text
         if resp.status_code == 404:
-            return None  # file doesn't exist yet — session hasn't started
-        log.warning(f"GitHub progress.md fetch: {resp.status_code} for {owner}/{repo}")
+            return None  # file doesn't exist yet
+        log.warning(f"GitHub {path} fetch: {resp.status_code} for {owner}/{repo}")
     except httpx.TimeoutException:
-        log.warning(f"GitHub fetch timed out for {owner}/{repo}")
+        log.warning(f"GitHub fetch timed out for {owner}/{repo} ({path})")
     except Exception as e:
-        log.warning(f"GitHub fetch error: {e}")
+        log.warning(f"GitHub fetch error ({path}): {e}")
     return None
+
+
+def fetch_session_summary_md(github_repo: str, token: str | None = None) -> str | None:
+    """Fetch session_summary.md — the live session-continuity doc that
+    replaced progress.md. Written incrementally by the coder/designer."""
+    return fetch_repo_file(github_repo, "session_summary.md", token)
 
 
 def fetch_architecture_md(github_repo: str, token: str | None = None) -> str | None:
-    """Fetch ARCHITECTURE.md from the default branch, same pattern as progress.md."""
-    slug = parse_repo_slug(github_repo)
-    if not slug:
-        return None
-    owner, repo = slug
-    try:
-        resp = httpx.get(
-            f"https://api.github.com/repos/{owner}/{repo}/contents/ARCHITECTURE.md",
-            headers=_headers(token),
-            timeout=_TIMEOUT,
-        )
-        return resp.text if resp.status_code == 200 else None
-    except Exception as e:
-        log.warning(f"fetch_architecture_md error: {e}")
-    return None
+    """Fetch ARCHITECTURE.md from the default branch."""
+    return fetch_repo_file(github_repo, "ARCHITECTURE.md", token)
 
 
 def list_open_prs(github_repo: str, token: str | None = None) -> list[dict]:

@@ -5,7 +5,7 @@ HTML pages (require Basic Auth):
   GET  /                               — dashboard: product list + register tabs
   GET  /admin                          — admin: system config + PM management
   GET  /product/{id}                   — product detail: kanban + feature form
-  GET  /product/{id}/progress          — progress.md viewer (fetched from GitHub)
+  GET  /product/{id}/progress          — session_summary.md viewer (fetched from GitHub)
 
   POST /product/register               — brownfield: register existing repo
   POST /product/register/greenfield    — greenfield: scaffold new product
@@ -87,7 +87,7 @@ from website.models import (
 )
 from website.auth import require_auth, verify_internal_signature
 from website import schemas
-from website.github import fetch_progress_md, fetch_architecture_md, list_open_prs, merge_pr, close_pr
+from website.github import fetch_session_summary_md, fetch_architecture_md, list_open_prs, merge_pr, close_pr
 # 1-PR model: sprint integration branch / sprint PR were retired
 # 2026-05-15. Sprint completion no longer merges a PR — it just marks the
 # sprint completed and generates release notes from features already
@@ -825,12 +825,15 @@ async def progress_view(
     db: AsyncSession = Depends(get_db),
     current_pm: str = Depends(require_auth),
 ):
-    """Fetches progress.md from GitHub and renders as HTML."""
+    """Renders the product's session_summary.md (the live session-continuity
+    doc that replaced progress.md — agents stopped writing progress.md, so
+    this viewer always showed empty). Route path kept as /progress for
+    backward-compatible bookmarks/nav links."""
     product = await _get_product_or_404(product_id, db)
     alert_count = await _unread_alert_count(db)
     _sys_cfg = await _get_system_config(db)
     _gh_pat = _github_token_from_config(_sys_cfg)
-    raw_md = fetch_progress_md(product.github_repo or "", token=_gh_pat) if product.github_repo else None
+    raw_md = fetch_session_summary_md(product.github_repo or "", token=_gh_pat) if product.github_repo else None
     html_content = _md(raw_md) if raw_md else None
 
     return templates.TemplateResponse("progress.html", {

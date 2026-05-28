@@ -277,7 +277,7 @@ See `.env.example` for all variables. Critical ones:
 - `AGENT_BACKEND` — Set to `ollama` to use local Ollama instead of Claude CLI
 - `CLAUDE_DIR` — Host path for Claude OAuth token mount into agent containers (`SSH_DIR` is legacy; SSH-based git auth is retired — see Auth & Security)
 - `SESSION_TIMEOUT_MINUTES` — Kill Docker container after N minutes (default: 90)
-- `STALE_THRESHOLD_MINUTES` — Alert if progress.md not pushed in N minutes (default: 45)
+- `STALE_THRESHOLD_MINUTES` — **Retired 2026-05-28.** Was the progress.md-push staleness threshold for `orchestrator/heartbeat.py` (deleted; never wired into the containerized cycle loop). Stale-session detection is now the per-cycle watchdog in `deploy/orchestrator/tools.py` (session-heartbeat freshness + `docker ps` presence). No code reads this var anymore.
 - `BROWNFIELD_FILE_THRESHOLD` — Source file count above which a product is treated as brownfield (default: 10)
 - `MAX_FEATURES_PER_RUN` — Max features an agent attempts per session (default: 1; per-product override in DB)
 (Retired by migration 043: `system_config.max_features_per_sprint` and the per-sprint feature-count cap. Under the phases→features flat model, phases are unbounded UI groupings — features have their own per-PR sizing instead.)
