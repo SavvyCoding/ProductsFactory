@@ -58,10 +58,10 @@ def fetch_repo_file(github_repo: str, path: str, token: str | None = None) -> st
     return None
 
 
-def fetch_session_summary_md(github_repo: str, token: str | None = None) -> str | None:
-    """Fetch session_summary.md — the live session-continuity doc that
-    replaced progress.md. Written incrementally by the coder/designer."""
-    return fetch_repo_file(github_repo, "session_summary.md", token)
+# NOTE: there is intentionally no fetch_session_summary_md here.
+# session_summary.md is gitignored (a per-session artefact) so it never
+# exists on the remote — the /product/{id}/progress viewer reads it off
+# the local products mount instead (see website/main.py:progress_view).
 
 
 def fetch_architecture_md(github_repo: str, token: str | None = None) -> str | None:

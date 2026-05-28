@@ -87,7 +87,7 @@ from website.models import (
 )
 from website.auth import require_auth, verify_internal_signature
 from website import schemas
-from website.github import fetch_session_summary_md, fetch_architecture_md, list_open_prs, merge_pr, close_pr
+from website.github import fetch_architecture_md, list_open_prs, merge_pr, close_pr
 # 1-PR model: sprint integration branch / sprint PR were retired
 # 2026-05-15. Sprint completion no longer merges a PR — it just marks the
 # sprint completed and generates release notes from features already
@@ -826,14 +826,22 @@ async def progress_view(
     current_pm: str = Depends(require_auth),
 ):
     """Renders the product's session_summary.md (the live session-continuity
-    doc that replaced progress.md — agents stopped writing progress.md, so
-    this viewer always showed empty). Route path kept as /progress for
-    backward-compatible bookmarks/nav links."""
+    doc that replaced progress.md). Read from the LOCAL products mount, NOT
+    GitHub: session_summary.md is gitignored by design (a per-session
+    artefact, see the product .gitignore "ProductFactory session artefacts"
+    block), so it never lands on the remote. The pm-api container has the
+    products root mounted read-only at /workspace, so we read it off the
+    filesystem via the same working_dir→/workspace mapping used for story
+    docs and videos. Route path kept as /progress for bookmark compat."""
     product = await _get_product_or_404(product_id, db)
     alert_count = await _unread_alert_count(db)
-    _sys_cfg = await _get_system_config(db)
-    _gh_pat = _github_token_from_config(_sys_cfg)
-    raw_md = fetch_session_summary_md(product.github_repo or "", token=_gh_pat) if product.github_repo else None
+    raw_md = None
+    try:
+        summary_path = _workspace_dir_for_product(product.working_dir) / "session_summary.md"
+        if summary_path.is_file():
+            raw_md = summary_path.read_text(encoding="utf-8")
+    except Exception as e:
+        log.warning(f"progress_view: could not read session_summary.md for product {product_id}: {e}")
     html_content = _md(raw_md) if raw_md else None
 
     return templates.TemplateResponse("progress.html", {

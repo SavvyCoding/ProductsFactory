@@ -293,9 +293,23 @@ def _reset_workspace(working_dir: str, product_name: str) -> None:
         log.warning(f"[{product_name}] git reset --hard failed: {r.stderr.strip()[:200]}")
 
     # 4. Remove untracked and ignored files (session artifacts, .pyc, etc.)
-    #    Preserve output/ and Results/ which may contain artefacts the PM cares about.
+    #    Preserve:
+    #      - output/ and Results/ — artefacts the PM cares about
+    #      - Temp/ — scratch the agent may want within a session
+    #      - session_summary.md — the cross-session continuity doc. It's
+    #        gitignored (never on the remote), so without this exclude
+    #        `git clean -fdx` wiped it on every reset, BEFORE
+    #        docker_runner._read_session_summary reads it to build the
+    #        next session's {prev_session_summary}. Net effect: every
+    #        session got an EMPTY prior-summary and improvised without
+    #        continuity. Excluding it here is what makes the continuity
+    #        mechanism actually work. (session_result.json is deliberately
+    #        NOT excluded — it's a per-session output channel the
+    #        orchestrator drains each cycle, not cross-session state.)
     safe_run(
-        ["git", "clean", "-fdx", "--exclude=output/", "--exclude=Results/", "--exclude=Temp/"],
+        ["git", "clean", "-fdx",
+         "--exclude=output/", "--exclude=Results/", "--exclude=Temp/",
+         "--exclude=session_summary.md"],
         cwd=wd, log_label=product_name,
     )
 
