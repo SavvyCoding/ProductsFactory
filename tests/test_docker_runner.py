@@ -207,3 +207,30 @@ class TestOllamaBackendSandbox:
         cmd = _run_and_capture(monkeypatch, docker_runner, product, tmp_path, backend="ollama")
         for flag in ("--pids-limit", "--cap-drop", "--read-only", "--security-opt"):
             assert flag in cmd, f"ollama backend missing hardening flag {flag}"
+
+
+class TestReadSessionSummaryTruncation:
+    """_read_session_summary tail-keeps so the freshest continuity notes (which
+    agents append to the END of session_summary.md) survive the char cap."""
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        from orchestrator import docker_runner
+        assert docker_runner._read_session_summary(str(tmp_path)) == ""
+
+    def test_short_summary_returned_verbatim(self, tmp_path):
+        from orchestrator import docker_runner
+        (tmp_path / "session_summary.md").write_text("brief notes", encoding="utf-8")
+        assert docker_runner._read_session_summary(str(tmp_path)) == "brief notes"
+
+    def test_long_summary_keeps_tail_not_head(self, tmp_path):
+        from orchestrator import docker_runner
+        # HEAD marker at the start, TAIL marker at the very end of a >2000-char doc.
+        body = "HEAD-MARKER\n" + ("x" * 3000) + "\nTAIL-MARKER"
+        (tmp_path / "session_summary.md").write_text(body, encoding="utf-8")
+
+        out = docker_runner._read_session_summary(str(tmp_path))
+
+        assert len(out) <= 2000
+        assert out.startswith("...[truncated]")
+        assert "TAIL-MARKER" in out, "freshest notes (end of file) must survive"
+        assert "HEAD-MARKER" not in out, "stale head should be the part dropped"

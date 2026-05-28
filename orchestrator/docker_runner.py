@@ -318,7 +318,11 @@ def _read_session_summary(working_dir: str) -> str:
         content = summary_file.read_text(encoding="utf-8").strip()
         max_chars = 2000
         if len(content) > max_chars:
-            content = content[:max_chars - 50] + "\n...[truncated]"
+            # Tail-keep: agents append the most recent / closing notes (per-feature
+            # verification notes, the end-of-batch "Session State Summary") to the
+            # END of the file. Keep the tail so that the freshest context survives;
+            # front-truncation used to drop exactly the part the next session needs.
+            content = "...[truncated]\n" + content[-(max_chars - 50):]
         return content
     except Exception as e:
         log.warning(f"Could not read session_summary.md: {e}")
