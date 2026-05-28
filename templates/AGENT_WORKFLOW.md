@@ -22,32 +22,10 @@ Read these files in order before doing anything else:
 1. `README.md` — product vision, goals, out-of-scope list, known constraints
 2. `ARCHITECTURE.md` — existing patterns. Hard cap ~800 tokens. Never introduce a new pattern without PM approval.
 3. `CLAUDE.md` — runtime, test command, folder layout, key rules. Hard cap 1,500 tokens.
-4. `progress.md` — check YAML front matter:
+4. `session_summary.md` — the previous session's continuity notes (key decisions, patterns introduced, blockers). Absent on a first session.
+5. `docs/story_<feature_id>.md` — the design doc for each assigned feature. This is your spec — read it before writing any code.
 
-```yaml
----
-workflow_version: 2
-resume_step: <number>     # which step to resume at (see step map below)
-resume_feature_id: <id>   # which feature was in progress
----
-```
-
-**Resume step map:**
-
-| resume_step | Meaning — start here |
-|-------------|----------------------|
-| 2 | Batch plan written, now claim first feature |
-| 3 | Feature claimed (Implementing), now write code |
-| 4 | Code written, now run tests |
-| 5 | Tests passed, now commit + push + open PR |
-| 6 | PR open, now update session summary |
-| 7 | Batch done, now run competitor research |
-
-If `resume_step` is present → **RESUME mode**: skip to that step for `resume_feature_id`.
-If absent or file missing → **FRESH mode**: start a new batch from step 2.
-
-After reading context:
-- If on a feature branch: `git fetch origin && git rebase origin/main`
+Crash recovery is handled by the orchestrator, not by you: a feature left in an agent-state for >45 min is auto-reset (`reset_stuck`) to a re-pickable status, and the watchdog kills a container whose session heartbeat goes stale. You do not need to track resume state in a file.
 
 ---
 
@@ -59,24 +37,7 @@ Do NOT call `GET /api/features/approved`. Use the assigned list from the prompt 
 - Sort assigned features by `priority ASC`, then by `depends_on` (dependencies first)
 - Take max **{MAX_BATCH_SIZE}** feature(s) — never exceed this
 - Write `Temp/batch_{date}_plan.md` — one paragraph per feature: what, why, approach
-- Initialise `progress.md`:
-
-```markdown
----
-workflow_version: 2
-resume_step: 2
-resume_feature_id: {first_feature_id}
----
-# Progress — {PRODUCT_NAME} | Session {SESSION_UID}
-Started: {datetime} UTC
-Last heartbeat: {datetime} UTC
-
-## Batch
-- [ ] {feature_1_name} (id={id})
-- [ ] {feature_2_name} (id={id})
-```
-
-- **Commit + push `progress.md` to main** — this is heartbeat #0
+- Start `session_summary.md` with a one-line header naming the session and the batch
 
 ---
 
@@ -98,14 +59,11 @@ git push origin --delete feature/{feature_name} 2>/dev/null || true
 git checkout -b feature/{feature_name}
 ```
 
-- Update `progress.md`: `resume_step: 3, resume_feature_id: {id}` → commit + push (heartbeat)
-
 ### Step 4 — Implement
 
 - Write implementation to `{SOURCE_PATH}/{feature_name}.{ext}`
 - Follow every pattern in `ARCHITECTURE.md` exactly
-- **Brownfield only:** write to `{NEW_FEATURE_SOURCE}` path. Do NOT touch existing source files unless the feature description explicitly requires it. Log any existing-file touch in `progress.md` under "Touched existing files".
-- Update `progress.md`: `resume_step: 4` → commit + push (heartbeat)
+- **Brownfield only:** write to `{NEW_FEATURE_SOURCE}` path. Do NOT touch existing source files unless the feature description explicitly requires it. Note any existing-file touch in `session_summary.md` under "Touched existing files".
 
 ### Step 5 — Test + audit
 
@@ -132,7 +90,7 @@ After 3 failures, append **one JSON line** to `/workspace/session_result.json`:
 ```
 {"id": <feature_id>, "status": "Blocked", "blocked_reason": "<reason>"}
 ```
-Write the reason to `progress.md`. Push. Move on to the next feature in the batch.
+Note the reason in `session_summary.md`. Move on to the next feature in the batch.
 
 After tests pass, run the security audit:
 ```
@@ -140,10 +98,8 @@ After tests pass, run the security audit:
 ```
 If vulnerabilities found → fix before committing.
 
-Write a **Verification Note** to `progress.md`:
+Write a **Verification Note** to `session_summary.md`:
 > Re-read the original feature description. In 2–3 sentences confirm the implementation matches the spec — not just that tests pass.
-
-Update `progress.md`: `resume_step: 5` → commit + push (heartbeat)
 
 ### Step 5b — Deletion safety self-review
 
@@ -180,7 +136,7 @@ git push origin feature/{feature_name}
 gh pr create --title "feat: {description}" --base main
 ```
 
-**Push failure** → `PATCH status → Blocked`, write reason to `progress.md`, never exit 0 silently.
+**Push failure** → `PATCH status → Blocked`, note reason in `session_summary.md`, never exit 0 silently.
 
 On success, append **one JSON line** to `/workspace/session_result.json`:
 ```
@@ -188,10 +144,8 @@ On success, append **one JSON line** to `/workspace/session_result.json`:
 ```
 Use `echo '{"id":...}' >> /workspace/session_result.json`. The poller polls this file every 30 s and applies each new line to the DB in real-time. Do NOT call `PATCH /api/features/{id}`.
 
-Append **Session State Summary** to `progress.md`:
+Append **Session State Summary** to `session_summary.md`:
 > Key decisions made, patterns introduced, anything the next session must know about this feature.
-
-Update `progress.md`: `resume_step: 6` → commit + push (heartbeat)
 
 ---
 
@@ -199,9 +153,8 @@ Update `progress.md`: `resume_step: 6` → commit + push (heartbeat)
 
 After all features in the batch are done:
 
-- Update `progress.md`: session complete, clear `resume_step` (remove from front matter)
-- Commit + push `progress.md` and `session_summary.md` to main
-- Exit cleanly (exit 0)
+- Finalize `session_summary.md` with a closing line noting the batch is complete
+- Exit cleanly (exit 0). The orchestrator's post-coder pipeline handles the git commit/push/PR — you do not run git yourself.
 
 > **Note:** Do NOT run competitor research or POST new features here. The recommender agent runs as a separate Docker session after this one completes — it has its own backlog-size gate.
 
