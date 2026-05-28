@@ -43,10 +43,10 @@ PM_USERNAME  = os.environ.get("PM_USERNAME", "digvi")
 PM_PASSWORD  = os.environ.get("PM_PASSWORD", "admin123")
 SSH_DIR      = Path(os.environ.get("SSH_DIR", "C:/Users/digvi/.ssh"))
 PRODUCTS_DIR = Path(os.environ.get("PRODUCTS_BASE_DIR", "C:/Users/digvi/Personal/Products"))
-WORKING_DIR  = PRODUCTS_DIR / "Calculator"
+WORKING_DIR  = PRODUCTS_DIR / "Calc3"
 
-PRODUCT_NAME  = "Calculator"
-REPO_NAME     = "calculator"
+PRODUCT_NAME  = "Calc3"
+REPO_NAME     = "calc3"
 VISION        = "A simple calculator web app with REST API and clean UI."
 STACK         = "python"
 
