@@ -240,6 +240,27 @@ class TestRunAll:
         assert any(f.category == "shell_artifact" for f in out)
 
 
+def _mk_client(get_return=None, post_return=None, post_side_effect=None):
+    """Build a MagicMock httpx-like client where GET returns recent
+    comments (empty list by default → no dedupe matches) and POST returns
+    a 2xx by default."""
+    client = MagicMock()
+    if get_return is None:
+        client.get.return_value = SimpleNamespace(
+            status_code=200, json=lambda: [],
+        )
+    else:
+        client.get.return_value = get_return
+    if post_side_effect is not None:
+        client.post.side_effect = post_side_effect
+    else:
+        client.post.return_value = (
+            post_return if post_return is not None
+            else SimpleNamespace(status_code=201)
+        )
+    return client
+
+
 class TestPostFindings:
     def test_posts_each_finding_as_comment(self):
         findings = [
@@ -250,8 +271,7 @@ class TestPostFindings:
                     target_type="feature", target_id="43",
                     feature_id=43, detail="d2", fix_hint="h2"),
         ]
-        client = MagicMock()
-        client.post.return_value = SimpleNamespace(status_code=201)
+        client = _mk_client()
         posted = post_findings(findings, client, product_name="t")
         assert posted == 2
         assert client.post.call_count == 2
@@ -270,8 +290,7 @@ class TestPostFindings:
             Finding(category="x", severity="low", target_type="file",
                     target_id="t", feature_id=1, detail="d", fix_hint="h"),
         ]
-        client = MagicMock()
-        client.post.return_value = SimpleNamespace(status_code=500)
+        client = _mk_client(post_return=SimpleNamespace(status_code=500))
         # Should not raise, should not count as posted.
         posted = post_findings(findings, client, product_name="t")
         assert posted == 0
@@ -283,15 +302,78 @@ class TestPostFindings:
             Finding(category="x", severity="low", target_type="file",
                     target_id="b", feature_id=2, detail="d", fix_hint="h"),
         ]
-        client = MagicMock()
-        # First call raises, second succeeds.
-        client.post.side_effect = [
+        client = _mk_client(post_side_effect=[
             RuntimeError("network"),
             SimpleNamespace(status_code=201),
-        ]
+        ])
         posted = post_findings(findings, client, product_name="t")
         assert posted == 1
         assert client.post.call_count == 2
+
+
+class TestDedupe:
+    """Re-running the same detectors must not double-post comments."""
+
+    def test_skips_finding_whose_body_already_posted(self):
+        f = Finding(category="shell_artifact", severity="medium",
+                    target_type="file", target_id="=3.0,",
+                    feature_id=42, detail="d", fix_hint="h")
+        # The GET on /api/features/42/comments returns one drift-scanner
+        # comment whose body exactly matches what we'd post.
+        client = _mk_client(get_return=SimpleNamespace(
+            status_code=200,
+            json=lambda: [{"author": "drift-scanner", "body": f.as_comment_body()}],
+        ))
+        posted = post_findings([f], client, product_name="t")
+        assert posted == 0
+        assert client.post.call_count == 0  # dedupe hit, no POST
+
+    def test_does_not_dedupe_other_authors(self):
+        f = Finding(category="x", severity="low", target_type="file",
+                    target_id="t", feature_id=1, detail="d", fix_hint="h")
+        # The feature has a comment with the same body but a different
+        # author — drift-scanner should still post.
+        client = _mk_client(get_return=SimpleNamespace(
+            status_code=200,
+            json=lambda: [{"author": "reviewer", "body": f.as_comment_body()}],
+        ))
+        posted = post_findings([f], client, product_name="t")
+        assert posted == 1
+
+    def test_dedupes_within_same_cycle(self):
+        # Two findings with identical bodies in the same call — second
+        # should be deduped from the in-cycle cache.
+        f1 = Finding(category="x", severity="low", target_type="file",
+                     target_id="t", feature_id=1, detail="d", fix_hint="h")
+        f2 = Finding(category="x", severity="low", target_type="file",
+                     target_id="t", feature_id=1, detail="d", fix_hint="h")
+        client = _mk_client()
+        posted = post_findings([f1, f2], client, product_name="t")
+        assert posted == 1   # second skipped
+        assert client.post.call_count == 1
+
+    def test_caches_get_per_feature(self):
+        # Two findings on the same feature_id should only GET once.
+        f1 = Finding(category="a", severity="low", target_type="file",
+                     target_id="x", feature_id=5, detail="d", fix_hint="h")
+        f2 = Finding(category="b", severity="low", target_type="file",
+                     target_id="y", feature_id=5, detail="d", fix_hint="h")
+        client = _mk_client()
+        post_findings([f1, f2], client, product_name="t")
+        # exactly one GET, two POSTs
+        assert client.get.call_count == 1
+        assert client.post.call_count == 2
+
+    def test_get_failure_does_not_block_post(self):
+        # If the GET for existing comments fails (network / 5xx), we
+        # default to "no existing comments" and post anyway.
+        f = Finding(category="x", severity="low", target_type="file",
+                    target_id="t", feature_id=1, detail="d", fix_hint="h")
+        client = _mk_client(get_return=SimpleNamespace(
+            status_code=500, json=lambda: None,
+        ))
+        posted = post_findings([f], client, product_name="t")
+        assert posted == 1
 
 
 class TestFindingRender:
