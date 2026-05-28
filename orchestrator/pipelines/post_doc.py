@@ -14,6 +14,7 @@ Extracted from docker_runner.py during Phase 2 of OrchestratorRefactor.
 import logging
 import os
 import subprocess as _sp
+from pathlib import Path
 
 import httpx
 
@@ -318,33 +319,83 @@ def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
     # Real loop observed: DigitalSign feature 164, sessions 1963→1964→1966,
     # ~3 planner sessions back-to-back to push the same docs/story_164.md.
     # changed_by="post-doc:fallback" mirrors the post-coder bypass label.
+    #
+    # VERIFY-THE-DOC-EXISTS guard (2026-05-28): only mark a feature Designed
+    # if its design doc actually exists at docs/story_{id}.md in the working
+    # tree. Without this, the fallback fabricated a design_doc_path from the
+    # feature id for EVERY assigned feature — even ones the designer never
+    # actually designed. Canonical incident: designer assigned #1005 (it's the
+    # only feature in {assigned_features}) but it queried GET /api/features,
+    # judged the health-check feature foundational, and designed #1007 instead
+    # (writing docs/story_1007.md + reporting #1007 Designed via
+    # session_result.json). The fallback then marked the ASSIGNED #1005
+    # Designed with phantom docs/story_1005.md — a file that was never
+    # written. The #1005 coder then read an empty spec, improvised, and
+    # bounced on Guard 6 until the supervisor blocked it. By only marking
+    # features whose doc is on disk, a "wandered" assignment stays Approved
+    # and gets re-designed next cycle instead of stranding the coder.
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-            for f in assigned_features:
-                fid = f["id"]
-                # Convention: agents write docs/story_{id}.md. If the agent
-                # used a different filename we don't try to discover it —
-                # the next coder run will read whatever's at the conventional
-                # path; mismatch is logged via post-coder's "no design doc"
-                # warning rather than corrupting state here.
-                doc_path = f.get("design_doc_path") or f"docs/story_{fid}.md"
-                try:
-                    r = client.patch(f"/api/features/{fid}", json={
-                        "status": "Designed",
-                        "design_doc_path": doc_path,
-                        "changed_by": "post-doc:fallback",
-                    })
-                    r.raise_for_status()
-                    log.info(
-                        f"[post-{persona}] {pname}: feature #{fid} → Designed "
-                        f"(doc={doc_path})"
-                    )
-                except Exception as e:
-                    log.warning(
-                        f"[post-{persona}] {pname}: direct PATCH for #{fid} failed: {e}"
-                    )
+            _mark_assigned_features_designed(
+                working_dir, assigned_features, persona, pname, client,
+            )
     except Exception as e:
         log.warning(f"[post-{persona}] {pname}: PM client error during designed PATCH: {e}")
+
+
+def _mark_assigned_features_designed(
+    working_dir: str, assigned_features: list, persona: str,
+    pname: str, client,
+) -> None:
+    """For each assigned feature, mark it Designed IF its design doc exists
+    on disk; otherwise re-queue it to Approved (the designer wandered and
+    never wrote this feature's doc — don't fabricate a phantom path).
+
+    Extracted from _run_post_doc_pipeline so the verify-doc-exists guard
+    is unit-testable without the surrounding git/chmod side-effects.
+    """
+    wd = Path(working_dir)
+    for f in assigned_features:
+        fid = f["id"]
+        doc_path = f.get("design_doc_path") or f"docs/story_{fid}.md"
+        if not (wd / doc_path).is_file():
+            # The designer didn't write this feature's doc (it wandered to a
+            # different feature, or named the file wrong). Do NOT fabricate a
+            # Designed status with a phantom path — leave it Approved so the
+            # next designer cycle re-picks it. The feature the designer DID
+            # write (and reported in session_result.json) is handled by the
+            # reconcile path independently.
+            log.warning(
+                f"[post-{persona}] {pname}: feature #{fid} assigned but "
+                f"`{doc_path}` not on disk — designer designed a different "
+                f"feature. Rolling #{fid} back to Approved for re-design "
+                f"(no phantom design_doc_path)."
+            )
+            try:
+                client.patch(f"/api/features/{fid}", json={
+                    "status": "Approved",
+                    "design_doc_path": None,
+                    "changed_by": "post-doc:rollback",
+                })
+            except Exception as e2:
+                log.warning(
+                    f"[post-{persona}] {pname}: re-queue PATCH for #{fid} failed: {e2}"
+                )
+            continue
+        try:
+            r = client.patch(f"/api/features/{fid}", json={
+                "status": "Designed",
+                "design_doc_path": doc_path,
+                "changed_by": "post-doc:fallback",
+            })
+            r.raise_for_status()
+            log.info(
+                f"[post-{persona}] {pname}: feature #{fid} → Designed (doc={doc_path})"
+            )
+        except Exception as e:
+            log.warning(
+                f"[post-{persona}] {pname}: direct PATCH for #{fid} failed: {e}"
+            )
 
 
 def _rollback_doc_features(product: dict, assigned_features: list[dict]) -> None:
