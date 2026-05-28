@@ -775,6 +775,62 @@ class TestBlockedQuarantine:
         assert r.status_code == 422
 
 
+class TestImplementedBounceCircuitBreaker:
+    """Fix #2 for the 2026-05-28 calc3 #1022 infinite loop.
+
+    A post-coder lint bounce moves a feature Implemented→Implementing with
+    review_outcome ALREADY changes_requested (never reset on re-claim), so it
+    matched none of the website's fix_attempts triggers — the loop never
+    auto-Blocked (fix_attempts stuck at 1 over ~12 bounces). Implemented→
+    Implementing is now a rework trigger feeding the existing cap→auto-Block.
+    """
+
+    def test_implemented_to_implementing_bumps_fix_attempts(self, client, db):
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Implemented", fix_attempts=1,
+                         review_outcome="changes_requested")
+        r = client.patch(
+            f"/api/features/{f.id}",
+            json={"status": "Implementing",
+                  "review_outcome": "changes_requested",   # unchanged value
+                  "changed_by": "post-coder:lint-guard"},
+        )
+        assert r.status_code == 200
+        db.refresh(f)
+        # Bumped despite review_outcome being unchanged (the old conditions
+        # both missed this path).
+        assert f.fix_attempts == 2
+
+    def test_repeated_bounces_auto_block_at_cap(self, client, db):
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Implemented", fix_attempts=4,
+                         review_outcome="changes_requested")
+        r = client.patch(
+            f"/api/features/{f.id}",
+            json={"status": "Implementing",
+                  "review_outcome": "changes_requested",
+                  "changed_by": "post-coder:lint-guard"},
+        )
+        assert r.status_code == 200
+        db.refresh(f)
+        assert f.fix_attempts == 5
+        # Crossing the cap auto-Blocks, overriding the requested Implementing.
+        assert f.status == "Blocked"
+        assert f.blocked_reason
+
+    def test_normal_reclaim_does_not_bump(self, client, db):
+        # Implementing→Implementing (coder re-claim) is not a bounce.
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Implementing", fix_attempts=1)
+        r = client.patch(
+            f"/api/features/{f.id}",
+            json={"status": "Implementing", "changed_by": "agent"},
+        )
+        assert r.status_code == 200
+        db.refresh(f)
+        assert f.fix_attempts == 1
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # REST API — Sessions
 # ══════════════════════════════════════════════════════════════════════════════

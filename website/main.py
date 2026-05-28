@@ -1826,15 +1826,32 @@ async def api_update_feature(
     rework_via_flap = (
         new_status == "Implementing" and prev_status == "Reviewing"
     )
+    # (c) Implemented → Implementing: the agent marked the work done and a
+    #     post-coder gate (lint/test) bounced it back. review_outcome is often
+    #     ALREADY changes_requested from the prior bounce (never reset on
+    #     re-claim), so rework_via_outcome doesn't fire; prev_status is
+    #     Implemented (not Reviewing), so rework_via_flap doesn't either —
+    #     leaving the lint-bounce loop with no fix_attempts bump and thus no
+    #     circuit breaker. Canonical 2026-05-28 calc3 #1022: ~12 lint bounces,
+    #     fix_attempts stuck at 1, never auto-Blocked. There is no legitimate
+    #     non-rework Implemented→Implementing transition, so this is safe.
+    rework_via_implemented_bounce = (
+        new_status == "Implementing" and prev_status == "Implemented"
+    )
     should_bump = (
-        (rework_via_outcome or rework_via_flap)
+        (rework_via_outcome or rework_via_flap or rework_via_implemented_bounce)
         and "fix_attempts" not in updates
         and changed_by not in ("pm", "kill_recovery", "supervisor")
     )
     if should_bump:
         new_attempts = prev_fix_attempts + 1
         feature.fix_attempts = new_attempts
-        trigger = "rework cycle" if rework_via_outcome else "Reviewing→Implementing flap"
+        if rework_via_outcome:
+            trigger = "rework cycle"
+        elif rework_via_flap:
+            trigger = "Reviewing→Implementing flap"
+        else:
+            trigger = "Implemented→Implementing bounce"
         db.add(FeatureChangelog(
             feature_id=feature_id,
             field="fix_attempts",

@@ -962,8 +962,21 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
         )
         if not opens_conn:
             continue
-        has_with = _re.search(r"with\s+\w+(_connection|get_connection|_conn)\s*[(\[]", content) \
-                   or "with get_db_connection" in content
+        has_with = (
+            _re.search(r"with\s+\w+(_connection|get_connection|_conn)\s*[(\[]", content)
+            or "with get_db_connection" in content
+            # Stdlib form: `with sqlite3.connect(...) as conn:` /
+            # `with psycopg2.connect(...)` / `with mysql.connector.connect(...)`.
+            # The original regex only matched helper names ending in
+            # _connection/_conn, so the common stdlib pattern read as a leak.
+            # Canonical 2026-05-28 calc3 #1022 incident: src/auth/users.py used
+            # `with sqlite3.connect()` everywhere (no leak), but the heuristic
+            # fired every cycle and the remedy hint pointed at a get_db_connection()
+            # helper that didn't exist → unsatisfiable → infinite coder loop.
+            or _re.search(r"with\s+[\w.]*connect\s*\(", content)
+            # contextlib.closing(...) is also a valid lifecycle wrapper.
+            or "with closing(" in content
+        )
         has_raise = "raise" in content
         has_finally_close = _re.search(r"finally\s*:[^}]*?\.close\(\)", content)
         if has_raise and not has_with and not has_finally_close:
@@ -973,8 +986,9 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
             f"potential DB connection leak (open + raise without `with` or "
             f"`finally: close`): {', '.join(conn_leak_hits[:3])}"
             f"{'...' if len(conn_leak_hits) > 3 else ''}. "
-            f"Heuristic — verify; if false positive, refactor to `with "
-            f"get_db_connection() as conn:` to make the check unambiguous."
+            f"Heuristic — verify; if false positive, wrap the connection in a "
+            f"`with` block (e.g. `with sqlite3.connect(...) as conn:`) or close "
+            f"it in a `finally:` clause."
         )
 
     # --- Guard 15: alembic-branch detection ---
@@ -2220,7 +2234,7 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                         # Bounce feature back to Implementing+changes_requested.
                         # Implementing(4) ← Implemented(4) is rank-equal (no guard).
                         # Implementing ← Reviewing is in _ALLOWED_BACKWARD.
-                        client.patch(
+                        _bounce_resp = client.patch(
                             f"/api/features/{fid}",
                             json={
                                 "status": "Implementing",
@@ -2228,6 +2242,19 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                                 "changed_by": "post-coder:lint-guard",
                             },
                         )
+                        # Respect a supervisor / cap Block: if the feature is
+                        # Blocked, the website quarantine rejects the un-block
+                        # with 422. Don't retry, don't treat as error — the
+                        # Block is protecting against exactly this loop. (The
+                        # primary circuit breaker is the fix_attempts cap, which
+                        # auto-Blocks at 5 lint bounces; this is belt-and-braces.)
+                        if _bounce_resp.status_code == 422:
+                            log.warning(
+                                f"[post-coder] {pname}: feature #{fid} is Blocked "
+                                f"— bounce rejected by quarantine (422); respecting "
+                                f"the Block, not re-queuing."
+                            )
+                            continue
                         log.info(
                             f"[post-coder] {pname}: feature #{fid} bounced by "
                             f"lint-guard ({len(lint_violations)} issue(s))"
