@@ -99,7 +99,7 @@ For each section, look for concrete mismatches:
 
 **(a) Factual sections you may edit row-by-row, in place.** These describe what IS in the code; they are facts that change as the product evolves.
 
-- **MODULES** — add a row when you find a canonical module that isn't listed (e.g. `src/users/user_store.py` is the single owner of user persistence). Update a row when a module's path or surface changes. Remove a row when its file no longer exists.
+- **MODULES** — add a row when you find a canonical module that isn't listed (e.g. `src/users/user_store.py` is the single owner of user persistence). Update a row when a module's path or surface changes. Remove a row when its file no longer exists. **Also**: if the table still has the renderer-template placeholder row `_(populated by the architect persona as features land — do not edit by hand)_`, delete that row in the same edit that adds your first real entry; it's a stub that confuses pre-coder context once real modules exist.
 - **DEPRECATED** — add an item when a module is being phased out (parallel-module drift; older one should die), OR when an anti-pattern file (`*.bak`, `*_v2.py`, `*_old.py`) still exists in the tree. Remove an item when the file has actually been deleted (housekeeping). DEPRECATED entries become the post-coder lint Guard 13's refusal-to-re-introduce queue; coders won't re-add them.
 - **ENTRY POINTS** — update the canonical-file column when an entry moves (e.g. `src/main.py` → `src/app/main.py`). Add a row for a new entry kind (CLI command, worker, scheduled job). Remove a row when an entry kind is retired.
 - **Directory structure** — update the tree block when a top-level dir is added or removed. NEVER duplicate a top-level entry (no two `src/` lines).

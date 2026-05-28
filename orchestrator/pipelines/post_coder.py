@@ -116,6 +116,18 @@ def _coder_stage_with_denylist(working_dir: str, _run, product_name: str = "?") 
             continue
         # Denylist match -- forward-slash normalized for Windows safety.
         normalized = path.replace("\\", "/")
+        # Shell-artifact filename: basename starts with a shell
+        # comparator / redirect / pipe / job-control char. These are never
+        # legitimate source files — they're created when a coder agent
+        # runs an unquoted shell command like
+        #   pip install flask>=3.0,<4
+        # and the shell parses `>=3.0,<4` as redirection + literal,
+        # producing files like `=3.0,` or `<4` in the cwd. `git add -A`
+        # then picks them up. Canonical 2026-05-27 calcv2 incident.
+        _basename = normalized.rsplit("/", 1)[-1]
+        if _basename and _basename[0] in "=<>|&":
+            stripped.append((status_letter, normalized + "  [shell-artifact filename]"))
+            continue
         if any(_fnmatch.fnmatchcase(normalized, deny) for deny in _CODER_DENYLIST):
             stripped.append((status_letter, normalized))
             continue

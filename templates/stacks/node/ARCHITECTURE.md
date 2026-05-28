@@ -34,12 +34,7 @@ The source-of-truth registry. Pre-coder context reads this section; when your fe
 
 | Concern | Canonical module | Owns | Notes |
 |---|---|---|---|
-| _(populated as features land)_ | | | |
-
-Example rows (replace as the product grows):
-- `User persistence` | `src/users/userStore.ts` | `User`, `createUser`, `getUserById` | Single store; do not create `userRepository.ts` etc.
-- `Authentication` | `src/auth/verifyAuth.ts` | `verifyAuth(req) → User` | Throws `Unauthorized`; do not hand-roll per-route.
-- `HTTP client` | `src/lib/httpClient.ts` | `getClient()` | Configures retries/timeouts; do not call raw `fetch()`.
+| _(populated by the architect persona as features land — do not edit by hand)_ | | | |
 
 ## RULES
 
