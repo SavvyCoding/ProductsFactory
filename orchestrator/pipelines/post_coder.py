@@ -1376,6 +1376,61 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
     return violations
 
 
+def _introduced_failures(feature_failed: list[str], baseline_failed: set[str]) -> list[str]:
+    """Test ids that failed for the feature but NOT on the baseline.
+
+    Pure + order-preserving over `feature_failed`. A test that fails on both
+    the feature branch and origin/main is pre-existing (not this feature's
+    fault); one that fails only on the feature branch was introduced by it.
+    """
+    return [t for t in feature_failed if t not in baseline_failed]
+
+
+def _baseline_pytest_failures(working_dir: str, test_ids: list[str],
+                              timeout: int) -> set[str]:
+    """Run `test_ids` against a throwaway git worktree at origin/main and return
+    the subset that FAIL there (i.e. pre-existing failures).
+
+    Uses `git worktree add --detach` so the live session branch / working tree
+    is never touched. Runs in the orchestrator's existing Python env (deps were
+    already pip-installed by the caller). `--continue-on-collection-errors` so a
+    test FILE that only exists on the feature branch (new test) doesn't abort
+    the baseline run — it simply won't appear in the baseline FAILED set, and is
+    therefore correctly classified as introduced.
+
+    Best-effort: ANY error → empty set, which makes the caller treat every
+    failure as introduced (fails safe toward the old bounce-on-any behaviour).
+    """
+    import tempfile as _tf, shutil as _sh, os as _os, re as __re
+    if not test_ids:
+        return set()
+    base_root = _tf.mkdtemp(prefix="pf-baseline-")
+    wt = _os.path.join(base_root, "wt")
+    try:
+        add = _sp.run(["git", "worktree", "add", "--detach", wt, "origin/main"],
+                      cwd=working_dir, capture_output=True, text=True, timeout=60)
+        if add.returncode != 0:
+            log.warning(f"[post-coder] baseline worktree add failed: "
+                        f"{(add.stderr or '')[:200]}")
+            return set()
+        rr = _sp.run(["pytest", "-q", "--no-header", "-s",
+                      "-p", "no:cacheprovider", "--continue-on-collection-errors",
+                      *test_ids],
+                     cwd=wt, capture_output=True, text=True, timeout=timeout)
+        out = (rr.stdout or "") + "\n" + (rr.stderr or "")
+        return set(__re.findall(r"^FAILED (\S+)", out, __re.M))
+    except Exception as e:
+        log.warning(f"[post-coder] baseline failure-check raised: {e}")
+        return set()
+    finally:
+        try:
+            _sp.run(["git", "worktree", "remove", "--force", wt],
+                    cwd=working_dir, capture_output=True, text=True, timeout=30)
+        except Exception:
+            pass
+        _sh.rmtree(base_root, ignore_errors=True)
+
+
 def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
                             timeout: int = 300) -> dict:
     """
@@ -1410,6 +1465,8 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
     result = {
         "passed": True, "env_broken": False, "collection_errors": 0,
         "framework": "none", "output": "", "first_failure": "",
+        "introduced_failures": [], "pre_existing_failures": [],
+        "pre_existing_only": False,
     }
     # ---- detect framework from filesystem markers ----
     if (wd / "pytest.ini").exists() or (wd / "pyproject.toml").exists():
@@ -1553,8 +1610,41 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
             result["env_broken"] = True
             result["passed"] = False
             return result
-        # Real test failure — extract first failing test name for the bounce
-        # message. pytest: "FAILED tests/X::test_Y" ; jest: "FAIL tests/X.test.js" ;
+        # Real test failure. For pytest, separate failures the FEATURE
+        # INTRODUCED from PRE-EXISTING failures on origin/main, so a single
+        # broken test can't deadlock every feature. Canonical 2026-05-29 calc3:
+        # a DDL-consolidation regression broke ~20 order-dependent tests, and
+        # because post-coder runs the FULL suite, every subsequent feature
+        # bounced on those unrelated tests → mass-Block. (npm/go keep the
+        # bounce-on-any-failure behaviour; baseline-delta is pytest-only.)
+        if framework == "pytest":
+            failed_ids = _re.findall(r"^FAILED (\S+)", run_out, _re.M)
+            result["failed_ids"] = failed_ids
+            if failed_ids:
+                baseline = _baseline_pytest_failures(working_dir, failed_ids, timeout)
+                introduced = _introduced_failures(failed_ids, baseline)
+                result["pre_existing_failures"] = sorted(baseline & set(failed_ids))
+                result["introduced_failures"] = introduced
+                if not introduced:
+                    # Every failure pre-exists on origin/main → not this
+                    # feature's fault. Let it proceed (don't bounce); the suite
+                    # is broken independently and needs an operator/chore fix.
+                    result["passed"] = True
+                    result["pre_existing_only"] = True
+                    result["first_failure"] = ""
+                    log.warning(
+                        f"[post-coder] {product_name}: {len(failed_ids)} test "
+                        f"failure(s), ALL pre-existing on origin/main — suite is "
+                        f"broken independent of this feature; not bouncing. "
+                        f"Operator/chore must fix: "
+                        f"{result['pre_existing_failures'][:5]}"
+                    )
+                    return result
+                result["passed"] = False
+                result["first_failure"] = f"FAILED {introduced[0]}"
+                return result
+        # non-pytest, or pytest with no parseable FAILED ids → bounce on any
+        # failure. pytest: "FAILED tests/X::test_Y"; jest: "FAIL tests/X.test.js";
         # go: "--- FAIL: TestFoo"
         first = ""
         for ln in run_out.splitlines():
