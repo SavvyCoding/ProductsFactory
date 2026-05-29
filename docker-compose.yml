@@ -106,6 +106,12 @@ services:
       SESSION_TIMEOUT_MINUTES: ${SESSION_TIMEOUT_MINUTES:-90}
       MAX_FEATURES_PER_RUN: ${MAX_FEATURES_PER_RUN:-1}
       ORCHESTRATION_CYCLE_SECONDS: ${ORCHESTRATION_CYCLE_SECONDS:-60}
+      # Corrective-chore reconciler: when truthy, high-severity drift findings
+      # (e.g. duplicate DDL) are filed as Approved priority=1 chore features for
+      # the coder pipeline to fix. Default off; set RECONCILER_CHORES_ENABLED=1
+      # in .env to trial. Orchestrator-global (applies to whatever product's
+      # coder session just ran).
+      RECONCILER_CHORES_ENABLED: ${RECONCILER_CHORES_ENABLED:-}
       # Agent backend — `ollama` for local/offline/TOS-compliant, `claude` for API
       AGENT_BACKEND:      ${AGENT_BACKEND:-ollama}
       # OLLAMA_HOST: leave overridable via .env so we can switch between local
