@@ -211,6 +211,82 @@ def _check_required_arch_sections(working_dir: str) -> list[str]:
     return violations
 
 
+def _path_exists_exact_case(working_dir: str, relpath: str) -> bool:
+    """True iff `relpath` exists under `working_dir`, matching case EXACTLY at
+    every path component.
+
+    `os.path.exists` is case-INSENSITIVE on Windows/macOS bind mounts (Docker
+    Desktop surfaces NTFS that way), so `os.path.exists(wd/'SRC')` returns True
+    when only `src/` exists — which is exactly how the architect's DEPRECATED
+    `SRC/` phantom survives (and why its own `find SRC/` inventory can falsely
+    succeed). Walking listdir() per component compares against the REAL stored
+    names, so it's correct on case-sensitive and case-insensitive filesystems
+    alike.
+    """
+    parts = [p for p in relpath.replace("\\", "/").split("/") if p]
+    cur = working_dir
+    for part in parts:
+        try:
+            entries = os.listdir(cur)
+        except Exception:
+            return False
+        if part not in entries:
+            return False
+        cur = os.path.join(cur, part)
+    return True
+
+
+def _prune_phantom_deprecated(working_dir: str) -> int:
+    """Remove DEPRECATED entries that name a concrete path which doesn't exist.
+
+    The architect persona has no existence-check on its DEPRECATED list, so it
+    carries phantom entries forward indefinitely — and even "maintains" them
+    (calc3 2026-05-28: the `SRC/` entry, a directory that never existed, had
+    its file count updated 5→8 to track `src/`'s growth). Every phantom is
+    injected into the pre-coder context as a bogus "⚠ DEPRECATED — do not use"
+    warning and arms Guard 13 against a path no one will ever create.
+
+    Only concrete paths are pruned. Glob/pattern entries (`*.bak`, `temp_*`)
+    and the renderer placeholder (`_(...)_`) are left untouched — they can't be
+    existence-checked. Returns the number of entries removed; rewrites
+    ARCHITECTURE.md in place only if something was removed. Best-effort: never
+    raises. Preserves the `## DEPRECATED` header (so the section-integrity
+    check still passes).
+    """
+    import re as _re
+    arch = os.path.join(working_dir, "ARCHITECTURE.md")
+    try:
+        with open(arch, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception:
+        return 0
+    m = _re.search(r"(^##\s+DEPRECATED\b[^\n]*\n)(.*?)(?=\n##\s|\Z)",
+                   content, _re.S | _re.M)
+    if not m:
+        return 0
+    body = m.group(2)
+    kept: list[str] = []
+    removed = 0
+    for line in body.split("\n"):
+        bm = _re.match(r"^\s*-\s+`([^`]+)`", line)
+        if bm:
+            token = bm.group(1).rstrip("/")
+            is_concrete = bool(token) and "*" not in token and not token.startswith("_(")
+            if is_concrete and not _path_exists_exact_case(working_dir, token):
+                removed += 1
+                continue  # drop the phantom bullet
+        kept.append(line)
+    if removed == 0:
+        return 0
+    new_content = content[:m.start(2)] + "\n".join(kept) + content[m.end(2):]
+    try:
+        with open(arch, "w", encoding="utf-8") as f:
+            f.write(new_content)
+    except Exception:
+        return 0
+    return removed
+
+
 def _stage_allowed_paths(
     persona: str, working_dir: str, _run, product_name: str = "?",
 ) -> tuple[int, list[str]]:
@@ -423,6 +499,23 @@ def _run_post_maintenance_pipeline(product: dict, session_uid: str,
                 log.info(f"[post-{persona}] {pname}: resolved {len(paths)} "
                          f"stash-pop conflict(s) in favor of agent")
             _run(["git", "stash", "drop"])
+
+    # Architect-only: prune phantom DEPRECATED entries (paths that don't
+    # exist, exact-case) the LLM keeps carrying forward. Runs after the
+    # origin/main sync so it checks against the current tree, and before
+    # staging so the pruned ARCHITECTURE.md is committed alongside the
+    # architect's other edits. Deterministic — the prompt already asks the
+    # architect to remove deleted entries and it doesn't comply.
+    if persona == "architect":
+        try:
+            pruned = _prune_phantom_deprecated(working_dir)
+            if pruned:
+                log.info(
+                    f"[post-{persona}] {pname}: pruned {pruned} phantom "
+                    f"DEPRECATED entry/entries (path does not exist)"
+                )
+        except Exception:
+            log.debug("phantom-DEPRECATED prune raised", exc_info=True)
 
     # Soft-allowlist staging: for personas with an allowlist (architect,
     # documenter, devops, etc.), stage ONLY paths that match the allowlist.
