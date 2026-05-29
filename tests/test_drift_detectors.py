@@ -563,3 +563,16 @@ class TestFileCorrectiveChores:
     def test_post_failure_does_not_raise(self):
         client = _client(get_features=[], post_status=500)
         assert file_corrective_chores([_high()], client, product_id=24) == 0
+
+    def test_many_sites_body_has_no_ac_bullets(self):
+        # Regression (calc3 2026-05-29): the /api/features story-sizing guard
+        # counts lines starting with `- ` or `* ` as acceptance criteria and
+        # 422s at >4. A dedup chore lists every site, so >4-site dups (the
+        # worst ones) were rejected. Locations must be a code fence, not bullets.
+        import re as _re
+        client = _client(get_features=[])
+        file_corrective_chores([_high(table="calculations", n=11)], client, product_id=24)
+        body = _posts(client)[0]["description"]
+        ac_bullets = [ln for ln in body.splitlines() if _re.match(r"^\s*[-*] ", ln)]
+        assert ac_bullets == [], f"chore body must carry no AC bullets, found: {ac_bullets}"
+        assert "src/f0.py:0" in body, "locations must still be present (in a code fence)"
