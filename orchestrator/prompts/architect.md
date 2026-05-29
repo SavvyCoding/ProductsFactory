@@ -108,6 +108,14 @@ For each section, look for concrete mismatches:
 
 - **RULES**, **REFERENCE PATTERNS**, **CONFIG GATES** — write proposed changes to `/workspace/docs/architecture_review_<date>.md`. The PM merges them by hand. If you see CONFIG GATES drift vs `quality_gates.json`, flag that — quality-gate tampering (`cov-fail-under` lowered to 0, etc.) is the highest-impact finding you can make.
 
+**(c) Retire your own resolved review docs.** Before writing a new one, `ls /workspace/docs/architecture_review_*.md` and read each. For any whose finding NO LONGER HOLDS — e.g. it says "`src/auth/` does not exist" but `src/auth/` is now a row in MODULES, or its proposed RULES change was already applied — **overwrite that file** (it's on your write allowlist) with a one-line stub:
+
+```
+# RESOLVED <YYYY-MM-DD>: <original finding, one line> — addressed (<what changed>).
+```
+
+Do NOT delete the file (deletion is forbidden — see Hard rules; the allowlist refuses non-doc deletions and would discard your whole commit). Overwriting to a RESOLVED stub keeps the never-delete rule intact while stopping the stale doc from contradicting the live MODULES table. A review doc that asserts a module is missing while you've just registered that module in MODULES is the kind of self-contradiction that erodes trust in the whole doc set.
+
 ### 5 — How to edit ARCHITECTURE.md surgically
 
 Use this Python pattern. Paste, modify `OP` and `PARAMS`, run. It parses the markdown, finds the right section, and applies a single targeted edit. It refuses to touch other sections.
