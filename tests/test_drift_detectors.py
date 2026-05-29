@@ -18,10 +18,13 @@ os.environ.setdefault("PM_API_URL", "http://pm-api:8080")
 from orchestrator.drift_detectors import (  # noqa: E402
     Finding,
     detect_design_doc_mismatch,
+    detect_duplicate_ddl,
     detect_placeholder_template_content,
     detect_shell_artifact_files,
+    file_corrective_chores,
     post_findings,
     run_all,
+    run_chore_detectors,
 )
 
 
@@ -390,3 +393,173 @@ class TestFindingRender:
         assert "=3.0," in body
         assert "junk file" in body
         assert "delete it" in body
+
+
+# ── Finding worklist fields ─────────────────────────────────────────────────
+
+
+class TestFindingWorklistFields:
+    def test_dedupe_key_defaults_to_category_target(self):
+        f = Finding(
+            category="duplicate_ddl", severity="high", target_type="code",
+            target_id="calculations", feature_id=0, detail="d", fix_hint="h",
+        )
+        assert f.dedupe_key == "duplicate_ddl:calculations"
+        assert f.occurrences == []
+        assert f.product_id is None
+
+    def test_explicit_dedupe_key_preserved(self):
+        f = Finding(
+            category="x", severity="low", target_type="doc", target_id="t",
+            feature_id=1, detail="d", fix_hint="h", dedupe_key="custom:key",
+        )
+        assert f.dedupe_key == "custom:key"
+
+    def test_existing_detectors_construct_unchanged(self, tmp_path):
+        # Back-compat: the original comment-mode detectors don't pass the
+        # new fields and must still work.
+        (tmp_path / "=3.0,").write_text("")
+        out = detect_shell_artifact_files(tmp_path, [_feature(1, product_id=24)])
+        assert out and out[0].occurrences == [] and out[0].dedupe_key
+
+
+# ── detect_duplicate_ddl ────────────────────────────────────────────────────
+
+
+class TestDetectDuplicateDDL:
+    def _write(self, path, body):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+
+    def test_flags_multiple_sites(self, tmp_path):
+        ddl = 'conn.execute("CREATE TABLE IF NOT EXISTS calculations (id INTEGER)")\n'
+        self._write(tmp_path / "src" / "history.py", ddl * 2)   # 2 in one file
+        self._write(tmp_path / "src" / "stats.py", ddl)         # 1 in another
+        out = detect_duplicate_ddl(tmp_path, [_feature(1, product_id=24)])
+        assert len(out) == 1
+        f = out[0]
+        assert f.category == "duplicate_ddl"
+        assert f.severity == "high"
+        assert f.target_id == "calculations"
+        assert len(f.occurrences) == 3
+        assert f.product_id == 24
+        assert f.dedupe_key == "duplicate_ddl:calculations"
+
+    def test_single_site_clean(self, tmp_path):
+        self._write(
+            tmp_path / "src" / "history.py",
+            'conn.execute("CREATE TABLE calculations (id INTEGER)")\n',
+        )
+        assert detect_duplicate_ddl(tmp_path, [_feature(1, product_id=24)]) == []
+
+    def test_migrations_excluded(self, tmp_path):
+        ddl = 'op.execute("CREATE TABLE calculations (id INTEGER)")\n'
+        # Two CREATE TABLEs but both under migrations/ → legitimate, not flagged.
+        self._write(tmp_path / "migrations" / "0001.py", ddl)
+        self._write(tmp_path / "migrations" / "0002.py", ddl)
+        assert detect_duplicate_ddl(tmp_path, [_feature(1, product_id=24)]) == []
+
+    def test_comments_ignored(self, tmp_path):
+        body = (
+            'conn.execute("CREATE TABLE calculations (id INTEGER)")\n'
+            "# CREATE TABLE calculations -- this is just a comment\n"
+        )
+        # Only one real occurrence (the comment is skipped) → not flagged.
+        self._write(tmp_path / "src" / "history.py", body)
+        assert detect_duplicate_ddl(tmp_path, [_feature(1, product_id=24)]) == []
+
+    def test_run_chore_detectors_includes_it(self, tmp_path):
+        ddl = 'conn.execute("CREATE TABLE t (id INTEGER)")\n'
+        self._write(tmp_path / "src" / "a.py", ddl)
+        self._write(tmp_path / "src" / "b.py", ddl)
+        out = run_chore_detectors(tmp_path, [_feature(1, product_id=24)])
+        assert any(f.category == "duplicate_ddl" for f in out)
+
+
+# ── file_corrective_chores ──────────────────────────────────────────────────
+
+
+def _high(table="calculations", n=3, pid=24, key=None):
+    return Finding(
+        category="duplicate_ddl", severity="high", target_type="code",
+        target_id=table, feature_id=0, detail="dup", fix_hint="consolidate",
+        occurrences=[f"src/f{i}.py:{i}" for i in range(n)], product_id=pid,
+        dedupe_key=key or "",
+    )
+
+
+def _client(get_features=None, post_status=201):
+    """MagicMock pm_client. get → product features list; post → status."""
+    c = MagicMock()
+    c.get.return_value = SimpleNamespace(
+        status_code=200, json=lambda: (get_features or []),
+    )
+    c.post.return_value = SimpleNamespace(status_code=post_status)
+    return c
+
+
+def _posts(client):
+    return [
+        call.kwargs["json"]
+        for call in client.post.call_args_list
+        if call.args and call.args[0] == "/api/features"
+    ]
+
+
+class TestFileCorrectiveChores:
+    def test_files_high_finding_with_correct_fields(self):
+        client = _client(get_features=[])
+        filed = file_corrective_chores([_high()], client, product_id=24)
+        assert filed == 1
+        body = _posts(client)[0]
+        assert body["product_id"] == 24
+        assert body["feature_type"] == "chore"
+        assert body["status"] == "Approved"
+        assert body["source"] == "ai"
+        # priority MUST be 1 (lowest number = picked first under ORDER BY
+        # priority ASC; schema validator floor is 1, so 0 is rejected).
+        assert body["priority"] == 1
+        assert "<!-- reconciler-key: duplicate_ddl:calculations -->" in body["description"]
+        assert "src/f0.py:0" in body["description"]
+
+    def test_skips_low_and_medium(self):
+        client = _client(get_features=[])
+        low = Finding("c", "low", "doc", "t", 1, "d", "h")
+        med = Finding("c", "medium", "doc", "t", 1, "d", "h")
+        assert file_corrective_chores([low, med], client, product_id=24) == 0
+        assert _posts(client) == []
+
+    def test_dedupes_against_open_chore(self):
+        existing = [{
+            "feature_type": "chore",
+            "status": "Implementing",
+            "description": "...\n<!-- reconciler-key: duplicate_ddl:calculations -->",
+        }]
+        client = _client(get_features=existing)
+        assert file_corrective_chores([_high()], client, product_id=24) == 0
+        assert _posts(client) == []
+
+    def test_closed_chore_does_not_dedupe(self):
+        # A Pushed chore for the same key means the drift was fixed and has
+        # regressed — re-file it.
+        existing = [{
+            "feature_type": "chore",
+            "status": "Pushed",
+            "description": "<!-- reconciler-key: duplicate_ddl:calculations -->",
+        }]
+        client = _client(get_features=existing)
+        assert file_corrective_chores([_high()], client, product_id=24) == 1
+
+    def test_respects_cap(self):
+        client = _client(get_features=[])
+        findings = [_high(table=f"t{i}", n=i + 2) for i in range(5)]
+        assert file_corrective_chores(findings, client, product_id=24, max_chores=2) == 2
+        assert len(_posts(client)) == 2
+
+    def test_no_product_id_files_nothing(self):
+        client = _client(get_features=[])
+        assert file_corrective_chores([_high(pid=None)], client, product_id=None) == 0
+
+    def test_post_failure_does_not_raise(self):
+        client = _client(get_features=[], post_status=500)
+        assert file_corrective_chores([_high()], client, product_id=24) == 0
