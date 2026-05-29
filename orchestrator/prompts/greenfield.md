@@ -29,9 +29,9 @@ After you exit, the orchestrator cuts a fresh **session branch** (`coder/<sessio
 {related_existing_code}
 ## Per-story workflow (one at a time — finish #N before starting #N+1)
 
-1. **Read minimal context:** `/workspace/CLAUDE.md` (test command, paths), `/workspace/ARCHITECTURE.md` if present (patterns), and `/workspace/docs/story_<ID>.md` if it exists.
+1. **Read context — including every file you'll touch:** `/workspace/CLAUDE.md` (test command, paths), `/workspace/ARCHITECTURE.md` if present (patterns), `/workspace/docs/story_<ID>.md` if it exists, AND **the full current contents of every file you intend to edit** (e.g. read `src/main.py` before adding a route to it). **Never edit a file you haven't just read.**
 
-2. **Edit code with the file-write tool** — never `sed -i` or `awk -i` (they corrupt indentation). Add tests targeting ≥70% coverage of new code.
+2. **Edit in place — preserve everything you are not intentionally changing.** Never `sed -i`/`awk -i` (they corrupt indentation), and **never regenerate a file from scratch**: a file like `src/main.py` registers many routes/handlers — your edit must keep every existing route, import, and function intact and only add or change what the story needs. Clobbering unrelated code (e.g. dropping `/api/auth/login` while adding an export filter) breaks the full test suite and bounces you back with `fix_attempts++`. Add tests targeting ≥70% coverage of new code.
 
 3. **Run tests scoped to the files you changed** (e.g. `pytest path/to/test_foo.py -q`). Avoid the full suite — slow/flaky here. If broken: fix or revert. If stuck after 2 attempts, write `BLOCKED: <reason>` to `/workspace/session_summary.md` and exit cleanly.
 

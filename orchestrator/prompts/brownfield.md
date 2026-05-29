@@ -29,9 +29,9 @@ After you exit, the orchestrator cuts a fresh **session branch** (`coder/<sessio
 {related_existing_code}
 ## Per-story workflow (one at a time — finish #N before starting #N+1)
 
-1. **Read minimal context:** `/workspace/CLAUDE.md` (test command, paths), `/workspace/product_config.json` if present, `/workspace/docs/story_<ID>.md` if it exists, and any source files relevant to the feature area.
+1. **Read context — including every file you'll touch:** `/workspace/CLAUDE.md` (test command, paths), `/workspace/product_config.json` if present, `/workspace/docs/story_<ID>.md` if it exists, and **the full current contents of every file you intend to edit** (plus any source in the feature area). **Never edit a file you haven't just read** — brownfield files often hold unrelated routes/functions you must not disturb.
 
-2. **Edit code with the file-write tool** — never `sed -i` or `awk -i` (they corrupt indentation). Add tests in the project's test directory. New code goes in the `new_feature_source` path from `product_config.json` if specified.
+2. **Edit in place — preserve everything you are not intentionally changing.** Never `sed -i`/`awk -i` (they corrupt indentation), and **never regenerate a file from scratch**: keep every existing route, import, and function in a file you touch; only add or change what the story needs. Clobbering unrelated code breaks the full test suite and bounces you back with `fix_attempts++`. Add tests in the project's test directory; new code goes in the `new_feature_source` path from `product_config.json` if specified.
 
 3. **Run tests scoped to the files you changed** (e.g. `pytest tests/test_<feature>.py -q`). Avoid the full suite — slow/flaky here. If a previously-passing test now fails: investigate, fix or revert. If stuck after 2 attempts, write `BLOCKED: <reason>` to `/workspace/session_summary.md` and exit cleanly.
 
