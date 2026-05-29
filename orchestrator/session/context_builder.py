@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -81,7 +82,16 @@ def build_related_code_context(
             len(keywords), len(canonical), len(discovered),
             len(deprecated), len(entry_points),
         )
-        return _render_block(canonical, discovered, deprecated, entry_points)
+        focused = _render_block(canonical, discovered, deprecated, entry_points)
+        # Repo-map v0 (2026-05-29): always-included, whole-repo route+symbol
+        # inventory. Independent of MODULES staleness / keyword matching so
+        # the coder structurally sees every registered route before editing —
+        # canonical calc3 #1025/#1031 case where coders editing main.py for
+        # an unrelated feature clobbered /api/auth/login and the read-before-
+        # edit prompt didn't reliably prevent it.
+        repo_map = build_repo_map(working_dir)
+        parts = [b for b in (repo_map, focused) if b]
+        return "\n\n".join(parts)
     except Exception:
         log.debug("build_related_code_context failed (returning empty)", exc_info=True)
         return ""
@@ -293,3 +303,179 @@ def _render_block(
             lines.append(f"- {d}")
         lines.append("")
     return "\n".join(lines)
+
+
+# ── Repo-map v0 (always-included, structural) ────────────────────────────────
+#
+# Whole-repo, AST-derived inventory of (a) every registered HTTP route and
+# (b) every file's top-level public symbols. Reads CODE (not ARCHITECTURE.md),
+# so it can't go stale. Always included regardless of feature keywords, so the
+# coder structurally sees every existing route before editing a multi-route
+# file — preventing the canonical clobber pattern where a feature editing
+# main.py for one route drops unrelated routes (calc3 #1025/#1031).
+
+_FLASK_FASTAPI_ROUTE_DECOS = frozenset({"route", "get", "post", "put", "patch", "delete"})
+
+_RM_EXCLUDE_DIRS = frozenset({
+    ".git", ".venv", "venv", "env", "__pycache__", "node_modules",
+    "Temp", "Results", "dist", "build", ".pytest_cache", ".mypy_cache",
+    "tests", "test", "migrations",
+})
+
+_RM_EXCLUDE_PATH_SUBSTR = ("alembic/versions", "db/migrations")
+
+# Per-file symbol cap and overall budget. Routes get unconditional inclusion
+# (small + highest-signal); symbols fill remaining budget then truncate.
+_RM_SYMBOLS_PER_FILE = 8
+_RM_DEFAULT_MAX_CHARS = 2500
+
+
+def _rm_iter_py_files(working_dir: Path):
+    """Yield .py files under `working_dir`, pruning excluded dirs."""
+    if not working_dir.is_dir():
+        return
+    for root, dirs, files in os.walk(working_dir):
+        dirs[:] = [d for d in dirs if d not in _RM_EXCLUDE_DIRS]
+        rel_root = os.path.relpath(root, working_dir).replace("\\", "/")
+        if any(sub in rel_root for sub in _RM_EXCLUDE_PATH_SUBSTR):
+            continue
+        for fn in files:
+            if fn.endswith(".py"):
+                yield Path(root) / fn
+
+
+def _rm_extract_routes_from_tree(tree: ast.AST, rel_path: str) -> list[tuple]:
+    """Return [(method, path, file, func_name), ...] for every Flask/FastAPI
+    route decorator in `tree`. Handles `@app.route("/p", methods=[...])` and
+    `@app.get/post/...("/p")` / `@router.get(...)`."""
+    out: list[tuple] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for d in node.decorator_list:
+            if not isinstance(d, ast.Call):
+                continue
+            if not isinstance(d.func, ast.Attribute):
+                continue
+            attr = d.func.attr
+            if attr not in _FLASK_FASTAPI_ROUTE_DECOS:
+                continue
+            # First positional arg = path literal.
+            if not d.args or not isinstance(d.args[0], ast.Constant) \
+                    or not isinstance(d.args[0].value, str):
+                continue
+            path = d.args[0].value
+            # `methods=[...]` kwarg only on Flask `route()`; otherwise method
+            # is the decorator name (`get` → GET, etc.).
+            methods: list[str] = []
+            for kw in d.keywords:
+                if kw.arg == "methods" and isinstance(kw.value, (ast.List, ast.Tuple)):
+                    for elt in kw.value.elts:
+                        if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                            methods.append(elt.value)
+                    break
+            if not methods:
+                methods = ["GET"] if attr == "route" else [attr.upper()]
+            for m in methods:
+                out.append((m.upper(), path, rel_path, node.name))
+    return out
+
+
+def _rm_extract_module_surface(tree: ast.AST) -> list[tuple]:
+    """Return [(name, kind, signature), ...] for top-level public defs/classes
+    (skips `_`-prefixed). signature is `ast.unparse(node.args)` for funcs."""
+    out: list[tuple] = []
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name.startswith("_"):
+                continue
+            try:
+                sig = ast.unparse(node.args)  # py 3.9+
+            except Exception:
+                sig = ""
+            out.append((node.name, "def", sig))
+        elif isinstance(node, ast.ClassDef):
+            if node.name.startswith("_"):
+                continue
+            out.append((node.name, "class", ""))
+    return out
+
+
+def _rm_collect(working_dir: str) -> tuple[list[tuple], list[tuple]]:
+    """Walk the repo once; return (routes, files_with_symbols)."""
+    wd = Path(working_dir)
+    routes: list[tuple] = []
+    files: list[tuple] = []
+    for fpath in _rm_iter_py_files(wd):
+        try:
+            text = fpath.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(text)
+        except Exception:
+            continue
+        rel = str(fpath.relative_to(wd)).replace("\\", "/")
+        routes.extend(_rm_extract_routes_from_tree(tree, rel))
+        symbols = _rm_extract_module_surface(tree)
+        if symbols:
+            files.append((rel, symbols))
+    return routes, files
+
+
+def _render_repo_map(routes: list[tuple], files: list[tuple], max_chars: int) -> str:
+    if not routes and not files:
+        return ""
+    header = (
+        "## Repository map — every registered route + module surface\n\n"
+        "**This is the COMPLETE route table and module surface of this product, "
+        "auto-extracted from the code on every session. Before editing a file, "
+        "scan this map: if your target file (e.g. `src/main.py`) appears below, "
+        "every route and function listed for it currently exists — your edit must "
+        "preserve them. Never regenerate a file from scratch; in-place edits only.**\n\n"
+    )
+    if routes:
+        rows = sorted(set(routes), key=lambda r: (r[1], r[0]))   # by path, then method
+        # Compact fixed-width rendering.
+        path_w = max((len(r[1]) for r in rows), default=8)
+        path_w = min(path_w, 40)
+        route_lines = ["### Registered HTTP routes", "```"]
+        for method, path, file, func in rows:
+            route_lines.append(f"{method:<7} {path:<{path_w}}  {file}:{func}")
+        route_lines.append("```\n")
+    else:
+        route_lines = []
+    routes_block = "\n".join(route_lines)
+    current = header + routes_block
+    if not files or len(current) >= max_chars:
+        return current.rstrip() + "\n"
+    # Module surface — append until budget hit. Per-file cap, then overall truncation.
+    sym_lines = ["### Module surface (top-level public symbols)", "```"]
+    for rel, symbols in sorted(files, key=lambda x: x[0]):
+        sym_lines.append(f"{rel}:")
+        for name, kind, sig in symbols[:_RM_SYMBOLS_PER_FILE]:
+            if kind == "class":
+                sym_lines.append(f"  class {name}")
+            else:
+                sym_lines.append(f"  def   {name}({sig})")
+        if len(symbols) > _RM_SYMBOLS_PER_FILE:
+            sym_lines.append(f"  … +{len(symbols) - _RM_SYMBOLS_PER_FILE} more")
+    sym_lines.append("```\n")
+    sym_block = "\n".join(sym_lines)
+    remaining = max_chars - len(current) - 60
+    if remaining > 0 and len(sym_block) > remaining:
+        sym_block = sym_block[:remaining] + "\n…[symbol list truncated to fit budget]\n```\n"
+    return (current + "\n" + sym_block).rstrip() + "\n"
+
+
+def build_repo_map(working_dir: str, max_chars: int = _RM_DEFAULT_MAX_CHARS) -> str:
+    """Whole-repo route + symbol inventory as a markdown block.
+
+    Always reads code (not ARCHITECTURE.md), so it cannot lag MODULES. Best-
+    effort: any failure returns empty (must never block session launch)."""
+    try:
+        wd = Path(working_dir)
+        if not wd.is_dir():
+            return ""
+        routes, files = _rm_collect(str(wd))
+        return _render_repo_map(routes, files, max_chars)
+    except Exception:
+        log.debug("build_repo_map failed (returning empty)", exc_info=True)
+        return ""
