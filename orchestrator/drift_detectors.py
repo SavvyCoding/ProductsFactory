@@ -70,6 +70,21 @@ class Finding:
     feature_id: int
     detail: str
     fix_hint: str
+    # Worklist fields (PR: reconciler-chore-controller). Optional with
+    # defaults so the original comment-mode detectors construct unchanged.
+    #   occurrences: located violation sites ("src/history.py:20", ...) — lets
+    #     a code-drift finding enumerate every offending location in the chore.
+    #   product_id: product-wide drift (e.g. duplicate DDL) has no single
+    #     feature anchor; the chore is filed against the product.
+    #   dedupe_key: stable identity used to (a) skip re-filing a chore that's
+    #     already open and (b) detect regressions. Defaults to category:target_id.
+    occurrences: list[str] = field(default_factory=list)
+    product_id: int | None = None
+    dedupe_key: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.dedupe_key:
+            self.dedupe_key = f"{self.category}:{self.target_id}"
 
     def as_comment_body(self) -> str:
         """Render as a feature_comment body."""
@@ -309,6 +324,107 @@ def _extract_section(text: str, heading: str) -> str:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Detector 4: duplicate DDL (schema declared in >1 place)  [chore-eligible]
+# ────────────────────────────────────────────────────────────────────────────
+
+# `CREATE TABLE [IF NOT EXISTS] [`"']<name>` — capture the table identifier.
+_DDL_RE = re.compile(
+    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[\"'`]?([A-Za-z_][A-Za-z0-9_]*)",
+    re.IGNORECASE,
+)
+# Dir names where multiple CREATE TABLE statements are legitimate (one per
+# migration) or irrelevant (build/scratch/tests). Pruned during the walk.
+_DDL_EXCLUDE_DIRS = frozenset({
+    ".git", ".venv", "venv", "env", "__pycache__", "node_modules",
+    "Temp", "Results", "dist", "build", ".pytest_cache", ".mypy_cache",
+    "tests", "test", "migrations",
+})
+_DDL_EXCLUDE_PATH_SUBSTR = ("alembic/versions", "db/migrations")
+
+
+def detect_duplicate_ddl(
+    working_dir: str | Path, features: list[dict]
+) -> list[Finding]:
+    """Schema (a given `CREATE TABLE`) declared in more than one location.
+
+    The canonical agent-drift smell: every new persistence/query function
+    defensively re-runs `CREATE TABLE IF NOT EXISTS <t>` instead of relying
+    on a single init function. calc3 2026-05-28 reached 11 copies of
+    `CREATE TABLE calculations` across history.py (5) + stats.py (3) and
+    growing with each feature. A schema change becomes an N-site edit.
+
+    Python-first (scans `*.py`); migrations/test dirs excluded since
+    repeated DDL is legitimate there. Counts total occurrences (so the
+    within-file repetition in calc3 is caught, not just cross-file).
+    Emits `severity="high"` → routes to the corrective-chore sink.
+    """
+    wd = Path(working_dir)
+    if not wd.is_dir():
+        return []
+    sites: dict[str, list[str]] = {}  # table_name → ["relpath:lineno", ...]
+    for root, dirs, files in os.walk(wd):
+        dirs[:] = [d for d in dirs if d not in _DDL_EXCLUDE_DIRS]
+        rel_root = os.path.relpath(root, wd).replace("\\", "/")
+        if any(sub in rel_root for sub in _DDL_EXCLUDE_PATH_SUBSTR):
+            continue
+        for fn in files:
+            if not fn.endswith(".py"):
+                continue
+            fpath = Path(root) / fn
+            try:
+                text = fpath.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            rel = os.path.relpath(fpath, wd).replace("\\", "/")
+            for i, line in enumerate(text.splitlines(), start=1):
+                hash_idx = line.find("#")
+                for m in _DDL_RE.finditer(line):
+                    # Skip matches inside a Python comment.
+                    if hash_idx != -1 and hash_idx < m.start():
+                        continue
+                    sites.setdefault(m.group(1).lower(), []).append(f"{rel}:{i}")
+
+    pid = _product_id_from_features(features)
+    anchor = _pick_target_feature(features) or 0
+    findings: list[Finding] = []
+    for table, locs in sorted(sites.items()):
+        if len(locs) <= 1:
+            continue
+        findings.append(Finding(
+            category="duplicate_ddl",
+            severity="high",
+            target_type="code",
+            target_id=table,
+            feature_id=anchor,
+            detail=(
+                f"`CREATE TABLE {table}` is declared in {len(locs)} places. "
+                "Schema must be declared exactly once (in the persistence / "
+                "init module); every other site should assume the table "
+                "already exists. Duplicated DDL means a schema change is an "
+                f"{len(locs)}-site edit and the copies will drift apart."
+            ),
+            fix_hint=(
+                "Keep the CREATE TABLE in a single init function (e.g. "
+                "init_db()) called once at startup; delete the inline "
+                "re-declarations from the other functions and have them "
+                "rely on the table already existing."
+            ),
+            occurrences=locs,
+            product_id=pid,
+        ))
+    return findings
+
+
+def _product_id_from_features(features: list[dict]) -> int | None:
+    """First product_id found in the features list, else None."""
+    for f in features or []:
+        pid = f.get("product_id")
+        if isinstance(pid, int):
+            return pid
+    return None
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Orchestration
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -318,6 +434,35 @@ _DETECTORS = (
     detect_design_doc_mismatch,
     detect_placeholder_template_content,
 )
+
+# Objective code-drift detectors whose high-severity findings are routed to
+# the corrective-chore sink (file_corrective_chores). Kept SEPARATE from
+# _DETECTORS so the existing comment-only path (run_all + post_findings) and
+# its three detectors are untouched — this is the preserved fallback.
+_CHORE_DETECTORS = (
+    detect_duplicate_ddl,
+)
+
+
+def run_chore_detectors(
+    working_dir: str | Path, features: list[dict]
+) -> list[Finding]:
+    """Run the chore-eligible detectors and concatenate findings.
+
+    Best-effort, same contract as run_all: a detector that raises is logged
+    and skipped. Returns Findings (typically severity="high") destined for
+    file_corrective_chores. Does NOT touch run_all / the comment path.
+    """
+    out: list[Finding] = []
+    for detector in _CHORE_DETECTORS:
+        try:
+            out.extend(detector(working_dir, features))
+        except Exception as e:
+            log.warning(
+                "reconciler: detector %s raised %s; skipping",
+                detector.__name__, e,
+            )
+    return out
 
 
 def _pick_target_feature(features: list[dict]) -> int | None:
@@ -436,3 +581,137 @@ def post_findings(
             product_name, skipped_dupe,
         )
     return posted
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Corrective-chore sink (reconciler-as-controller)
+# ────────────────────────────────────────────────────────────────────────────
+#
+# Turns high-severity findings into Approved chore features that the existing
+# coder→guard→reviewer→merge pipeline picks up and fixes. The pipeline is the
+# actuator, so corrections get the same verification as any feature change —
+# the reconciler can't silently break working code.
+#
+# Statuses that mean the chore is closed (don't dedupe against these).
+_RECONCILER_CLOSED_STATUSES = frozenset({"Pushed", "Rejected", "Deferred", "Reverted"})
+_RECONCILER_KEY_RE = re.compile(r"<!--\s*reconciler-key:\s*(\S+)\s*-->")
+
+
+def _chore_name(f: Finding) -> str:
+    n = len(f.occurrences)
+    where = f" ({n} sites)" if n > 1 else ""
+    return f"[reconciler] {f.category}: {f.target_id}{where}"
+
+
+def _chore_body(f: Finding) -> str:
+    locs = "\n".join(f"- {o}" for o in f.occurrences) or "- (see detail)"
+    return (
+        f"{f.detail}\n\n"
+        f"Locations:\n{locs}\n\n"
+        f"Fix: {f.fix_hint}\n\n"
+        "_Filed automatically by the drift reconciler. This is mechanical "
+        "cleanup — keep the change tightly scoped to the locations above._\n"
+        f"<!-- reconciler-key: {f.dedupe_key} -->"
+    )
+
+
+def _open_reconciler_chore_keys(pm_client, product_id: int) -> set[str]:
+    """dedupe_keys of reconciler chores already OPEN for this product.
+
+    Reads the reconciler-key marker out of each open chore's description so
+    dedupe survives an orchestrator restart (no in-memory state). Best-effort:
+    any API failure → empty set (lets the finding through; the per-cycle cap
+    bounds the blast radius of a transient miss)."""
+    keys: set[str] = set()
+    try:
+        resp = pm_client.get(f"/api/products/{product_id}/features")
+        if not (200 <= resp.status_code < 300):
+            return keys
+        data = resp.json()
+        if not isinstance(data, list):
+            return keys
+        for feat in data:
+            if not isinstance(feat, dict):
+                continue
+            if feat.get("feature_type") != "chore":
+                continue
+            if feat.get("status") in _RECONCILER_CLOSED_STATUSES:
+                continue
+            m = _RECONCILER_KEY_RE.search(feat.get("description") or "")
+            if m:
+                keys.add(m.group(1))
+    except Exception:
+        return keys
+    return keys
+
+
+def file_corrective_chores(
+    findings: Iterable[Finding],
+    pm_client,
+    product_id: int | None,
+    product_name: str = "?",
+    max_chores: int = 3,
+) -> int:
+    """File high-severity findings as Approved chore features.
+
+    Returns the count filed. Behaviour:
+      - Only `severity == "high"` findings are filed (others stay on the
+        comment path via post_findings).
+      - Most-occurrences-first, capped at `max_chores` per call so a messy
+        product isn't flooded with dozens of chores in one cycle.
+      - Deduped against currently-open reconciler chores by dedupe_key, so
+        the same drift isn't re-filed every cycle until it's fixed.
+
+    Chore field choices (validated against website/schemas.py FeatureCreate):
+      - status="Approved"  → skips the PM gate; immediately eligible. The
+        internal API bypasses PM_ALLOWED_TRANSITIONS, so create-as-Approved
+        is permitted for this caller.
+      - priority=1         → selection orders by `Feature.priority` ASC, so
+        the LOWEST number is picked first; 1 is the highest urgency the
+        schema allows (validator floor is 1 — 0 is rejected). Do NOT "fix"
+        this to a high number; that would sort the chore to the BACK.
+      - source="ai"        → schema validator allows only 'pm'|'ai'.
+      - feature_type="chore".
+    (skip_design and labels are not FeatureCreate fields — omitted in v1;
+    the chore goes through the designer first, which is acceptable for a
+    mechanical task. skip_design routing is a future optimization.)
+    """
+    high = [f for f in findings if f.severity == "high"]
+    if not high or product_id is None:
+        return 0
+    high.sort(key=lambda f: len(f.occurrences), reverse=True)
+    open_keys = _open_reconciler_chore_keys(pm_client, product_id)
+    filed = 0
+    for f in high:
+        if filed >= max_chores:
+            break
+        if f.dedupe_key in open_keys:
+            continue
+        try:
+            resp = pm_client.post("/api/features", json={
+                "product_id":   product_id,
+                "name":         _chore_name(f),
+                "description":  _chore_body(f),
+                "feature_type": "chore",
+                "status":       "Approved",
+                "priority":     1,
+                "source":       "ai",
+            })
+            if 200 <= resp.status_code < 300:
+                filed += 1
+                open_keys.add(f.dedupe_key)  # don't double-file within this call
+                log.info(
+                    "[reconciler] %s: filed chore for %s (%s site(s))",
+                    product_name, f.dedupe_key, len(f.occurrences),
+                )
+            else:
+                log.warning(
+                    "[reconciler] %s: POST /api/features for %s returned %s",
+                    product_name, f.dedupe_key, resp.status_code,
+                )
+        except Exception as e:
+            log.warning(
+                "[reconciler] %s: filing chore for %s raised %s; skipping",
+                product_name, f.dedupe_key, e,
+            )
+    return filed
