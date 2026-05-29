@@ -604,10 +604,18 @@ def _chore_name(f: Finding) -> str:
 
 
 def _chore_body(f: Finding) -> str:
-    locs = "\n".join(f"- {o}" for o in f.occurrences) or "- (see detail)"
+    # Locations go in a FENCED CODE BLOCK, not markdown `- ` bullets. The
+    # /api/features story-sizing guard counts lines starting with `- ` or `* `
+    # as acceptance criteria and rejects >4 with 422 ("story too big"). A
+    # dedup chore with N>4 sites would otherwise be rejected — backwards, since
+    # the worst dups have the most sites. Canonical 2026-05-29 calc3:
+    # duplicate_ddl:calculations (11 sites) got 422 while :users (4) squeaked
+    # through. Code-fence lines (`src/x.py:20`) don't match the bullet pattern.
+    locs = "\n".join(f.occurrences) if f.occurrences else "(see detail)"
+    n = len(f.occurrences)
     return (
         f"{f.detail}\n\n"
-        f"Locations:\n{locs}\n\n"
+        f"Locations ({n} site{'s' if n != 1 else ''}):\n```\n{locs}\n```\n\n"
         f"Fix: {f.fix_hint}\n\n"
         "_Filed automatically by the drift reconciler. This is mechanical "
         "cleanup — keep the change tightly scoped to the locations above._\n"
