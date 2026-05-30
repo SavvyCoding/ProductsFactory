@@ -15,9 +15,11 @@ ProductFactory is a 24/7 autonomous development system. It orchestrates Claude C
 - `orchestrator/pipelines/` — per-persona post-session pipelines: `post_coder.py` (cut session branch, run lint guards + test execution, commit, push, open PR), `post_doc.py` (designer commits to main), `post_maintenance.py`, `auto_merge_reviewer.py` (per-reviewer-session squash-merge of approved session PRs)
 - `orchestrator/session/` — the session FSM. `state_machine.py` defines lifecycle states (incl. the "wrapping" state wired up in `04c4282`); `reconciler.py` reconciles DB session rows against Docker reality; `result_io.py` reads/writes `session_result.json`; `context_builder.py` (Phase 7) builds the pre-coder "related code" context from ARCHITECTURE.md MODULES/ENTRY POINTS/DEPRECATED to stop parallel-module drift. The agent loop is hardened against shape drift / hallucinated tool calls here (`d1bf9a9`).
 - `orchestrator/cycle/` — currently just `persona.py` (per-product deterministic decision tree, called by `deploy/orchestrator/tools.run_cycle`). The sibling helpers `selection.py` / `locks.py` / `loop_detector.py` were retired together with the host-mode poller (2026-05-18); product selection and per-product mutex now live in the website / `tools.py`.
+- `orchestrator/prompts/` — per-persona prompt templates (`coder.md`, `designer.md`, `reviewer.md`, `architect.md`, `planner.md`, `product_trainer.md`, etc.) + a builder (`__init__.py`) that fills in product context and injects `Pattern:` lines harvested from `session_summary.md` (capped at 10 patterns / 200 chars each to bound prompt growth). Add a new persona prompt here; do **not** inline persona text into `docker_runner.py`.
 - `orchestrator/integrations/` — outbound integrations: `github_app.py` (JWT sign + installation-token minting, single chokepoint for all git auth), `github.py`, `git_ops.py` (authenticated push via one-shot credential helper, no token in `.git/config`), `docker_cli.py`.
+- `orchestrator/agent_loop.py` — backend-agnostic tool-use loop extracted from `ollama_agent.py`. A `Backend` protocol turns one chat turn into an assistant message; a `ToolDispatcher` callable returns `(result_text, is_done)`. New backends (Claude API, OpenAI-compatible gateways) plug in here instead of duplicating the message/tool plumbing.
+- `orchestrator/drift_detectors.py` — **deterministic Phase-1 drift scanner**, runs after each post-coder cycle (wired in `pipelines/post_coder.py`). Two registries: `_DETECTORS` (comment path — findings post as `feature_comments` with `author="drift-scanner"`, deduped against the last 24h, and surface to the next coder via `{reviewer_feedback}` injection), and `_CHORE_DETECTORS` (chore path — high-severity findings get filed as Approved chore features when the `RECONCILER_CHORES_ENABLED` env flag is on; gated by `dedupe_key` so an open chore isn't re-filed). Current detectors: `shell_artifact_files`, `design_doc_missing`, `duplicate_ddl`, `god_file`, `public_route_blanket_with_auth`. Each is a pure function `(working_dir, features) -> list[Finding]`; add new ones to the appropriate registry and a sibling test in `tests/test_drift_detectors.py`. The architect persona is the slow/reasoning sibling — these detectors are the cheap layer that runs every cycle.
 - `orchestrator/infra/` — `redaction.py` (token redaction in logs).
-- `orchestrator/slice/` and `orchestrator/workflow/` — **empty dead packages** (only stale `__pycache__/` from removed modules). No live imports anywhere; safe to delete on the next cleanup pass.
 
 ## Commands
 
@@ -110,9 +112,20 @@ After the coder agent exits, `_run_post_coder_pipeline` (`orchestrator/pipelines
 
 ### Supervisor cascade detectors
 
-`orchestrator/supervisor.py` runs after each reviewer session. Two complementary detectors for stuck rework loops:
-- `detect_repeated_review_feedback` — **convergent cascade**: same comment signature across N consecutive cycles (reviewer flags the same issue, coder keeps missing it).
-- `detect_divergent_review_feedback` (Phase 6) — **divergent cascade**: reviewer flags a *different* issue each cycle while ignoring earlier ones. The 25-comment cumulative-feedback context (`_fetch_recent_review_comments` + `_format_reviewer_feedback`, limit raised 6→25 on 2026-05-07) is injected into the rework coder prompt via `{reviewer_feedback}` to make the running checklist explicit.
+`orchestrator/supervisor.py` is a rule-based detector layer called from existing hook points (post-coder pipeline, reconcile sweep, `determine_next_action`). No LLM. Every firing writes a row to `supervisor_actions` so PMs can audit it. All detectors honor `supervisor_dry_run_only` (global kill) plus their own `system_config` enable flag — flip the flag, no restart needed.
+
+Active detectors:
+- `false_success` — coder session claimed `task_done` but staged no commits / left features unaddressed
+- `dirty_pr_close` — PR with merge conflicts, idle, ≥1h old → close + reset features
+- `auto_plan` — active phase dead, ≥N un-phased Approved features → kick off LLM phase planner
+- `merge_stall_alert` — phase all-Reviewed but PRs not merging for ≥1h → operator alert
+- `overlap_pr` — multiple open PRs cover the same feature IDs → close the older
+- `detect_repeated_review_feedback` — **convergent cascade**: same comment signature across N consecutive cycles → Block the feature with `blocked_reason`
+- `detect_divergent_review_feedback` (Phase 6) — **divergent cascade**: reviewer flags a *different* issue each cycle while ignoring earlier ones. The 25-comment cumulative-feedback context (`_fetch_recent_review_comments` + `_format_reviewer_feedback`, limit raised 6→25 on 2026-05-07) is injected into the rework coder prompt via `{reviewer_feedback}` so the running checklist is explicit.
+
+### Session continuity (`session_summary.md`)
+
+`session_summary.md` is the per-product cross-session continuity doc, replacing the retired `progress.md` (2026-05-28, commit `9fa045f`). `orchestrator/docker_runner.py::_read_session_summary` reads it before each session and passes the contents into the agent prompt as `{prev_session_summary}`; on session end it's committed by `integrations/git_ops.py` so the next session on the same product sees the freshest notes. Reads are tail-keep capped (commit `b58bc8d`) so the newest notes survive the prompt-size limit. Reviewer-authored `Pattern:` lines inside it are also harvested by `orchestrator/prompts/__init__._read_reviewer_patterns` and injected separately into coder/designer prompts as a checklist (capped at 10 / 200 chars). If you're tempted to add a new long-lived continuity file, extend this one instead.
 
 ### Maintenance personas
 
@@ -280,6 +293,7 @@ See `.env.example` for all variables. Critical ones:
 - `STALE_THRESHOLD_MINUTES` — **Retired 2026-05-28.** Was the progress.md-push staleness threshold for `orchestrator/heartbeat.py` (deleted; never wired into the containerized cycle loop). Stale-session detection is now the per-cycle watchdog in `deploy/orchestrator/tools.py` (session-heartbeat freshness + `docker ps` presence). No code reads this var anymore.
 - `BROWNFIELD_FILE_THRESHOLD` — Source file count above which a product is treated as brownfield (default: 10)
 - `MAX_FEATURES_PER_RUN` — Max features an agent attempts per session (default: 1; per-product override in DB)
+- `RECONCILER_CHORES_ENABLED` — Opt-in (`1`/`true`/`yes`/`on`) to enable the corrective-chore sink: high-severity findings from `orchestrator/drift_detectors.py::_CHORE_DETECTORS` (currently `duplicate_ddl`) get filed as Approved chore features instead of just posted as feature comments. Default OFF. Per-environment / per-product A/B flag.
 (Retired by migration 043: `system_config.max_features_per_sprint` and the per-sprint feature-count cap. Under the phases→features flat model, phases are unbounded UI groupings — features have their own per-PR sizing instead.)
 - `OLLAMA_HOST` — Ollama base URL (default: `http://host.docker.internal:11434` inside Docker, `http://localhost:11434` for local runs)
 - `DESIGNER_MODEL` / `CODER_MODEL` — Ollama model names (defaults: `gemma3:27b` / `qwen3-coder:30b`)

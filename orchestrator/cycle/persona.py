@@ -12,12 +12,15 @@ Returns one of:
     {"action": "exit",           "reason": ...}
 
 Behavior notes:
+  - Phase planner runs at step 0 (before reviewer/coder/designer) whenever
+    any Approved feature is unphased. Restores pre-fe54264 semantics: phases
+    are planned eagerly, not after the designer drains the Approved backlog.
+    The 4h per-product cooldown inside detect_auto_plan prevents thrash.
   - Implementing+changes_requested counts as codeable immediately (no
     45-minute stuck timer needed — the reviewer explicitly bounced it).
   - max_pending_approved backpressure (default 10): planner skipped when
     the Approved backlog is already deep, so the system completes
     pending work before adding more.
-  - Inline supervisor.detect_merge_stall + detect_auto_plan calls.
 """
 
 import json
@@ -52,6 +55,25 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
 
         non_terminal = [f for f in features if f.get("status") not in _TERMINAL]
 
+        # 0. Phase planner — plan whenever any Approved feature is unphased.
+        # Restores pre-fe54264 semantics: phase planning runs eagerly, not
+        # after the designer drains the backlog. detect_auto_plan still
+        # honors its 4h per-product cooldown so a transient plan-phases
+        # failure doesn't get retried every cycle.
+        unphased_approved = [f for f in features
+                             if f.get("status") == "Approved" and f.get("phase_id") is None]
+        if unphased_approved:
+            try:
+                from orchestrator.supervisor import detect_auto_plan  # type: ignore
+                if detect_auto_plan(
+                    product_id=product_id,
+                    unphased_approved_count=len(unphased_approved),
+                ):
+                    return {"action": "exit",
+                            "reason": f"supervisor auto_plan triggered for product {product_id}"}
+            except Exception:
+                log.exception("supervisor auto_plan detector failed")
+
         # 1. Reviewer first — clear open PRs before anything else.
         reviewing = [f for f in non_terminal
                      if f.get("status") == "Reviewing" and f.get("pr_number")]
@@ -85,24 +107,7 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
             return {"action": "exit",
                     "reason": f"{len(in_agent_stuck)} features stuck in agent state; reset_stuck will handle"}
 
-        # 5. Planner — unphased Approved features waiting for grouping.
-        # Phases→features flat model (migration 043): plan-phases groups
-        # Approved features into phases by theme. Optional — features can
-        # ship without a phase, but grouping helps the UI.
-        unphased_approved = [f for f in features
-                             if f.get("status") == "Approved" and f.get("phase_id") is None]
-        try:
-            from orchestrator.supervisor import detect_auto_plan  # type: ignore
-            if detect_auto_plan(
-                product_id=product_id,
-                unphased_approved_count=len(unphased_approved),
-            ):
-                return {"action": "exit",
-                        "reason": f"supervisor auto_plan triggered for product {product_id}"}
-        except Exception:
-            log.exception("supervisor auto_plan detector failed")
-
-        # 6. Recommender / planner — generate features if backlog is light.
+        # 5. Recommender / planner — generate features if backlog is light.
         all_approved = [f for f in features if f.get("status") == "Approved"]
         max_pending = (sys_cfg.get("max_pending_approved")
                        or int(os.environ.get("MAX_PENDING_APPROVED", "10")))

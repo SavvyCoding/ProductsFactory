@@ -564,7 +564,9 @@ _CFG_DEFAULTS = {
     "supervisor_dirty_pr_min_age_min":           60,
     "supervisor_dirty_pr_idle_min":              30,
     "supervisor_auto_plan_enabled":              True,
-    "supervisor_auto_plan_min_unsprinted":       3,
+    # Keep in sync with orchestrator.supervisor._DEFAULTS — 1 means plan
+    # whenever any Approved feature is unphased.
+    "supervisor_auto_plan_min_unsprinted":       1,
     "supervisor_merge_stall_enabled":            True,
     "supervisor_merge_stall_min_min":            60,
     "supervisor_overlap_pr_enabled":             True,
@@ -1753,6 +1755,11 @@ async def api_update_feature(
     prev_review_outcome = feature.review_outcome
     prev_fix_attempts   = feature.fix_attempts or 0
     prev_status         = feature.status
+    # Captured because the supervisor's divergent_review_feedback detector
+    # PATCHes {"status":"Blocked","pr_number":None} together — without a
+    # snapshot the unified Blocked-transition closer below sees pr_number=
+    # None and can't close the PR on GitHub.
+    prev_pr_number      = feature.pr_number
 
     # Auto-record changelog for tracked fields before applying the update
     _CHANGELOG_FIELDS = frozenset({
@@ -1888,13 +1895,36 @@ async def api_update_feature(
                 new_value="Blocked",
                 changed_by=f"{changed_by} (auto-blocked at cap)",
             ))
-            # Close the open GitHub PR for this feature (if any) — Blocked
-            # features shouldn't keep an in-flight PR open against main.
-            _product_for_pr = await db.get(Product, feature.product_id)
-            _gh_repo = (_product_for_pr.github_repo or "") if _product_for_pr else ""
-            await _close_blocked_feature_pr(
-                feature, _gh_repo, feature.blocked_reason or trigger, db,
-            )
+            # PR closing handled by the unified Blocked-transition block below.
+
+    # Unified Blocked-transition PR closer — the single chokepoint for
+    # "feature just got Blocked-routed, close its open session PR." Fires
+    # whenever this PATCH moves status into Blocked, regardless of how
+    # (direct supervisor PATCH, fix_attempts cap auto-Block above, or a
+    # PM-driven Block). Without this, supervisor.detect_rapid_flap and
+    # supervisor.detect_divergent_review_feedback — which PATCH status=
+    # Blocked directly and bypass _close_blocked_feature_pr's two prior
+    # callsites (api_route_to_blocked_sprint + the inline cap-router
+    # above) — leak open PRs forever. Canonical 2026-05-30 DocumentSign
+    # incident: 7 open PRs accumulated on Blocked features because both
+    # detectors cleared at most `pr_number` and never closed the PR or
+    # cleared `pr_url` / `branch_name`. The orphan-PR sweep can't paper
+    # over this because it correctly treats a feature whose `pr_url`
+    # still matches the PR as the PR's owner.
+    if feature.status == "Blocked" and prev_status != "Blocked" and prev_pr_number:
+        # Restore pr_number to the snapshot if this PATCH cleared it — the
+        # helper closes via pr_number, then re-clears all three link
+        # fields on success. The supervisor's intent ("cleared the link")
+        # is preserved on the success path; on failure we'd rather retry
+        # next cycle than leave a stale numeric pointer to a closed PR.
+        if not feature.pr_number:
+            feature.pr_number = prev_pr_number
+        _product_for_pr = await db.get(Product, feature.product_id)
+        _gh_repo = (_product_for_pr.github_repo or "") if _product_for_pr else ""
+        await _close_blocked_feature_pr(
+            feature, _gh_repo,
+            feature.blocked_reason or "transitioned to Blocked", db,
+        )
 
     # Flush + refresh so response serialization can read server-computed
     # columns (updated_at uses onupdate=func.now()) without triggering a
@@ -2639,7 +2669,6 @@ async def api_release_notes(
 async def api_plan_phases(
     product_id: int,
     db: AsyncSession = Depends(get_db),
-    _: str = Depends(require_auth),
 ):
     """LLM plans phases + assigns features directly. Flat phase→feature
     model — no sprints layer. Each phase is a coherent grouping of

@@ -107,7 +107,11 @@ _DEFAULTS = {
     "supervisor_dirty_pr_min_age_min":          60,
     "supervisor_dirty_pr_idle_min":             30,
     "supervisor_auto_plan_enabled":             True,
-    "supervisor_auto_plan_min_unsprinted":      3,
+    # 1 = plan whenever any Approved feature is unphased. Was 3 — too
+    # high a bar; products with a fresh backlog never reached the auto-
+    # planner because the designer drained Approved-no-design features
+    # one at a time and the persona tree's auto-plan step never fired.
+    "supervisor_auto_plan_min_unsprinted":      1,
     "supervisor_merge_stall_enabled":           True,
     "supervisor_merge_stall_min_min":           60,
     "supervisor_overlap_pr_enabled":            True,
