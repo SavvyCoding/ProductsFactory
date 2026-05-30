@@ -288,6 +288,126 @@ class TestProductDetail:
         assert "Run Analysis" not in r.text
 
 
+class TestLifetimeAggregates:
+    """Regression for the 2026-05-30 'Tokens lifetime' shrinking bug.
+
+    Pre-fix: the product_detail route LIMIT'd the sessions query at 50; the
+    template then summed tokens_input/tokens_output across that slice for
+    the metric cards labeled "Tokens lifetime" / "Sessions lifetime" /
+    "Session success rate." As new sessions landed, older ones fell off
+    the window and their tokens vanished from the displayed total — a
+    monotonically-increasing lifetime metric was actually shrinking.
+
+    Post-fix: lifetime aggregates come from a separate unbounded query.
+    These tests create 60+ sessions (well past the 50 cap) with known
+    token counts and assert the rendered HTML reflects the FULL totals.
+    """
+
+    def _make_session(self, db, product_id, *, uid, exit_code=0,
+                      tokens_input=100_000, tokens_output=10_000,
+                      ended=True):
+        # Both started_at and ended_at are set explicitly so the duration
+        # is 5 min — well past the 10s ghost-session threshold. Without
+        # this, started_at defaults to func.now() (test wall-clock) and a
+        # fixed ended_at lands BEFORE it, making (ended_at - started_at)
+        # negative and matching the < 10s ghost predicate, which silently
+        # filters every failed session out of the lifetime aggregate.
+        started = datetime(2026, 5, 30, 12, 0, tzinfo=timezone.utc)
+        ended_at = (datetime(2026, 5, 30, 12, 5, tzinfo=timezone.utc)
+                    if ended else None)
+        s = DBSession(
+            product_id=product_id,
+            session_uid=uid,
+            started_at=started,
+            ended_at=ended_at,
+            exit_code=exit_code,
+            tokens_input=tokens_input,
+            tokens_output=tokens_output,
+        )
+        db.add(s)
+        db.flush()
+        return s
+
+    def test_tokens_lifetime_includes_sessions_past_limit_50(self, client, db):
+        # Pre-fix: only the most-recent 50 sessions contributed to the
+        # displayed total. With 60 sessions × 100k input + 10k output =
+        # 6.6M tokens; LIMIT(50) would show 5.5M; the missing 1.1M is the
+        # bug. The "X in" foot text renders with comma-formatting, so we
+        # can grep for the exact byte string.
+        p = make_product(db)
+        for i in range(60):
+            self._make_session(db, p.id, uid=f"u{i:03d}")
+        r = client.get(f"/product/{p.id}", auth=AUTH)
+        assert r.status_code == 200
+        # Full lifetime input total: 60 × 100,000 = 6,000,000
+        assert "6,000,000 in" in r.text, (
+            "tokens_input lifetime total must include all 60 sessions, "
+            "not just the LIMIT(50) display slice. Look for the 'X in' "
+            "foot text on the Tokens lifetime card."
+        )
+        # Full lifetime output: 60 × 10,000 = 600,000
+        assert "600,000 out" in r.text
+
+    def test_sessions_lifetime_count_includes_past_limit_50(self, client, db):
+        p = make_product(db)
+        for i in range(75):
+            self._make_session(db, p.id, uid=f"u{i:03d}")
+        r = client.get(f"/product/{p.id}", auth=AUTH)
+        assert r.status_code == 200
+        # The "Sessions lifetime" metric card renders the count as the
+        # metric value. With 75 sessions, the page must contain "75",
+        # not "50" (the LIMIT cap).
+        # Use the foot text format which is unique: "X OK · Y killed"
+        # to anchor the assertion away from incidental numbers.
+        assert "75 OK · 0 killed" in r.text
+
+    def test_session_success_rate_uses_lifetime_not_slice(self, client, db):
+        # 60 OK sessions + 40 killed sessions → 100 total, 60% success.
+        # Pre-fix: slice was the 50 most-recent (whatever mix of OK/killed
+        # those happened to be, depending on insertion order) which gave
+        # the WRONG ratio. Post-fix: 60/100 = 60%, stable regardless of
+        # what's in the LIMIT(50) display slice.
+        p = make_product(db)
+        for i in range(60):
+            self._make_session(db, p.id, uid=f"ok-{i:03d}", exit_code=0)
+        for i in range(40):
+            self._make_session(db, p.id, uid=f"kill-{i:03d}", exit_code=137)
+        r = client.get(f"/product/{p.id}", auth=AUTH)
+        assert r.status_code == 200
+        # The metric card renders the percentage as the value and the
+        # supporting count in foot text "across N runs". 60/100 = 60.
+        assert "across 100 runs" in r.text
+        # And the percentage must appear — guard against ratio computed
+        # off the slice. Format from the template: {{ ok_pct }}<suffix>%
+        # so look for ">60<" inside the metric-value span.
+        assert ">60<" in r.text
+
+    def test_ghost_sessions_excluded_from_lifetime(self, client, db):
+        # Ghost sessions (failed AND ended within 10s of start) are
+        # excluded by _ghost_filter in BOTH the display query and the
+        # lifetime aggregate. Without this, infra crashes would inflate
+        # killed counts and depress success rate. 5 real OK + 3 ghosts
+        # ⇒ lifetime shows 5 sessions, 100% success.
+        p = make_product(db)
+        for i in range(5):
+            self._make_session(db, p.id, uid=f"real-{i:03d}")
+        # Insert ghost sessions: failed (exit != 0), ended_at - started_at < 10s
+        for i in range(3):
+            g = DBSession(
+                product_id=p.id,
+                session_uid=f"ghost-{i}",
+                exit_code=125,
+                started_at=datetime(2026, 5, 30, 12, 0, tzinfo=timezone.utc),
+                ended_at  =datetime(2026, 5, 30, 12, 0, 5, tzinfo=timezone.utc),
+            )
+            db.add(g)
+        db.flush()
+        r = client.get(f"/product/{p.id}", auth=AUTH)
+        assert r.status_code == 200
+        # 5 real, all OK
+        assert "5 OK · 0 killed" in r.text
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # FEATURE MANAGEMENT (HTML forms)
 # ══════════════════════════════════════════════════════════════════════════════
