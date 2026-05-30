@@ -59,8 +59,8 @@ from src.auth.verify import verify_auth, Unauthorized
 def create_resource():
     try:
         user = verify_auth(request)
-    except Unauthorized as e:
-        return jsonify({"error": str(e)}), 401
+    except Unauthorized:
+        return jsonify({"error": {"code": "UNAUTHORIZED", "message": "auth required"}}), 401
     # ... handler body, with user.id available
 ```
 
@@ -78,6 +78,55 @@ with get_db_connection() as conn:
     rows = cur.fetchall()
 # conn closes via context manager — no leak in any branch
 ```
+
+### Route organisation — one Blueprint per concern (never a god-file)
+A single `src/main.py` holding every route turns each edit into a coordination problem and routinely loses unrelated handlers on rewrite. Split by concern: one file per Blueprint, `main.py` does app-factory only.
+```python
+# src/api/auth.py
+from flask import Blueprint, jsonify, request
+auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
+
+@auth_bp.post("/login")
+def login(): ...
+
+# src/api/history.py
+history_bp = Blueprint("history", __name__, url_prefix="/api/history")
+
+@history_bp.get("/")
+def list_history(): ...
+
+# src/main.py  ← app factory ONLY
+from flask import Flask
+from src.api.auth import auth_bp
+from src.api.history import history_bp
+
+def create_app():
+    app = Flask(__name__)
+    app.register_blueprint(auth_bp)
+    app.register_blueprint(history_bp)
+    return app
+```
+Soft cap: **≤ 8 routes per file**. Above that, split. The post-coder `detect_god_file` check files a chore on any file crossing the threshold.
+
+### Test isolation — autouse DB fixture per test
+Tests must not share DB state via the process-global path env var. Put this in `tests/conftest.py`:
+```python
+import pytest
+
+@pytest.fixture(autouse=True)
+def _isolated_db(tmp_path, monkeypatch):
+    """Fresh, schema-initialised DB + JWT secret per test."""
+    db_path = tmp_path / "test.db"
+    monkeypatch.setenv("CALC_DB_PATH", str(db_path))      # rename to your app's env var
+    monkeypatch.setenv("JWT_SECRET", "test-secret-key-please-use-32-bytes-min!")
+    # Call your product's schema-init functions here:
+    from src.history import init_db
+    init_db()
+    # from src.auth.users import init_users_db
+    # init_users_db()
+    yield
+```
+Without this, a test calling a repository function directly (or one of two tests sharing the default DB path) leaks state into the next test — invisible in isolation, broken in the full suite. The post-coder test-check runs the FULL suite, so cross-test leakage poisons every feature's gate.
 
 ## CONFIG GATES
 

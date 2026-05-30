@@ -425,6 +425,250 @@ def _product_id_from_features(features: list[dict]) -> int | None:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Detector 5: god-file (one file holds too many HTTP routes)
+# ────────────────────────────────────────────────────────────────────────────
+
+# A `@<obj>.<method>(...)` route decorator. Matches Flask `@app.route` and
+# `@app.get/post/...`; FastAPI `@router.get/post/...`; covers all the common
+# Python web stacks with a single regex (cheaper than AST for a counting check).
+_ROUTE_DECORATOR_RE = re.compile(
+    r"@\w+\.(route|get|post|put|patch|delete)\s*\(",
+    re.IGNORECASE,
+)
+# Threshold above which a single file is a structural clobber-risk. Picked from
+# calc3 2026-05-29: main.py held 15 routes and coders editing one for an
+# unrelated feature routinely dropped the other 14 (#1025/#1031). Any product
+# crossing this gets bounced into a Blueprint/router split.
+_GOD_FILE_ROUTE_THRESHOLD = 8
+
+
+def detect_god_file(
+    working_dir: str | Path, features: list[dict]
+) -> list[Finding]:
+    """Source files holding more than _GOD_FILE_ROUTE_THRESHOLD route handlers.
+
+    Canonical clobber pattern: a single multi-route file (e.g. calc3 src/main.py
+    with 15 routes) makes every edit a coordination problem — the coder editing
+    one route has to mentally avoid the other 14, and LLM coders routinely drop
+    unrelated handlers when rewriting the file. Splitting into Flask Blueprints
+    (one file per concern) makes the clobber STRUCTURALLY impossible because
+    the file the coder edits no longer contains the routes it would otherwise
+    clobber.
+
+    Python-first (matches `*.py`); migrations/test dirs excluded. Emits one
+    high-severity finding per offending file with route count and LOC.
+    """
+    wd = Path(working_dir)
+    if not wd.is_dir():
+        return []
+    findings: list[Finding] = []
+    pid = _product_id_from_features(features)
+    anchor = _pick_target_feature(features) or 0
+    for root, dirs, files in os.walk(wd):
+        dirs[:] = [d for d in dirs if d not in _DDL_EXCLUDE_DIRS]
+        rel_root = os.path.relpath(root, wd).replace("\\", "/")
+        if any(sub in rel_root for sub in _DDL_EXCLUDE_PATH_SUBSTR):
+            continue
+        for fn in files:
+            if not fn.endswith(".py"):
+                continue
+            fpath = Path(root) / fn
+            try:
+                text = fpath.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            route_count = len(_ROUTE_DECORATOR_RE.findall(text))
+            if route_count <= _GOD_FILE_ROUTE_THRESHOLD:
+                continue
+            loc = text.count("\n") + 1
+            rel = os.path.relpath(fpath, wd).replace("\\", "/")
+            findings.append(Finding(
+                category="god_file",
+                severity="high",
+                target_type="file",
+                target_id=rel,
+                feature_id=anchor,
+                detail=(
+                    f"`{rel}` holds {route_count} route handlers in {loc} lines. "
+                    f"Threshold is {_GOD_FILE_ROUTE_THRESHOLD}. A single multi-route "
+                    "file is the structural root of the cross-file clobber pattern "
+                    "(coders editing one route drop unrelated handlers). Split into "
+                    "Flask Blueprints / FastAPI routers so each file holds a focused "
+                    "subset and the clobber becomes structurally impossible."
+                ),
+                fix_hint=(
+                    "Refactor into Blueprints: one file per concern "
+                    "(e.g. `src/api/auth.py`, `src/api/history.py`, `src/api/stats.py`); "
+                    "keep `src/main.py` as the app factory that imports and registers "
+                    "each Blueprint. Move each route's handler verbatim — do not change "
+                    "the URL paths or response shapes."
+                ),
+                occurrences=[f"{rel}: {route_count} routes, {loc} lines"],
+                product_id=pid,
+            ))
+    return findings
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Detector 6: file-level PUBLIC_ROUTE blanket coexisting with verify_auth
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def detect_public_route_blanket_with_auth(
+    working_dir: str | Path, features: list[dict]
+) -> list[Finding]:
+    """Files whose first non-empty line opts the whole file out of Guard 6 via
+    `# PUBLIC_ROUTE:` while also containing `verify_auth(` somewhere — a
+    self-contradicting state that silently turns Guard 6 OFF for any future
+    state-changing route added to the file.
+
+    Canonical 2026-05-28 calc3 src/main.py: header says "arithmetic endpoints
+    have no user state" but the file went on to register `POST /api/auth/login`,
+    `POST /api/auth/register`, and authed `DELETE` endpoints. The DELETEs got
+    auth from the coder's good behaviour, not from enforcement — the file-level
+    blanket suppressed Guard 6 for the entire file. The fix is to drop the
+    blanket and annotate per-route the ones that truly are public.
+    """
+    wd = Path(working_dir)
+    if not wd.is_dir():
+        return []
+    findings: list[Finding] = []
+    pid = _product_id_from_features(features)
+    anchor = _pick_target_feature(features) or 0
+    for root, dirs, files in os.walk(wd):
+        dirs[:] = [d for d in dirs if d not in _DDL_EXCLUDE_DIRS]
+        rel_root = os.path.relpath(root, wd).replace("\\", "/")
+        if any(sub in rel_root for sub in _DDL_EXCLUDE_PATH_SUBSTR):
+            continue
+        for fn in files:
+            if not fn.endswith(".py"):
+                continue
+            fpath = Path(root) / fn
+            try:
+                text = fpath.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            # First non-empty line carries the file-level marker (matches the
+            # same convention the post-coder lint guard uses).
+            first_nonempty = ""
+            for line in text.splitlines():
+                if line.strip():
+                    first_nonempty = line
+                    break
+            if "PUBLIC_ROUTE" not in first_nonempty:
+                continue
+            if "verify_auth(" not in text:
+                continue
+            rel = os.path.relpath(fpath, wd).replace("\\", "/")
+            findings.append(Finding(
+                category="public_route_blanket_with_auth",
+                severity="high",
+                target_type="file",
+                target_id=rel,
+                feature_id=anchor,
+                detail=(
+                    f"`{rel}` has a file-level `# PUBLIC_ROUTE:` annotation AND "
+                    "calls `verify_auth(`. The blanket opts EVERY route in this "
+                    "file out of Guard 6 (the state-changing-routes-need-auth check), "
+                    "yet some routes are explicitly authed — a self-contradiction. "
+                    "Any future POST/PUT/PATCH/DELETE added to this file silently "
+                    "bypasses Guard 6 and could ship unauthed."
+                ),
+                fix_hint=(
+                    "Delete the file-level `# PUBLIC_ROUTE:` line. For the routes "
+                    "that genuinely don't need auth (login, register, calculate, "
+                    "etc.), add a per-route comment `# PUBLIC_ROUTE: <reason>` on "
+                    "the line above the route decorator. Guard 6 honours per-route "
+                    "annotations too, but only one route at a time — not a whole file."
+                ),
+                occurrences=[f"{rel}:1 — first-line annotation: `{first_nonempty.strip()}`"],
+                product_id=pid,
+            ))
+    return findings
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Detector 7: mixed error-response envelopes in one file
+# ────────────────────────────────────────────────────────────────────────────
+
+# Structured: `{"error": {"code": "...", "message": "..."}}` — the canonical
+# shape per ARCHITECTURE.md REFERENCE PATTERNS.
+_ERR_STRUCTURED_RE = re.compile(
+    r"['\"]?error['\"]?\s*:\s*\{\s*['\"]?code['\"]?",
+)
+# Raw: `{"error": str(e)}` — the form REFERENCE PATTERNS explicitly says "NEVER".
+_ERR_RAW_RE = re.compile(
+    r"['\"]?error['\"]?\s*:\s*str\s*\(",
+)
+
+
+def detect_mixed_error_envelopes(
+    working_dir: str | Path, features: list[dict]
+) -> list[Finding]:
+    """Files that emit BOTH `{"error": {"code", "message"}}` (structured) and
+    `{"error": str(e)}` (raw) error responses.
+
+    Canonical 2026-05-28 calc3 src/main.py: 24 handlers used the structured
+    shape, 5 (mostly auth Unauthorized paths) leaked raw `str(e)`. Mixed shapes
+    mean clients can't reliably parse error responses, and the raw form risks
+    leaking internal details. ARCHITECTURE.md REFERENCE PATTERNS specifies the
+    structured shape as canonical with an explicit "NEVER" on the raw form.
+    """
+    wd = Path(working_dir)
+    if not wd.is_dir():
+        return []
+    findings: list[Finding] = []
+    pid = _product_id_from_features(features)
+    anchor = _pick_target_feature(features) or 0
+    for root, dirs, files in os.walk(wd):
+        dirs[:] = [d for d in dirs if d not in _DDL_EXCLUDE_DIRS]
+        rel_root = os.path.relpath(root, wd).replace("\\", "/")
+        if any(sub in rel_root for sub in _DDL_EXCLUDE_PATH_SUBSTR):
+            continue
+        for fn in files:
+            if not fn.endswith(".py"):
+                continue
+            fpath = Path(root) / fn
+            try:
+                text = fpath.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            structured_hits = len(_ERR_STRUCTURED_RE.findall(text))
+            raw_hits = len(_ERR_RAW_RE.findall(text))
+            if structured_hits == 0 or raw_hits == 0:
+                continue   # consistent (one shape or no errors)
+            rel = os.path.relpath(fpath, wd).replace("\\", "/")
+            findings.append(Finding(
+                category="mixed_error_envelopes",
+                severity="high",
+                target_type="file",
+                target_id=rel,
+                feature_id=anchor,
+                detail=(
+                    f"`{rel}` mixes error-response shapes: "
+                    f"{structured_hits} structured `{{\"error\": {{\"code\", \"message\"}}}}` "
+                    f"occurrence(s) and {raw_hits} raw `{{\"error\": str(...)}}` "
+                    "occurrence(s). ARCHITECTURE.md REFERENCE PATTERNS specifies "
+                    "the structured form as canonical with an explicit `NEVER` on "
+                    "the raw form. Mixed shapes make clients unable to reliably "
+                    "parse error responses."
+                ),
+                fix_hint=(
+                    "Convert every raw `{\"error\": str(e)}` to the canonical "
+                    "`{\"error\": {\"code\": \"<CODE>\", \"message\": \"<msg>\"}}` "
+                    "form. Pick a stable code per error class (e.g. `UNAUTHORIZED`, "
+                    "`INVALID_INPUT`, `INTERNAL_ERROR`) and a short message. Never "
+                    "leak raw exception text in the response — log it server-side."
+                ),
+                occurrences=[
+                    f"{rel}: structured={structured_hits}, raw={raw_hits}",
+                ],
+                product_id=pid,
+            ))
+    return findings
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Orchestration
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -441,6 +685,9 @@ _DETECTORS = (
 # its three detectors are untouched — this is the preserved fallback.
 _CHORE_DETECTORS = (
     detect_duplicate_ddl,
+    detect_god_file,
+    detect_public_route_blanket_with_auth,
+    detect_mixed_error_envelopes,
 )
 
 
