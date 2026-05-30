@@ -1,0 +1,38 @@
+{
+  "id": "reviewer_lgtm_on_clean_pr",
+  "description": "Reviewer faces a clean diff that matches all ACs, has proper tests, and a session_summary.md with verification blocks. Should approve with LGTM, no rejections.",
+  "persona": "reviewer",
+  "product_overrides": {
+    "name": "DocumentSign",
+    "tech_stack": ["python", "fastapi"],
+    "_session_branch": "coder/eval-clean-pr",
+    "_session_pr_number": 99,
+    "_session_pr_url": "https://github.com/example/DocumentSign/pull/99"
+  },
+  "assigned_features": [
+    {
+      "id": 7003,
+      "name": "Add /api/health endpoint",
+      "status": "Reviewing",
+      "pr_number": 99
+    }
+  ],
+  "stub_response": "✅ Commit abc1234: LGTM — functional/tests/security pass. All ACs verified; session_summary.md contains AC1 and AC2 verification blocks matching Expected outputs. [eval-reviewer-uid]",
+  "checks": [
+    {
+      "scorer": "reviewer_decision",
+      "args": {"expected": "approved"},
+      "weight": 1.0
+    },
+    {
+      "scorer": "matches_regex",
+      "args": {"pattern": "\\[[a-zA-Z0-9-]+\\]\\s*$"},
+      "weight": 0.3
+    },
+    {
+      "scorer": "does_not_contain",
+      "args": {"needle": "❌"},
+      "weight": 0.5
+    }
+  ]
+}

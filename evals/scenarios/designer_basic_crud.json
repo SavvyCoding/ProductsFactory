@@ -1,0 +1,35 @@
+{
+  "id": "designer_basic_crud",
+  "description": "Designer faces a simple CRUD feature and must produce a story doc with the post-2026-05-30 three-part AC contract (behavior + Verify + Expected + Test).",
+  "persona": "designer",
+  "product_overrides": {
+    "name": "DocumentSign",
+    "tech_stack": ["python", "fastapi"]
+  },
+  "assigned_features": [
+    {
+      "id": 7001,
+      "name": "Tag-based document categorization",
+      "description": "Users can add/remove tags on documents. GET /api/documents/{id}/tags returns the list; POST /api/documents/{id}/tags adds a tag; DELETE /api/documents/{id}/tags/{tag} removes one. Tags are user-scoped (a user can't add tags to another user's document). Validation: tag is 1-32 chars, alphanumeric + dashes only.",
+      "status": "Approved"
+    }
+  ],
+  "stub_response": "# Feature Design: Tag-based document categorization\n\n## Summary\nUsers can attach short text tags to their documents for organization.\n\n## Acceptance Criteria (must be ≤4)\n\nAC1. POST /api/documents/{id}/tags adds a tag to the document; returns 201 with {\"tag\": \"<value>\"}.\n     Verify: `curl -sS -X POST -H 'X-API-Key: k1' -H 'Content-Type: application/json' -d '{\"tag\":\"urgent\"}' http://localhost:8000/api/documents/1/tags | python3 -c \"import json,sys; d=json.load(sys.stdin); assert d['tag']=='urgent'; print('OK')\"`\n     Expected: `OK`\n     Test: `test_tag_create_returns_201`.\n\nAC2. GET /api/documents/{id}/tags returns 200 with a JSON array of tag strings.\n     Verify: `curl -sS -H 'X-API-Key: k1' http://localhost:8000/api/documents/1/tags | python3 -c \"import json,sys; d=json.load(sys.stdin); assert isinstance(d,list); print('OK')\"`\n     Expected: `OK`\n     Test: `test_tag_list_returns_array`.\n\nAC3. Cross-user access returns 404 (not 403, to avoid existence-leak).\n     Verify: `curl -sS -o /dev/null -w '%{http_code}' -H 'X-API-Key: k_other' http://localhost:8000/api/documents/1/tags`\n     Expected: `404`\n     Test: `test_tag_cross_user_returns_404`.\n\nAC4. Invalid tag (>32 chars or non-alphanumeric) returns 400.\n     Verify: `curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'X-API-Key: k1' -H 'Content-Type: application/json' -d '{\"tag\":\"!!!\"}' http://localhost:8000/api/documents/1/tags`\n     Expected: `400`\n     Test: `test_tag_invalid_returns_400`.\n",
+  "checks": [
+    {
+      "scorer": "designer_ac_structure",
+      "args": {"min_acs": 3, "max_acs": 4, "require_verify": true},
+      "weight": 1.0
+    },
+    {
+      "scorer": "contains_substring",
+      "args": {"needle": "## Acceptance Criteria"},
+      "weight": 0.5
+    },
+    {
+      "scorer": "does_not_contain",
+      "args": {"needle": "TODO: implement"},
+      "weight": 0.5
+    }
+  ]
+}
