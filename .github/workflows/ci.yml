@@ -58,6 +58,25 @@ jobs:
         # tighten this once those are fixed.
         run: pytest tests/ -v --tb=short
 
+      - name: Persona prompt contracts (Tier 1 evals)
+        # Tier 1: structural invariants on built persona prompts. No LLM call,
+        # no credentials, ~5 seconds. Catches the "prompt refactor silently
+        # dropped a security instruction" regression on every PR. See
+        # evals/README.md and evals/fixtures.py:PROMPT_INVARIANTS.
+        run: pytest evals/test_prompt_contracts.py -v --tb=short
+
+      - name: Persona eval scenarios (Tier 2 stub backend)
+        # Tier 2: parametrized over evals/scenarios/*.json. Stub backend
+        # replays each scenario's stub_response — no LLM call, no tokens.
+        # The purpose here is to catch breakage to the scenario JSON
+        # schema, scorer registry, or runner plumbing — NOT to measure
+        # real LLM behavior (that needs EVAL_BACKEND=ollama, a separate
+        # opt-in workflow). ~1 second.
+        env:
+          RUN_LIVE_EVALS: "1"
+          EVAL_BACKEND:   "stub"
+        run: pytest evals/test_live_evals.py -v --tb=short
+
       - name: pip-audit (dependency CVE scan)
         # Don't block on transitive vulnerabilities yet — surface them only.
         continue-on-error: true
