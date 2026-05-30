@@ -1751,20 +1751,68 @@ _SERVER_UNAVAILABLE_MARKERS = (
     "Could not resolve host",
 )
 
+# curl -s --silent suppresses stderr; curl -w '%{http_code}' on connection
+# failure writes 000 to stdout. So stderr markers ALONE miss the
+# DocumentSign 2026-05-30 cascade: every `curl -s -w '%{http_code}'
+# http://localhost:8000/...` recipe ran, exited 7, emitted "000\n" to
+# stdout and empty stderr → verify-check classified them as mismatches
+# (output "000" != expected "200") and bounced every cycle. After 3-4
+# rework rounds, supervisor.rapid_flap then Blocked the feature.
+# Cascade affected 7 features (#1115, 1119, 1121, 1125, ...) before the
+# gate was disabled.
+#
+# Fix: pre-detect server-required commands by parsing the command shape
+# instead of relying on runtime stderr. Cover curl + python http libs
+# against localhost / 127.0.0.1 / 0.0.0.0; whitelist TestClient (ASGI
+# direct, no real server needed).
+_SERVER_REQUIRED_CURL_RE = re.compile(
+    r"\bcurl\b[^\n|;]*?https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0)\b",
+    re.IGNORECASE,
+)
+_SERVER_REQUIRED_PYHTTP_RE = re.compile(
+    r"(requests|httpx|urllib).*https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0)",
+    re.IGNORECASE | re.DOTALL,
+)
+_TESTCLIENT_RE = re.compile(
+    r"\b(TestClient|starlette\.testclient|fastapi\.testclient)\b",
+)
+
+
+def _is_server_required(cmd: str) -> bool:
+    """True when the Verify command needs a running HTTP server.
+
+    Pre-run detection so we don't have to scrape stderr for failure
+    markers that curl -s suppresses. TestClient-based commands hit ASGI
+    directly with no real server — those return False so they DO run
+    and DO get enforced.
+    """
+    if _TESTCLIENT_RE.search(cmd):
+        return False
+    if _SERVER_REQUIRED_CURL_RE.search(cmd):
+        return True
+    if _SERVER_REQUIRED_PYHTTP_RE.search(cmd):
+        return True
+    return False
+
 
 def _run_verify(cmd: str, cwd: str, timeout: int) -> dict:
     """Run a single Verify command in bash. Returns a dict with:
       exit_code: int (124 on timeout, subprocess returncode otherwise)
       stdout:    str
       stderr:    str (capped at 500 chars for log noise)
-      skipped:   bool — True when the command appears to need a running
-                        server (connection refused / can't resolve).
-      skip_reason: str ("server unavailable" or "")
+      skipped:   bool — True when the command needs a server (pre-detect)
+                        OR connection failed at runtime (stderr marker).
+      skip_reason: str ("server-required" / "server unavailable" / "")
 
-    Best-effort: any subprocess exception is captured into a "skipped"
-    result with the error string as the reason. The verify-check gate
-    NEVER raises out of its caller — only logs and continues.
+    Best-effort: any subprocess exception is captured into a skipped
+    result. The verify-check gate NEVER raises out of its caller — only
+    logs and continues.
     """
+    if _is_server_required(cmd):
+        return {"exit_code": 0, "stdout": "", "stderr": "",
+                "skipped": True,
+                "skip_reason": "server-required (post-coder pipeline does "
+                               "not start the app yet)"}
     try:
         r = _sp.run(
             ["bash", "-c", cmd],
@@ -1775,7 +1823,8 @@ def _run_verify(cmd: str, cwd: str, timeout: int) -> dict:
         stderr = (r.stderr or "")[:500]
         if any(mk in stderr for mk in _SERVER_UNAVAILABLE_MARKERS):
             return {"exit_code": r.returncode, "stdout": r.stdout, "stderr": stderr,
-                    "skipped": True, "skip_reason": "server unavailable (curl connection refused)"}
+                    "skipped": True,
+                    "skip_reason": "server unavailable (connection failed at runtime)"}
         return {"exit_code": r.returncode, "stdout": r.stdout, "stderr": stderr,
                 "skipped": False, "skip_reason": ""}
     except _sp.TimeoutExpired:
