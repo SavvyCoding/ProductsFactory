@@ -37,8 +37,63 @@ from orchestrator.pipelines.post_coder import (  # noqa: E402
     _parse_ac_verifies,
     _run_verify,
     _check_expected,
+    _is_server_required,
     _post_coder_verify_check,
 )
+
+
+class TestIsServerRequired:
+    """Pre-run command-shape detector. Regression for the 2026-05-30
+    DocumentSign cascade: `curl -s -w '%{http_code}' http://localhost:...`
+    recipes ran, exited 7, wrote 000 to stdout and empty stderr (because
+    of -s), and the stderr-marker-only check classified them as mismatches.
+    The pre-detector closes that gap by parsing the command shape.
+    """
+
+    @pytest.mark.parametrize("cmd", [
+        "curl http://localhost:8000/foo",
+        "curl -s -X POST http://localhost:8000/api/auth",
+        "curl -s -o /dev/null -w '%{http_code}' -H 'X-API-Key: k' http://localhost:8000/x",
+        "curl http://127.0.0.1/health",
+        "curl -s 'http://0.0.0.0:8765/api/v1/y'",
+        "curl --silent https://localhost:8443/secure",
+        "curl http://localhost:8000/x | python3 -c '...'",
+    ])
+    def test_curl_localhost_variants_are_server_required(self, cmd):
+        assert _is_server_required(cmd) is True
+
+    @pytest.mark.parametrize("cmd", [
+        "python3 -c 'import requests; r = requests.get(\"http://localhost:8000/x\")'",
+        "python -c 'import httpx; httpx.get(\"http://127.0.0.1/y\")'",
+        "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/z\")'",
+    ])
+    def test_python_http_against_localhost_is_server_required(self, cmd):
+        assert _is_server_required(cmd) is True
+
+    @pytest.mark.parametrize("cmd", [
+        "python3 -c 'from fastapi.testclient import TestClient; ...'",
+        "python -c 'from src.main import app; from starlette.testclient import TestClient; c = TestClient(app); ...'",
+        "python -c 'from src.foo import bar; assert bar(1) == 2'",
+        "echo OK",
+        "pytest tests/test_foo.py::test_bar",
+        "python3 -c 'import re; assert re.match(r\"\\d+\", \"42\")'",
+        # curl against EXTERNAL service is NOT server-required from the
+        # post-coder pipeline's perspective (we're not the missing host).
+        "curl https://api.github.com/repos/foo/bar",
+    ])
+    def test_pure_commands_are_not_server_required(self, cmd):
+        assert _is_server_required(cmd) is False
+
+    def test_testclient_overrides_localhost_pattern(self):
+        # TestClient + a string mentioning localhost in a comment: the
+        # TestClient marker wins because it doesn't actually make a
+        # network call to localhost.
+        cmd = (
+            "python3 -c 'from fastapi.testclient import TestClient; "
+            "# tests http://localhost:8000 routes via ASGI direct\n"
+            "from src.main import app; c = TestClient(app); print(c.get(\"/x\").status_code)'"
+        )
+        assert _is_server_required(cmd) is False
 
 
 # ── _parse_ac_verifies ───────────────────────────────────────────────────────
