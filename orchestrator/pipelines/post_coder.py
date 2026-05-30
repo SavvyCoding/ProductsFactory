@@ -2294,6 +2294,65 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             )
             return pushed_ids
 
+    # 4.4 Drift-scanner + reconciler chore-controller — runs BEFORE the lint
+    # guard so it isn't starved by the lint-guard's early-return-on-violation
+    # below. The detectors are pure functions of (working_dir, features); they
+    # observe product-wide drift (architect review docs, duplicate DDL,
+    # god-files, doc/code contract drift) that is independent of whether
+    # THIS session's specific commit lints clean. Pre-2026-05-30 wiring put
+    # this block AFTER the lint-guard's `return pushed_ids` — a coder stuck
+    # in a lint-bounce loop on a single feature could starve the chore-
+    # controller indefinitely, which exactly the canonical DocumentSign 2026-
+    # 05-30 case (5 architect-review-pending findings sat unfiled while
+    # feature #1102 cycled coder→lint-bounce→coder on a deps-coherence
+    # violation). Best-effort — wrapped in try/except, never raises, never
+    # bounces the feature.
+    #
+    # Scope: fetch ALL features for the product, not just session-assigned.
+    # Cross-feature drift (e.g. design_doc_path set but the doc file never
+    # landed — canonical calcv2 features 995/996/1001/1002) only surfaces
+    # if every feature's state is visible to the detectors. Dedupe in
+    # post_findings + file_corrective_chores keeps noise bounded across
+    # cycles.
+    try:
+        from orchestrator import drift_detectors as _drift
+        _product_id = product.get("id")
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as _drift_client:
+            try:
+                _resp = _drift_client.get(f"/api/products/{_product_id}/features")
+                _all_features = _resp.json() if (200 <= _resp.status_code < 300) else assigned_features
+            except Exception:
+                _all_features = assigned_features
+            _drift_findings = _drift.run_all(working_dir, _all_features)
+            if _drift_findings:
+                log.info(
+                    f"[drift-scanner] {pname}: {len(_drift_findings)} finding(s) "
+                    f"on session {session_uid} (scope={len(_all_features)} feature(s))"
+                )
+                _drift.post_findings(_drift_findings, _drift_client, pname)
+
+            # Reconciler-as-controller (opt-in via RECONCILER_CHORES_ENABLED).
+            # Objective code-drift detectors (separate _CHORE_DETECTORS registry,
+            # not the comment-path _DETECTORS above) emit high-severity findings
+            # that get filed as Approved chore features. The existing
+            # coder→guard→reviewer pipeline is the actuator, so corrections run
+            # through the same verification as any feature. Default OFF — flip
+            # the flag per-environment to A/B on a product. Best-effort: failure
+            # here never bounces the feature.
+            if os.environ.get("RECONCILER_CHORES_ENABLED", "").strip().lower() \
+                    in ("1", "true", "yes", "on"):
+                _chore_findings = _drift.run_chore_detectors(working_dir, _all_features)
+                if _chore_findings:
+                    _filed = _drift.file_corrective_chores(
+                        _chore_findings, _drift_client, _product_id, pname,
+                    )
+                    log.info(
+                        f"[reconciler] {pname}: {len(_chore_findings)} chore-eligible "
+                        f"finding(s), filed {_filed} corrective chore(s)"
+                    )
+    except Exception as _drift_e:
+        log.warning(f"[post-coder] {pname}: drift-scanner raised {_drift_e}; continuing")
+
     # 4.5 Lint guards — auto-reject obviously-broken commits before they hit
     # the LLM reviewer. Per the 2026-05-07 audit, ~80% of reviewer rejections
     # cluster in 3-4 grep-able categories. Catching them here saves a slow
@@ -2381,58 +2440,6 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     # bumping fix_attempts — broken-env is not the coder's fault. Calculator's
     # feature 594 cascade was driven by missing jest/dev-deps, which iterations
     # of coder rework can't fix.
-    # Drift-scanner: deterministic detectors that catch the patterns the
-    # architect persona would catch but doesn't run every cycle. Findings
-    # are posted as feature_comments with author="drift-scanner" and surface
-    # in the next coder's {reviewer_feedback} block alongside lint-guard
-    # output. Best-effort — never raises, never bounces the feature.
-    #
-    # Scope: fetch ALL features for the product, not just session-assigned.
-    # Cross-feature drift (e.g. design_doc_path set but the doc file
-    # never landed — canonical calcv2 features 995/996/1001/1002) only
-    # surfaces if every feature's state is visible to the detectors. With
-    # only session_assigned, drift on inactive features stays hidden
-    # until those features happen to be picked up again. Dedupe in
-    # post_findings keeps the noise bounded across cycles.
-    try:
-        from orchestrator import drift_detectors as _drift
-        _product_id = product.get("id")
-        with httpx.Client(base_url=PM_API_URL, timeout=10) as _drift_client:
-            try:
-                _resp = _drift_client.get(f"/api/products/{_product_id}/features")
-                _all_features = _resp.json() if (200 <= _resp.status_code < 300) else assigned_features
-            except Exception:
-                _all_features = assigned_features
-            _drift_findings = _drift.run_all(working_dir, _all_features)
-            if _drift_findings:
-                log.info(
-                    f"[drift-scanner] {pname}: {len(_drift_findings)} finding(s) "
-                    f"on session {session_uid} (scope={len(_all_features)} feature(s))"
-                )
-                _drift.post_findings(_drift_findings, _drift_client, pname)
-
-            # Reconciler-as-controller (opt-in via RECONCILER_CHORES_ENABLED).
-            # Objective code-drift detectors (separate _CHORE_DETECTORS registry,
-            # not the comment-path _DETECTORS above) emit high-severity findings
-            # that get filed as Approved chore features. The existing
-            # coder→guard→reviewer pipeline is the actuator, so corrections run
-            # through the same verification as any feature. Default OFF — flip
-            # the flag per-environment to A/B on a product. Best-effort: failure
-            # here never bounces the feature.
-            if os.environ.get("RECONCILER_CHORES_ENABLED", "").strip().lower() \
-                    in ("1", "true", "yes", "on"):
-                _chore_findings = _drift.run_chore_detectors(working_dir, _all_features)
-                if _chore_findings:
-                    _filed = _drift.file_corrective_chores(
-                        _chore_findings, _drift_client, _product_id, pname,
-                    )
-                    log.info(
-                        f"[reconciler] {pname}: {len(_chore_findings)} chore-eligible "
-                        f"finding(s), filed {_filed} corrective chore(s)"
-                    )
-    except Exception as _drift_e:
-        log.warning(f"[post-coder] {pname}: drift-scanner raised {_drift_e}; continuing")
-
     test_result = _post_coder_test_check(working_dir, _run, pname)
     if test_result.get("framework") != "none" and not test_result.get("passed"):
         env_broken = test_result.get("env_broken", False)
