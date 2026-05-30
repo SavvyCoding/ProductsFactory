@@ -24,6 +24,7 @@ import ast as _ast
 import json as _json
 import logging
 import os
+import re
 import subprocess as _sp
 from pathlib import Path
 
@@ -1664,6 +1665,247 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
         return result
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Verify-check gate (2026-05-30): empirical AC-recipe runner
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Reads each assigned feature's docs/story_<id>.md, extracts the per-AC
+# `Verify:` bash commands and `Expected:` outputs that the post-2026-05-30
+# designer prompt produces, runs each recipe in a subprocess, and compares
+# the actual output to Expected. Bounces the feature on real mismatch.
+#
+# Motivation: the coder's `## AC<N> verification:` blocks in session_summary.md
+# are coder-self-reported. Canonical 2026-05-30 #1119 incident: coder pasted
+# `## AC1 verification: OK` despite the route being registered at
+# `/admin/metrics` (not `/api/admin/metrics` as the Verify command targeted) —
+# the curl would have 404'd if actually run. The system relied on the
+# reviewer's eyeball reading of the diff to catch this; for subtler bugs
+# (`time.strftime("%f")` family, where the routing is fine but the output is
+# wrong) eyeball review will miss them.
+#
+# Server-required commands (curl http://localhost:...) currently get skipped
+# with a "server unavailable" classification rather than bounced — the
+# post-coder pipeline doesn't currently spin up the app. Pure-Python commands
+# (TestClient-based, library-level) ARE enforced and will bounce on mismatch.
+# Adding stack-specific server startup (uvicorn for FastAPI, npm for Node) is
+# a follow-up. See `_run_verify` for the skip classification heuristic.
+#
+# Gated by env `POST_CODER_VERIFY_CHECK_ENABLED` (default off) so we can A/B
+# this on DocumentSign before turning it on for all products. When the gate
+# is off, the function is a no-op.
+
+
+def _parse_ac_verifies(design_doc_text: str) -> list[tuple[int, str, str]]:
+    """Parse (ac_number, verify_command, expected_output) triples from a story doc.
+
+    Story-doc shape from the post-2026-05-30 designer prompt:
+
+        AC1. [behavior]
+             Verify: `<bash one-liner>`
+             Expected: `<concrete output>`
+             [Verify: `<another command>` Expected: `<another output>`]*
+             Test: <test name>
+
+    Multiple Verify+Expected pairs per AC are supported (the designer
+    prompt allows this for ACs with multiple observable behaviors —
+    success path + error path + edge case). Returns one triple per
+    Verify recipe.
+
+    Backticks around the command and around the expected output are
+    stripped; surrounding whitespace is normalized. The command may span
+    multiple lines inside a single pair of backticks (multi-line python
+    -c is common for fixture-heavy ACs).
+    """
+    triples: list[tuple[int, str, str]] = []
+    # Split by AC headers — `AC<N>.` at start of line.
+    sections = re.split(r"^(AC\d+)\.\s", design_doc_text, flags=re.MULTILINE)
+    # sections[0] is the preamble; then alternating ac_id, body, ac_id, body...
+    for i in range(1, len(sections), 2):
+        ac_id = sections[i]
+        m_num = re.match(r"AC(\d+)", ac_id)
+        if not m_num:
+            continue
+        ac_num = int(m_num.group(1))
+        body = sections[i + 1] if i + 1 < len(sections) else ""
+        # Find all Verify: `...` Expected: <line> pairs.
+        # The command can be multi-line (between backticks); the expected
+        # is single-line. Use DOTALL so the command capture spans newlines.
+        for vm in re.finditer(
+            r"Verify:\s*`(?P<cmd>(?:[^`]|`[^`])+?)`\s*\n\s*Expected:\s*(?P<exp>[^\n]+)",
+            body, re.DOTALL,
+        ):
+            cmd = vm.group("cmd").strip()
+            exp = vm.group("exp").strip().strip("`").strip()
+            triples.append((ac_num, cmd, exp))
+    return triples
+
+
+# Substring patterns in stderr that indicate the command needs a running
+# server (curl couldn't connect). We skip these rather than bounce —
+# bouncing would punish the coder for a missing server which is the
+# post-coder pipeline's responsibility to provide, not the coder's.
+_SERVER_UNAVAILABLE_MARKERS = (
+    "Connection refused",
+    "Couldn't connect to server",
+    "Failed to connect to",
+    "Could not resolve host",
+)
+
+
+def _run_verify(cmd: str, cwd: str, timeout: int) -> dict:
+    """Run a single Verify command in bash. Returns a dict with:
+      exit_code: int (124 on timeout, subprocess returncode otherwise)
+      stdout:    str
+      stderr:    str (capped at 500 chars for log noise)
+      skipped:   bool — True when the command appears to need a running
+                        server (connection refused / can't resolve).
+      skip_reason: str ("server unavailable" or "")
+
+    Best-effort: any subprocess exception is captured into a "skipped"
+    result with the error string as the reason. The verify-check gate
+    NEVER raises out of its caller — only logs and continues.
+    """
+    try:
+        r = _sp.run(
+            ["bash", "-c", cmd],
+            cwd=cwd,
+            capture_output=True, text=True,
+            timeout=timeout,
+        )
+        stderr = (r.stderr or "")[:500]
+        if any(mk in stderr for mk in _SERVER_UNAVAILABLE_MARKERS):
+            return {"exit_code": r.returncode, "stdout": r.stdout, "stderr": stderr,
+                    "skipped": True, "skip_reason": "server unavailable (curl connection refused)"}
+        return {"exit_code": r.returncode, "stdout": r.stdout, "stderr": stderr,
+                "skipped": False, "skip_reason": ""}
+    except _sp.TimeoutExpired:
+        return {"exit_code": 124, "stdout": "", "stderr": f"timed out after {timeout}s",
+                "skipped": False, "skip_reason": ""}
+    except FileNotFoundError as e:
+        # `bash` not in PATH on this container — skip rather than bounce.
+        return {"exit_code": 127, "stdout": "", "stderr": f"shell unavailable: {e}",
+                "skipped": True, "skip_reason": "shell unavailable"}
+
+
+def _check_expected(actual_stdout: str, actual_exit: int, expected: str) -> bool:
+    """Compare actual output to the designer's Expected string. Heuristic:
+
+      - Expected text mentions "exit code 0" / "exits 0" / "returncode 0"
+        / "exit 0" → check actual_exit == 0
+      - Expected text mentions "exit code N" / "exits N" → check actual_exit == N
+      - Otherwise → strip prefix words ("stdout exactly", "prints",
+        "returns", "stdout", "output", "matches") and surrounding
+        backticks/quotes, then look for the cleaned string as a substring
+        of stdout. Substring (not equality) so trailing newlines / curl
+        progress noise don't cause spurious failures.
+
+    The coder ships the actual implementation; the heuristic is forgiving
+    on the stdout-match path but strict on the exit-code path because the
+    exit code is unambiguous.
+    """
+    exp_lower = expected.lower()
+    m = re.search(r"\bexit(?:\s+code)?\s+(\d+)\b|\bexits?\s+(\d+)\b|\breturncode\s+(\d+)\b",
+                  exp_lower)
+    if m:
+        target = int(m.group(1) or m.group(2) or m.group(3))
+        return actual_exit == target
+    cleaned = re.sub(
+        r"^(stdout exactly|prints|returns|stdout|output|matches)\s+",
+        "", expected, flags=re.IGNORECASE,
+    ).strip().strip("`").strip("'").strip('"').strip()
+    if not cleaned:
+        # An Expected line with nothing parseable — treat as pass to avoid
+        # spurious bounces. Designer is responsible for writing a real one.
+        return True
+    return cleaned in actual_stdout
+
+
+def _post_coder_verify_check(
+    working_dir: str,
+    product_name: str,
+    assigned_features: list[dict],
+    timeout_per_command: int = 30,
+) -> dict:
+    """Empirical AC-recipe gate. Reads each assigned feature's
+    docs/story_<id>.md, parses Verify+Expected pairs, runs each command,
+    classifies success / mismatch / skip-server. Returns:
+
+      {
+        "checked":  bool,    # False = gate disabled or no recipes to check
+        "passed":   bool,    # True = no mismatch failures (skips don't fail)
+        "failures": list,    # one dict per command that ran AND mismatched
+        "skipped":  list,    # commands skipped (server unavailable, etc.)
+        "total":    int,     # commands attempted
+      }
+
+    The gate is OFF by default and turned on by setting the environment
+    variable POST_CODER_VERIFY_CHECK_ENABLED to one of {1, true, yes, on}.
+    Off → returns checked=False, passed=True (no-op).
+    """
+    if os.environ.get("POST_CODER_VERIFY_CHECK_ENABLED", "").strip().lower() \
+            not in ("1", "true", "yes", "on"):
+        return {"checked": False, "passed": True, "failures": [],
+                "skipped": [], "total": 0}
+    failures: list[dict] = []
+    skipped: list[dict] = []
+    total = 0
+    for feat in assigned_features:
+        fid = feat.get("id")
+        if not isinstance(fid, int):
+            continue
+        # Designer writes docs/story_<id>.md with zero-padding; tolerate
+        # both the zero-padded and the legacy un-padded forms.
+        doc_path = None
+        for candidate in (f"story_{fid:03d}.md", f"story_{fid}.md"):
+            p = Path(working_dir) / "docs" / candidate
+            if p.is_file():
+                doc_path = p
+                break
+        if doc_path is None:
+            continue
+        try:
+            text = doc_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        triples = _parse_ac_verifies(text)
+        if not triples:
+            log.info(
+                f"[verify-check] {product_name}: feature #{fid} has design doc "
+                f"but no Verify recipes (legacy doc?) — skipping."
+            )
+            continue
+        log.info(
+            f"[verify-check] {product_name}: feature #{fid} — running "
+            f"{len(triples)} Verify recipe(s)"
+        )
+        for ac_num, cmd, expected in triples:
+            total += 1
+            r = _run_verify(cmd, cwd=working_dir, timeout=timeout_per_command)
+            if r["skipped"]:
+                skipped.append({
+                    "feature_id": fid, "ac": ac_num,
+                    "command": cmd[:200], "reason": r["skip_reason"],
+                })
+                continue
+            if not _check_expected(r["stdout"], r["exit_code"], expected):
+                failures.append({
+                    "feature_id":    fid,
+                    "ac":            ac_num,
+                    "command":       cmd[:400],
+                    "expected":      expected[:200],
+                    "actual_stdout": (r["stdout"] or "")[:300],
+                    "actual_stderr": (r["stderr"] or "")[:200],
+                    "actual_exit":   r["exit_code"],
+                })
+    return {
+        "checked":  True,
+        "passed":   not failures,
+        "failures": failures,
+        "skipped":  skipped,
+        "total":    total,
+    }
+
+
 def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                               assigned_features: list[dict]) -> list[int]:
     """
@@ -2569,6 +2811,97 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                 working_dir, {f["id"] for f in assigned_features}, pname,
             )
             return pushed_ids
+
+    # 4c. Verify-check gate (2026-05-30). Runs the per-AC `Verify:` recipes
+    # the designer wrote into docs/story_<id>.md and compares to the
+    # `Expected:` outputs. Catches the coder-gaming pattern where
+    # `session_summary.md` has cosmetic `## AC<N> verification: OK` blocks
+    # that don't reflect actually running the recipe. OFF by default —
+    # gated by env POST_CODER_VERIFY_CHECK_ENABLED. When ON, real
+    # mismatches bounce the feature like lint/test failures; server-
+    # unavailable skips are logged as warnings but DO NOT bounce (the
+    # post-coder pipeline doesn't start the app yet; a follow-up will
+    # add uvicorn-bg startup for FastAPI products).
+    verify_result = _post_coder_verify_check(
+        working_dir=working_dir,
+        product_name=pname,
+        assigned_features=assigned_features,
+    )
+    if verify_result["checked"] and verify_result["skipped"]:
+        log.info(
+            f"[verify-check] {pname}: {len(verify_result['skipped'])} recipe(s) "
+            f"skipped (server unavailable / shell unavailable); "
+            f"{verify_result['total']} total recipe(s) attempted"
+        )
+    if verify_result["checked"] and not verify_result["passed"]:
+        n_fail = len(verify_result["failures"])
+        log.warning(
+            f"[post-coder] {pname}: verify-check found {n_fail} AC recipe "
+            f"mismatch(es); bouncing features to Implementing+changes_requested"
+        )
+        # Group failures by feature so each bounced feature gets one
+        # actionable comment with all its failing ACs.
+        per_feature: dict[int, list[dict]] = {}
+        for f in verify_result["failures"]:
+            per_feature.setdefault(f["feature_id"], []).append(f)
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                for feat in assigned_features:
+                    fid = feat["id"]
+                    fails = per_feature.get(fid)
+                    if not fails:
+                        continue
+                    bullets = []
+                    for f in fails:
+                        bullets.append(
+                            f"- AC{f['ac']}: command `{f['command'][:140]}`\n"
+                            f"  expected `{f['expected'][:120]}`\n"
+                            f"  actual stdout `{(f['actual_stdout'] or '').strip()[:200]}` "
+                            f"(exit {f['actual_exit']})"
+                        )
+                    body = (
+                        f"❌ post-coder verify-check auto-reject "
+                        f"({len(fails)} AC recipe mismatch(es)):\n\n"
+                        + "\n".join(bullets)
+                        + "\n\nThese are the per-AC `Verify:` recipes the "
+                          "designer wrote into the story doc. The pipeline "
+                          "ran each one and the actual output diverged from "
+                          "`Expected:`. Either your implementation doesn't "
+                          "satisfy the AC, or your `session_summary.md` "
+                          "AC verification block was self-reported without "
+                          "running the recipe. Re-run each Verify command "
+                          "yourself, observe the actual output, and fix the "
+                          "code until it matches Expected. "
+                          "Do NOT paste fake outputs into session_summary "
+                          "to make this go away — the gate runs the recipes "
+                          "independently."
+                    )
+                    try:
+                        client.post(
+                            f"/api/features/{fid}/comments",
+                            json={"author": "post-coder:verify-check", "body": body},
+                        )
+                        client.patch(
+                            f"/api/features/{fid}",
+                            json={
+                                "status": "Implementing",
+                                "review_outcome": "changes_requested",
+                                "changed_by": "post-coder:verify-check",
+                            },
+                        )
+                    except Exception as e2:
+                        log.warning(
+                            f"[post-coder] {pname}: verify-check PATCH for "
+                            f"#{fid} failed: {e2}"
+                        )
+        except Exception as e:
+            log.warning(
+                f"[post-coder] {pname}: verify-check PM client error: {e}"
+            )
+        _filter_session_result_by_id(
+            working_dir, {f["id"] for f in assigned_features}, pname,
+        )
+        return pushed_ids
 
     # 5. Mark assigned features as Reviewing + link to the PR via direct PM
     # API PATCH. Until 2026-05-06 this used a session_result.json append +
