@@ -22,15 +22,72 @@ pytest evals/ -v
 
 ## Tier 2 — live LLM evals (optional, slower)
 
-For a canned fixture (product + feature), we actually run the persona against
-the backend (Ollama for local, Claude API for CI). We then apply judge rubrics
-to the output (did it produce a design doc? valid JSON? reasonable scope?).
+For each scenario (JSON file under `evals/scenarios/`), we build the persona
+prompt, call the backend, and apply deterministic scorers to the output.
+Designed so a prompt edit's effect is measurable rather than guessed.
 
-Enable by setting:
-- `RUN_LIVE_EVALS=1`
-- `OLLAMA_HOST` (local) or `ANTHROPIC_API_KEY` (CI)
+### One-shot run
 
-Tier-2 evals are skipped by default so `pytest` stays fast.
+```bash
+RUN_LIVE_EVALS=1 OLLAMA_HOST=https://ollama.com OLLAMA_API_KEY=... \
+  pytest evals/ -v
+```
+
+Or via the runner directly (writes a JSON report consumable by `compare.py`):
+
+```bash
+python -m evals.runner evals/results/latest.json
+```
+
+### Baseline vs candidate comparison (the main workflow)
+
+```bash
+# 1. Run on current master to establish baseline.
+python -m evals.runner evals/results/baseline.json
+
+# 2. Edit a persona prompt.
+vim orchestrator/prompts/coder.md
+
+# 3. Run again on the candidate prompt.
+python -m evals.runner evals/results/candidate.json
+
+# 4. Compare. Exits non-zero if the candidate has any pass→fail
+#    regression, or if overall score dropped >1% (tolerance configurable).
+python -m evals.compare evals/results/baseline.json evals/results/candidate.json
+```
+
+A CI pre-merge gate could run `compare.py` on every prompt-touching PR.
+
+### Backends
+
+Selected by `EVAL_BACKEND` (default: `ollama` if `OLLAMA_HOST` is set, else `stub`).
+
+- **stub** — replays each scenario's `stub_response` field. Token-free; lets the
+  harness be self-tested in CI. Used by `tests/test_eval_harness.py`.
+- **ollama** — POSTs to the Ollama HTTP API at `OLLAMA_HOST`, model from
+  `EVAL_OLLAMA_MODEL` (default `qwen3-coder:30b`). Matches the orchestrator's
+  production path.
+
+### Adding a scenario
+
+1. Create `evals/scenarios/<id>.json`. Required fields:
+   - `id`: unique string, also the test name in pytest
+   - `description`: one-line human summary
+   - `persona`: persona name (or `null` + `product_overrides.type` for the
+     greenfield/brownfield coder, which is type-routed)
+   - `product_overrides`: dict merged over `SAMPLE_PRODUCT`
+   - `assigned_features`: list of feature dicts
+   - `stub_response`: the response the StubBackend should replay (must
+     satisfy the scenario's own checks; the runner's unit tests verify this)
+   - `checks`: list of `{scorer, args, weight}` — scorers in `evals/scoring.py`
+2. Run `pytest tests/test_eval_harness.py::TestRunnerEndToEnd::test_seed_scenarios_all_pass_with_stub`
+   to confirm the new scenario's checks pass on its own stub response.
+
+### Adding a scorer
+
+Add a function to `evals/scoring.py` returning `ScoreResult`. Register it in
+`SCORERS`. Add a test in `tests/test_eval_harness.py` covering both the pass
+and fail paths.
 
 ## When to add an eval
 
@@ -40,4 +97,4 @@ Every time you:
 - Add a new persona
 
 Add a tier-1 invariant that would have caught the regression, and a tier-2
-fixture if it's worth the eval cost.
+scenario + scorer if the failure mode needs behavioural detection.
