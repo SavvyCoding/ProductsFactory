@@ -112,6 +112,14 @@ services:
       # in .env to trial. Orchestrator-global (applies to whatever product's
       # coder session just ran).
       RECONCILER_CHORES_ENABLED: ${RECONCILER_CHORES_ENABLED:-}
+      # Verify-check gate (2026-05-30): runs the per-AC `Verify:` recipes from
+      # docs/story_<id>.md and bounces features whose actual output diverges
+      # from `Expected:`. Catches the coder-self-reporting gaming pattern
+      # surfaced on DocumentSign #1119. Default off; flip to 1 in .env to
+      # exercise. Recipes that need a running server are SKIPPED (not bounced)
+      # because the post-coder pipeline doesn't currently spin up the app —
+      # adding uvicorn-bg startup for FastAPI products is a follow-up.
+      POST_CODER_VERIFY_CHECK_ENABLED: ${POST_CODER_VERIFY_CHECK_ENABLED:-}
       # Agent backend — `ollama` for local/offline/TOS-compliant, `claude` for API
       AGENT_BACKEND:      ${AGENT_BACKEND:-ollama}
       # OLLAMA_HOST: leave overridable via .env so we can switch between local
