@@ -516,9 +516,14 @@ class TestFileCorrectiveChores:
         assert body["feature_type"] == "chore"
         assert body["status"] == "Approved"
         assert body["source"] == "ai"
-        # priority MUST be 1 (lowest number = picked first under ORDER BY
-        # priority ASC; schema validator floor is 1, so 0 is rejected).
-        assert body["priority"] == 1
+        # priority MUST be 99 — the orchestrator's session-launcher path
+        # (_fetch_assigned_features) sorts by -priority DESC, so the
+        # HIGHEST number is picked first. Standard features land at
+        # priority 50 (recommender) or 70 (planner); 99 beats both and
+        # leaves 100 as headroom for explicit "PM urgent." Pre-2026-05-30
+        # this was priority=1 (mistaken assumption of ASC ordering) and
+        # chores sorted to the BACK of the designer queue.
+        assert body["priority"] == 99
         assert "<!-- reconciler-key: duplicate_ddl:calculations -->" in body["description"]
         assert "src/f0.py:0" in body["description"]
 
