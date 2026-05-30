@@ -1,0 +1,38 @@
+{
+  "id": "reviewer_rejects_route_mismatch",
+  "description": "Reviewer faces the canonical #1119 DocumentSign incident: AC1 specifies POST /api/admin/metrics; coder registered the route at /admin/metrics (wrong prefix). Reviewer should reject AND cite the Verify command as the evidence — proves the verify-driven prompt pattern flows into reviewer behavior.",
+  "persona": "reviewer",
+  "product_overrides": {
+    "name": "DocumentSign",
+    "tech_stack": ["python", "fastapi"],
+    "_session_branch": "coder/eval-route-mismatch",
+    "_session_pr_number": 100,
+    "_session_pr_url": "https://github.com/example/DocumentSign/pull/100"
+  },
+  "assigned_features": [
+    {
+      "id": 7004,
+      "name": "Admin metrics endpoint",
+      "status": "Reviewing",
+      "pr_number": 100
+    }
+  ],
+  "stub_response": "❌ Functional: Route path mismatch — AC1 specifies POST /api/admin/metrics but the implementation registers the endpoint at /admin/metrics (admin_bp has prefix=\"/admin\"). The AC1 Verify command (`curl ... http://localhost:8000/api/admin/metrics`) would get a 404. Fix the router prefix to /api/admin to match the AC. [eval-reviewer-uid]",
+  "checks": [
+    {
+      "scorer": "reviewer_decision",
+      "args": {"expected": "changes_requested"},
+      "weight": 1.0
+    },
+    {
+      "scorer": "contains_substring",
+      "args": {"needle": "Verify"},
+      "weight": 0.5
+    },
+    {
+      "scorer": "matches_regex",
+      "args": {"pattern": "AC\\d+", "flags": 0},
+      "weight": 0.5
+    }
+  ]
+}
