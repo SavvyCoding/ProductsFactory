@@ -775,6 +775,128 @@ class TestBlockedQuarantine:
         assert r.status_code == 422
 
 
+class TestBlockedTransitionClosesPR:
+    """Regression suite for the 2026-05-30 DocumentSign 7-open-PR incident.
+
+    Both supervisor.detect_rapid_flap and supervisor.detect_divergent_review_feedback
+    PATCH `status=Blocked` directly via /api/features/{id}, bypassing
+    _close_blocked_feature_pr's two prior callsites (api_route_to_blocked_sprint
+    + the fix_attempts cap inline path). Result: PRs accumulated open on
+    Blocked features because neither detector closed them.
+
+    Fix: api_update_feature is now the single chokepoint — any PATCH that
+    transitions a feature into Blocked closes the open session PR and clears
+    pr_number / pr_url / branch_name. Both detectors get it for free.
+    """
+
+    @pytest.fixture
+    def stub_gh(self, monkeypatch):
+        """Stub the website.main module-level close_pr import + force a
+        non-empty GitHub token so _close_blocked_feature_pr proceeds past
+        its config gates. Records (repo, pr_number) of every close call.
+        """
+        from website import main as web_main
+        calls: list[tuple[str, int]] = []
+
+        def fake_close_pr(github_repo, pr_number, token, reason=""):
+            calls.append((github_repo, int(pr_number)))
+            return True
+
+        monkeypatch.setattr(web_main, "close_pr", fake_close_pr)
+        monkeypatch.setattr(
+            web_main, "_github_token_from_config",
+            lambda _cfg: "fake-token",
+        )
+        return calls
+
+    def test_supervisor_rapid_flap_patch_closes_pr(self, client, db, stub_gh):
+        """detect_rapid_flap PATCH shape: status + blocked_reason, no
+        pr_number clear. The route must still close the PR + clear all
+        three link fields."""
+        p = make_product(db, github_repo="org/repo")
+        f = make_feature(
+            db, p.id, status="Implementing", pr_number=21,
+            pr_url="https://github.com/org/repo/pull/21",
+            branch_name="coder/abc12345",
+        )
+        r = client.patch(
+            f"/api/features/{f.id}",
+            json={
+                "status": "Blocked",
+                "blocked_reason": "Auto-routed: rapid status flap loop",
+                "changed_by": "supervisor",
+            },
+        )
+        assert r.status_code == 200
+        assert stub_gh == [("org/repo", 21)]
+        db.refresh(f)
+        assert f.status == "Blocked"
+        assert f.pr_number is None
+        assert f.pr_url is None
+        assert f.branch_name is None
+
+    def test_supervisor_divergent_feedback_patch_closes_pr(self, client, db, stub_gh):
+        """detect_divergent_review_feedback PATCH shape: status +
+        pr_number=None together. Without snapshotting pre-PATCH pr_number
+        the chokepoint would see None and silently skip. Asserts the
+        snapshot path closes the GitHub PR correctly."""
+        p = make_product(db, github_repo="org/repo")
+        f = make_feature(
+            db, p.id, status="Implementing", pr_number=26,
+            pr_url="https://github.com/org/repo/pull/26",
+            branch_name="coder/def67890",
+        )
+        r = client.patch(
+            f"/api/features/{f.id}",
+            json={
+                "status": "Blocked",
+                "pr_number": None,
+                "blocked_reason": "Auto-blocked: divergent cascade",
+                "changed_by": "supervisor.divergent_review_feedback",
+            },
+        )
+        assert r.status_code == 200
+        assert stub_gh == [("org/repo", 26)]
+        db.refresh(f)
+        assert f.status == "Blocked"
+        assert f.pr_number is None
+        assert f.pr_url is None
+        assert f.branch_name is None
+
+    def test_no_pr_no_close_attempt(self, client, db, stub_gh):
+        """Block-routing a feature with no open PR must not call close_pr
+        (cheap-path; also avoids confusing log warnings about missing token
+        on features that legitimately never opened a PR)."""
+        p = make_product(db, github_repo="org/repo")
+        f = make_feature(db, p.id, status="Approved")  # no pr_number
+        r = client.patch(
+            f"/api/features/{f.id}",
+            json={"status": "Blocked", "blocked_reason": "manual",
+                  "changed_by": "pm"},
+        )
+        assert r.status_code == 200
+        assert stub_gh == []
+
+    def test_already_blocked_idempotent(self, client, db, stub_gh):
+        """Re-PATCHing a Blocked feature (e.g. PM updates blocked_reason)
+        must NOT re-close — prev_status == Blocked guards against double
+        close attempts on every subsequent edit of a Blocked feature."""
+        p = make_product(db, github_repo="org/repo")
+        f = make_feature(
+            db, p.id, status="Blocked", pr_number=99,
+            pr_url="https://github.com/org/repo/pull/99",
+            blocked_reason="initial",
+        )
+        # Trying to update blocked_reason is rejected by the quarantine
+        # guard for non-PM callers — use changed_by=pm.
+        r = client.patch(
+            f"/api/features/{f.id}",
+            json={"blocked_reason": "PM edited", "changed_by": "pm"},
+        )
+        assert r.status_code == 200
+        assert stub_gh == []
+
+
 class TestImplementedBounceCircuitBreaker:
     """Fix #2 for the 2026-05-28 calc3 #1022 infinite loop.
 
