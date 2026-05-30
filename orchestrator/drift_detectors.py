@@ -668,121 +668,15 @@ def detect_mixed_error_envelopes(
     return findings
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# Detector 9: pending findings in architect's review docs
-# ────────────────────────────────────────────────────────────────────────────
-
-# `### N. <title>` finding heading. Architect-prompt-mandated shape; tolerate
-# either `.` or `)` after the number and any trailing whitespace.
-_ARCH_REVIEW_FINDING_RE = re.compile(
-    r"^###\s+(\d+)[.)]\s*(.+?)\s*$",
-    re.MULTILINE,
-)
-_ARCH_REVIEW_GLOB = "architecture_review_*.md"
-# `- **Key:** value` bullets inside a finding section, value runs until the
-# next bullet or end-of-section. DOTALL so multi-line values are kept whole.
-_ARCH_REVIEW_BULLET_RE = re.compile(
-    r"-\s*\*\*([^:*\n]+?)[:\*]+\s*(.+?)(?=\n\s*-\s*\*\*|\Z)",
-    re.DOTALL,
-)
-
-
-def _slugify_title(title: str, n: int = 60) -> str:
-    """Stable, dedupe-key-safe slug from a finding's heading title."""
-    s = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")
-    return s[:n] or "untitled"
-
-
-def detect_architect_review_pending(
-    working_dir: str | Path, features: list[dict]
-) -> list[Finding]:
-    """Pending findings in architect-authored review docs at
-    ``docs/architecture_review_*.md``.
-
-    The architect persona writes contract-section drift findings (RULES,
-    REFERENCE PATTERNS, CONFIG GATES) to dated review docs instead of
-    editing those PM-curated sections in place. Each finding follows a
-    ``### N. <title>`` heading + structured ``- **Key:** value`` bullets
-    ("Section / Doc says / Code does / Proposed change"). Until this
-    detector existed, those docs sat unread between sessions — a real
-    contract drift (e.g. Flask docs in a FastAPI repo) would surface once
-    and then go nowhere. Each unresolved finding now becomes one
-    high-severity chore whose body quotes the architect's "Proposed
-    change" verbatim.
-
-    Dedupe key is the title slug ONLY — not the filename, not the section
-    number — so the same finding survives a doc rewrite or renumbering
-    without re-filing. A material title edit IS treated as a new finding.
-
-    A review doc is considered RESOLVED if its first non-empty line
-    starts with ``# RESOLVED`` (the architect's own retirement contract:
-    overwrite the file with that one-line stub when the finding is
-    addressed). Whole-file skip — no per-section RESOLVED tracking.
-    """
-    wd = Path(working_dir)
-    docs_dir = wd / "docs"
-    if not docs_dir.is_dir():
-        return []
-    pid = _product_id_from_features(features)
-    anchor = _pick_target_feature(features) or 0
-    findings: list[Finding] = []
-    for review_path in sorted(docs_dir.glob(_ARCH_REVIEW_GLOB)):
-        try:
-            text = review_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        first_line = next(
-            (ln.strip() for ln in text.splitlines() if ln.strip()), ""
-        )
-        if first_line.lower().startswith("# resolved"):
-            continue
-        sections = list(_ARCH_REVIEW_FINDING_RE.finditer(text))
-        for i, m in enumerate(sections):
-            n = m.group(1)
-            title = m.group(2).strip()
-            start = m.end()
-            end = sections[i + 1].start() if i + 1 < len(sections) else len(text)
-            # Stop at the next `## ` or `# ` heading (e.g. trailing
-            # "## Recommendation" in the architect's template) so its
-            # text doesn't bleed into this section's body.
-            tail_m = re.search(r"^##?\s", text[start:end], re.MULTILINE)
-            if tail_m:
-                end = start + tail_m.start()
-            body = text[start:end].strip()
-            fields: dict[str, str] = {}
-            for fm in _ARCH_REVIEW_BULLET_RE.finditer(body):
-                fields[fm.group(1).strip().lower()] = fm.group(2).strip()
-            fix_hint = (
-                fields.get("proposed change")
-                or fields.get("proposed")
-                or body[:400]
-            )
-            # Bullet-free detail format so the website story-sizing guard
-            # (rejects descriptions with >4 `- `/`* ` lines as "story too
-            # big") doesn't 422 the chore. The bullets in the original
-            # review doc are flattened into `**Key:** value` paragraphs.
-            detail_lines = [
-                f"Architect-flagged drift in `{review_path.name}` "
-                f"(finding #{n}): {title}"
-            ]
-            for key_label in ("section", "doc says", "code does"):
-                val = fields.get(key_label)
-                if val:
-                    detail_lines.append(f"**{key_label.title()}:** {val}")
-            detail = "\n\n".join(detail_lines)
-            findings.append(Finding(
-                category="architect_review_pending",
-                severity="high",
-                target_type="doc",
-                target_id=f"{review_path.name}#{n}",
-                feature_id=anchor,
-                detail=detail,
-                fix_hint=fix_hint,
-                occurrences=[f"{review_path.name}#{n}"],
-                product_id=pid,
-                dedupe_key=f"architect_review:{_slugify_title(title)}",
-            ))
-    return findings
+# Retired 2026-05-30: `detect_architect_review_pending` filed chores from
+# architect review docs but the actuator (coder) couldn't write to
+# ARCHITECTURE.md (RO-mounted via `_PM_CURATED_RO_FILES` for non-architect
+# personas). Coders fell back to creating `ARCHITECTURE.md.tmp`, reviewers
+# rejected every attempt, supervisor.divergent_review_feedback auto-Blocked
+# the chores. Replacement: the architect persona itself now applies its own
+# findings on its next cadence — see orchestrator/prompts/architect.md
+# "Apply your own findings" step. The architect already has RW on
+# ARCHITECTURE.md, so the actuator and the writer are now the same persona.
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -805,7 +699,6 @@ _CHORE_DETECTORS = (
     detect_god_file,
     detect_public_route_blanket_with_auth,
     detect_mixed_error_envelopes,
-    detect_architect_review_pending,
 )
 
 

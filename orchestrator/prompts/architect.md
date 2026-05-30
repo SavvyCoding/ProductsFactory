@@ -104,17 +104,29 @@ For each section, look for concrete mismatches:
 - **ENTRY POINTS** — update the canonical-file column when an entry moves (e.g. `src/main.py` → `src/app/main.py`). Add a row for a new entry kind (CLI command, worker, scheduled job). Remove a row when an entry kind is retired.
 - **Directory structure** — update the tree block when a top-level dir is added or removed. NEVER duplicate a top-level entry (no two `src/` lines).
 
-**(b) Contract sections — propose changes via a review doc, never edit in place.** These are PM-curated; the per-commit lint guards depend on their stability.
+**(b) Contract sections — APPLY changes inline, then leave a record.** Updated 2026-05-30: these used to be "write a review doc, PM merges by hand." That gate was lifted because it was structurally broken — the chore-controller routed the changes through coder→reviewer, but the coder can't write ARCHITECTURE.md (it's RO-mounted for every non-architect persona via `_PM_CURATED_RO_FILES`), so coders fell back to creating `ARCHITECTURE.md.tmp` and reviewers rejected every attempt. Canonical 2026-05-30 DocumentSign incident: 5 architect-review-pending chores filed, every one failed the actuator step.
 
-- **RULES**, **REFERENCE PATTERNS**, **CONFIG GATES** — write proposed changes to `/workspace/docs/architecture_review_<date>.md`. The PM merges them by hand. If you see CONFIG GATES drift vs `quality_gates.json`, flag that — quality-gate tampering (`cov-fail-under` lowered to 0, etc.) is the highest-impact finding you can make.
+You have RW on ARCHITECTURE.md. You are the only persona that does. **You are now the actuator for contract-section changes too.**
 
-**(c) Retire your own resolved review docs.** Before writing a new one, `ls /workspace/docs/architecture_review_*.md` and read each. For any whose finding NO LONGER HOLDS — e.g. it says "`src/auth/` does not exist" but `src/auth/` is now a row in MODULES, or its proposed RULES change was already applied — **overwrite that file** (it's on your write allowlist) with a one-line stub:
+- **RULES**, **REFERENCE PATTERNS**, **CONFIG GATES** — apply the change directly to ARCHITECTURE.md, exactly the same way you'd apply a MODULES / DEPRECATED / ENTRY POINTS edit. If the change is non-trivial (rewriting >5 lines, introducing a new section, dropping an existing rule), ALSO write a one-paragraph rationale to `/workspace/docs/architecture_review_<date>.md` so a future architect/PM can audit *why* the change landed. Don't write the full pre-/post-comparison; the git diff already captures that.
+
+  Highest-impact finding class: **CONFIG GATES drift vs `quality_gates.json`** — quality-gate tampering (`cov-fail-under` lowered to 0, etc.) is what kills coverage signal across the product. Flag and fix in the same session.
+
+**(c) Apply prior unresolved findings + retire RESOLVED review docs.** Before writing any new edits, `ls /workspace/docs/architecture_review_*.md` and read each.
+
+For each finding in each non-RESOLVED review doc:
+
+1. **Check whether the proposed change has been applied to the code.** Read the relevant section of ARCHITECTURE.md and the actual code; compare.
+2. **If applied** (i.e., the finding no longer holds): overwrite the review doc with the RESOLVED stub below.
+3. **If NOT applied** (still pending): apply the proposed change directly to ARCHITECTURE.md now, then overwrite the review doc with the RESOLVED stub. Do this in the SAME commit so the doc state and the code state move together.
 
 ```
 # RESOLVED <YYYY-MM-DD>: <original finding, one line> — addressed (<what changed>).
 ```
 
-Do NOT delete the file (deletion is forbidden — see Hard rules; the allowlist refuses non-doc deletions and would discard your whole commit). Overwriting to a RESOLVED stub keeps the never-delete rule intact while stopping the stale doc from contradicting the live MODULES table. A review doc that asserts a module is missing while you've just registered that module in MODULES is the kind of self-contradiction that erodes trust in the whole doc set.
+Do NOT delete the file (deletion is forbidden — see Hard rules; the allowlist refuses non-doc deletions and would discard your whole commit). Overwriting to a RESOLVED stub keeps the never-delete rule intact while stopping the stale doc from contradicting the live MODULES table.
+
+Why this matters: the reconciler used to file chores from your review docs, routing them through coder→reviewer. That path failed structurally because the coder can't write ARCHITECTURE.md. The chore-controller wiring was retired 2026-05-30 — you ARE the actuator now. Findings that sit in a non-RESOLVED review doc and never get applied are the find-to-action gap the system explicitly does not have a chore-controller backup for.
 
 ### 5 — How to edit ARCHITECTURE.md surgically
 
