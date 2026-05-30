@@ -74,7 +74,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse,
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import bcrypt as _bcrypt_lib
-from sqlalchemy import select, func, text, update, or_, and_
+from sqlalchemy import select, func, text, update, or_, and_, case
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -734,21 +734,50 @@ async def product_detail(
         .order_by(Feature.priority, Feature.created_at)
     )
     features = feat_result.scalars().all()
+    # Ghost-session filter: failed AND ended within 10s (container startup errors).
+    # Applied to BOTH the per-session display list and the lifetime aggregate
+    # below so the two views are consistent.
+    _ghost_filter = ~(
+        (DBSession.exit_code != 0) &
+        (DBSession.ended_at != None) &
+        (func.extract("epoch", DBSession.ended_at - DBSession.started_at) < 10)
+    )
     sess_result = await db.execute(
         select(DBSession)
         .where(DBSession.product_id == product_id)
-        .where(
-            # Exclude ghost sessions: failed AND ended within 10s (container startup errors)
-            ~(
-                (DBSession.exit_code != 0) &
-                (DBSession.ended_at != None) &
-                (func.extract("epoch", DBSession.ended_at - DBSession.started_at) < 10)
-            )
-        )
+        .where(_ghost_filter)
         .order_by(DBSession.started_at.desc())
         .limit(50)
     )
     sessions = sess_result.scalars().all()
+
+    # Lifetime aggregates — separate unbounded query. The display query above
+    # caps at 50 sessions for the per-session list; without this separate
+    # query, the "Tokens lifetime" / "Sessions lifetime" / "Session success
+    # rate" metric cards in product.html were summing across the LIMIT(50)
+    # slice and SHRINKING as older sessions fell off the window. Cards label
+    # themselves "lifetime" — must reflect all-time totals, not the last 50.
+    # Canonical 2026-05-30 DocumentSign incident: dashboard showed 27M tokens
+    # while DB had 116M; 88M (76%) hidden behind the limit.
+    _life_row = (await db.execute(
+        select(
+            func.count(DBSession.id).label("n_total"),
+            func.coalesce(func.sum(DBSession.tokens_input),  0).label("t_in"),
+            func.coalesce(func.sum(DBSession.tokens_output), 0).label("t_out"),
+            func.coalesce(
+                func.sum(case((DBSession.exit_code == 0, 1), else_=0)), 0
+            ).label("n_ok"),
+            func.coalesce(
+                func.sum(case((and_(DBSession.exit_code != 0,
+                                    DBSession.exit_code != None), 1), else_=0)), 0
+            ).label("n_killed"),
+            func.coalesce(
+                func.sum(case((DBSession.ended_at == None, 1), else_=0)), 0
+            ).label("n_running"),
+        )
+        .where(DBSession.product_id == product_id)
+        .where(_ghost_filter)
+    )).one()
     alert_count = await _unread_alert_count(db)
     _sys_cfg = await _get_system_config(db)
     _gh_pat = _github_token_from_config(_sys_cfg)
@@ -788,6 +817,18 @@ async def product_detail(
         "sprints": sprints,
         "active_sprint": active_sprint,
         "labels": labels,
+        # Lifetime aggregates (see _life_row above). The template's metric
+        # cards labeled "lifetime" use these; the per-session list still
+        # uses `sessions` (capped at 50 by display query). Cast to int
+        # because postgres `SUM(CASE ...)` returns Decimal, and Jinja's
+        # division operator on Decimal can yield mismatching types in
+        # the `(ok / total) * 100 | int` chain.
+        "lifetime_sessions":   int(_life_row.n_total or 0),
+        "lifetime_tokens_in":  int(_life_row.t_in or 0),
+        "lifetime_tokens_out": int(_life_row.t_out or 0),
+        "lifetime_ok":         int(_life_row.n_ok or 0),
+        "lifetime_killed":     int(_life_row.n_killed or 0),
+        "lifetime_running":    int(_life_row.n_running or 0),
     })
     # Force browsers to re-fetch the HTML on every navigation. Without this,
     # the cached HTML keeps pointing at older CSS/JS hashes and the user
