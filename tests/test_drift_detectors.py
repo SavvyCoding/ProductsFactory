@@ -576,3 +576,140 @@ class TestFileCorrectiveChores:
         ac_bullets = [ln for ln in body.splitlines() if _re.match(r"^\s*[-*] ", ln)]
         assert ac_bullets == [], f"chore body must carry no AC bullets, found: {ac_bullets}"
         assert "src/f0.py:0" in body, "locations must still be present (in a code fence)"
+
+
+# ── detect_god_file ─────────────────────────────────────────────────────────
+
+from orchestrator.drift_detectors import (  # noqa: E402
+    detect_god_file,
+    detect_public_route_blanket_with_auth,
+    detect_mixed_error_envelopes,
+)
+
+
+def _write(p, body):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body, encoding="utf-8")
+
+
+class TestDetectGodFile:
+    def _routes(self, n):
+        # Generate n route handlers in a single file.
+        return "\n".join(
+            f"@app.get('/r{i}')\ndef h{i}(): return 'ok'\n" for i in range(n)
+        )
+
+    def test_flags_file_above_threshold(self, tmp_path):
+        _write(tmp_path / "src" / "main.py", self._routes(9))   # > 8
+        out = detect_god_file(tmp_path, [_feature(1, product_id=24)])
+        assert len(out) == 1
+        assert out[0].category == "god_file"
+        assert out[0].severity == "high"
+        assert out[0].target_id == "src/main.py"
+        assert "9" in out[0].occurrences[0]
+
+    def test_under_threshold_no_finding(self, tmp_path):
+        _write(tmp_path / "src" / "main.py", self._routes(8))   # at threshold
+        assert detect_god_file(tmp_path, [_feature(1, product_id=24)]) == []
+
+    def test_recognises_flask_and_fastapi(self, tmp_path):
+        # mix of `app.route`, `app.post`, `router.get` — all count.
+        body = (
+            "@app.route('/a')\ndef a(): pass\n"
+            "@app.post('/b')\ndef b(): pass\n"
+            "@app.delete('/c')\ndef c(): pass\n"
+            "@router.get('/d')\ndef d(): pass\n"
+            "@router.put('/e')\ndef e(): pass\n"
+            "@router.patch('/f')\ndef f(): pass\n"
+            "@app.get('/g')\ndef g(): pass\n"
+            "@app.post('/h')\ndef h(): pass\n"
+            "@app.delete('/i')\ndef i(): pass\n"
+        )
+        _write(tmp_path / "src" / "api.py", body)
+        out = detect_god_file(tmp_path, [_feature(1, product_id=24)])
+        assert len(out) == 1
+        assert "src/api.py" in out[0].target_id
+
+    def test_tests_dir_excluded(self, tmp_path):
+        _write(tmp_path / "tests" / "test_x.py", self._routes(15))
+        assert detect_god_file(tmp_path, [_feature(1, product_id=24)]) == []
+
+
+# ── detect_public_route_blanket_with_auth ───────────────────────────────────
+
+
+class TestDetectPublicRouteBlanketWithAuth:
+    def test_flags_blanket_with_authed_route(self, tmp_path):
+        _write(tmp_path / "src" / "main.py", (
+            "# PUBLIC_ROUTE: arithmetic endpoints have no user state\n"
+            "from src.auth import verify_auth\n"
+            "@app.delete('/api/x')\ndef x():\n    user = verify_auth(request)\n"
+        ))
+        out = detect_public_route_blanket_with_auth(tmp_path, [_feature(1, product_id=24)])
+        assert len(out) == 1
+        assert out[0].category == "public_route_blanket_with_auth"
+        assert out[0].severity == "high"
+        assert out[0].target_id == "src/main.py"
+
+    def test_blanket_alone_no_auth_no_finding(self, tmp_path):
+        # Genuinely public file — annotation correct, no contradiction.
+        _write(tmp_path / "src" / "public.py", (
+            "# PUBLIC_ROUTE: weather widget\n"
+            "@app.get('/weather')\ndef w(): pass\n"
+        ))
+        assert detect_public_route_blanket_with_auth(tmp_path, [_feature(1, product_id=24)]) == []
+
+    def test_auth_alone_no_blanket_no_finding(self, tmp_path):
+        # Per-route auth without a file-level blanket — correct pattern.
+        _write(tmp_path / "src" / "main.py", (
+            "from src.auth import verify_auth\n"
+            "@app.delete('/api/x')\ndef x():\n    verify_auth(request)\n"
+        ))
+        assert detect_public_route_blanket_with_auth(tmp_path, [_feature(1, product_id=24)]) == []
+
+    def test_blanket_only_in_first_nonempty_line(self, tmp_path):
+        # A PUBLIC_ROUTE token buried mid-file is NOT a blanket; don't flag.
+        _write(tmp_path / "src" / "main.py", (
+            '"""docstring"""\n'
+            "import x\n"
+            "# PUBLIC_ROUTE: this is a comment somewhere, not a blanket\n"
+            "from src.auth import verify_auth\n"
+            "@app.delete('/api/x')\ndef x(): verify_auth(request)\n"
+        ))
+        assert detect_public_route_blanket_with_auth(tmp_path, [_feature(1, product_id=24)]) == []
+
+
+# ── detect_mixed_error_envelopes ────────────────────────────────────────────
+
+
+class TestDetectMixedErrorEnvelopes:
+    def test_flags_mixed_shapes(self, tmp_path):
+        _write(tmp_path / "src" / "main.py", (
+            "def a():\n"
+            "    return jsonify({'error': {'code': 'INVALID', 'message': 'bad'}}), 400\n"
+            "def b():\n"
+            "    return jsonify({'error': str(e)}), 401\n"
+        ))
+        out = detect_mixed_error_envelopes(tmp_path, [_feature(1, product_id=24)])
+        assert len(out) == 1
+        assert out[0].category == "mixed_error_envelopes"
+        assert out[0].severity == "high"
+        # detail contains both counts
+        assert "structured=" in out[0].occurrences[0]
+        assert "raw=" in out[0].occurrences[0]
+
+    def test_only_structured_no_finding(self, tmp_path):
+        _write(tmp_path / "src" / "main.py", (
+            "return jsonify({'error': {'code': 'X', 'message': 'y'}}), 400\n"
+        ))
+        assert detect_mixed_error_envelopes(tmp_path, [_feature(1, product_id=24)]) == []
+
+    def test_only_raw_no_finding(self, tmp_path):
+        # Raw only (still bad but a different finding class — let
+        # `detect_mixed_error_envelopes` stay narrow on MIXED state).
+        _write(tmp_path / "src" / "main.py", "return jsonify({'error': str(e)}), 500\n")
+        assert detect_mixed_error_envelopes(tmp_path, [_feature(1, product_id=24)]) == []
+
+    def test_no_errors_no_finding(self, tmp_path):
+        _write(tmp_path / "src" / "calculate.py", "def calc(a, b): return a + b\n")
+        assert detect_mixed_error_envelopes(tmp_path, [_feature(1, product_id=24)]) == []
