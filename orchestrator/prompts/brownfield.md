@@ -35,7 +35,20 @@ After you exit, the orchestrator cuts a fresh **session branch** (`coder/<sessio
 
 3. **Run tests scoped to the files you changed** (e.g. `pytest tests/test_<feature>.py -q`). Avoid the full suite — slow/flaky here. If a previously-passing test now fails: investigate, fix or revert. If stuck after 2 attempts, write `BLOCKED: <reason>` to `/workspace/session_summary.md` and exit cleanly.
 
-4. **Append ONE JSON line to `/workspace/session_result.json`** — no arrays, no `{"features": [...]}` wrapping. `status` must be exactly `"Implemented"` or `"Blocked"` — never `"Reviewing"` (that's the orchestrator's downstream state):
+4. **Verify each AC empirically — pytest green is NOT enough.** `docs/story_<id>.md` lists per-AC `Verify:` bash commands and `Expected:` outputs. For each AC, run the Verify command and paste the **actual output** into `/workspace/session_summary.md` under a `## AC<N> verification:` heading. Compare it to the design doc's Expected line — if it diverges, fix the code (or, rarely, fix the Verify recipe and note it in a comment). Pytest reports "no exception raised" — that's compatible with `def test_x(): pass` and with `time.strftime("%Y-%m-%dT%H:%M:%S.%f")` silently emitting the literal `%f`. The Verify recipe runs against the actual production code and produces text you can read; bugs that look right in code are visible in the recipe's output.
+
+   ```bash
+   # Example for an AC like: "JsonFormatter timestamp includes microseconds"
+   # Verify (from story_<id>.md): python -c "..." | grep -cE '"timestamp": "[^"]*\.\d{3,6}'
+   OUTPUT=$(python -c "import logging; from src.logging import JsonFormatter; rec=logging.LogRecord('x', logging.INFO, 'f.py', 1, 'hi', None, None); print(JsonFormatter().format(rec))")
+   echo "## AC1 verification:" >> /workspace/session_summary.md
+   echo "$OUTPUT" >> /workspace/session_summary.md
+   echo "$OUTPUT" | grep -cE '"timestamp": "[^"]*\.\d{3,6}'   # must print 1
+   ```
+
+   **Legacy design docs without Verify recipes** (pre-2026-05-30 split): do an ad-hoc empirical check per AC — for each AC, invoke the production code path once, capture the actual output, paste under `## AC<N> empirical check:` in session_summary.md. The reviewer looks for one block per AC; missing blocks bounce the feature.
+
+5. **Append ONE JSON line to `/workspace/session_result.json`** — no arrays, no `{"features": [...]}` wrapping. `status` must be exactly `"Implemented"` or `"Blocked"` — never `"Reviewing"` (that's the orchestrator's downstream state):
    ```bash
    echo '{"id": <id>, "status": "Implemented"}' >> /workspace/session_result.json
    echo '{"id": <id>, "status": "Blocked", "blocked_reason": "<reason>"}' >> /workspace/session_result.json
@@ -48,6 +61,7 @@ After you exit, the orchestrator cuts a fresh **session branch** (`coder/<sessio
 The reviewer flags these same items every cycle — handling them now saves a rework round (each adds 20–60 min and bumps `fix_attempts` toward the auto-block cap of 5). For each implemented story:
 
 - [ ] **Acceptance criteria covered** — re-read `docs/story_<id>.md`; every numbered AC has both a code path and a non-skipped test exercising it.
+- [ ] **AC Verify recipes executed** — for each AC in `docs/story_<id>.md`, the `Verify:` command ran AND the actual output is pasted in `session_summary.md` under `## AC<N> verification:` AND the output matches the AC's `Expected:` line. Legacy docs without recipes: ad-hoc empirical-check block pasted per AC instead. **A pasted "## AC<N> verification:" block with output that matches Expected is the single strongest signal you actually built the AC** — much stronger than "pytest is green," because pytest is satisfied by hollow tests but a Verify recipe with concrete Expected output is not.
 - [ ] **HARD STOP: tests must actually run the AC behavior — not pretend to.** Recently this is the #1 reviewer-rejection reason. Banned patterns the lint-guard or reviewer will reject:
     - **Skipped/disabled** — `@pytest.mark.skip`, `pytest.skip()`, `@pytest.mark.todo`, `xit(`, `xdescribe(`, OR test bodies commented out inside docstrings / triple-quoted strings. (The lint-guard catches the decorator forms; reviewers catch the commented-out forms.)
     - **Hollow asserts** — `assert True`, `assert 1`, `assert callable(fn)`, `assert <module> is not None`, "test name asserts a fixture exists." These have shipped repeatedly and the reviewer rejected every one.

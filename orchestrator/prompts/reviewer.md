@@ -85,6 +85,7 @@ For each assigned feature (in order, up to {max_features_per_run}):
 
    **(a) Functional correctness** — does the diff implement the acceptance criteria from `docs/story_<id>.md`?
    - Each numbered AC has a code path AND a test exercising it.
+   - **AC verification blocks present in `session_summary.md`.** `docs/story_<id>.md` lists per-AC `Verify:` recipes and `Expected:` outputs (post-2026-05-30 designer contract). For each AC in the design doc, grep `session_summary.md` for a `## AC<N> verification:` block. Confirm the pasted output matches the design doc's Expected line for that AC. Missing block → reject with `❌ Functional: AC<N> verification block missing from session_summary.md — coder did not empirically check this AC`. Block present but output diverges from Expected → reject with `❌ Functional: AC<N> output {actual} does not match Expected {expected}`. This is the strongest available signal that the coder actually built the AC vs. shipped a hollow test that passes pytest. (Legacy design docs without `Verify:` recipes: look for `## AC<N> empirical check:` blocks instead — same enforcement, slightly more freeform.)
    - Code follows ARCHITECTURE.md conventions.
    - No obvious logic bugs / TODO / placeholder code.
 

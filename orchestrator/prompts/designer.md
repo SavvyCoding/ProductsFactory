@@ -186,10 +186,19 @@ correctly, design it normally — don't recursively split.
    need it fills. No marketing language.
 
    ## Acceptance Criteria (must be ≤4)
-   AC1. [Observable behavior, ≤25 words.] — Test: [test name that proves it].
+   Each AC has THREE required parts: the behavior, an empirical verification recipe, and a unit test name. The verification recipe is the bash one-liner the coder runs against the actual code to confirm the AC is satisfied — NOT the unit test. The expected output is concrete (a regex match, a string substring, an HTTP status + body shape) so the coder has a fixed target to hit instead of inventing what "done" means. The unit test then codifies the recipe's behavior as a regression check.
+
+   This three-part structure is the antidote to the hollow-test failure mode. A coder can write `def test_x(): pass` and ship it because pytest reports green; the coder CANNOT pass a verification recipe like `python -c "..." | grep -E '\.\d{3,6}'` without the production code actually producing that output. The recipe is what makes "I'm done" auditable.
+
+   AC1. [Observable behavior, ≤25 words.]
+        Verify: `[bash command operating on real production code]`
+        Expected: [concrete output the verify command must produce — a regex match count, a substring, an exit code + grep, an HTTP status + body field. Be specific. "Returns a string" is not specific.]
+        Test: [test name that codifies the verify as a regression check].
    AC2. ...
    AC3. ...
    AC4. ...
+
+   For ACs where the behavior is truly internal (e.g. a refactor with no observable change, a state transition with no external side-effect), write `Verify: see unit test` and lean on the unit test alone — but be honest about it. Most "internal" ACs have an observable consequence somewhere (a log line, a metric, a DB row, a function return value); the verify recipe should target that consequence.
 
    ## Anchored Patterns
    For each AC, name the existing decorator / helper / convention the
@@ -249,9 +258,22 @@ correctly, design it normally — don't recursively split.
          OR justifies why a new pattern is needed
    - [ ] Every algorithmic AC has a formula in the Algorithm Specs section
    - [ ] Every error response in the API section also appears in Edge Cases
-   - [ ] Every AC maps to at least one named test
+   - [ ] **Every AC has a Verify command** — a bash one-liner that runs
+         against the actual production code (not mocks). For internal
+         refactors, "Verify: see unit test" is acceptable but must be
+         honest (most "internal" ACs have an observable consequence).
+   - [ ] **Every Verify command has a concrete Expected output** — a
+         regex match count, a specific substring, an HTTP status + body
+         field. "Returns a string" / "doesn't crash" are NOT specific.
+         If you write the Expected and it could be satisfied by `return
+         None`, sharpen it.
+   - [ ] **Every Verify command references only code the coder will
+         build in THIS story** — not modules that don't exist yet,
+         not future ACs, not external services without a clear fixture.
+   - [ ] Every AC maps to at least one named test (the Test: line)
    - [ ] A coder reading this doc has zero "what does the spec mean here?"
-         questions
+         questions AND zero "how do I prove this works?" questions —
+         the Verify recipe answers the second class of question.
    ```
 
    Keep total length under 400 lines. If you're approaching that, you're
@@ -287,28 +309,45 @@ as "indicators are placeholders" because the coder cherry-picks 1-2 and
 stubs the rest. Split into 5 stories (one per indicator) OR 1 story scoped
 to a single indicator.
 
-**Good** (one behavior, one test, one fix):
+**Good** (one behavior, concrete verification, regression test):
 
 > AC1. Component renders a separate panel labeled "RSI (14)" below the price
 >      chart when the user toggles RSI on. Panel shows the RSI line for the
 >      currently displayed timeframe; values during the 14-period warm-up
->      render as a gap. — Test: `StockChart.test.js::rsi_panel_renders_with_warmup_gap`.
+>      render as a gap.
+>      Verify: `curl -s 'http://localhost:8000/chart?rsi=on' | grep -cE 'class="indicator-panel"[^>]*>RSI \(14\)'`
+>      Expected: `1` (exactly one panel renders).
+>      Test: `StockChart.test.js::rsi_panel_renders_with_warmup_gap`.
 
-Specific, observable, testable in isolation, one display mode, one indicator.
+Specific, observable, the Verify command runs against the actual page and counts panel renders — the coder cannot ship a stub that "looks like RSI" because the grep would return 0.
 
-**Bad** (specifies WHAT but not HOW for an algorithm):
+**Bad** (specifies WHAT but not HOW for an algorithm, no verify):
 
 > AC. `calculateRSI(data, period)` returns an array of RSI values.
 
-No formula, no warm-up rule, no edge case behavior. Coder ships `return 50;`.
+No formula, no warm-up rule, no edge case behavior, no verify command. Coder ships `return 50;` or `return [];` and the test asserts `isinstance(result, list)`.
 
-**Good** (algorithm spec lives in §Algorithm Specs):
+**Good** (algorithm spec + concrete verify against known input):
 
 > AC2. `calculateRSI(data, period)` exposed from
 >      `src/lib/charts/indicatorCalculators.js` returns an array of RSI values
 >      computed per the formula in §Algorithm Specs, with `null` in the first
->      `period-1` positions. — Test: `indicatorCalculators.test.js::rsi_known_inputs`
->      uses the 14-period RSI fixture from `tests/fixtures/rsi_known_values.json`.
+>      `period-1` positions.
+>      Verify: `node -e "const {calculateRSI}=require('./src/lib/charts/indicatorCalculators.js'); const d=require('./tests/fixtures/rsi_known_values.json'); const r=calculateRSI(d.input, 14); console.log(JSON.stringify(r.slice(13,16)))"`
+>      Expected: `[100,76.66,73.33]` (matches §Algorithm Specs hand-computed values for indices 13-15 of the RSI fixture, ±0.01).
+>      Test: `indicatorCalculators.test.js::rsi_known_inputs` uses the same fixture.
+
+The Verify command runs the actual function with a known fixture and prints a 3-value slice; the coder cannot ship a stub because the printed values would not match. The Expected is byte-precise (with explicit tolerance), so "ship something plausible" doesn't pass.
+
+**Good** (output-format AC — the `time.strftime("%f")` family — most-failed pattern):
+
+> AC3. `JsonFormatter.format(record)` returns a JSON string whose `timestamp`
+>      field contains microseconds (6 digits after the decimal point).
+>      Verify: `python3 -c "import logging; from src.logging import JsonFormatter; rec=logging.LogRecord('x', logging.INFO, 'f.py', 1, 'hi', None, None); out=JsonFormatter().format(rec); print(out); import re; assert re.search(r'\"timestamp\": \"[^\"]*\\.\\d{6}\"', out), f'no microseconds in: {out}'"`
+>      Expected: prints `{"timestamp": "2026-05-30T15:35:40.123456", ...}` and exits 0 (assertion holds).
+>      Test: `tests/test_logging.py::test_AC3_timestamp_includes_microseconds` runs the same regex assertion.
+
+The Verify command prints the actual output AND asserts the regex; the coder pasted output reveals `\.%f` literal immediately if `time.strftime` was used instead of `datetime.strftime`. This is the bug the pipeline currently catches at reviewer time — with this verify, the coder catches it in the first session.
 
 And §Algorithm Specs holds:
 
