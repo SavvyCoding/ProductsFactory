@@ -103,16 +103,16 @@ PROMPT_INVARIANTS: dict[str, list[str]] = {
         "Review incomplete",
     ],
 
-    # Planner (Phase 2 of futureplan_v2): must produce one Feature (sprint)
-    # decomposed into Stories (features) within the size cap. Prompt must
-    # reference both "Story" and the sprint POST endpoint, otherwise the
-    # planner reverts to the old "create flat features" behaviour.
+    # Planner: under the flat phases→features model (migration 043, 2026-05-26)
+    # the planner creates Stories grouped into a Phase. It must POST features
+    # in Pending status (PM gate) and reference the phases + features
+    # endpoints. Pre-2026-05-26 invariants ("sprint", "/api/sprints") are
+    # retired with the sprints layer.
     "planner": [
-        "sprint",
-        "Story",
-        "/api/sprints",
-        "≤4 acceptance",
-        "≤6 files",                   # the size cap on stories
+        "Story",                      # vocabulary the prompt teaches
+        "phase",                      # phases→features flat model
+        "/api/phases",                # phase create endpoint
+        "/api/features",              # story POST endpoint
         "Pending",                    # stories must be created in Pending state
         "ONE new Feature",            # the one-feature-per-session rule
     ],
