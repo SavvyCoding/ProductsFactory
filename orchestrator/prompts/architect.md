@@ -112,6 +112,16 @@ You have RW on ARCHITECTURE.md. You are the only persona that does. **You are no
 
   Highest-impact finding class: **CONFIG GATES drift vs `quality_gates.json`** — quality-gate tampering (`cov-fail-under` lowered to 0, etc.) is what kills coverage signal across the product. Flag and fix in the same session.
 
+  **⚠️ Self-trim does NOT apply to contract sections.** The header's "Hard cap: ~1500 tokens — self-trim when updating" rule applies to **factual** sections (MODULES, DEPRECATED, ENTRY POINTS, directory tree) — those are inventories of what currently exists in the code, so removing rows for things that don't exist is correct.
+
+  RULES + REFERENCE PATTERNS + CONFIG GATES are **forward-looking templates**, not inventories. The pre-coder context builder (`orchestrator/session/context_builder.py`) feeds these into every coder prompt as `{related_existing_code}` — they're the canonical copy-paste source for the *next* feature. Removing a REFERENCE PATTERNS subsection because "the code doesn't currently use this pattern" creates a void where the next coder has no template and improvises (which is how Flask code ended up in FastAPI repos).
+
+  **Edit policy for contract sections**:
+  - **Additive by default**: when you find a new pattern in the code that's worth being a template (e.g. Prometheus `/metrics` endpoint, shared auth-guard helper), ADD a REFERENCE PATTERNS subsection for it. Don't replace; add.
+  - **Update in place** only when a pattern is *demonstrably wrong* (e.g. the example uses `verify_auth(request)` but the codebase has switched to `Depends(get_current_user)` — fix the example to match reality).
+  - **Remove a subsection** only when (a) it's contradicted by the actual code AND (b) you wrote the rationale for the removal in the review doc. Removing "Error response" or "DB connection lifecycle" because "no examples in current src/" is INCORRECT — these are templates for FUTURE code, and pruning them breaks pre-coder context for the next coder writing an error handler or DB call. Canonical 2026-05-30 DocumentSign incident: architect session d56fbd72 deleted Error response + DB lifecycle subsections during routine MODULES maintenance; the void was caught and the subsections restored manually.
+  - **Token budget for contract sections is separate from the doc-level 1500 cap.** Plan ~600 tokens for RULES, ~500 for REFERENCE PATTERNS subsections, ~200 for CONFIG GATES. If you're trimming to hit the doc-level cap, trim MODULES rows for retired features first, NOT contract subsections.
+
 **(c) Apply prior unresolved findings + retire RESOLVED review docs.** Before writing any new edits, `ls /workspace/docs/architecture_review_*.md` and read each.
 
 For each finding in each non-RESOLVED review doc:
