@@ -184,16 +184,20 @@
 
   {% set pending_count = status_counts.get('Pending', 0) %}
 
-  {% set total_sessions = sessions | length %}
-  {% set ok_sessions = sessions | selectattr('exit_code','equalto',0) | list | length %}
-  {% set killed_sessions = sessions | rejectattr('exit_code','equalto',0) | rejectattr('exit_code','none') | list | length %}
-  {% set running_sessions = sessions | selectattr('ended_at','none') | list | length %}
+  {# Lifetime aggregates come from a separate unbounded query in product_detail
+     (website/main.py). The `sessions` variable is the LIMIT(50) display slice
+     used by the per-session list further down — summing across it for the
+     "lifetime" metric cards caused the totals to SHRINK as older sessions fell
+     off the window (2026-05-30 DocumentSign: 27M shown vs 116M in DB). Cards
+     below labeled "lifetime" MUST use the lifetime_* vars; only the list view
+     uses `sessions`. #}
+  {% set total_sessions   = lifetime_sessions %}
+  {% set ok_sessions      = lifetime_ok %}
+  {% set killed_sessions  = lifetime_killed %}
+  {% set running_sessions = lifetime_running %}
   {% set ok_pct = ((ok_sessions / total_sessions) * 100) | int if total_sessions else 0 %}
-  {# Some sessions have NULL token columns (Claude backend, killed before metrics
-     were patched, etc.). `sum(attribute=...)` chokes on None — sum manually
-     with a default-zero list comprehension instead. #}
-  {% set _t_in  = sessions | map(attribute='tokens_input')  | reject('none') | sum %}
-  {% set _t_out = sessions | map(attribute='tokens_output') | reject('none') | sum %}
+  {% set _t_in  = lifetime_tokens_in %}
+  {% set _t_out = lifetime_tokens_out %}
   {% set _t_total = _t_in + _t_out %}
 
   {% set sprint_active = sprints | selectattr('status','equalto','active') | rejectattr('kind','equalto','blocked') | list | first %}
