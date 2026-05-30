@@ -713,3 +713,186 @@ class TestDetectMixedErrorEnvelopes:
     def test_no_errors_no_finding(self, tmp_path):
         _write(tmp_path / "src" / "calculate.py", "def calc(a, b): return a + b\n")
         assert detect_mixed_error_envelopes(tmp_path, [_feature(1, product_id=24)]) == []
+
+
+# ── detect_architect_review_pending ────────────────────────────────────────
+
+from orchestrator.drift_detectors import (  # noqa: E402
+    detect_architect_review_pending,
+)
+
+
+def _arch_review(title_n: int, title: str, section: str = "RULES",
+                 doc_says: str = "old contract", code_does: str = "new contract",
+                 proposed: str = "rewrite to match code") -> str:
+    """One finding section in the architect's mandated `### N.` shape."""
+    return (
+        f"### {title_n}. {title}\n"
+        f"- **Section:** {section}\n"
+        f"- **Doc says:** {doc_says}\n"
+        f"- **Code does:** {code_does}\n"
+        f"- **Proposed change:** {proposed}\n"
+    )
+
+
+class TestDetectArchitectReviewPending:
+    def test_single_finding_parsed(self, tmp_path):
+        _write(
+            tmp_path / "docs" / "architecture_review_2026-05-30.md",
+            "# Architecture review — 2026-05-30\n\n## Findings\n\n"
+            + _arch_review(1, "RULES — auth rule stale",
+                           doc_says="verify_auth(request)",
+                           code_does="Depends(get_current_user)",
+                           proposed="Rewrite to FastAPI pattern"),
+        )
+        out = detect_architect_review_pending(
+            tmp_path, [_feature(99, product_id=25)],
+        )
+        assert len(out) == 1
+        f = out[0]
+        assert f.category == "architect_review_pending"
+        assert f.severity == "high"
+        assert f.target_type == "doc"
+        assert f.feature_id == 99
+        assert f.product_id == 25
+        assert "RULES — auth rule stale" in f.detail
+        assert "verify_auth(request)" in f.detail
+        assert "Depends(get_current_user)" in f.detail
+        assert f.fix_hint == "Rewrite to FastAPI pattern"
+        # Detail must NOT contain leading `- ` bullets (would trip the
+        # website story-sizing guard's >4-bullet rejection).
+        for line in f.detail.split("\n"):
+            assert not line.lstrip().startswith("- "), \
+                f"detail line {line!r} has a bullet — would 422 the chore"
+
+    def test_multiple_findings_each_get_own(self, tmp_path):
+        _write(
+            tmp_path / "docs" / "architecture_review_2026-05-30.md",
+            "# Architecture review\n\n## Findings\n\n"
+            + _arch_review(1, "RULES — auth stale")
+            + "\n"
+            + _arch_review(2, "REFERENCE PATTERNS — all Flask",
+                           section="REFERENCE PATTERNS",
+                           doc_says="Flask idioms",
+                           code_does="FastAPI",
+                           proposed="Rewrite patterns")
+            + "\n"
+            + _arch_review(3, "CONFIG GATES — cov-fail-under was lowered",
+                           section="CONFIG GATES",
+                           doc_says="cov-fail-under=70",
+                           code_does="cov-fail-under=0",
+                           proposed="Restore to 70")
+            + "\n## Recommendation\n\nDo all the above.\n",
+        )
+        out = detect_architect_review_pending(
+            tmp_path, [_feature(99, product_id=25)],
+        )
+        assert len(out) == 3
+        titles = [f.target_id for f in out]
+        assert "architecture_review_2026-05-30.md#1" in titles
+        assert "architecture_review_2026-05-30.md#2" in titles
+        assert "architecture_review_2026-05-30.md#3" in titles
+        # Recommendation section must NOT have been absorbed into #3.
+        f3 = next(f for f in out if f.target_id.endswith("#3"))
+        assert "Do all the above" not in f3.detail
+        assert "Restore to 70" == f3.fix_hint
+
+    def test_resolved_file_skipped(self, tmp_path):
+        _write(
+            tmp_path / "docs" / "architecture_review_2026-05-29.md",
+            "# RESOLVED 2026-05-30: RULES auth stale — addressed in commit abc123.\n",
+        )
+        out = detect_architect_review_pending(
+            tmp_path, [_feature(99, product_id=25)],
+        )
+        assert out == []
+
+    def test_resolved_marker_case_insensitive_and_after_blank(self, tmp_path):
+        _write(
+            tmp_path / "docs" / "architecture_review_2026-05-29.md",
+            "\n\n# Resolved 2026-05-30: contract drift addressed.\n",
+        )
+        out = detect_architect_review_pending(
+            tmp_path, [_feature(99, product_id=25)],
+        )
+        assert out == []
+
+    def test_no_docs_dir_no_findings(self, tmp_path):
+        # No `docs/` subdir at all — clean greenfield.
+        out = detect_architect_review_pending(
+            tmp_path, [_feature(99, product_id=25)],
+        )
+        assert out == []
+
+    def test_no_review_doc_no_findings(self, tmp_path):
+        # `docs/` exists but only has story docs.
+        _write(tmp_path / "docs" / "story_1.md", "# Story 1\n")
+        out = detect_architect_review_pending(
+            tmp_path, [_feature(99, product_id=25)],
+        )
+        assert out == []
+
+    def test_dedupe_key_is_title_only(self, tmp_path):
+        """Filename + section number are NOT part of the dedupe key, so the
+        same finding moved to a new dated review doc or renumbered keeps
+        the same key and won't re-file. Material title edit IS a new key."""
+        body_a = (
+            "# Review\n\n## Findings\n\n"
+            + _arch_review(3, "RULES — auth rule stale")
+        )
+        body_b = (
+            "# Review\n\n## Findings\n\n"
+            + _arch_review(1, "RULES — auth rule stale")  # renumbered
+        )
+        body_c = (
+            "# Review\n\n## Findings\n\n"
+            + _arch_review(1, "RULES — auth rule STILL stale")  # retitled
+        )
+        for name, body in [
+            ("architecture_review_a.md", body_a),
+            ("architecture_review_b.md", body_b),
+            ("architecture_review_c.md", body_c),
+        ]:
+            (tmp_path / "docs").mkdir(exist_ok=True)
+            (tmp_path / "docs" / name).write_text(body, encoding="utf-8")
+            out = detect_architect_review_pending(
+                tmp_path, [_feature(99, product_id=25)],
+            )
+            (tmp_path / "docs" / name).unlink()
+            if name in ("architecture_review_a.md", "architecture_review_b.md"):
+                assert out and out[0].dedupe_key == (
+                    "architect_review:rules_auth_rule_stale"
+                )
+            else:
+                # Retitled → different key.
+                assert out and out[0].dedupe_key != (
+                    "architect_review:rules_auth_rule_stale"
+                )
+
+    def test_finding_without_proposed_change_uses_body_excerpt(self, tmp_path):
+        # If the architect deviates from the bullet schema (no "Proposed
+        # change:" line), the detector falls back to the section body as
+        # the fix_hint rather than skipping the finding outright.
+        _write(
+            tmp_path / "docs" / "architecture_review_2026-05-30.md",
+            "# Review\n\n## Findings\n\n"
+            "### 1. Something is off in main.py\n"
+            "It looks weird and we should probably fix it.\n",
+        )
+        out = detect_architect_review_pending(
+            tmp_path, [_feature(99, product_id=25)],
+        )
+        assert len(out) == 1
+        assert "It looks weird" in out[0].fix_hint
+
+    def test_anchor_feature_id_zero_when_no_features(self, tmp_path):
+        # No anchor feature: still emit findings (chore sink files
+        # against the product, not a specific feature), with feature_id=0.
+        _write(
+            tmp_path / "docs" / "architecture_review_2026-05-30.md",
+            "# Review\n\n" + _arch_review(1, "X"),
+        )
+        out = detect_architect_review_pending(tmp_path, [])
+        assert len(out) == 1
+        assert out[0].feature_id == 0
+        assert out[0].product_id is None
