@@ -57,6 +57,7 @@ The post-doc lint guard auto-rejects any commit that touches anything outside th
 - Tests or test fixtures (`tests/`, `*_test.*`, `*.spec.*`, fixtures of any kind)
 - **Config files** — `pytest.ini`, `requirements.txt`, `package.json`, `tsconfig.json`, `.gitignore`, `quality_gates.json`, `pyproject.toml`, `setup.cfg`, `Dockerfile`, `docker-compose.yml`, `.env*`
 - Existing in-repo docs — `ARCHITECTURE.md`, `CLAUDE.md`, `AGENT_WORKFLOW.md`, `CONTRIBUTING.md`, `README.md`
+- **Architect review docs** — `docs/architecture_review_*.md` (only the architect persona may write these; post-doc lint-guard rejected feature 1106 on 2026-05-30 for writing one). If you want to flag a drift concern, post it as a `feature_comments` POST on the relevant feature or append to `product_memory.md` instead.
 - The deletion-safety helper — `check_deletion_safety.py` (mounted RO; writes return EROFS)
 
 If the story spec implies a new config file (e.g. "needs pytest configured"), describe it in the design doc's **Files to create** section — the coder will write it. Designers describe, coders implement.
@@ -270,6 +271,21 @@ correctly, design it normally — don't recursively split.
    - [ ] **Every Verify command references only code the coder will
          build in THIS story** — not modules that don't exist yet,
          not future ACs, not external services without a clear fixture.
+   - [ ] **Every Verify command runs in a clean shell with only the
+         committed code** — no assumption that `localhost:8000` is already
+         up, no `docker-compose up` prerequisite, no out-of-band setup.
+         The post-coder verify-check runs each recipe in a fresh subshell
+         from `/workspace`; if your recipe does `curl http://localhost:8000/...`
+         and nothing is listening, you get `actual stdout: '' (exit 7)`
+         and the feature bounces. Canonical 2026-05-30 fires: features
+         1119, 1121, 1125 (curl localhost without a server). Pick ONE
+         of these patterns:
+         - **Boot the server inline:** `uvicorn src.main:app --port 8001 & SERVER_PID=$!; sleep 2; curl -s http://localhost:8001/...; kill $SERVER_PID` (use a non-conflicting port; always `kill` at the end).
+         - **In-process client:** `python -c "from src.main import app; from fastapi.testclient import TestClient; print(TestClient(app).get('/...').json())"`.
+         - **Pure function call:** `python -c "from src.lib.x import calc; print(calc(...))"` — best for non-HTTP ACs.
+         - For ACs that genuinely require an external service that
+           can't be booted in-process, write `Verify: see unit test`
+           and lean on the named test.
    - [ ] Every AC maps to at least one named test (the Test: line)
    - [ ] A coder reading this doc has zero "what does the spec mean here?"
          questions AND zero "how do I prove this works?" questions —
