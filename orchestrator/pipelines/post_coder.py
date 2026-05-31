@@ -1735,7 +1735,23 @@ def _parse_ac_verifies(design_doc_text: str) -> list[tuple[int, str, str]]:
             body, re.DOTALL,
         ):
             cmd = vm.group("cmd").strip()
-            exp = vm.group("exp").strip().strip("`").strip()
+            raw_exp = vm.group("exp").strip()
+            # Designer prompt §AC quality calibration teaches Expected lines
+            # in two shapes:
+            #   `<concrete output>` (parenthetical narration about WHY).
+            #   prints "OK" and exits 0.
+            # When a backtick-quoted segment leads, THAT is the strict-match
+            # target — the trailing parenthetical is human commentary the
+            # downstream substring matcher must NOT include in its compare.
+            # Failure mode this guards against: 2026-05-31 DocumentSign
+            # #1145, #1146 (actual stdout byte-for-byte matched the quoted
+            # target; matcher compared against quoted+parenthetical and
+            # rejected), cascading into 18 rapid_flap blocks in ~12h.
+            m_quoted = re.match(r"`((?:[^`]|`[^`])+?)`", raw_exp)
+            if m_quoted:
+                exp = m_quoted.group(1).strip()
+            else:
+                exp = raw_exp.strip("`").strip("'").strip('"').strip()
             triples.append((ac_num, cmd, exp))
     return triples
 
