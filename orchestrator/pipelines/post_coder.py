@@ -21,6 +21,7 @@ commit_and_push, record_reviewing_entries).
 """
 
 import ast as _ast
+import contextlib
 import json as _json
 import logging
 import os
@@ -153,6 +154,78 @@ def _coder_stage_with_denylist(working_dir: str, _run, product_name: str = "?") 
             log.warning(f"  - {verb} `{p}` -- in coder denylist")
 
     return (len(staged), [p for _, p in stripped])
+
+
+@contextlib.contextmanager
+def _workspace_symlink(working_dir: str, product_name: str = "?"):
+    """Make /workspace point at the current product's working_dir for the
+    duration of the wrapped block.
+
+    Why: agent containers mount the product at /workspace, so designer
+    Verify recipes (and the test code coders write following those recipes)
+    routinely use absolute /workspace/... paths. The post-coder pipeline
+    runs inside the pf-orchestrator container, which mounts the product at
+    /products/<name>/ — so /workspace/... resolves to a nonexistent path
+    and every test that greps it fails (canonical 2026-05-31 incident:
+    feature 1147's `test_audit_log_ddl_single_site` shipped real DDL
+    consolidation work but the test's `os.popen("grep ... /workspace/src/")`
+    returned 0 matches because /workspace doesn't exist in this container,
+    cascading 5+ features into rapid_flap blocks).
+
+    Concurrency: the symlink is a single global path. Safe under the
+    orchestrator's per-product mutex (`tools.run_cycle` serializes
+    post-coder pipelines product-by-product) AND while only one product
+    is in flight at a time. If two products' post-coder pipelines were
+    ever interleaved, this would break — flag for replacement with a
+    chroot or per-process bind-mount if multi-product concurrency lands.
+
+    Idempotency: if /workspace already exists (dev env, prior crashed
+    pipeline left a stale symlink), the CM logs and yields without
+    swapping. Removing someone else's mount-point would be worse than
+    the path bug we're patching.
+
+    Band-aid: the proper fix is a designer/coder prompt change that
+    forbids absolute /workspace/... paths in Verify recipes and test
+    code. Tracked separately.
+    """
+    link = Path("/workspace")
+    if link.exists() or link.is_symlink():
+        log.debug(
+            f"[workspace-symlink] {product_name}: /workspace already exists "
+            f"(symlink={link.is_symlink()}); skipping band-aid"
+        )
+        yield
+        return
+    created = False
+    try:
+        try:
+            link.symlink_to(working_dir, target_is_directory=True)
+            created = True
+            log.info(
+                f"[workspace-symlink] {product_name}: /workspace -> "
+                f"{working_dir} (band-aid for absolute /workspace/... paths)"
+            )
+        except OSError as e:
+            # Filesystem doesn't support symlinks (rare in Linux containers
+            # but possible on overlay-fs edge cases) or insufficient perms.
+            # Don't fail the pipeline — the test/verify checks will just see
+            # the underlying path bug as before.
+            log.warning(
+                f"[workspace-symlink] {product_name}: could not create "
+                f"/workspace symlink ({e}); test/verify checks will run "
+                f"without the band-aid"
+            )
+        yield
+    finally:
+        if created:
+            try:
+                link.unlink()
+            except OSError as e:
+                log.warning(
+                    f"[workspace-symlink] {product_name}: failed to clean up "
+                    f"/workspace symlink ({e}); next pipeline run will skip "
+                    f"the band-aid (idempotency path) until manually removed"
+                )
 
 
 def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> list[str]:
@@ -2747,7 +2820,16 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     # bumping fix_attempts — broken-env is not the coder's fault. Calculator's
     # feature 594 cascade was driven by missing jest/dev-deps, which iterations
     # of coder rework can't fix.
-    test_result = _post_coder_test_check(working_dir, _run, pname)
+    # /workspace symlink band-aid: test code that follows designer Verify
+    # recipes uses absolute /workspace/... paths (e.g. `os.popen("grep
+    # /workspace/src/...")`). The post-coder pipeline runs in the
+    # pf-orchestrator container where /workspace doesn't exist, so those
+    # tests fail even when the work is correct. The CM creates the symlink
+    # for the duration of the pytest run and cleans up after. Tracked for
+    # removal once the designer/coder prompts forbid absolute /workspace
+    # paths and the in-flight features are reauthored.
+    with _workspace_symlink(working_dir, pname):
+        test_result = _post_coder_test_check(working_dir, _run, pname)
     if test_result.get("framework") != "none" and not test_result.get("passed"):
         env_broken = test_result.get("env_broken", False)
         first_failure = test_result.get("first_failure", "")
@@ -2887,11 +2969,18 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     # unavailable skips are logged as warnings but DO NOT bounce (the
     # post-coder pipeline doesn't start the app yet; a follow-up will
     # add uvicorn-bg startup for FastAPI products).
-    verify_result = _post_coder_verify_check(
-        working_dir=working_dir,
-        product_name=pname,
-        assigned_features=assigned_features,
-    )
+    # Same /workspace symlink band-aid as the test-check above — designer
+    # Verify recipes are full of `grep /workspace/src/...` and `python -c
+    # "with open('/workspace/...')"` patterns that need /workspace to
+    # resolve. Without the CM, the recipes consistently report stdout=""
+    # and exit 1/2, which the matcher reads as a real mismatch and bounces
+    # the feature (canonical 2026-05-31 cascade: features 1147/1148/1149).
+    with _workspace_symlink(working_dir, pname):
+        verify_result = _post_coder_verify_check(
+            working_dir=working_dir,
+            product_name=pname,
+            assigned_features=assigned_features,
+        )
     if verify_result["checked"] and verify_result["skipped"]:
         log.info(
             f"[verify-check] {pname}: {len(verify_result['skipped'])} recipe(s) "
