@@ -175,6 +175,54 @@ class TestParseACVerifies:
         )
         assert _parse_ac_verifies(doc) == []
 
+    def test_expected_with_backtick_then_parenthetical_narration(self):
+        # Regression for 2026-05-31 DocumentSign #1145/#1146 cascade.
+        # Designer prompt §AC quality calibration shows Expected as:
+        #     Expected: `[100,76.66,73.33]` (matches §Algorithm Specs...).
+        # The first backtick-quoted segment is the strict-match target;
+        # the parenthetical that follows is human commentary. Pre-fix,
+        # the parser emitted the entire post-strip line including the
+        # parenthetical, and downstream `cleaned in actual_stdout` failed
+        # because the target was longer than the actual output.
+        doc = (
+            "AC1. Insert and read back.\n"
+            "     Verify: `python -c \"print('view {test:true}')\"`\n"
+            "     Expected: `view {test:true}` (row inserted and readable "
+            "with correct values).\n"
+            "     Test: test_audit_insert.\n"
+        )
+        out = _parse_ac_verifies(doc)
+        assert len(out) == 1
+        # Strict-match target is the backtick-quoted output ONLY —
+        # the parenthetical narration must be stripped.
+        assert out[0][2] == "view {test:true}"
+
+    def test_expected_with_status_codes_and_narration(self):
+        # Real-world #1146 shape: multiple status codes inside backticks
+        # followed by a verbose parenthetical mapping each to its case.
+        doc = (
+            "AC1. Decline endpoint.\n"
+            "     Verify: `python -c \"...\"`\n"
+            "     Expected: `200 declined 409 404` (valid token → 200 + "
+            "\"declined\", used token → 409, fake token → 404).\n"
+        )
+        out = _parse_ac_verifies(doc)
+        assert len(out) == 1
+        assert out[0][2] == "200 declined 409 404"
+
+    def test_expected_without_backticks_falls_back_to_full_line(self):
+        # Legacy / freeform Expected lines (no backtick quotes) still parse
+        # sensibly — the whole stripped line is the match target so the
+        # current substring heuristic in _check_expected keeps working.
+        doc = (
+            "AC1. plain.\n"
+            "     Verify: `echo hello world`\n"
+            "     Expected: hello world\n"
+        )
+        out = _parse_ac_verifies(doc)
+        assert len(out) == 1
+        assert out[0][2] == "hello world"
+
 
 # ── _check_expected ──────────────────────────────────────────────────────────
 
