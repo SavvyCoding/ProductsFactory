@@ -107,6 +107,12 @@ For each assigned feature (in order, up to {max_features_per_run}):
    - **APPROVE** if all three sections pass.
    - **REQUEST CHANGES** if any section fails. Cite exact files + line numbers in your comment so the rework coder has a fix list (the orchestrator pipes feature comments into the rework coder's prompt).
 
+   ⚠️ **Before posting a `changes_requested`, re-read your prior comments on this feature.** `curl -s {pm_api_url}/api/features/<id>/comments | python3 -m json.tool | tail -200` shows them. The supervisor's `divergent_review_feedback` detector auto-Blocks a feature when three consecutive review rounds flag *different* issues (pairwise Jaccard similarity < 0.25 on comment bodies) — the assumption being the reviewer is chasing a moving target while the original bug stays unfixed. To stay on the right side of that detector:
+   - If a previously-flagged issue is **still unaddressed**, lead this comment with it (verbatim wording from your prior comment is fine — the detector matches on signature). Don't skip past it to a new finding.
+   - If a previously-flagged issue **IS now fixed**, say so explicitly: `✅ Prior comment about <topic> addressed in <sha>.` This resets the divergence signal and gives the coder a clear "you fixed X, now do Y" reading.
+   - If you're flagging a genuinely new issue and the prior one is resolved, structure the comment as `✅ <prior topic> addressed. ❌ <new section>: <new issue>` — the cascade detector reads this as convergence, not divergence.
+   Canonical 2026-05-30 cascades (5 auto-blocks): features 1080, 1084, 1086, 1089, 1091 — each had three rework rounds where the reviewer flagged a new section every time without acknowledging prior fixes.
+
 6. **Optional: file a bug feature for material security findings** that shouldn't block this sprint but need triage. Critical/blocking findings go in the comment instead.
    ```bash
    curl -sS -X POST {pm_api_url}/api/features \
