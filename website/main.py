@@ -1718,13 +1718,48 @@ async def api_update_feature(
     # belt-and-suspenders backup (Blocked is now rank 7, so demotes are
     # rejected there too).
     _peek_changed_by = updates.get("changed_by", "agent")
-    if feature.status == "Blocked" and _peek_changed_by != "pm":
+    # Allow narrow data-cleanup callers to write on Blocked features
+    # without re-engaging them. The drift-scanner auto-heal (cycle CT+CU
+    # 2026-06-01) clears stale `design_doc_path` when the doc file is
+    # missing from disk; it does NOT change status, so it can't undo a
+    # supervisor's Blocked decision. Without this carve-out the heal got
+    # 422 on Blocked features (canonical 2026-06-01 #1177 and #1178
+    # rapid_flap auto-Block cases) and residual phantom paths persisted
+    # across PM unblock — the next designer/coder cycle then ran against
+    # a stale path. Belt-and-suspenders: the rank guard below still
+    # rejects status downgrades for these callers.
+    _BLOCKED_DATA_CLEANUP_CALLERS = frozenset({
+        "drift-scanner:auto-heal",
+    })
+    _is_blocked_data_cleanup = _peek_changed_by in _BLOCKED_DATA_CLEANUP_CALLERS
+    if (
+        feature.status == "Blocked"
+        and _peek_changed_by != "pm"
+        and not _is_blocked_data_cleanup
+    ):
         raise HTTPException(
             status_code=422,
             detail=(
                 f"Feature #{feature_id} is Blocked — only PM can re-engage "
                 f"(PATCH with changed_by=pm and a target status of "
                 f"Approved/Designed/Implementing)."
+            ),
+        )
+    # Data-cleanup callers on Blocked features must NOT include `status`
+    # — the carve-out is strictly for stale-data cleanup, not status
+    # changes. A `status` field in such a PATCH is treated as a
+    # contract violation.
+    if (
+        feature.status == "Blocked"
+        and _is_blocked_data_cleanup
+        and "status" in updates
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"changed_by={_peek_changed_by!r} may not change status on "
+                f"a Blocked feature (data-cleanup carve-out is for stale "
+                f"fields only — use PM to re-engage)."
             ),
         )
 
