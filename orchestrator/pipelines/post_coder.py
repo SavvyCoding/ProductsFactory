@@ -3354,11 +3354,37 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                             f"/api/features/{fid}/comments",
                             json={"author": "post-coder:verify-check", "body": body},
                         )
+                        # Cycle DG (2026-06-01): explicitly compute and PATCH
+                        # the bumped fix_attempts. The website's auto-bump
+                        # only fires on a real status transition (Implemented
+                        # → Implementing) or review_outcome transition (None
+                        # → changes_requested). When verify-check fires
+                        # repeatedly on the same Implementing+changes_requested
+                        # feature (because the agent re-pushed without
+                        # marking Implemented, or the agent re-claims and
+                        # post-coder bounces again instantly), the PATCH is
+                        # idempotent and the auto-bump skips. Without an
+                        # explicit bump here, the cascade is unbounded:
+                        # rapid_flap can't fire (no status flap), the cap-
+                        # route never triggers, and the feature loops
+                        # forever. Canonical 2026-06-01 DocumentSign #1177:
+                        # 2 verify-check bounces 10min apart, fix_attempts
+                        # stuck at 1, ruff missing from agent image was the
+                        # underlying cause but no circuit-breaker fired.
+                        # When caller includes `fix_attempts` in the PATCH,
+                        # the website's should_bump check at main.py:1891
+                        # skips its own auto-bump and uses our value.
+                        try:
+                            cur = client.get(f"/api/features/{fid}").json()
+                            cur_attempts = int(cur.get("fix_attempts") or 0)
+                        except Exception:
+                            cur_attempts = 0
                         client.patch(
                             f"/api/features/{fid}",
                             json={
                                 "status": "Implementing",
                                 "review_outcome": "changes_requested",
+                                "fix_attempts": cur_attempts + 1,
                                 "changed_by": "post-coder:verify-check",
                             },
                         )
