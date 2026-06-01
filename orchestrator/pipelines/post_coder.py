@@ -1809,6 +1809,28 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
         # the post-coder check (pytest-cov, pytest-xdist, etc.). That's a
         # missing-tool problem, not a code bug — coder shouldn't be punished.
         r"unrecognized arguments:\s*--(cov|xdist|benchmark|mock|django|sugar)",
+        # Cycle DL (2026-06-01): the new cycle-CX designer prompt teaches
+        # designers to write Verify recipes / tests that HARD-assert
+        # runtime tool presence: `assert shutil.which('ruff'), 'ruff not
+        # on PATH'`. That's the right shape (no skip-evasion) but it
+        # produces an AssertionError when the tool genuinely isn't in
+        # the agent image. Without this pattern, test-check classifies
+        # it as a regular test failure and bounces — the coder cycles
+        # through cap-route (5 attempts × ~8 min each = ~40 min) before
+        # auto-Block.
+        #
+        # Canonical 2026-06-01 cascade: DocumentSign features 1177
+        # (Dev tooling — ruff/pre-commit/git) and 1178 (Ruff lint check)
+        # both burned ~40 min each on missing-runtime-tool with no
+        # operator alert. Several more queued (1179, 1180, 1181,
+        # 1182-1185 locust children) would have done the same.
+        #
+        # Matching the assertion message shape gives the immediate
+        # operator-alert path (env_broken → no bump, rollback to
+        # Designed/Approved, alert) on FIRST failure.
+        r"AssertionError:\s*['\"]?[\w\-.]+['\"]?\s+(not\s+(on|in|installed))?\s*(on PATH|in PATH)",
+        # Generic pytest assertion shape with the message text after the AC.
+        r"AssertionError:.*not\s+on\s+PATH",
     ]
     _ENV_BROKEN_RE = _re.compile("|".join(_ENV_BROKEN_PATTERNS))
 
