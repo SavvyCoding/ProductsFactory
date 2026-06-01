@@ -157,6 +157,26 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
         # Schedule: every ~50 features pushed (gate in cycle/persona.py),
         # or on-demand via run_persona_now="architect".
         template_name = "architect"
+    elif persona == "coder":
+        # Coder always uses brownfield.md regardless of product.type. The
+        # greenfield/brownfield distinction was originally meant to give a
+        # truly-empty scaffolding-time repo a simpler prompt, but in practice
+        # every product accumulates real code within hours of discovery and
+        # the brownfield prompt's "preserve existing code" guidance applies
+        # vacuously to empty repos (nothing to preserve). Meanwhile, ALL the
+        # coder-quality structural fixes have been shipped to brownfield.md
+        # over the 2026-05-30..06-01 watch loop: HARD STOP no-skips,
+        # self-rolled mock class ban, runtime-tool availability check, full-
+        # suite before task_done, rework branch persistence, last-feedback-
+        # only block, anti-doc-only-commit guidance. The greenfield template
+        # accumulated none of these. Canonical 2026-06-01 incident:
+        # DocumentSign carried product.type='greenfield' from initial
+        # scaffolding despite having 200+ files; its coders read greenfield.md
+        # and silently ignored every structural improvement to brownfield.md
+        # — 6 hours of 0 Pushed traced directly to this routing bug.
+        # Note: analysis_run uses a different code path (template_name set
+        # above for `analysis_status == running`) and is not affected.
+        template_name = "brownfield"
     elif product.get("analysis_status") == "running":
         template_name = "analysis_run"
     elif product.get("type") == "brownfield":
