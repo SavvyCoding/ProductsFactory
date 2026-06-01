@@ -12,6 +12,22 @@ set -euo pipefail
 # docker-compose service runs us as user:"0" so we can do this; if someone
 # changes that, the chown/chmod silently fail and we proceed as-is.
 if [ "$(id -u)" = "0" ]; then
+    # /workspace symlink-farm root. Designer Verify recipes and the test code
+    # coders write following them routinely use absolute /workspace/... paths
+    # (the agent container mounts the product at /workspace). The post-coder
+    # pipeline runs in this orchestrator container where /workspace doesn't
+    # exist by default, so every such test/recipe fails with "no such file".
+    # We create /workspace as a dir owned by the orchestrator user so the
+    # post-coder pipeline can populate it with subdir symlinks pointing at
+    # the current product's working_dir (see _workspace_symlink in
+    # orchestrator/pipelines/post_coder.py). Doing this here (as root, before
+    # re-exec to the orchestrator user) is the only place / can be written.
+    # Canonical 2026-05-31 DocumentSign cascade: features 1147/1148/1149.
+    mkdir -p /workspace
+    chown orchestrator:orchestrator /workspace
+    chmod 0755 /workspace
+    echo "[bootstrap] /workspace dir ready for symlink-farm population"
+
     SSH_DIR=/home/orchestrator/.ssh
     if [ -d "$SSH_DIR" ]; then
         chown -R orchestrator:orchestrator "$SSH_DIR" 2>/dev/null || true
