@@ -1993,7 +1993,28 @@ def _check_expected(actual_stdout: str, actual_exit: int, expected: str) -> bool
         # An Expected line with nothing parseable — treat as pass to avoid
         # spurious bounces. Designer is responsible for writing a real one.
         return True
-    return cleaned in actual_stdout
+    if cleaned in actual_stdout:
+        return True
+    # Prose-with-multiple-backticks fallback. Some designer-authored Expected
+    # lines drift to "first `wc -l` outputs `1`, second outputs `1`" instead
+    # of the canonical single-backtick shape `` `1\n1` (parenthetical) ``. The
+    # prose form is unparseable for a substring match against stdout, but if
+    # every non-empty stdout line EQUALS some backtick-quoted segment of the
+    # Expected text, the work clearly satisfies the AC — pass. Equality
+    # (not substring) prevents `"1"` from spuriously passing stdout `"100"`.
+    # Stricter than the primary path because the prose form is ambiguous.
+    # Designer prompt now forbids this shape; this is a back-compat net for
+    # in-flight stories authored before the prompt update. Canonical fire:
+    # 2026-06-01 DocumentSign #1147 (audit_log DDL grep recipe).
+    if "`" in cleaned and actual_stdout.strip():
+        segments = {s.strip() for s in re.findall(
+            r"`((?:[^`]|`[^`])+?)`", cleaned)}
+        stdout_lines = [ln.strip() for ln in actual_stdout.splitlines()
+                        if ln.strip()]
+        if segments and stdout_lines and all(
+                ln in segments for ln in stdout_lines):
+            return True
+    return False
 
 
 def _post_coder_verify_check(

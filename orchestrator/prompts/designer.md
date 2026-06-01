@@ -193,11 +193,35 @@ correctly, design it normally — don't recursively split.
 
    AC1. [Observable behavior, ≤25 words.]
         Verify: `[bash command operating on real production code]`
-        Expected: [concrete output the verify command must produce — a regex match count, a substring, an exit code + grep, an HTTP status + body field. Be specific. "Returns a string" is not specific.]
+        Expected: `[concrete output the verify command must produce]` (optional one-sentence parenthetical explaining WHY — not part of the match target).
         Test: [test name that codifies the verify as a regression check].
    AC2. ...
    AC3. ...
    AC4. ...
+
+   **HARD STRUCTURE FOR THE `Expected:` LINE — DO NOT DEVIATE.** The verify-check matcher takes the FIRST backtick-quoted segment of the Expected line as the strict-match target and treats whatever follows it as human commentary. So you MUST write Expected in exactly this shape:
+
+   ```
+   Expected: `<the byte-for-byte stdout the verify command produces>` (optional parenthetical).
+   ```
+
+   For multi-line output, put the literal newlines INSIDE the backtick block — don't write prose with multiple inline backticks. Example for a verify command that runs two greps with `&&`:
+
+   - **✅ Correct** (single backtick block; matches whatever stdout actually looks like):
+     ```
+     Expected: `1
+     1` (two grep counts, both 1 — one occurrence in src/, that one in src/db.py).
+     ```
+   - **❌ Wrong, will silently false-reject even when the work is correct** (prose with multiple inline backticks; the matcher can't reconstruct stdout from prose):
+     ```
+     Expected: first `wc -l` outputs `1` (exactly one occurrence in src/), second `wc -l` outputs `1` (that occurrence is in `src/db.py`).
+     ```
+
+   Failure mode this guards against: 2026-06-01 DocumentSign #1147. Designer wrote the wrong-shape Expected; symlink-farm-resolved grep returned the correct `1\n1` stdout; matcher compared against the prose form, no substring of the prose appears in `1\n1`, feature bounced. Multiply by 4-5 rework rounds and rapid_flap blocks the feature.
+
+   If the AC asserts BOTH a stdout value AND an exit code, name them in the parenthetical and let the matcher's exit-code path catch the exit half: `` Expected: `OK` (exit 0). ``
+
+   Numeric-only outputs still go in backticks: `` Expected: `1`. ``
 
    For ACs where the behavior is truly internal (e.g. a refactor with no observable change, a state transition with no external side-effect), write `Verify: see unit test` and lean on the unit test alone — but be honest about it. Most "internal" ACs have an observable consequence somewhere (a log line, a metric, a DB row, a function return value); the verify recipe should target that consequence.
 
@@ -268,6 +292,17 @@ correctly, design it normally — don't recursively split.
          field. "Returns a string" / "doesn't crash" are NOT specific.
          If you write the Expected and it could be satisfied by `return
          None`, sharpen it.
+   - [ ] **Every Expected line is a single backtick-quoted block followed
+         by an optional parenthetical** — see §AC quality calibration's
+         "HARD STRUCTURE" section. Multi-line outputs put the newlines
+         INSIDE the backticks (`` `1\n1` `` becomes `` `1[newline]1` `` on
+         a single line, or use the literal-newline-inside-backticks pattern
+         shown). Do NOT write prose with multiple inline backticks like
+         "first `wc -l` outputs `1`, second outputs `1`" — the verify-check
+         matcher only extracts the FIRST backtick segment and treats the
+         rest as commentary, so prose-style Expected lines silently
+         false-reject even when the work is correct (canonical 2026-06-01
+         DocumentSign #1147).
    - [ ] **Every Verify command references only code the coder will
          build in THIS story** — not modules that don't exist yet,
          not future ACs, not external services without a clear fixture.
