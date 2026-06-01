@@ -2504,38 +2504,66 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         )
         return pushed_ids
 
-    # Belt-and-braces: if local HEAD is on a coder/* or sprint/* branch, that
-    # is evidence _reset_workspace didn't land cleanly. Force checkout to the
-    # true default branch before continuing — agent's working-tree edits are
-    # restashed-and-popped so they survive the switch. Loud warning so the
-    # operator can chase the _reset_workspace failure separately.
+    # Belt-and-braces: if local HEAD is on a coder/* or sprint/* branch, two
+    # cases are possible:
+    #   (a) INTENTIONAL rework pre-checkout — docker_runner.py's
+    #       _find_rework_branch + _checkout_branch (commit 80f42e3) lands
+    #       the coder on the prior coder branch when assigned features have
+    #       review_outcome=changes_requested + branch_name set, so the agent
+    #       inherits the prior implementation. HEAD will equal a
+    #       feature.branch_name in this case. The rework_pr_mode block below
+    #       will commit + force-push to this same branch — no main-reset
+    #       needed.
+    #   (b) CORRUPTION — _reset_workspace silently failed, HEAD on an
+    #       unrelated coder/sprint branch. Force-restore to main before
+    #       continuing, as before.
+    # Canonical 2026-06-01 incident: routing-fix c58b0f5 surfaced this
+    # interaction — rework pre-checkout sessions were force-resetting to
+    # main and the subsequent `git checkout -B coder/<uid>` failed with
+    # "you need to resolve your current index first" because the agent's
+    # uncommitted edits + prior-branch state conflicted on the reset.
+    # Every rework cycle ended with features_pushed=0.
     _hb = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
     current_head = (_hb.stdout or "").strip()
     if current_head.startswith(("coder/", "sprint/")):
-        log.warning(
-            f"[post-coder] {pname}: HEAD is on {current_head!r} entering "
-            f"post-coder (should have been {default_branch!r} after "
-            f"_reset_workspace) — forcing checkout. This indicates "
-            f"_reset_workspace silently failed; check the prior session's "
-            f"reset logs."
-        )
-        _pre = _run(["git", "stash", "push", "-u", "-m",
-                     f"post-coder-pre-reset-{session_uid}"], timeout=300)
-        _pre_stashed = (_pre.returncode == 0
-                        and "No local changes to save" not in (_pre.stdout or ""))
-        _co = _run(["git", "checkout", "-f", default_branch])
-        if _co.returncode != 0:
-            log.error(
-                f"[post-coder] {pname}: forced checkout to {default_branch} "
-                f"failed — {_fmt_err(_co)}. Bailing rather than opening a PR "
-                f"with the wrong base."
+        intentional_rework = current_head in {
+            f.get("branch_name") for f in assigned_features
+            if f.get("branch_name")
+        }
+        if intentional_rework:
+            log.info(
+                f"[post-coder] {pname}: HEAD on {current_head!r} matches an "
+                f"assigned feature's branch_name — intentional rework "
+                f"pre-checkout (docker_runner._find_rework_branch). Skipping "
+                f"main-reset; rework_pr_mode below will commit + force-push "
+                f"to this branch."
             )
+        else:
+            log.warning(
+                f"[post-coder] {pname}: HEAD is on {current_head!r} entering "
+                f"post-coder (should have been {default_branch!r} after "
+                f"_reset_workspace, and does NOT match any assigned "
+                f"feature.branch_name) — forcing checkout. This indicates "
+                f"_reset_workspace silently failed; check the prior session's "
+                f"reset logs."
+            )
+            _pre = _run(["git", "stash", "push", "-u", "-m",
+                         f"post-coder-pre-reset-{session_uid}"], timeout=300)
+            _pre_stashed = (_pre.returncode == 0
+                            and "No local changes to save" not in (_pre.stdout or ""))
+            _co = _run(["git", "checkout", "-f", default_branch])
+            if _co.returncode != 0:
+                log.error(
+                    f"[post-coder] {pname}: forced checkout to {default_branch} "
+                    f"failed — {_fmt_err(_co)}. Bailing rather than opening a PR "
+                    f"with the wrong base."
+                )
+                if _pre_stashed:
+                    _run(["git", "stash", "pop"])  # best-effort restore
+                return pushed_ids
+            _run(["git", "reset", "--hard", f"origin/{default_branch}"])
             if _pre_stashed:
-                _run(["git", "stash", "pop"])  # best-effort restore
-            return pushed_ids
-        _run(["git", "reset", "--hard", f"origin/{default_branch}"])
-        if _pre_stashed:
-            _run(["git", "stash", "pop"])
+                _run(["git", "stash", "pop"])
 
     # Rework detection: when every assigned feature shares one open PR, the
     # prior coder cycle produced a session PR that the reviewer rejected and
