@@ -350,6 +350,23 @@ correctly, design it normally — don't recursively split.
 
 ## AC quality calibration — examples
 
+**Anchor grep patterns to the exact construct, not its name.** When the Verify command uses `grep` to count occurrences of a code construct (a CREATE TABLE, a route decorator, a function definition), the regex must be anchored so that substring-y names don't false-match. Canonical 2026-06-01 fire: feature 1148 chore "consolidate `CREATE TABLE documents` to one site". Designer wrote:
+
+```
+Verify: grep -rn "CREATE TABLE.*documents" /workspace/ --include="*.py" | wc -l
+Expected: `1` (...)
+```
+
+That pattern matches `CREATE TABLE documents`, `CREATE TABLE documents_history`, `CREATE TABLE documents_audit`, `CREATE TABLE recent_documents`, etc. — any table whose name contains `documents`. The repo had 4 such tables; the coder correctly consolidated the `documents` DDL but the recipe returned 4, the matcher rejected, the feature rapid_flap'd. **Always anchor the pattern**:
+
+- Word-boundary anchor: `CREATE TABLE.*\bdocuments\b` matches `documents` but not `documents_history`.
+- Whitespace/paren anchor: `CREATE TABLE IF NOT EXISTS documents\s*\(` matches the exact DDL form Story #1145 ships.
+- For Python defs / route handlers: anchor on the closing `(` (e.g. `def make_widget\(` not `def make_widget`) so a longer-named function isn't a false hit.
+
+If you're unsure whether your regex over-matches, scan the existing repo before writing the AC: `grep -rEn 'CREATE TABLE.*<name>' src/` — if it returns more rows than your AC will consolidate to, anchor harder.
+
+---
+
 **Bad** (vague, hides multiple behaviors, untestable):
 
 > AC. Indicators display in separate panels below the main price chart (RSI, MACD)
