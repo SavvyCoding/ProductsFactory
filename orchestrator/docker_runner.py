@@ -450,28 +450,47 @@ def _write_sprint_features_md(working_dir: str, features: list[dict], sprint_nam
 
 def _fetch_recent_review_comments(feature_id: int, limit: int = 25) -> list[dict]:
     """
-    Pull the last `limit` reviewer/lint-guard/post-coder:test-check comments
-    for a feature from the PM API. Returns oldest-first within the slice so
-    the prompt-renderer can stack them in chronological order under the
-    feature.
+    Pull the comments relevant to the CURRENT rework cycle. Returns
+    oldest-first within the slice so the prompt-renderer can stack them
+    in chronological order under the feature.
 
-    Used by `_format_reviewer_feedback` to bridge the reviewer→coder feedback
-    gap. Until 2026-05-06 the rework coder had no signal for WHY it was
-    rerunning — review_outcome=changes_requested was the only hint, with the
-    actual line numbers / failing test names buried in feature_comments that
-    the prompt never read. Real example: reviewer 1975 left specific
-    comments on feature 179 (`SRC/healthCheckService.js` lines 34/44/54/84/122,
-    three skipped test cases by name) that coder 1976 never saw.
+    Filter (2026-06-01): only the LATEST bounce's feedback drives the
+    rework — not the accumulated history. The bounce can come from the
+    reviewer OR from any post-coder gate (lint-guard, post-coder:
+    test-check, post-coder:verify-check); whichever fired most recently
+    is what the coder needs to address. Paired with the coder-rework-
+    pre-checkout in `_prepare_workspace` — the coder now lands on the
+    previous coder branch with the prior implementation intact, so
+    they're patching specific issues against existing code, not
+    re-deriving the whole feature from a long accumulated checklist.
+    Implementation:
 
-    2026-05-07 limit raised 6 → 25: MySalesforce feature #224 hit the cap
-    after 5 fix_attempts with 13 reviewer comments — older comments
-    (auth-middleware-missing flagged in attempt 1) were truncated by the
-    time attempt 4 ran, so the coder kept addressing surface issues from
-    the latest review and let earlier systemic flags (auth, tests) slip.
-    Showing all prior comments forces the coder to carry forward
-    unresolved items across attempts. ~25 comments × ~250 chars ≈ 6KB,
-    well within prompt budget.
+      - Find the timestamp of the most recent comment (any allowed
+        author: reviewer, lint-guard, post-coder:test-check,
+        post-coder:verify-check). That's the "last bounce."
+      - Define a 10-minute window backward from that timestamp.
+        Reviewer sessions post multiple comments (one per failing
+        section: functional / tests / security) within tens of seconds.
+        Post-coder gates can also stack (e.g. lint-guard violation
+        then test-check failure on the same commit). The window
+        captures the last bounce's coherent feedback set without
+        bleeding into prior bounces.
+      - Anything older than the window is from a PRIOR bounce that
+        the coder either already addressed (post-checkout, the prior
+        code in the workspace reflects those fixes) or that the
+        latest reviewer / gate has decided to re-raise. Either way,
+        the latest signal is the truth source.
+
+    Earlier behavior (2026-05-06 → 2026-06-01) was the opposite —
+    accumulate up to 25 prior comments so unresolved items from older
+    sessions couldn't be forgotten. That made sense when the workspace
+    was reset to clean main each cycle (the coder needed the full
+    history because the *code* was gone). With the rework branch now
+    persisted, the prior code carries the prior decisions; the
+    accumulated text was making the coder address already-fixed flags
+    and ignore the actual latest rejection.
     """
+    import datetime as _dt
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
             r = client.get(f"/api/features/{feature_id}/comments")
@@ -495,20 +514,123 @@ def _fetch_recent_review_comments(feature_id: int, limit: int = 25) -> list[dict
             # tests/test_database.py" feedback was authored by lint-guard,
             # not reviewer, and therefore excluded from the prompt.
             _ALLOWED_AUTHORS = {
-                "reviewer", "lint-guard", "post-coder:test-check",
+                "reviewer", "lint-guard",
+                "post-coder:test-check", "post-coder:verify-check",
             }
             relevant = [c for c in data
                         if (c.get("author") or "").lower() in _ALLOWED_AUTHORS]
-            return relevant[-limit:]
+            if not relevant:
+                return []
+            # Last-bounce filter (2026-06-01): keep only comments within
+            # a 10-minute window backward from the most recent comment's
+            # timestamp. See docstring for the rationale.
+            last_ts_str = relevant[-1].get("created_at") or ""
+            try:
+                last_ts = _dt.datetime.fromisoformat(
+                    last_ts_str.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                # Unparseable timestamp — bail back to the tail cap so we
+                # don't silently drop everything. Better to over-include
+                # than to leave the coder with no feedback at all.
+                return relevant[-limit:]
+            window_start = last_ts - _dt.timedelta(minutes=10)
+            filtered: list[dict] = []
+            for c in relevant:
+                cts = c.get("created_at") or ""
+                try:
+                    cts_dt = _dt.datetime.fromisoformat(
+                        cts.replace("Z", "+00:00"))
+                except (ValueError, AttributeError):
+                    continue
+                if cts_dt >= window_start:
+                    filtered.append(c)
+            return filtered[-limit:]
     except Exception as e:
         log.debug(f"[reviewer-feedback] could not fetch comments for #{feature_id}: {e}")
         return []
 
 
+def _find_rework_branch(assigned_features: list[dict], product: dict,
+                        product_name: str = "?") -> str:
+    """Find the branch that the prior coder run pushed for this rework
+    cycle, so the next coder lands on that branch and inherits the prior
+    implementation. Returns "" when no rework branch is identifiable —
+    caller leaves the session on main (fresh first-pass behavior).
+
+    A "rework" feature has either `review_outcome=changes_requested` or
+    `fix_attempts > 0`. We expect the 1-PR model to assign one branch to
+    a coherent group of rework features (the session PR's head), so the
+    set of branches/PRs across rework features should be singleton —
+    we bail when it isn't.
+
+    Strategy (in priority order):
+      1. `feature.branch_name` from DB — set by post_coder on push,
+         usually retained on reviewer bounce. Cheap and reliable.
+      2. `feature.pr_number` from DB → GitHub `/pulls/{n}` → `head.ref`.
+         Slower (network) but works when branch_name was cleared (some
+         legacy flows clear it on status transition).
+
+    Returns "" on any failure path — the coder falls back to the
+    pre-existing fresh-main behavior, which is no worse than before
+    this feature shipped.
+    """
+    rework_features = [
+        f for f in assigned_features
+        if f.get("review_outcome") == "changes_requested"
+        or (f.get("fix_attempts") or 0) > 0
+    ]
+    if not rework_features:
+        return ""
+    # Strategy 1: branch_name on feature row
+    branch_names = {f.get("branch_name") for f in rework_features
+                    if f.get("branch_name")}
+    if len(branch_names) == 1:
+        return next(iter(branch_names))
+    if len(branch_names) > 1:
+        log.warning(
+            f"[{product_name}] rework pre-checkout: assigned features have "
+            f"divergent branch_names {branch_names}; skipping checkout "
+            f"(coder starts on main)"
+        )
+        return ""
+    # Strategy 2: pr_number → GitHub lookup
+    pr_numbers = {f.get("pr_number") for f in rework_features
+                  if isinstance(f.get("pr_number"), int)}
+    if len(pr_numbers) != 1:
+        return ""
+    pr_n = next(iter(pr_numbers))
+    try:
+        gh_token = _get_gh_token()
+        github_repo = product.get("github_repo", "")
+        if not (gh_token and github_repo):
+            return ""
+        repo_slug = _parse_repo_slug(github_repo)
+        r = httpx.get(
+            f"https://api.github.com/repos/{repo_slug}/pulls/{pr_n}",
+            headers={
+                "Authorization": f"Bearer {gh_token}",
+                "Accept": "application/vnd.github+json",
+            },
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return ""
+        pr_data = r.json()
+        if not isinstance(pr_data, dict) or pr_data.get("state") != "open":
+            return ""
+        return (pr_data.get("head") or {}).get("ref") or ""
+    except Exception as e:
+        log.debug(
+            f"[{product_name}] rework pre-checkout: PR #{pr_n} lookup "
+            f"failed: {e}"
+        )
+        return ""
+
+
 def _format_reviewer_feedback(features: list[dict]) -> str:
     """
-    Render the most recent reviewer/auditor comments per feature as a
-    Markdown block. Empty string when no feature in `features` has
+    Render the most recent bounce's feedback per feature as a Markdown
+    block. Empty string when no feature in `features` has
     `review_outcome=changes_requested` — i.e. fresh first-pass assignments
     don't get this section, only reworks do.
 
@@ -520,19 +642,22 @@ def _format_reviewer_feedback(features: list[dict]) -> str:
     if not rework_features:
         return ""
     sections: list[str] = [
-        "## Reviewer feedback to address",
+        "## Latest feedback to address",
         "",
-        "These features are in a **rework cycle** — the reviewer or "
-        "security auditor flagged specific issues on the prior commit. "
-        "Address each item below before re-pushing. Don't reimplement "
-        "from scratch — keep the working parts and patch the listed gaps.",
+        "These features are in a **rework cycle** — the most recent "
+        "reviewer or post-coder gate (lint-guard / test-check / "
+        "verify-check) flagged specific issues on the prior commit. "
+        "Your workspace IS the previous coder branch — the prior "
+        "implementation is already in your tree (open `git log` to see). "
+        "**Patch the listed items in place — do not reimplement from "
+        "scratch.** Keep every working part of the prior code; only "
+        "change what the listed feedback names.",
         "",
-        "**Comments are accumulated across ALL prior rework attempts**, "
-        "not just the most recent reviewer session. Earlier flags (e.g. "
-        "missing auth middleware, missing API endpoints) are listed even "
-        "if not repeated by the latest reviewer — they remain unresolved "
-        "until you explicitly address them. Treat the full list as a "
-        "checklist; do not assume an earlier issue was silently fixed.",
+        "Only the LATEST bounce's feedback is included below (the "
+        "10-minute window around the most recent comment). Earlier "
+        "bounces' feedback was either already addressed in the code "
+        "you now see, or the latest bounce decided to re-raise it — "
+        "either way, the items below are what's still outstanding.",
         "",
     ]
     for f in rework_features:
@@ -1660,10 +1785,13 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     # Reviewer pre-checkout: land the agent on the session branch under
     # review so its first `git log`/`git show` runs against the right
-    # tree. Coder + designer stay on whatever branch `_reset_workspace`
-    # left them on (main/master) — the 1-PR model doesn't have a sprint
-    # integration branch to switch to, and post_coder cuts the session
-    # branch off main itself.
+    # tree. Designer always stays on whatever branch `_reset_workspace`
+    # left them on (main/master) — designer commits docs straight to main.
+    # Coder: fresh first-pass stays on main and post_coder cuts the
+    # session branch itself; rework lands on the previous coder branch
+    # so the prior implementation persists — paired with the last-bounce
+    # feedback filter in _fetch_recent_review_comments, the coder
+    # patches in place against existing code instead of reimplementing.
     if persona == "reviewer" and product.get("_session_branch"):
         _checkout_branch(
             working_dir,
@@ -1678,6 +1806,26 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         # chmod AFTER the checkout. (Reviewer is read-only on workspace,
         # so this is defensive — kept symmetric with the prior code path.)
         _chmod_workspace_via_alpine(working_dir, product.get("name", "?"))
+    elif persona == "coder" and assigned_features:
+        rework_branch = _find_rework_branch(
+            assigned_features, product, product.get("name", "?"))
+        if rework_branch:
+            log.info(
+                f"[{product.get('name','?')}] coder rework pre-checkout: "
+                f"landing on {rework_branch!r} to preserve prior "
+                f"implementation"
+            )
+            ok = _checkout_branch(
+                working_dir, rework_branch,
+                product.get("name", str(working_dir)),
+            )
+            if ok:
+                # Same chmod-after-checkout rationale as the reviewer
+                # block above. The coder will write files (uid 1001),
+                # so it MUST have write access — without this re-chmod
+                # the first `write_file` would EACCES.
+                _chmod_workspace_via_alpine(
+                    working_dir, product.get("name", "?"))
 
     # Write sprint-scoped features.md to working dir (replaces any stale full-backlog copy)
     _write_sprint_features_md(working_dir, assigned_features, active_sprint_name)
