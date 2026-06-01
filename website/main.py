@@ -1796,6 +1796,24 @@ async def api_update_feature(
                                   # (Reviewing→Implementing), so this bypass is
                                   # defense-in-depth only.
         "reset_stuck",
+        "post-coder:test-env-broken",  # added 2026-06-01: env-broken handler
+                                  # in pipelines/post_coder.py resets a feature
+                                  # to Designed (or Approved when no design_doc)
+                                  # after pip-install / jest-missing / runner-
+                                  # ENOENT failures, on the principle that the
+                                  # coder isn't responsible for an env break.
+                                  # Implemented(rank 4) → Designed(rank 3) IS
+                                  # a downgrade. Without this bypass the env-
+                                  # broken PATCH got silent-422'd by the rank
+                                  # guard; the feature stayed at Implemented;
+                                  # reset_stuck eventually demoted it to
+                                  # Implementing; the agent re-claimed; env-
+                                  # broken fired again. Infinite loop with no
+                                  # path to Reviewing.
+                                  # Canonical 2026-06-01 DocumentSign #1102:
+                                  # 20+ Implemented↔Implementing transitions
+                                  # in ~4 hours, no progress to Reviewing,
+                                  # which is why "nothing is getting pushed".
     }
     if new_status_for_rank and _caller not in _RANK_GUARD_BYPASS:
         cur_rank = _FEATURE_PROGRESS_RANK.get(feature.status, 0)
