@@ -158,73 +158,111 @@ def _coder_stage_with_denylist(working_dir: str, _run, product_name: str = "?") 
 
 @contextlib.contextmanager
 def _workspace_symlink(working_dir: str, product_name: str = "?"):
-    """Make /workspace point at the current product's working_dir for the
-    duration of the wrapped block.
+    """Populate /workspace with subdir symlinks pointing at working_dir for
+    the duration of the wrapped block.
 
     Why: agent containers mount the product at /workspace, so designer
     Verify recipes (and the test code coders write following those recipes)
-    routinely use absolute /workspace/... paths. The post-coder pipeline
-    runs inside the pf-orchestrator container, which mounts the product at
+    routinely use absolute /workspace/... paths (`grep /workspace/src/...`,
+    `with open("/workspace/...")`, etc). The post-coder pipeline runs
+    inside the pf-orchestrator container where the product is mounted at
     /products/<name>/ — so /workspace/... resolves to a nonexistent path
-    and every test that greps it fails (canonical 2026-05-31 incident:
-    feature 1147's `test_audit_log_ddl_single_site` shipped real DDL
-    consolidation work but the test's `os.popen("grep ... /workspace/src/")`
-    returned 0 matches because /workspace doesn't exist in this container,
-    cascading 5+ features into rapid_flap blocks).
+    and every such test/recipe fails. Canonical 2026-05-31 cascade:
+    feature 1147 (audit_log DDL) shipped a real consolidation but the
+    test's `os.popen("grep ... /workspace/src/")` returned 0 matches and
+    rapid_flap'd the feature; same pattern hit 1148/1149/1140/etc.
 
-    Concurrency: the symlink is a single global path. Safe under the
-    orchestrator's per-product mutex (`tools.run_cycle` serializes
-    post-coder pipelines product-by-product) AND while only one product
-    is in flight at a time. If two products' post-coder pipelines were
-    ever interleaved, this would break — flag for replacement with a
-    chroot or per-process bind-mount if multi-product concurrency lands.
+    Strategy: bootstrap.sh creates /workspace as a dir owned by the
+    orchestrator user (uid 999) at container start (we cannot create
+    entries at / from a non-root process). At runtime, we populate that
+    dir with one symlink per top-level entry in working_dir
+    (`/workspace/src -> /products/X/src`, `/workspace/tests -> ...`,
+    `/workspace/docs -> ...`, etc.). Then `/workspace/src/db.py` resolves
+    to `/products/X/src/db.py`. We unlink those subdir symlinks on exit;
+    the /workspace dir itself stays in place for the next pipeline run.
 
-    Idempotency: if /workspace already exists (dev env, prior crashed
-    pipeline left a stale symlink), the CM logs and yields without
-    swapping. Removing someone else's mount-point would be worse than
-    the path bug we're patching.
+    Concurrency: the /workspace symlink farm is single-global. Safe under
+    the orchestrator's per-product mutex (`tools.run_cycle` serializes
+    post-coder pipelines product-by-product) and while only one product is
+    in flight at a time. Multi-product concurrent post-coder pipelines
+    would clash — flag for replacement with a chroot or per-process bind
+    mount if that's ever wanted.
 
-    Band-aid: the proper fix is a designer/coder prompt change that
-    forbids absolute /workspace/... paths in Verify recipes and test
-    code. Tracked separately.
+    Idempotency: we create each subdir symlink via `os.symlink` to a
+    `.<name>.symlink_tmp` then `os.replace` over the target. `os.replace`
+    is atomic and works on symlinks, so a crashed prior pipeline leaving
+    stale links gets cleanly overwritten. Pre-existing non-symlink
+    entries (e.g. a regular file someone dropped in /workspace) are
+    left alone and logged.
+
+    Band-aid: proper fix is designer/coder prompts forbidding absolute
+    /workspace/... paths in Verify recipes and test code. Tracked
+    separately.
     """
-    link = Path("/workspace")
-    if link.exists() or link.is_symlink():
-        log.debug(
-            f"[workspace-symlink] {product_name}: /workspace already exists "
-            f"(symlink={link.is_symlink()}); skipping band-aid"
+    workspace = Path("/workspace")
+    if not workspace.is_dir() or workspace.is_symlink():
+        # bootstrap.sh creates the dir; if it's missing the container is
+        # mis-provisioned. Skip the band-aid and let the underlying path
+        # bug surface, with a loud warning.
+        log.warning(
+            f"[workspace-symlink] {product_name}: /workspace is not a "
+            f"plain directory (is_symlink={workspace.is_symlink()}, "
+            f"exists={workspace.exists()}). Check that bootstrap.sh ran "
+            f"the workspace-mkdir step. Test/verify checks will run "
+            f"without the band-aid."
         )
         yield
         return
-    created = False
+    src_root = Path(working_dir)
+    created_links: list[Path] = []
     try:
         try:
-            link.symlink_to(working_dir, target_is_directory=True)
-            created = True
-            log.info(
-                f"[workspace-symlink] {product_name}: /workspace -> "
-                f"{working_dir} (band-aid for absolute /workspace/... paths)"
-            )
+            entries = list(src_root.iterdir())
         except OSError as e:
-            # Filesystem doesn't support symlinks (rare in Linux containers
-            # but possible on overlay-fs edge cases) or insufficient perms.
-            # Don't fail the pipeline — the test/verify checks will just see
-            # the underlying path bug as before.
             log.warning(
-                f"[workspace-symlink] {product_name}: could not create "
-                f"/workspace symlink ({e}); test/verify checks will run "
-                f"without the band-aid"
+                f"[workspace-symlink] {product_name}: cannot list "
+                f"{src_root} ({e}); skipping band-aid"
+            )
+            yield
+            return
+        for entry in entries:
+            link_path = workspace / entry.name
+            tmp_link = workspace / f".{entry.name}.symlink_tmp"
+            try:
+                if tmp_link.is_symlink() or tmp_link.exists():
+                    tmp_link.unlink()
+                tmp_link.symlink_to(
+                    entry,
+                    target_is_directory=entry.is_dir(),
+                )
+                os.replace(tmp_link, link_path)
+                created_links.append(link_path)
+            except OSError as e:
+                log.warning(
+                    f"[workspace-symlink] {product_name}: could not link "
+                    f"{link_path} -> {entry} ({e}); continuing"
+                )
+                try:
+                    if tmp_link.is_symlink() or tmp_link.exists():
+                        tmp_link.unlink()
+                except OSError:
+                    pass
+        if created_links:
+            log.info(
+                f"[workspace-symlink] {product_name}: populated /workspace "
+                f"with {len(created_links)} subdir symlink(s) -> "
+                f"{working_dir} (band-aid for absolute /workspace/... paths)"
             )
         yield
     finally:
-        if created:
+        for link_path in created_links:
             try:
-                link.unlink()
+                if link_path.is_symlink():
+                    link_path.unlink()
             except OSError as e:
                 log.warning(
-                    f"[workspace-symlink] {product_name}: failed to clean up "
-                    f"/workspace symlink ({e}); next pipeline run will skip "
-                    f"the band-aid (idempotency path) until manually removed"
+                    f"[workspace-symlink] {product_name}: failed to clean "
+                    f"up {link_path} ({e}); next pipeline run will overwrite"
                 )
 
 
