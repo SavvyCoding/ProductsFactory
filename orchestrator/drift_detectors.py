@@ -884,41 +884,50 @@ def post_findings(
         if existing is None:
             existing = _recent_drift_comments(pm_client, f.feature_id)
             _per_feature_cache[f.feature_id] = existing
-        if body in existing:
+        is_dupe = body in existing
+        if is_dupe:
             skipped_dupe += 1
-            continue
-        try:
-            resp = pm_client.post(
-                f"/api/features/{f.feature_id}/comments",
-                json={"author": "drift-scanner", "body": body},
-            )
-            if 200 <= resp.status_code < 300:
-                posted += 1
-                # Remember our own post so a second finding with the
-                # same body in the same cycle doesn't double-post.
-                existing.append(body)
-                log.info(
-                    "[drift-scanner] %s: filed %s on feature #%s",
-                    product_name, f.category, f.feature_id,
+        else:
+            try:
+                resp = pm_client.post(
+                    f"/api/features/{f.feature_id}/comments",
+                    json={"author": "drift-scanner", "body": body},
                 )
-                # Auto-heal actuator (per-category, opt-in via
-                # _AUTO_HEAL_ACTIONS map). Runs AFTER the comment is
-                # posted so the operator still sees the diagnosis trail
-                # even if the heal succeeds.
-                heal = _AUTO_HEAL_ACTIONS.get(f.category)
-                if heal is not None:
-                    heal(pm_client, f, product_name)
-            else:
+                if 200 <= resp.status_code < 300:
+                    posted += 1
+                    # Remember our own post so a second finding with the
+                    # same body in the same cycle doesn't double-post.
+                    existing.append(body)
+                    log.info(
+                        "[drift-scanner] %s: filed %s on feature #%s",
+                        product_name, f.category, f.feature_id,
+                    )
+                else:
+                    log.warning(
+                        "[drift-scanner] %s: POST comment for feature #%s "
+                        "returned %s",
+                        product_name, f.feature_id, resp.status_code,
+                    )
+            except Exception as e:
                 log.warning(
-                    "[drift-scanner] %s: POST comment for feature #%s "
-                    "returned %s",
-                    product_name, f.feature_id, resp.status_code,
+                    "[drift-scanner] %s: post finding raised %s; skipping",
+                    product_name, e,
                 )
-        except Exception as e:
-            log.warning(
-                "[drift-scanner] %s: post finding raised %s; skipping",
-                product_name, e,
-            )
+
+        # Auto-heal actuator runs REGARDLESS of comment dedupe (cycle CU
+        # 2026-06-01). The dedupe check is for the diagnostic comment
+        # only — it prevents log spam when the same finding cycles. The
+        # heal is the actual state-cleanup actuator and must run on
+        # every finding, including the dedupe path, so residual data
+        # state (like a phantom design_doc_path with an existing
+        # drift-scanner comment from before the heal was wired up) gets
+        # corrected. The heal itself is idempotent: PATCHing
+        # design_doc_path=null on a feature already null is harmless;
+        # the Designed→Approved demote is a no-op once status is no
+        # longer Designed.
+        heal = _AUTO_HEAL_ACTIONS.get(f.category)
+        if heal is not None:
+            heal(pm_client, f, product_name)
     if skipped_dupe:
         log.info(
             "[drift-scanner] %s: deduped %s finding(s) already on feature(s)",
