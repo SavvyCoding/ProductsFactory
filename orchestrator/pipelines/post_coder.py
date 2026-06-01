@@ -26,6 +26,7 @@ import json as _json
 import logging
 import os
 import re
+import shutil
 import subprocess as _sp
 from pathlib import Path
 
@@ -156,10 +157,22 @@ def _coder_stage_with_denylist(working_dir: str, _run, product_name: str = "?") 
     return (len(staged), [p for _, p in stripped])
 
 
+# Directory names to skip when populating /workspace. .git is the largest
+# (12MB+ for DocumentSign) and never referenced by Verify/test recipes;
+# .pytest_cache and .coverage rebuild themselves; __pycache__ / .venv /
+# node_modules are tooling caches the recipes never read. Excluding them
+# brings the copy cost from ~21s (full repo) down to ~0.5s.
+_WORKSPACE_COPY_EXCLUDE = frozenset({
+    ".git", ".pytest_cache", ".coverage", "__pycache__",
+    "node_modules", ".tox", ".venv", "venv", "env",
+})
+
+
 @contextlib.contextmanager
 def _workspace_symlink(working_dir: str, product_name: str = "?"):
-    """Populate /workspace with subdir symlinks pointing at working_dir for
-    the duration of the wrapped block.
+    """Populate /workspace as a real-file MIRROR of working_dir for the
+    duration of the wrapped block. (Name kept for back-compat with
+    callsites; the strategy is now copy-farm, not symlink-farm — see Why.)
 
     Why: agent containers mount the product at /workspace, so designer
     Verify recipes (and the test code coders write following those recipes)
@@ -172,28 +185,41 @@ def _workspace_symlink(working_dir: str, product_name: str = "?"):
     test's `os.popen("grep ... /workspace/src/")` returned 0 matches and
     rapid_flap'd the feature; same pattern hit 1148/1149/1140/etc.
 
-    Strategy: bootstrap.sh creates /workspace as a dir owned by the
-    orchestrator user (uid 999) at container start (we cannot create
-    entries at / from a non-root process). At runtime, we populate that
-    dir with one symlink per top-level entry in working_dir
-    (`/workspace/src -> /products/X/src`, `/workspace/tests -> ...`,
-    `/workspace/docs -> ...`, etc.). Then `/workspace/src/db.py` resolves
-    to `/products/X/src/db.py`. We unlink those subdir symlinks on exit;
-    the /workspace dir itself stays in place for the next pipeline run.
+    History of strategies (failed → working):
+      1. 2026-05-31 commit 5f31d80 — `os.symlink('/products/X', '/workspace')`.
+         Failed: orchestrator runs as uid 999 (per bootstrap.sh re-exec)
+         and cannot create entries at /. Inert; logged perm-denied every
+         time.
+      2. 2026-05-31 commit b90519a — bootstrap.sh pre-creates /workspace
+         as orchestrator-owned dir; CM populates it with subdir symlinks
+         (/workspace/src -> /products/X/src). Worked for direct path
+         access (cat /workspace/src/db.py) but BROKE under `grep -r
+         /workspace/ --include='*.py'`: GNU grep with -r does not follow
+         symlinks found during recursion (only when given as command-line
+         args). So recipes targeting the workspace root silently returned
+         0 matches. Canonical 2026-06-01 fire: feature 1148 grep recipe.
+      3. 2026-06-01 (this) — file-level mirror via shutil.copytree. The
+         shadow tree is real directories + real files (not symlinks),
+         so grep -r, find, python's os.walk, and pytest's collection all
+         see it as if it were the original repo. ~0.5s for DocumentSign
+         (2.3MB after excluding .git etc).
 
-    Concurrency: the /workspace symlink farm is single-global. Safe under
-    the orchestrator's per-product mutex (`tools.run_cycle` serializes
-    post-coder pipelines product-by-product) and while only one product is
-    in flight at a time. Multi-product concurrent post-coder pipelines
-    would clash — flag for replacement with a chroot or per-process bind
-    mount if that's ever wanted.
+    Excluded from the copy: see _WORKSPACE_COPY_EXCLUDE — `.git`,
+    `.pytest_cache`, `.coverage`, `__pycache__`, `node_modules`, `.tox`,
+    `.venv`, `venv`, `env`. These are tooling state / dep caches that
+    Verify recipes never reference and would multiply the copy size by
+    10x+.
 
-    Idempotency: we create each subdir symlink via `os.symlink` to a
-    `.<name>.symlink_tmp` then `os.replace` over the target. `os.replace`
-    is atomic and works on symlinks, so a crashed prior pipeline leaving
-    stale links gets cleanly overwritten. Pre-existing non-symlink
-    entries (e.g. a regular file someone dropped in /workspace) are
-    left alone and logged.
+    Concurrency: the /workspace mirror is single-global. Safe under the
+    orchestrator's per-product mutex (`tools.run_cycle` serializes
+    post-coder pipelines product-by-product) and while only one product
+    is in flight at a time. Multi-product concurrent post-coder pipelines
+    would clash — flag for replacement with a chroot or per-process
+    overlay mount if that's ever wanted.
+
+    Idempotency: on entry we wipe /workspace's contents (a previous
+    crashed pipeline may have left files). On exit we wipe again so the
+    next product's mirror starts clean.
 
     Band-aid: proper fix is designer/coder prompts forbidding absolute
     /workspace/... paths in Verify recipes and test code. Tracked
@@ -201,11 +227,8 @@ def _workspace_symlink(working_dir: str, product_name: str = "?"):
     """
     workspace = Path("/workspace")
     if not workspace.is_dir() or workspace.is_symlink():
-        # bootstrap.sh creates the dir; if it's missing the container is
-        # mis-provisioned. Skip the band-aid and let the underlying path
-        # bug surface, with a loud warning.
         log.warning(
-            f"[workspace-symlink] {product_name}: /workspace is not a "
+            f"[workspace-mirror] {product_name}: /workspace is not a "
             f"plain directory (is_symlink={workspace.is_symlink()}, "
             f"exists={workspace.exists()}). Check that bootstrap.sh ran "
             f"the workspace-mkdir step. Test/verify checks will run "
@@ -214,56 +237,78 @@ def _workspace_symlink(working_dir: str, product_name: str = "?"):
         yield
         return
     src_root = Path(working_dir)
-    created_links: list[Path] = []
+    if not src_root.is_dir():
+        log.warning(
+            f"[workspace-mirror] {product_name}: source {src_root} is "
+            f"not a directory; skipping band-aid"
+        )
+        yield
+        return
+
+    def _purge_workspace() -> None:
+        try:
+            for entry in workspace.iterdir():
+                try:
+                    if entry.is_dir() and not entry.is_symlink():
+                        shutil.rmtree(entry, ignore_errors=True)
+                    else:
+                        entry.unlink()
+                except OSError as e:
+                    log.warning(
+                        f"[workspace-mirror] {product_name}: could not "
+                        f"remove {entry} during purge ({e}); continuing"
+                    )
+        except OSError as e:
+            log.warning(
+                f"[workspace-mirror] {product_name}: could not iterate "
+                f"/workspace during purge ({e}); continuing"
+            )
+
+    _purge_workspace()
+    copied = 0
     try:
         try:
             entries = list(src_root.iterdir())
         except OSError as e:
             log.warning(
-                f"[workspace-symlink] {product_name}: cannot list "
+                f"[workspace-mirror] {product_name}: cannot list "
                 f"{src_root} ({e}); skipping band-aid"
             )
             yield
             return
         for entry in entries:
-            link_path = workspace / entry.name
-            tmp_link = workspace / f".{entry.name}.symlink_tmp"
+            if entry.name in _WORKSPACE_COPY_EXCLUDE:
+                continue
+            target = workspace / entry.name
             try:
-                if tmp_link.is_symlink() or tmp_link.exists():
-                    tmp_link.unlink()
-                tmp_link.symlink_to(
-                    entry,
-                    target_is_directory=entry.is_dir(),
-                )
-                os.replace(tmp_link, link_path)
-                created_links.append(link_path)
-            except OSError as e:
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.copytree(
+                        entry, target,
+                        symlinks=True,
+                        ignore_dangling_symlinks=True,
+                        ignore=shutil.ignore_patterns(
+                            *_WORKSPACE_COPY_EXCLUDE,
+                        ),
+                    )
+                else:
+                    shutil.copy2(entry, target, follow_symlinks=False)
+                copied += 1
+            except (OSError, shutil.Error) as e:
                 log.warning(
-                    f"[workspace-symlink] {product_name}: could not link "
-                    f"{link_path} -> {entry} ({e}); continuing"
+                    f"[workspace-mirror] {product_name}: could not copy "
+                    f"{entry.name} -> /workspace/{entry.name} ({e}); "
+                    f"continuing"
                 )
-                try:
-                    if tmp_link.is_symlink() or tmp_link.exists():
-                        tmp_link.unlink()
-                except OSError:
-                    pass
-        if created_links:
+        if copied:
             log.info(
-                f"[workspace-symlink] {product_name}: populated /workspace "
-                f"with {len(created_links)} subdir symlink(s) -> "
-                f"{working_dir} (band-aid for absolute /workspace/... paths)"
+                f"[workspace-mirror] {product_name}: mirrored {copied} "
+                f"top-level entries to /workspace from {working_dir} "
+                f"(band-aid for absolute /workspace/... paths; "
+                f"grep -r compatible)"
             )
         yield
     finally:
-        for link_path in created_links:
-            try:
-                if link_path.is_symlink():
-                    link_path.unlink()
-            except OSError as e:
-                log.warning(
-                    f"[workspace-symlink] {product_name}: failed to clean "
-                    f"up {link_path} ({e}); next pipeline run will overwrite"
-                )
+        _purge_workspace()
 
 
 def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> list[str]:
