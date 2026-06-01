@@ -139,7 +139,7 @@ def _reconcile_session_result(working_dir: str, product_id: int, exit_code: int,
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
             for entry in features:
-                if _apply_session_entry(client, entry):
+                if _apply_session_entry(client, entry, working_dir=working_dir):
                     applied += 1
     except Exception as e:
         log.warning(f"[reconcile] PM API error: {e}")
