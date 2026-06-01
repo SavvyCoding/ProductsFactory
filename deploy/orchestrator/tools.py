@@ -396,6 +396,19 @@ def run_cycle(args: dict, **kwargs) -> str:
                 for s in active_sessions:
                     if s.get("id") in already_targeted:
                         continue
+                    # `wrapping` sessions exited their agent container by
+                    # design — the orchestrator-side post-coder pipeline is
+                    # what's still running. A missing container is the
+                    # expected state, NOT an orphan. Skip the docker-ps
+                    # orphan check; the dedicated 10-min stale-wrapping
+                    # watchdog (separate endpoint) handles wrapping that
+                    # genuinely hangs. Without this skip, the addition of
+                    # `wrapping` to /api/sessions/active (cycle CX-2) would
+                    # cause every wrapping session to be killed seconds
+                    # after the agent finishes — defeats the purpose of the
+                    # state machine.
+                    if s.get("status") == "wrapping":
+                        continue
                     cid = s.get("container_id")
                     if not cid:
                         continue
