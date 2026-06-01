@@ -258,6 +258,36 @@ class TestCheckExpected:
         assert _check_expected("", 0, "") is True
         assert _check_expected("anything", 0, "``") is True
 
+    def test_prose_with_multiple_backticks_matches_when_lines_equal_segments(self):
+        # Regression for 2026-06-01 DocumentSign #1147. Designer wrote:
+        #   Expected: first `wc -l` outputs `1` (...), second `wc -l` outputs `1` (...).
+        # The grep recipe correctly produced "1\n1". Pre-fix the matcher
+        # substring-checked the whole prose against "1\n1" → no match →
+        # rejected. The prose-with-multiple-backticks fallback now checks
+        # that every stdout LINE equals some backtick segment, so this passes.
+        expected = (
+            "first `wc -l` outputs `1` (exactly one occurrence in src/), "
+            "second `wc -l` outputs `1` (that occurrence is in `src/db.py`)."
+        )
+        assert _check_expected("1\n1", 0, expected) is True
+        # Trailing newline tolerated (real grep output usually ends in \n)
+        assert _check_expected("1\n1\n", 0, expected) is True
+
+    def test_prose_with_multiple_backticks_rejects_when_line_isnt_a_segment(self):
+        # Don't false-pass hollow output. `1` is a segment in Expected,
+        # but stdout `100` does not EQUAL any segment — substring `1 in 100`
+        # would have matched, but the fallback uses equality so this is
+        # correctly rejected.
+        expected = (
+            "first `wc -l` outputs `1`, second `wc -l` outputs `1` (...)"
+        )
+        assert _check_expected("100", 0, expected) is False
+        # Empty stdout is also a clear miss
+        assert _check_expected("", 0, expected) is False
+        # Stdout line that isn't ANY segment fails — `2` isn't in the
+        # Expected segments
+        assert _check_expected("1\n2", 0, expected) is False
+
 
 # ── _run_verify ──────────────────────────────────────────────────────────────
 
