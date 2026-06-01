@@ -1500,7 +1500,32 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
                         pypi = _canon(_PYPI_NAME_MAP.get(top, top))
                         _imported.setdefault(pypi, f)
 
-            _missing = sorted(set(_imported) - _declared)
+            # Namespace packages: many PyPI distributions can install a single
+            # import namespace. e.g. `opentelemetry-api`, `opentelemetry-sdk`,
+            # `opentelemetry-instrumentation-fastapi`, `opentelemetry-exporter-
+            # otlp-proto-grpc` all provide modules under the `opentelemetry`
+            # namespace, but no single distribution is named `opentelemetry`.
+            # Naive strict-equality (`opentelemetry` in _declared`) fires a
+            # false positive when any hyphenated member is declared but the
+            # bare prefix is not. Canonical 2026-06-01 DocumentSign #1101
+            # cascade: requirements.txt declared all four opentelemetry-*
+            # distributions, code did `from opentelemetry.trace import
+            # get_tracer_provider`, Guard 18 reported `opentelemetry` missing
+            # and bounced the feature; agent could not fix because
+            # `pip install opentelemetry` is not a real package.
+            # Conservative whitelist — extend only when a confirmed FP hits
+            # a new namespace family.
+            _NAMESPACE_PREFIXES = {
+                "opentelemetry",  # otel-api/sdk/instrumentation-*/exporter-*
+                "azure",          # azure-core/storage-*/identity/...
+            }
+            _missing = sorted(
+                pkg for pkg in _imported
+                if pkg not in _declared and not (
+                    pkg in _NAMESPACE_PREFIXES
+                    and any(d.startswith(pkg + "-") for d in _declared)
+                )
+            )
             if _missing:
                 sample = ", ".join(
                     f"`{pkg}` (used in {_imported[pkg]})" for pkg in _missing[:5]
