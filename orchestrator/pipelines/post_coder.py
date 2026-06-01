@@ -2705,6 +2705,40 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         return pushed_ids
     log.info(f"[post-coder] {pname}: pushed branch {branch}")
 
+    # Branch-tracking PATCH: persist `branch_name` on every assigned
+    # feature row IMMEDIATELY after push, before any post-coder gate runs.
+    # Without this, gate-bounced features (lint/test/verify rejects in
+    # the section below) end at status=Implementing with NULL branch_name
+    # in the DB — even though the code IS on origin at `branch`. The next
+    # rework cycle's pre-checkout (docker_runner._find_rework_branch)
+    # then can't locate the prior implementation and falls back to fresh
+    # main, defeating the purpose of the rework-persist machinery.
+    # Canonical incident: 2026-06-01 04:46 — feature #1062 bounced on
+    # test-check before the trailing Reviewing-PATCH at line 3192 ever
+    # ran; subsequent rework opened a fresh coder/<new_uid> off main.
+    # The PATCH here is best-effort; failure logs at debug because the
+    # downstream Reviewing-PATCH will retry the same field if gates pass.
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as _bt_client:
+            for _fid in feat_ids:
+                try:
+                    _bt_client.patch(
+                        f"/api/features/{_fid}",
+                        json={
+                            "branch_name": branch,
+                            "changed_by": "post-coder:branch-tracking",
+                        },
+                    )
+                except Exception as _e:
+                    log.debug(
+                        f"[post-coder] {pname}: branch_name PATCH for "
+                        f"#{_fid} failed: {_e}"
+                    )
+    except Exception as _e:
+        log.debug(
+            f"[post-coder] {pname}: branch-tracking PATCH session failed: {_e}"
+        )
+
     # 4. PR resolution. Two paths:
     #   - rework_pr_mode: reuse the existing open session PR we just force-
     #     pushed to (preserves the reviewer's comment thread).
@@ -2771,6 +2805,36 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                 f"[post-coder] {pname}: opened session PR #{pr_number} "
                 f"({branch} → {default_branch}) — {pr_url}"
             )
+            # PR-tracking PATCH: persist pr_number/pr_url on every assigned
+            # feature row IMMEDIATELY after PR creation. Same rationale as
+            # the branch-tracking PATCH above — gate-bounced features need
+            # the PR linkage in DB so the rework pre-checkout can find
+            # the prior implementation. The Reviewing PATCH at the bottom
+            # of this function sets these again on the all-gates-pass
+            # path; this early PATCH is the gate-bounce path's only
+            # opportunity to write them.
+            try:
+                with httpx.Client(base_url=PM_API_URL, timeout=10) as _pt_client:
+                    for _fid in feat_ids:
+                        try:
+                            _pt_client.patch(
+                                f"/api/features/{_fid}",
+                                json={
+                                    "pr_number": pr_number,
+                                    "pr_url": pr_url,
+                                    "changed_by": "post-coder:pr-tracking",
+                                },
+                            )
+                        except Exception as _e:
+                            log.debug(
+                                f"[post-coder] {pname}: pr_number PATCH "
+                                f"for #{_fid} failed: {_e}"
+                            )
+            except Exception as _e:
+                log.debug(
+                    f"[post-coder] {pname}: pr-tracking PATCH session "
+                    f"failed: {_e}"
+                )
         except Exception as e:
             log.warning(
                 f"[post-coder] {pname}: session PR create raised: {e} — "
