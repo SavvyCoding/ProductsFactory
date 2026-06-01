@@ -5,7 +5,7 @@ Separate from ORM models so the API contract is explicit.
 
 from datetime import datetime, date
 from typing import Optional, List
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 # Valid status values — kept in sync with models.py constants
 PM_ALLOWED_TRANSITIONS: dict[str, list[str]] = {
@@ -96,6 +96,65 @@ class FeatureCreate(BaseModel):
     story_points: Optional[int] = None
     due_date:     Optional[date] = None
     status:       str = "Pending"
+
+    @field_validator("name")
+    @classmethod
+    def name_substantive(cls, v: str) -> str:
+        # Reject stub/placeholder names that the designer can't work with.
+        # Canonical 2026-06-01 incident: 6 of 13 Blocked features on
+        # DocumentSign (1110, 1111, 1151, 1164, 1165, 1172) were stubs
+        # with name in {"test","x","DESIGNER_ASSIGN"} and null/trivial
+        # description — they polluted the backlog, burned designer cycles,
+        # and each got rejected with `Insufficient spec — cannot design
+        # from empty story`. Reject at the API boundary instead.
+        s = (v or "").strip()
+        if len(s) < 3:
+            raise ValueError(
+                f"name must be at least 3 characters (got {len(s)}); "
+                f"give the feature a descriptive title"
+            )
+        _STUB_NAMES = {
+            "test", "tests", "x", "y", "todo", "tbd", "draft",
+            "placeholder", "designer_assign", "designer-assign",
+            "fixme", "wip", "temp", "tmp", "asdf", "foo", "bar",
+            "feature", "bug", "chore",  # the type, not a name
+        }
+        if s.lower() in _STUB_NAMES:
+            raise ValueError(
+                f"name {v!r} looks like a stub/placeholder — give the "
+                f"feature a real, descriptive name. To file a quick-note "
+                f"task, use a feature_comments POST on an existing feature."
+            )
+        return v
+
+    @model_validator(mode="after")
+    def description_substantive(self) -> "FeatureCreate":
+        # Description is required for any creatable feature. Stub features
+        # with null/trivial descriptions cannot be designed and waste
+        # designer cycles. Reconciler-filed chores already pass multi-
+        # paragraph descriptions; PMs creating real features have something
+        # to say. The 10-char minimum filters single-word "yes"/"fix it"
+        # without being noisy on terse genuine descriptions.
+        #
+        # Uses model_validator (not field_validator) so the check runs even
+        # when `description` is omitted from the request body and falls
+        # through to the Optional[str]=None default — field_validators
+        # skip default values in Pydantic v2, but the API still needs to
+        # reject "no description provided" the same as "description: ''".
+        v = self.description
+        if v is None or not v.strip():
+            raise ValueError(
+                "description is required — the designer cannot author a "
+                "design doc from an empty story. Include at least one "
+                "sentence describing the desired behavior."
+            )
+        if len(v.strip()) < 10:
+            raise ValueError(
+                f"description must be at least 10 characters (got "
+                f"{len(v.strip())}); the designer needs enough context "
+                f"to author a design doc"
+            )
+        return self
 
     @field_validator("priority")
     @classmethod
