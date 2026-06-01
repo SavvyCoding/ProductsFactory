@@ -203,6 +203,60 @@ class TestDepsGuard:
             f"got: {violations}"
         )
 
+    def test_namespace_package_opentelemetry(self, tmp_path):
+        # `import opentelemetry` (or `from opentelemetry.x import y`) is
+        # satisfied by ANY `opentelemetry-*` distribution being declared:
+        # the PyPI ecosystem packages otel as many sub-distributions, none
+        # of which is canonically named `opentelemetry`. Canonical 2026-06-01
+        # DocumentSign #1101 cascade: strict equality bounced the feature
+        # because `opentelemetry` ≠ `opentelemetry-api`.
+        repo = _init_repo(tmp_path)
+        _write_and_commit(repo, {
+            "requirements.txt": (
+                "opentelemetry-api==1.42.1\n"
+                "opentelemetry-sdk==1.42.1\n"
+                "opentelemetry-instrumentation-fastapi==0.63b1\n"
+                "opentelemetry-exporter-otlp-proto-grpc==1.42.1\n"
+            ),
+            "tests/__init__.py": "",
+        }, "initial")
+        _write_and_commit(repo, {
+            "tests/test_tracing.py": (
+                "from opentelemetry import trace\n"
+                "from opentelemetry.sdk.trace import TracerProvider\n"
+                "def test_x(): assert trace.get_tracer_provider() is not None\n"
+            ),
+        }, "import otel namespace package")
+
+        violations = _post_coder_lint_check(str(repo), _make_run(str(repo)))
+        assert _violation(violations) is None, (
+            f"opentelemetry namespace prefix must be satisfied by any "
+            f"opentelemetry-* declared dep, got: {violations}"
+        )
+
+    def test_namespace_prefix_must_match_with_hyphen(self, tmp_path):
+        # `import django` must NOT be satisfied by `django-cors-headers`
+        # alone — django itself is a separate distribution. Only specific
+        # whitelisted namespace prefixes get the relaxation; everyone
+        # else is strict.
+        repo = _init_repo(tmp_path)
+        _write_and_commit(repo, {
+            "requirements.txt": "django-cors-headers>=4.0\n",
+            "src/__init__.py": "",
+        }, "initial")
+        _write_and_commit(repo, {
+            "src/api.py": "import django\nprint(django.VERSION)\n",
+        }, "import bare django without declaring it")
+
+        violations = _post_coder_lint_check(str(repo), _make_run(str(repo)))
+        v = _violation(violations)
+        assert v is not None, (
+            f"`import django` with only django-cors-headers declared must "
+            f"still fire (django is not a whitelisted namespace), got: "
+            f"{violations}"
+        )
+        assert "django" in v
+
     def test_multiple_undeclared_listed_in_message(self, tmp_path):
         repo = _init_repo(tmp_path)
         _write_and_commit(repo, {
