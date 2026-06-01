@@ -88,6 +88,36 @@ If ANY of these is true → **SPLIT before designing**:
   - Any single AC's algorithm is >20 lines AND there are >2 such ACs
   - You cannot honestly answer "yes" to #5
 
+**Runtime-tool stories — split aggressively.** When ANY AC requires an
+external runtime executable to be invoked by the test (`chromium` /
+`playwright` browser, `pre-commit run`, `locust` subprocess,
+`docker-compose up`, `ruff check` subprocess, `eslint` CLI,
+`pytest --browser`, anything spawned via `subprocess.run` of a named
+binary), treat each such AC as its own subsystem AND split the story
+into:
+
+  - **Story A — fixture availability.** Sole ACs: "tool X is present
+    in the agent image" + "calling X returns the expected version
+    string." No application tests yet; just a smoke probe (`shutil.which(X)`
+    + `subprocess.run([X, '--version'])`). If the tool is genuinely
+    unavailable in the image, the coder marks Story A Blocked and the
+    rest never starts — better to discover that immediately than to
+    have 4 dependent stories all hollow-testing.
+  - **Story B+ — one test per AC**, each depending on Story A. Each
+    child story is exactly one fixture + one test using it. NO story
+    bundles two e2e tests; the matrix of (fixture-setup × test-logic)
+    blows up the subsystem count and reviewers will catch a different
+    surface bug each round, tripping `supervisor.divergent_review_
+    feedback` after three rounds.
+
+Canonical 2026-06-01 cascade: DocumentSign features 1082 (pre-commit),
+1089 (Playwright infra), 1090 / 1091 / 1095 (three separate Playwright
+e2e tests as single stories), and 1080 (locust load-testing infra) all
+auto-blocked at fix_attempts=5 or by divergent_review_feedback because
+each AC required BOTH a runtime tool's availability AND the test
+itself — too much to land in one coder cycle. They would have shipped
+as 1 fixture-availability story + 1 test-per-AC follow-ups.
+
 Splitting workflow (see §SPLIT below). After splitting, the parent
 story is **Rejected as "Replaced"** (terminal — not Blocked), and the
 children inherit the parent's `phase_id` plus a `parent_id` pointing

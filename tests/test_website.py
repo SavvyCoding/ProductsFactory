@@ -614,21 +614,29 @@ class TestApiFeatures:
     def test_create_feature_json(self, client, db):
         p = make_product(db)
         r = client.post("/api/features",
-                        json={"product_id": p.id, "name": "json-feature"})
+                        json={"product_id": p.id,
+                              "name": "json-feature",
+                              "description": "A test feature for the JSON path."})
         assert r.status_code == 201
         assert r.json()["status"] == "Pending"
 
     def test_create_ai_feature(self, client, db):
         p = make_product(db)
         r = client.post("/api/features",
-                        json={"product_id": p.id, "name": "ai-feat", "source": "ai"})
+                        json={"product_id": p.id,
+                              "name": "ai-feat",
+                              "description": "AI-generated feature description.",
+                              "source": "ai"})
         assert r.status_code == 201
         assert r.json()["source"] == "ai"
 
     def test_create_feature_invalid_source(self, client, db):
         p = make_product(db)
         r = client.post("/api/features",
-                        json={"product_id": p.id, "name": "x", "source": "robot"})
+                        json={"product_id": p.id,
+                              "name": "Valid feature name",
+                              "description": "Description long enough for validation.",
+                              "source": "robot"})
         assert r.status_code == 422
 
     def test_story_size_cap_ac_bullets_under_limit(self, client, db):

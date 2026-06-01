@@ -1923,12 +1923,20 @@ async def api_update_feature(
             # holdpen sprint — just set the feature status to Blocked. PMs
             # re-engage by PATCHing status back to Approved/Designed.
             feature.status = "Blocked"
-            if not feature.blocked_reason:
-                feature.blocked_reason = (
-                    f"Auto-blocked: fix_attempts={new_attempts} >= "
-                    f"max_fix_attempts={max_fix} via {trigger}. "
-                    f"Needs human triage."
-                )
+            # Always overwrite blocked_reason on cap-route — without this,
+            # a feature that was previously Blocked (with some prior reason),
+            # then PM-reset to Approved (carrying the old reason text), then
+            # hits the cap again, keeps the STALE reason in the DB. The PM
+            # sees outdated context and triages against the wrong root cause.
+            # Canonical 2026-06-01 incident: feature 1080 (Load testing) was
+            # bulk-reset at 04:05 ("PM bulk unblock"), re-blocked at 14:00
+            # via cap-route, but its blocked_reason still showed the 04:05
+            # reset text instead of the 14:00 cap-route diagnosis.
+            feature.blocked_reason = (
+                f"Auto-blocked: fix_attempts={new_attempts} >= "
+                f"max_fix_attempts={max_fix} via {trigger}. "
+                f"Needs human triage."
+            )
             db.add(FeatureChangelog(
                 feature_id=feature_id,
                 field="status",
