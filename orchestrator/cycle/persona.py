@@ -95,32 +95,57 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
                     "product_id": product_id,
                     "reason": f"{len(rework_codeable)} rework features (changes_requested)"}
 
-        # 2b. Designer — Approved features without a design doc.
-        # Runs BEFORE the fresh first-pass coder so the designer drains
-        # the backlog continuously instead of being starved whenever
-        # the coder has a few pre-designed features to chew through.
-        # Canonical incident: 2026-06-01 cycle H — 41 Approved features
-        # waited for design while the coder cycled 10 sessions on a
-        # handful of already-designed features, with 0 features pushed
-        # for ~90 minutes. The old order (coder before designer) put
-        # any pre-designed feature ahead of the entire design backlog,
-        # so the system reliably starved the designer whenever ANY
-        # feature was codeable.
+        # 2b/2c. Designer vs fresh-coder — balance by queue depth.
+        # Whichever backlog is larger goes first; if only one has work,
+        # it goes alone. This is the stable balancing rule that avoids
+        # BOTH starvation modes the system has hit:
+        #
+        #   - 2026-06-01 cycle H: coder-first starved the designer.
+        #     41 Approved features waited for design while the coder
+        #     cycled 10 sessions on a handful of pre-designed features.
+        #     0 features pushed for ~90 minutes.
+        #   - 2026-06-01 cycle DD: designer-first starved the coder.
+        #     44 Designed features ready to code, 9 Approved features
+        #     needing design — designer monopolized every cycle for
+        #     ~1.5 hours, ZERO coder runs, nothing reaching Reviewing,
+        #     nothing merging. User-reported as "nothing has been
+        #     shipped in last many hours."
+        #
+        # Naive priority orderings (designer-first OR coder-first) are
+        # unstable: whichever persona is faster monopolizes; the slower
+        # persona's queue grows unbounded. Balancing by depth keeps both
+        # queues bounded — when one queue is larger, it runs; equilibrium
+        # is when both are roughly equal.
         approved_no_design = [f for f in non_terminal
                               if f.get("status") == "Approved" and not f.get("design_doc_path")]
-        if approved_no_design:
-            return {"action": "launch_session", "persona": "designer",
-                    "product_id": product_id,
-                    "reason": f"{len(approved_no_design)} Approved features need design docs"}
-
-        # 2c. Fresh first-pass coder — features with a design doc ready
-        # to be implemented for the first time. Lower priority than
-        # rework (2a) and designer (2b) so the design backlog drains
-        # and reviewer-bounced features get unstuck before fresh work.
         first_pass_codeable = [f for f in non_terminal
                                if f.get("status") == "Designed"
                                or (f.get("status") == "Approved"
                                    and f.get("design_doc_path"))]
+
+        if approved_no_design and first_pass_codeable:
+            # Both queues have work: run whichever is deeper. Ties go
+            # to coder so PRs reach Reviewing and merging — the system's
+            # ultimate throughput metric.
+            if len(first_pass_codeable) >= len(approved_no_design):
+                return {"action": "launch_session", "persona": "coder",
+                        "product_id": product_id,
+                        "reason": (
+                            f"{len(first_pass_codeable)} features ready to code "
+                            f"(first-pass; deeper queue than designer's "
+                            f"{len(approved_no_design)} Approved)"
+                        )}
+            return {"action": "launch_session", "persona": "designer",
+                    "product_id": product_id,
+                    "reason": (
+                        f"{len(approved_no_design)} Approved features need design docs "
+                        f"(deeper queue than coder's "
+                        f"{len(first_pass_codeable)} first-pass)"
+                    )}
+        if approved_no_design:
+            return {"action": "launch_session", "persona": "designer",
+                    "product_id": product_id,
+                    "reason": f"{len(approved_no_design)} Approved features need design docs"}
         if first_pass_codeable:
             return {"action": "launch_session", "persona": "coder",
                     "product_id": product_id,
