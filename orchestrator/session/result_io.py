@@ -215,7 +215,7 @@ def _live_poll_session_result(working_dir: str, stop_event: threading.Event, per
                         elif persona in ("coder", "reviewer") and entry.get("status") == "Pushed":
                             log.warning(f"[{label}] Blocked agent-written Pushed for feature #{entry.get('id')} (persona={persona}) — PRs must merge via GitHub")
                         else:
-                            _apply_session_entry(client, entry)
+                            _apply_session_entry(client, entry, working_dir=working_dir)
                     except Exception:
                         pass  # malformed line — skip, don't block the rest
                     applied_up_to += 1
