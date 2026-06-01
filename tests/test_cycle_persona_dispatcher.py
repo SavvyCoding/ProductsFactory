@@ -148,6 +148,55 @@ class TestDispatcherBalance:
         assert result["persona"] == "coder"
         assert "rework" in result["reason"].lower()
 
+    def test_rework_near_cap_loses_preemption(self):
+        """Cycle DM-2: rework features with fix_attempts >= 3 don't preempt.
+        They fall into the first-pass pool and compete fairly. Canonical:
+        #1178 cycling at fix_attempts=3 while 30+ fresh features sit idle."""
+        features = (
+            # ONE stuck rework feature at fix_attempts=3 (no longer preempts)
+            [_feature(1178, "Implementing",
+                      review_outcome="changes_requested",
+                      fix_attempts=3,
+                      design_doc_path="docs/1178.md")]
+            # 30 fresh codeable features
+            + [_feature(2000 + i, "Designed",
+                        design_doc_path=f"docs/{2000+i}.md")
+               for i in range(30)]
+            # 2 features needing design
+            + [_feature(3000 + i, "Approved", design_doc_path=None)
+               for i in range(2)]
+        )
+        client = _client_for_features(features)
+        result = _decide_action(product_id=25, client=client)
+        assert result["persona"] == "coder", (
+            f"coder should win (31 codeable vs 2 design), got {result}"
+        )
+        # The reason should reflect the first-pass count (30 fresh + 1
+        # de-prioritized rework = 31), not the "1 rework features" line.
+        assert "31" in result["reason"], (
+            f"de-prioritized rework should be in first-pass pool, got: {result}"
+        )
+
+    def test_low_attempts_rework_still_preempts(self):
+        """Rework at fix_attempts < 3 STILL preempts — fresh-from-reviewer
+        feedback is time-sensitive and the rework workspace has the hot
+        prior implementation."""
+        features = (
+            [_feature(1, "Implementing",
+                      review_outcome="changes_requested",
+                      fix_attempts=2,
+                      design_doc_path="docs/1.md")]
+            + [_feature(2000 + i, "Designed",
+                        design_doc_path=f"docs/{2000+i}.md")
+               for i in range(30)]
+        )
+        client = _client_for_features(features)
+        result = _decide_action(product_id=25, client=client)
+        assert result["persona"] == "coder"
+        assert "rework" in result["reason"].lower(), (
+            f"low-attempts rework still preempts, got: {result}"
+        )
+
     def test_reviewer_preempts_everything(self):
         """A Reviewing feature with a PR outranks every other branch.
         Open PRs MUST be reviewed before more work piles up."""

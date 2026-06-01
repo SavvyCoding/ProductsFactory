@@ -87,9 +87,24 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
         # bounced the feature back, and the rework workspace already
         # carries the prior implementation (since 80f42e3). Run these
         # before anything that competes for the coder.
+        #
+        # Cycle DM-2 (2026-06-01): rework features near the cap (fix_
+        # attempts >= REWORK_CAP_PROXIMITY) LOSE preemption priority.
+        # Canonical incident: DocumentSign #1178 cycled at fix_attempts
+        # 3→4→5 because the design doc required a runtime tool absent
+        # from the agent image. Each rework cycle monopolized the coder
+        # (always 2a preempted) while 30+ healthy fresh-codeable features
+        # sat idle. Doomed reworks should compete with fresh work, not
+        # block it — the rework still gets attention via the first-pass
+        # codeable pool below (which already accepts Implementing+
+        # changes_requested in its filter), it just no longer preempts.
+        # 2 more attempts either complete or cap-Block; meanwhile fresh
+        # features get throughput.
+        _REWORK_CAP_PROXIMITY = 3
         rework_codeable = [f for f in non_terminal
                            if f.get("status") == "Implementing"
-                           and f.get("review_outcome") == "changes_requested"]
+                           and f.get("review_outcome") == "changes_requested"
+                           and (f.get("fix_attempts") or 0) < _REWORK_CAP_PROXIMITY]
         if rework_codeable:
             return {"action": "launch_session", "persona": "coder",
                     "product_id": product_id,
@@ -121,7 +136,14 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
         first_pass_codeable = [f for f in non_terminal
                                if f.get("status") == "Designed"
                                or (f.get("status") == "Approved"
-                                   and f.get("design_doc_path"))]
+                                   and f.get("design_doc_path"))
+                               # Cycle DM-2 (2026-06-01): rework features
+                               # at/near the cap also land here so they
+                               # compete fairly with fresh work via the
+                               # queue-depth balancer instead of preempting.
+                               or (f.get("status") == "Implementing"
+                                   and f.get("review_outcome") == "changes_requested"
+                                   and (f.get("fix_attempts") or 0) >= _REWORK_CAP_PROXIMITY)]
 
         if approved_no_design and first_pass_codeable:
             # Both queues have work: run whichever is deeper. Ties go
