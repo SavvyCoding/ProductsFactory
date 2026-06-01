@@ -118,6 +118,44 @@ each AC required BOTH a runtime tool's availability AND the test
 itself — too much to land in one coder cycle. They would have shipped
 as 1 fixture-availability story + 1 test-per-AC follow-ups.
 
+**HARD STOP — no skip-evasion in Verify recipes or test specs.** Once
+you've split into Story A (fixture availability) + Story B+ (tests),
+the child stories INHERIT Story A's tool-presence guarantee. Do NOT
+write Verify recipes with `if not shutil.which(X): print('SKIP'); ...`
+or test specs that say "Guards with `pytest.skip` if `shutil.which(X)`
+returns `None`." These patterns defeat the verify-check gate — the
+recipe outputs the SKIP string instead of the Expected value, the
+matcher correctly reports a mismatch, the coder bounces with nothing
+actionable to fix (the recipe ITSELF is wrong, but the coder can't
+edit the design doc). Multiply by 3–5 rework rounds → `divergent_
+review_feedback` or `rapid_flap` auto-Block.
+
+Canonical 2026-06-01 incidents:
+  - #1177 (Dev tooling fixture availability — ruff/pre-commit/git):
+    designer Verify recipes had `shutil.which` skip guards; coder
+    shipped pytest.skip patterns; lint-guard Guard 2 (`.skip` regex)
+    bounced; `rapid_flap` Blocked at 11 transitions.
+  - #1178 (Ruff lint check), #1179 (Ruff format check): designer
+    propagated the same `shutil.which('ruff')` skip-evasion pattern
+    from #1177's design doc verbatim, including a literal "pattern
+    from #1177" callout in Anchored Patterns. Both bounced on
+    verify-check ("actual stdout SKIP: ruff not on PATH" vs "Expected:
+    OK") and lint-guard (`pytest.skip` in test bodies).
+
+CORRECT shapes for a Story B+ test using a runtime tool:
+
+  AC1. `ruff check` on a Python file with an unused import exits non-zero.
+       Verify: `ruff check tests/fixtures/unused_import.py; echo "exit=$?"`
+       Expected: `exit=1` (ruff finds the unused import).
+       Test: `tests/test_precommit.py::test_ruff_detects_unused_import`.
+
+The Verify command ASSUMES `ruff` is on PATH (Story A guaranteed it).
+If the runner is genuinely missing in the deployed agent image, that
+manifests as Story A Blocked (a clear, actionable signal). Do not
+paper over a missing runner with skip-evasion at every child story —
+that just turns one clear "tool missing" failure into many opaque
+"recipe doesn't match" failures.
+
 Splitting workflow (see §SPLIT below). After splitting, the parent
 story is **Rejected as "Replaced"** (terminal — not Blocked), and the
 children inherit the parent's `phase_id` plus a `parent_id` pointing
