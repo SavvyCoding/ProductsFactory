@@ -55,8 +55,27 @@ _PROGRESS_RANK = {
 _ALLOWED_BACKWARD = {("Reviewing", "Implementing"), ("Reviewed", "Implementing")}
 
 
-def _apply_session_entry(client: httpx.Client, entry: dict) -> bool:
-    """PATCH a single session_result entry to the PM API. Returns True on success."""
+def _apply_session_entry(
+    client: httpx.Client,
+    entry: dict,
+    working_dir: str | None = None,
+) -> bool:
+    """PATCH a single session_result entry to the PM API. Returns True on success.
+
+    `working_dir`: when provided, enables the phantom-design-doc-path guard.
+    Designer agents can write `{"status": "Designed", "design_doc_path":
+    "docs/story_<id>.md"}` to session_result.json WITHOUT actually writing
+    the doc to disk (the designer "wandered" to a different feature, or
+    named the file wrong, or hallucinated the path). If we blindly PATCH
+    `design_doc_path` to the PM API, the DB ends up with a stale path that
+    no file on disk satisfies — the next coder session reads it, finds no
+    spec, and fails. The post_doc.py fallback already has a verify-doc-
+    exists guard (added 2026-05-28), but the live-poll thread and the
+    final session_result reconciler bypass that path entirely. Canonical
+    2026-06-01 incident: DocumentSign feature 1178 had design_doc_path
+    `docs/story_1178.md` in the DB but the file was missing from the
+    working tree; the drift-scanner flagged it at 19:40:02.
+    """
     fid = entry.get("id")
     if not fid:
         log.warning(f"[progress] Skipping session_result entry with no feature id: {entry}")
@@ -163,6 +182,28 @@ def _apply_session_entry(client: httpx.Client, entry: dict) -> bool:
             pass  # proceed with update if check fails
 
     patch_body = {k: v for k, v in entry.items() if k not in ("id", "confidence")}
+
+    # Phantom design_doc_path guard: when working_dir is provided and the
+    # entry tries to set a design_doc_path, verify the file actually exists
+    # on disk before persisting the path. If it doesn't, strip
+    # design_doc_path from the patch so the DB doesn't carry a path that
+    # points at nothing. We keep the rest of the patch (e.g. status) so
+    # the agent's other state writes still apply — the next designer cycle
+    # will re-author this feature because design_doc_path is now NULL.
+    # See function docstring for the canonical 2026-06-01 #1178 incident.
+    if working_dir and patch_body.get("design_doc_path"):
+        from pathlib import Path as _PPath
+        doc_rel = patch_body["design_doc_path"]
+        if not (_PPath(working_dir) / doc_rel).is_file():
+            log.warning(
+                f"[progress] Feature #{fid}: stripping phantom "
+                f"design_doc_path={doc_rel!r} from session_result patch "
+                f"(file not present in working tree). "
+                f"Designer wandered or hallucinated the path; next "
+                f"designer cycle will re-author."
+            )
+            patch_body.pop("design_doc_path", None)
+
     try:
         resp = client.patch(f"/api/features/{fid}", json=patch_body)
         resp.raise_for_status()
