@@ -774,6 +774,85 @@ def _recent_drift_comments(pm_client, feature_id: int) -> list[str]:
         return []
 
 
+def _heal_design_doc_missing(pm_client, finding: "Finding", product_name: str) -> bool:
+    """Auto-heal for category="design_doc_missing": clear the phantom
+    design_doc_path so the next designer cycle re-authors a fresh doc.
+    Also resets status Designed→Approved so the designer dispatcher
+    actually picks the feature up (the persona router treats Designed
+    features as ready for coder, which would just fail again on the
+    missing file).
+
+    Safe because the only authoritative source of truth for the design
+    doc is the file at design_doc_path on the default branch. When the
+    file is missing the path IS stale; clearing it loses no information.
+    The post-doc pipeline already enforces that designer docs commit to
+    main (not a feature branch), so the "doc lives on a different
+    branch" case shouldn't occur under correct system behavior.
+
+    Returns True on a successful heal, False on PM API failure (the
+    finding's comment was still posted — operator can still manually
+    triage).
+
+    Canonical 2026-06-01 incidents: DocumentSign #1178 at 19:40:02 and
+    #1177 at 20:01:00 both surfaced the same residual phantom-path
+    state. Cycle CQ shipped the prevention guard in
+    state_machine._apply_session_entry; this cycle adds the cleanup
+    actuator so existing residue self-heals.
+    """
+    try:
+        patch = {
+            "design_doc_path": None,
+            "changed_by": "drift-scanner:auto-heal",
+        }
+        # Demote Designed → Approved so the persona dispatcher routes the
+        # feature back to the designer. For features already at Approved/
+        # Implementing/Reviewing/etc., leave status alone — clearing
+        # design_doc_path is sufficient and the right next step depends on
+        # downstream pipeline state.
+        try:
+            r = pm_client.get(f"/api/features/{finding.feature_id}")
+            if 200 <= r.status_code < 300:
+                cur_status = (r.json() or {}).get("status")
+                if cur_status == "Designed":
+                    patch["status"] = "Approved"
+        except Exception:
+            # Skip the status demotion on GET failure; just clear the path.
+            pass
+        resp = pm_client.patch(
+            f"/api/features/{finding.feature_id}", json=patch,
+        )
+        if 200 <= resp.status_code < 300:
+            log.info(
+                "[drift-scanner] %s: auto-healed design_doc_missing on "
+                "feature #%s (cleared design_doc_path, status=%s)",
+                product_name, finding.feature_id,
+                patch.get("status", "<unchanged>"),
+            )
+            return True
+        log.warning(
+            "[drift-scanner] %s: auto-heal PATCH for feature #%s "
+            "returned %s",
+            product_name, finding.feature_id, resp.status_code,
+        )
+        return False
+    except Exception as e:
+        log.warning(
+            "[drift-scanner] %s: auto-heal raised %s; finding's comment "
+            "remains for manual triage",
+            product_name, e,
+        )
+        return False
+
+
+# Auto-heal actuators by finding category. A category absent from this
+# map is comment-only (the prior behavior). Keep entries conservative —
+# auto-heal is only safe when the action is deterministic, idempotent,
+# and loses no information vs the existing comment-only flow.
+_AUTO_HEAL_ACTIONS = {
+    "design_doc_missing": _heal_design_doc_missing,
+}
+
+
 def post_findings(
     findings: Iterable[Finding],
     pm_client,
@@ -822,6 +901,13 @@ def post_findings(
                     "[drift-scanner] %s: filed %s on feature #%s",
                     product_name, f.category, f.feature_id,
                 )
+                # Auto-heal actuator (per-category, opt-in via
+                # _AUTO_HEAL_ACTIONS map). Runs AFTER the comment is
+                # posted so the operator still sees the diagnosis trail
+                # even if the heal succeeds.
+                heal = _AUTO_HEAL_ACTIONS.get(f.category)
+                if heal is not None:
+                    heal(pm_client, f, product_name)
             else:
                 log.warning(
                     "[drift-scanner] %s: POST comment for feature #%s "
