@@ -516,6 +516,16 @@ def _fetch_recent_review_comments(feature_id: int, limit: int = 25) -> list[dict
             _ALLOWED_AUTHORS = {
                 "reviewer", "lint-guard",
                 "post-coder:test-check", "post-coder:verify-check",
+                # post-coder:test-env: pip-install / runner-missing failures.
+                # Without this, the env_broken handler's comment (containing
+                # the literal pip error excerpt) is invisible to the next
+                # coder cycle and the agent ships the same bad pin forever.
+                # Canonical 2026-06-01 DocumentSign #1102 cascade: pin
+                # `opentelemetry-instrumentation-fastapi<1,>=0.40` doesn't
+                # resolve (all available versions are pre-release beta
+                # tags); env_broken fired twice in a row at 19:16:22 and
+                # 19:27:41 with identical state.
+                "post-coder:test-env",
             }
             relevant = [c for c in data
                         if (c.get("author") or "").lower() in _ALLOWED_AUTHORS]
