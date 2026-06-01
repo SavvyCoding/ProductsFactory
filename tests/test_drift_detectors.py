@@ -314,6 +314,92 @@ class TestPostFindings:
         assert client.post.call_count == 2
 
 
+class TestAutoHealDesignDocMissing:
+    """Cycle CT (2026-06-01): design_doc_missing findings trigger an auto-
+    heal PATCH that clears the phantom design_doc_path and demotes a
+    Designed status back to Approved so the designer re-authors."""
+
+    def _build_finding(self, fid=1178):
+        return Finding(
+            category="design_doc_missing", severity="high",
+            target_type="feature", target_id=str(fid),
+            feature_id=fid, detail="missing", fix_hint="clear",
+        )
+
+    def _client_with_status(self, current_status: str):
+        """Return a MagicMock client where the GET response carries the
+        given current_status, the comment GET returns no dupes, and PATCH
+        succeeds."""
+        client = MagicMock()
+        # Comments GET (dedupe) — empty list, no dupes.
+        comments_get = SimpleNamespace(status_code=200, json=lambda: [])
+        # Feature GET (auto-heal status read) — current status.
+        feature_get = SimpleNamespace(
+            status_code=200, json=lambda: {"id": 1, "status": current_status},
+        )
+        client.get.side_effect = lambda url, *a, **kw: (
+            feature_get if "/comments" not in url else comments_get
+        )
+        client.post.return_value = SimpleNamespace(status_code=201)
+        client.patch.return_value = SimpleNamespace(status_code=200)
+        return client
+
+    def test_heal_clears_design_doc_path_and_demotes_designed(self):
+        client = self._client_with_status("Designed")
+        post_findings([self._build_finding(1178)], client, product_name="t")
+        # Exactly one PATCH on the feature.
+        assert client.patch.call_count == 1
+        url = client.patch.call_args.args[0]
+        body = client.patch.call_args.kwargs["json"]
+        assert url == "/api/features/1178"
+        assert body["design_doc_path"] is None
+        assert body["status"] == "Approved", (
+            f"Designed must demote to Approved so designer re-runs, got {body}"
+        )
+        assert body["changed_by"] == "drift-scanner:auto-heal"
+
+    def test_heal_clears_path_but_keeps_status_when_not_designed(self):
+        """Already Approved / Implementing / Reviewing: just clear the
+        path. Don't demote — downstream pipeline state takes precedence."""
+        client = self._client_with_status("Implementing")
+        post_findings([self._build_finding(1177)], client, product_name="t")
+        assert client.patch.call_count == 1
+        body = client.patch.call_args.kwargs["json"]
+        assert body["design_doc_path"] is None
+        assert "status" not in body, (
+            f"non-Designed status must be left alone, got {body}"
+        )
+
+    def test_no_heal_for_other_categories(self):
+        """Only design_doc_missing has an auto-heal action. Other
+        categories must still post the comment but not PATCH anything."""
+        client = self._client_with_status("Designed")
+        other_finding = Finding(
+            category="shell_artifact", severity="medium",
+            target_type="file", target_id="=4", feature_id=42,
+            detail="d", fix_hint="h",
+        )
+        post_findings([other_finding], client, product_name="t")
+        assert client.post.call_count == 1, "comment should still post"
+        assert client.patch.call_count == 0, (
+            "shell_artifact has no auto-heal action; no PATCH expected"
+        )
+
+    def test_heal_patch_failure_doesnt_break_comment_flow(self):
+        """Auto-heal is a best-effort actuator; if the PATCH raises or
+        returns non-2xx, the comment must remain (operator still has the
+        diagnosis trail to manually triage)."""
+        client = self._client_with_status("Designed")
+        client.patch.side_effect = RuntimeError("network down")
+        posted = post_findings(
+            [self._build_finding(1178)], client, product_name="t",
+        )
+        # Comment was posted before the heal attempt — the comment-post
+        # success isn't undone by a downstream actuator failure.
+        assert posted == 1
+        assert client.post.call_count == 1
+
+
 class TestDedupe:
     """Re-running the same detectors must not double-post comments."""
 
