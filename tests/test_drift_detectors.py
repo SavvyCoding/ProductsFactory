@@ -385,6 +385,44 @@ class TestAutoHealDesignDocMissing:
             "shell_artifact has no auto-heal action; no PATCH expected"
         )
 
+    def test_heal_runs_even_when_comment_is_deduped(self):
+        """Cycle CU follow-up: residual phantom-path state has an existing
+        drift-scanner comment from a prior cycle (before the heal was
+        wired up). The comment dedupe must NOT suppress the heal — the
+        heal is the actuator, the comment is just diagnostic. This is
+        the scenario that left feature #1177 with a stale design_doc_path
+        despite cycle CT having shipped the heal action."""
+        finding = self._build_finding(1177)
+        body = finding.as_comment_body()
+
+        # Build a client whose comment GET returns the SAME body — i.e.
+        # the dedupe will fire and the comment POST will be skipped.
+        client = MagicMock()
+        comments_get = SimpleNamespace(
+            status_code=200,
+            json=lambda: [{"author": "drift-scanner", "body": body}],
+        )
+        feature_get = SimpleNamespace(
+            status_code=200, json=lambda: {"id": 1177, "status": "Designed"},
+        )
+        client.get.side_effect = lambda url, *a, **kw: (
+            feature_get if "/comments" not in url else comments_get
+        )
+        client.post.return_value = SimpleNamespace(status_code=201)
+        client.patch.return_value = SimpleNamespace(status_code=200)
+
+        posted = post_findings([finding], client, product_name="t")
+        # Comment was deduped → no POST happened.
+        assert posted == 0
+        assert client.post.call_count == 0
+        # But the heal STILL ran — that's the whole point of CU.
+        assert client.patch.call_count == 1, (
+            "auto-heal must run on deduped findings (residual-state cleanup)"
+        )
+        body_arg = client.patch.call_args.kwargs["json"]
+        assert body_arg["design_doc_path"] is None
+        assert body_arg["status"] == "Approved"
+
     def test_heal_patch_failure_doesnt_break_comment_flow(self):
         """Auto-heal is a best-effort actuator; if the PATCH raises or
         returns non-2xx, the comment must remain (operator still has the
