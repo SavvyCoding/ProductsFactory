@@ -2102,17 +2102,35 @@ async def api_reset_stuck(db: AsyncSession = Depends(get_db)):
             # session was killed between the agent's final write and the GitHub
             # push step. Without this branch the feature is unreachable: no
             # persona's next-for-persona query matches Implemented, and
-            # auto-merge waits for Reviewed. Recovery depends on whether the PR
-            # was actually pushed before the kill:
-            #   • PR exists → bump to Reviewing (post-coder partially completed,
-            #     PR is real, just the status PATCH was missed)
+            # auto-merge waits for Reviewed. Recovery depends on three signals:
+            #   • pr_number set AND review_outcome != changes_requested → bump
+            #     to Reviewing. The PR is real and the reviewer hasn't seen it
+            #     yet (or last saw an approved version); post-coder just missed
+            #     the final status PATCH.
+            #   • pr_number set AND review_outcome == changes_requested →
+            #     demote to Implementing+changes_requested. The reviewer
+            #     ALREADY rejected the code on this PR. If we re-bump to
+            #     Reviewing the reviewer sees the SAME stale code and rejects
+            #     again, looping forever. (Canonical 2026-06-01 incident:
+            #     feature 1101 OpenTelemetry — bounced 4× in 90min as
+            #     reset_stuck kept resurrecting Implemented→Reviewing on the
+            #     same un-rebuilt PR #300.) The Implementing branch above
+            #     normally demotes further (Approved/Designed); for the
+            #     post-reviewer-rejection orphan we stay in Implementing so
+            #     the next coder cycle treats it as a rework and force-pushes
+            #     fresh commits to the existing branch.
             #   • No PR → demote past Implementing back to a re-pickable state.
             #     Implementing alone is NOT pickable: next-for-persona requires
             #     Implementing+review_outcome=changes_requested for the coder
             #     query, and these features have no review (the reviewer never
             #     saw them). Mirror the Implementing branch above: Designed if
             #     there's a design doc, else Approved.
-            if f.pr_number:
+            if f.pr_number and f.review_outcome == "changes_requested":
+                # Keep status=Implementing AND keep review_outcome so the
+                # coder's next-for-persona query (Implementing + changes_
+                # requested) re-picks it up as a rework.
+                f.status = "Implementing"
+            elif f.pr_number:
                 f.status = "Reviewing"
             else:
                 f.status = "Designed" if f.design_doc_path else "Approved"
