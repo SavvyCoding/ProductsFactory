@@ -3103,9 +3103,22 @@ async def api_active_session(
     # "Active" = ended_at not yet set AND FSM status indicates a live session.
     # Without the status filter, orphaned rows (where the container died but
     # ended_at was never written) would be mis-classified as active forever.
+    # `wrapping` IS active: the agent container has exited but the orchestrator-
+    # side post-coder pipeline (lint guards, test-check, verify-check, git
+    # push, drift-scanner) is still touching the product's workspace. Without
+    # wrapping in this filter, launch_session sees no active session for the
+    # product and spawns a second agent container — two coders writing to the
+    # same workspace concurrently. Canonical 2026-06-01 race: product 25 had
+    # session 6920 (wrapping, post-coder force-pushing to coder/<uid> branch)
+    # and session 6921 (running, brand-new agent editing files) overlapping
+    # for several minutes. Now any caller that polls this endpoint to decide
+    # whether it's safe to spawn / launch on the product will correctly see
+    # the wrapping session as in-flight. The watchdog's orphan check below
+    # is updated in lockstep to skip wrapping sessions (their container exit
+    # is expected, not an orphan signal).
     q = select(DBSession).where(
         DBSession.ended_at.is_(None),
-        DBSession.status.in_(["pending", "starting", "running"]),
+        DBSession.status.in_(["pending", "starting", "running", "wrapping"]),
     )
     if product_id is not None:
         q = q.where(DBSession.product_id == product_id)
