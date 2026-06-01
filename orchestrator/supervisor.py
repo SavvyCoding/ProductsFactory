@@ -157,6 +157,128 @@ def _resolve_max_fix_attempts() -> int:
     return int(os.environ.get("MAX_FIX_ATTEMPTS", "5"))
 
 
+def _close_github_pr_on_auto_block(
+    *,
+    pr_number: int | None,
+    product_id: int | None,
+    detector: str,
+    reason: str,
+) -> None:
+    """Close a GitHub PR (and post an explanatory comment) when the
+    supervisor auto-blocks the feature that owned it.
+
+    Best-effort. Never raises. Logs at warning on failure but does not
+    interrupt the caller's auto-block PATCH. The PATCH should still run
+    even if this fails — a Blocked feature with a stale open PR on
+    GitHub is better than a feature stranded in its prior state.
+
+    Why this matters (canonical 2026-06-01 incident): auto-block paths
+    in `detect_repeated_review_feedback` and `detect_divergent_review_
+    feedback` set `pr_number=None` on the feature row but do nothing on
+    the GitHub side. Result: open PRs in GitHub with no feature
+    tracking them — DocumentSign had 3 orphan PRs (#290 / 1062, #293 /
+    1082, #296 / 1089) accumulated across a day of auto-blocks.
+    Reviewers see them, open them, find no PM tracking, get confused.
+    The auto-merge sweep skips them (no eligible features). They pile
+    up indefinitely until manually closed.
+
+    Pattern mirrors `detect_dirty_prs` — comment + PATCH state=closed
+    via the GitHub REST API using a fresh GitHub App installation
+    token. The PM API is the source of truth for github_repo; we look
+    it up per-call rather than threading it through every detector's
+    signature.
+    """
+    if not pr_number or not product_id:
+        return
+    try:
+        # Look up github_repo for this product via PM API.
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as _client:
+            _r = _client.get(f"/api/products/{product_id}")
+            if not _r.is_success:
+                log.debug(
+                    f"[{detector}] cannot close PR #{pr_number}: product "
+                    f"#{product_id} lookup HTTP {_r.status_code}"
+                )
+                return
+            github_repo = (_r.json() or {}).get("github_repo") or ""
+        if not github_repo:
+            log.debug(
+                f"[{detector}] cannot close PR #{pr_number}: product "
+                f"#{product_id} has no github_repo"
+            )
+            return
+        # Mint a fresh App installation token for this push. Same helper
+        # the rest of the orchestrator uses (post_coder, dirty_pr_close).
+        from orchestrator.integrations.github import _get_gh_token
+        try:
+            gh_token = _get_gh_token()
+        except Exception as _e:
+            log.warning(
+                f"[{detector}] cannot close PR #{pr_number}: token mint "
+                f"failed: {_e}"
+            )
+            return
+        if not gh_token:
+            return
+        m = re.search(r"[:/]([^/]+/[^/]+?)(?:\.git)?$", github_repo)
+        if not m:
+            log.warning(
+                f"[{detector}] cannot parse repo slug from {github_repo!r}"
+            )
+            return
+        slug = m.group(1)
+        headers = {
+            "Authorization": f"Bearer {gh_token}",
+            "Accept":        "application/vnd.github+json",
+        }
+        # Post a comment explaining the auto-close so the reviewer / PM
+        # can find the audit trail without digging into supervisor_actions.
+        try:
+            httpx.post(
+                f"https://api.github.com/repos/{slug}/issues/{pr_number}/comments",
+                headers={**headers, "Content-Type": "application/json"},
+                json={"body": (
+                    f"[supervisor.{detector}] Auto-closing this PR — the "
+                    f"feature it tracked was just Blocked by the "
+                    f"supervisor. Reason:\n\n> {reason}\n\nPM triage "
+                    f"required: either unblock the feature (which will "
+                    f"open a fresh PR on the next coder cycle) or close "
+                    f"the feature out."
+                )},
+                timeout=10,
+            )
+        except Exception:
+            # Comment is nice-to-have; close is the critical action.
+            log.debug(
+                f"[{detector}] PR #{pr_number} comment post failed",
+                exc_info=True,
+            )
+        # Actually close the PR. PATCH state=closed (not "merged" — the
+        # work didn't merge, the feature got blocked). GitHub keeps the
+        # branch around; future unblock + fresh coder cycle gets its own
+        # branch/PR anyway, so we don't need to clean up the branch here.
+        _close_resp = httpx.patch(
+            f"https://api.github.com/repos/{slug}/pulls/{pr_number}",
+            headers=headers,
+            json={"state": "closed"},
+            timeout=10,
+        )
+        if _close_resp.is_success:
+            log.info(
+                f"[{detector}] closed PR #{pr_number} on auto-block "
+                f"(feature #{product_id})"
+            )
+        else:
+            log.warning(
+                f"[{detector}] close PR #{pr_number} HTTP "
+                f"{_close_resp.status_code}: {_close_resp.text[:160]}"
+            )
+    except Exception:
+        log.exception(
+            f"[{detector}] unexpected failure closing PR #{pr_number}"
+        )
+
+
 def _route_to_blocked_if_at_cap(
     *,
     client: httpx.Client,
@@ -452,6 +574,17 @@ def detect_repeated_review_feedback(
                 return {"action": "blocked", "signature": sig, "repeated": new_count,
                         "reason": "dry-run: would block + clear pr_number + route to Blocked sprint"}
 
+            # Close the GitHub PR before clearing pr_number from DB. Without
+            # this, the open PR is orphaned on GitHub (no feature row tracks
+            # it). Canonical 2026-06-01 incident: DocumentSign accumulated 3
+            # orphan PRs (#290 / 1062, #293 / 1082, #296 / 1089) from this
+            # detector + divergent_review_feedback over a single day.
+            _close_github_pr_on_auto_block(
+                pr_number=feat.get("pr_number"),
+                product_id=product_id or feat.get("product_id"),
+                detector="repeated_review_feedback",
+                reason=block_reason,
+            )
             # Block: status=Blocked, pr_number cleared, blocked_reason set.
             # Phases→features flat model (043): no Blocked-sprint route; a
             # single PATCH carries the full transition. Pre-migration this
@@ -599,6 +732,17 @@ def detect_divergent_review_feedback(
                         "comparisons": len(sims),
                         "reason": "dry-run: would block + route to Blocked sprint"}
 
+            # Close the GitHub PR before clearing pr_number from DB. Same
+            # rationale as the repeated_review_feedback block above. This
+            # detector blocked features 1062 (PR #290), 1082 (PR #293), and
+            # 1089 (PR #296) on DocumentSign 2026-06-01 — all three left
+            # their PRs open and untracked until this fix.
+            _close_github_pr_on_auto_block(
+                pr_number=feat.get("pr_number"),
+                product_id=product_id or feat.get("product_id"),
+                detector="divergent_review_feedback",
+                reason=block_reason,
+            )
             client.patch(
                 f"/api/features/{feature_id}",
                 json={
