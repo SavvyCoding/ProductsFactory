@@ -82,24 +82,49 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
                     "product_id": product_id,
                     "reason": f"{len(reviewing)} features in Reviewing with PR"}
 
-        # 2. Coder — features ready to be implemented.
-        codeable = [f for f in non_terminal
-                    if f.get("status") == "Designed"
-                    or (f.get("status") == "Approved" and f.get("design_doc_path"))
-                    or (f.get("status") == "Implementing"
-                        and f.get("review_outcome") == "changes_requested")]
-        if codeable:
+        # 2a. Rework coder — Implementing+changes_requested is the most
+        # time-sensitive coder work: a reviewer or post-coder gate just
+        # bounced the feature back, and the rework workspace already
+        # carries the prior implementation (since 80f42e3). Run these
+        # before anything that competes for the coder.
+        rework_codeable = [f for f in non_terminal
+                           if f.get("status") == "Implementing"
+                           and f.get("review_outcome") == "changes_requested"]
+        if rework_codeable:
             return {"action": "launch_session", "persona": "coder",
                     "product_id": product_id,
-                    "reason": f"{len(codeable)} features ready to code"}
+                    "reason": f"{len(rework_codeable)} rework features (changes_requested)"}
 
-        # 3. Designer — Approved features without a design doc.
+        # 2b. Designer — Approved features without a design doc.
+        # Runs BEFORE the fresh first-pass coder so the designer drains
+        # the backlog continuously instead of being starved whenever
+        # the coder has a few pre-designed features to chew through.
+        # Canonical incident: 2026-06-01 cycle H — 41 Approved features
+        # waited for design while the coder cycled 10 sessions on a
+        # handful of already-designed features, with 0 features pushed
+        # for ~90 minutes. The old order (coder before designer) put
+        # any pre-designed feature ahead of the entire design backlog,
+        # so the system reliably starved the designer whenever ANY
+        # feature was codeable.
         approved_no_design = [f for f in non_terminal
                               if f.get("status") == "Approved" and not f.get("design_doc_path")]
         if approved_no_design:
             return {"action": "launch_session", "persona": "designer",
                     "product_id": product_id,
                     "reason": f"{len(approved_no_design)} Approved features need design docs"}
+
+        # 2c. Fresh first-pass coder — features with a design doc ready
+        # to be implemented for the first time. Lower priority than
+        # rework (2a) and designer (2b) so the design backlog drains
+        # and reviewer-bounced features get unstuck before fresh work.
+        first_pass_codeable = [f for f in non_terminal
+                               if f.get("status") == "Designed"
+                               or (f.get("status") == "Approved"
+                                   and f.get("design_doc_path"))]
+        if first_pass_codeable:
+            return {"action": "launch_session", "persona": "coder",
+                    "product_id": product_id,
+                    "reason": f"{len(first_pass_codeable)} features ready to code (first-pass)"}
 
         # 4. In-agent stuck features — let reset_stuck handle them.
         in_agent_stuck = [f for f in non_terminal if f.get("status") in _IN_AGENT]
