@@ -16,11 +16,13 @@ If the list is empty, exit cleanly (final assistant message, no tool calls).
 
 ## Branching
 
-You're on the default branch (`main` or `master`) of {product_name}.
+On a **fresh first-pass** assignment you start on the default branch (`main` or `master`) of {product_name}. After you exit, the orchestrator cuts a fresh **session branch** (`coder/<session_uid>`) from the default branch's tip, stages your edits onto it, commits with `[feature-<id>]` tags per assigned story, pushes, and opens a **Session PR** (head=`coder/<session_uid>`, base=default).
 
-After you exit, the orchestrator cuts a fresh **session branch** (`coder/<session_uid>`) from the default branch's tip, stages your edits onto it, commits with `[feature-<id>]` tags per assigned story, pushes, and opens a **Session PR** (head=`coder/<session_uid>`, base=default). The reviewer reviews the Session PR. Approving it squash-merges your session's work directly to the default branch.
+On a **rework cycle** (any assigned feature shows `RETRY #N` below) you start on the **previous coder branch** — the prior implementation's files are already in your tree, your `git log` shows what shipped last time. After you exit, the orchestrator force-pushes your changes back to the same session branch so the reviewer sees the new diff on the existing PR (comment thread preserved). Don't start over — patch in place. The `## Latest feedback to address` section is your only source of truth for what to change; earlier bounces' feedback is either already reflected in the code you can see or the latest bounce decided to re-raise it.
 
-**You do NOT run `git` or `gh`** — never `checkout`, `fetch`, `pull`, `branch`, `commit`, `push`, or `gh pr create`. Just edit files.
+The reviewer reviews the Session PR. Approving it squash-merges your session's work directly to the default branch.
+
+**You do NOT run `git` or `gh`** for state changes — never `checkout`, `pull`, `branch`, `commit`, `push`, or `gh pr create`. Read-only `git log` / `git diff` / `git show` are fine and encouraged on reworks to understand what's already shipped. Just edit files for the rest.
 
 ---
 
@@ -78,6 +80,6 @@ The reviewer flags these same items every cycle — handling them now saves a re
 - [ ] **Runtime-only deps that AST-walking misses** — Guard 18 only scans `import` lines, so deps you pull in indirectly are invisible. Eyeball-check these whenever the relevant pattern is in your diff: `python-multipart` (FastAPI `UploadFile` / `Form` / `File`), `uvicorn[standard]` (if you use `--reload` or `uvloop` features), `psycopg2-binary` (`sqlalchemy+postgresql://...` URL), `redis` (Celery broker), `httpx` (FastAPI `TestClient` on recent versions). 2026-05-30 misses: `python-multipart` (#1084 — `UploadFile` route), `opentelemetry-instrumentation-fastapi` (#1101/#1102 — used via FastAPIInstrumentor, no `import opentelemetry` line in src).
 - [ ] **No committed debris.** No `temp_*.{py,txt,json}` / `debug_*.*` / `scratch_*.*` / `*_artifact.*` files at the repo root or inside any source dir. Test artifacts (uploaded files, generated PDFs, sample fixtures) belong in `tmp_path` (pytest) or `.gitignore`'d directories — not committed. The lint-guard catches some patterns (Guard 13); reviewers catch the rest (`debug_yaml.py`, `uploads/<uuid>.pdf`, `temp_bad_file.py` at repo root).
 - [ ] **Existing passing tests still pass** — re-run them. Brownfield rule: do not break what's already green.
-- [ ] **Reviewer feedback addressed** (rework cycles only) — if `## Reviewer feedback to address` appears above, every bullet must be visibly addressed. Don't claim done with 2 of 3 done.
+- [ ] **Latest feedback addressed** (rework cycles only) — if `## Latest feedback to address` appears above, every bullet must be visibly addressed. Don't claim done with 2 of 3 done. On a rework you start on the previous coder branch (not main), so the prior implementation is in your tree already — `git log` shows what shipped last time. Patch the listed items in place; do not reimplement from scratch and do not revert working parts.
 
 All boxes ✓: append a final-summary line to `session_summary.md` listing feature IDs and call `task_done`. Any box ✗: fix and re-check. Don't write `Blocked` as a shortcut.
