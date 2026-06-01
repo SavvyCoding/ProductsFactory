@@ -1530,6 +1530,104 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
     except Exception:
         log.debug("Guard 18 deps-coherence raised", exc_info=True)
 
+    # --- Guard 19: doc-only commit (false-success commit detector) ---
+    # Catches the "fake done" pattern where the coder ships a commit
+    # containing ONLY documentation files (markdown/text) — no source code,
+    # no tests — typically alongside a `final_verification.md` /
+    # `implementation_summary.md` / `task_complete.md` file falsely
+    # asserting the AC is satisfied. Canonical incident: 2026-06-01
+    # cycle J — feature #1062 commit 501f2ec added only
+    # `final_verification.md` claiming all ACs verified; reviewer caught
+    # it but only after a full reviewer session. Reviewer's own words:
+    # "ZERO implementation code. The only file added is final_verification.md
+    # which falsely claims all ACs are verified. No src/lib/rate_limiter.py
+    # was created, no modifications to src/auth/deps.py, no test file."
+    #
+    # Heuristic: classify each changed file as source/test/doc/config/other.
+    # If every changed file is a doc AND there are zero source AND zero
+    # test files, bounce as false-success. Allows pure doc updates
+    # (designer/documenter persona; chore feature_type) by being narrow:
+    # only fires when the coder pipeline is the running pipeline AND the
+    # commit shape is unambiguously "claimed implementation, shipped doc."
+    #
+    # We DO NOT count `session_summary.md` / `session_result.json` as docs
+    # for this check — they're orchestrator I/O channels, not the coder's
+    # claimed deliverable. They're already filtered out of `files` at the
+    # top of this function.
+    try:
+        # Doc extensions: markdown, plain text, RST. Specifically NOT
+        # README.md (which can be a legitimate single-file change for a
+        # docs chore) — the guard fires when ONLY doc files changed AND
+        # at least one of them has a suspicious "completion-claim" name.
+        _DOC_EXT = (".md", ".txt", ".rst", ".adoc")
+        # Source-code extensions across the stacks this orchestrator
+        # supports. Anything in this list counts as "real implementation"
+        # and immunizes the commit from Guard 19.
+        _SRC_EXT = (
+            ".py", ".js", ".jsx", ".ts", ".tsx",
+            ".mjs", ".cjs", ".go", ".rb", ".java",
+            ".kt", ".swift", ".rs", ".c", ".cc", ".cpp",
+            ".h", ".hpp", ".php", ".cs", ".sql", ".sh",
+            ".yml", ".yaml", ".json", ".toml", ".ini",
+            ".cfg", ".dockerfile", "Dockerfile", "Makefile",
+        )
+        # Filenames that strongly suggest a false-success completion claim.
+        # Lowercased substring match against the filename (not path).
+        _COMPLETION_CLAIM_PATTERNS = (
+            "verification", "verify_complete",
+            "implementation_summary", "implementation_complete",
+            "task_complete", "task_done", "feature_complete",
+            "summary_of_changes", "completion_report",
+            "ac_verification", "final_report", "done_marker",
+        )
+        if files:
+            from pathlib import Path as _PP_g19
+            doc_files: list[str] = []
+            src_files: list[str] = []
+            other_files: list[str] = []
+            for f in files:
+                fl = f.lower()
+                name = _PP_g19(f).name.lower()
+                # Check src extensions first (some configs like .yml could
+                # be either; we err on the side of "treat as source" so
+                # legitimate config-only commits pass).
+                if any(fl.endswith(e.lower()) for e in _SRC_EXT) or name in {
+                    "dockerfile", "makefile",
+                }:
+                    src_files.append(f)
+                elif any(fl.endswith(e) for e in _DOC_EXT):
+                    doc_files.append(f)
+                else:
+                    other_files.append(f)
+            # Fires iff: at least one doc, zero source, zero "other"
+            # (the "other" check prevents weird edge cases — symlinks,
+            # binary files — from accidentally satisfying the guard).
+            # Additional safety: at least one doc filename must match a
+            # completion-claim pattern. A coder genuinely fixing only a
+            # README (no completion-claim name) passes through.
+            if doc_files and not src_files and not other_files:
+                claim_files = [
+                    f for f in doc_files
+                    if any(p in _PP_g19(f).name.lower()
+                           for p in _COMPLETION_CLAIM_PATTERNS)
+                ]
+                if claim_files:
+                    violations.append(
+                        f"doc-only commit with false-success completion-"
+                        f"claim file(s): {claim_files[0]!r} (and "
+                        f"{len(doc_files) - 1} other doc(s) — no source or "
+                        f"test changes). This commit shape is the canonical "
+                        f"'fake done' pattern: ship a markdown asserting all "
+                        f"ACs pass without actually changing any code. "
+                        f"DELETE the completion-claim file and ship real "
+                        f"implementation + tests for the AC. If the feature "
+                        f"genuinely needs only doc changes, file it as a "
+                        f"`chore` or `documenter` feature, not as a regular "
+                        f"feature."
+                    )
+    except Exception:
+        log.debug("Guard 19 doc-only-commit raised", exc_info=True)
+
     return violations
 
 
