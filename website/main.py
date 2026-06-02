@@ -473,10 +473,15 @@ async def _close_blocked_feature_pr(
         )
         return
     try:
+        # The reason string carries the actual transition (Blocked /
+        # Rejected / Deferred / Reverted) so the GitHub close comment
+        # reflects what really happened to the feature, not a hardcoded
+        # "Blocked sprint" label that became misleading once this helper
+        # was extended to all non-Pushed terminal statuses (cycle HC
+        # 2026-06-02).
         ok = close_pr(
             github_repo, pr_n, token,
-            reason=f"Auto-closed: feature #{feature.id} routed to Blocked "
-                   f"sprint ({reason}).",
+            reason=f"Auto-closed: feature #{feature.id} {reason}",
         )
         if ok:
             feature.pr_number  = None
@@ -2019,11 +2024,15 @@ async def api_update_feature(
             ))
             # PR closing handled by the unified Blocked-transition block below.
 
-    # Unified Blocked-transition PR closer — the single chokepoint for
-    # "feature just got Blocked-routed, close its open session PR." Fires
-    # whenever this PATCH moves status into Blocked, regardless of how
-    # (direct supervisor PATCH, fix_attempts cap auto-Block above, or a
-    # PM-driven Block). Without this, supervisor.detect_rapid_flap and
+    # Unified terminal-transition PR closer — the single chokepoint for
+    # "feature just transitioned to a terminal not-shipping status, close
+    # its open session PR." Fires whenever this PATCH moves status into
+    # Blocked / Rejected / Deferred / Reverted, regardless of how
+    # (direct supervisor PATCH, fix_attempts cap auto-Block, sizing-gate
+    # split, PM Reject, etc.). Pushed is excluded because the PR IS the
+    # source of the push — closing it would orphan the merge record.
+    #
+    # Without this, supervisor.detect_rapid_flap and
     # supervisor.detect_divergent_review_feedback — which PATCH status=
     # Blocked directly and bypass _close_blocked_feature_pr's two prior
     # callsites (api_route_to_blocked_sprint + the inline cap-router
@@ -2033,7 +2042,20 @@ async def api_update_feature(
     # cleared `pr_url` / `branch_name`. The orphan-PR sweep can't paper
     # over this because it correctly treats a feature whose `pr_url`
     # still matches the PR as the PR's owner.
-    if feature.status == "Blocked" and prev_status != "Blocked" and prev_pr_number:
+    #
+    # Cycle HC (2026-06-02) extended the trigger to Rejected/Deferred/
+    # Reverted after observing 4 leaked PRs (#308 #310 #311 #312) on
+    # Rejected features in DocumentSign that had been open 12+ hours.
+    # Sizing-gate splits in particular routinely produce Rejected
+    # transitions (parent "Replaced by children #X #Y" pattern from
+    # designer.md), and PM-Reject of an in-flight feature also lands
+    # here. Same close path, same single chokepoint.
+    _TERMINAL_NON_PUSHED = frozenset({"Blocked", "Rejected", "Deferred", "Reverted"})
+    if (
+        feature.status in _TERMINAL_NON_PUSHED
+        and prev_status not in _TERMINAL_NON_PUSHED
+        and prev_pr_number
+    ):
         # Restore pr_number to the snapshot if this PATCH cleared it — the
         # helper closes via pr_number, then re-clears all three link
         # fields on success. The supervisor's intent ("cleared the link")
@@ -2043,9 +2065,18 @@ async def api_update_feature(
             feature.pr_number = prev_pr_number
         _product_for_pr = await db.get(Product, feature.product_id)
         _gh_repo = (_product_for_pr.github_repo or "") if _product_for_pr else ""
+        # Build a transition-aware reason that the GitHub close comment
+        # surfaces. For Blocked features use blocked_reason (PMs read
+        # this on the website triage page); for other terminals fall back
+        # to the status name so reviewers grep'ing closed PRs can tell
+        # at a glance whether the parent feature was Rejected vs
+        # Deferred vs Reverted.
+        if feature.status == "Blocked":
+            _reason = feature.blocked_reason or "transitioned to Blocked"
+        else:
+            _reason = f"transitioned to {feature.status}"
         await _close_blocked_feature_pr(
-            feature, _gh_repo,
-            feature.blocked_reason or "transitioned to Blocked", db,
+            feature, _gh_repo, _reason, db,
         )
 
     # Flush + refresh so response serialization can read server-computed
