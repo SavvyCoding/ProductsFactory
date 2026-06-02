@@ -391,8 +391,37 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
             else:
                 features = []
 
-        # Sort by priority desc so highest-priority features ship first.
-        features.sort(key=lambda f: (-(f.get("priority") or 0), f.get("id") or 0))
+        # Sort: stuck-rework features (Implementing+changes_requested AND
+        # fix_attempts >= REWORK_CAP_PROXIMITY) go LAST so the coder picks
+        # a healthy fresh feature when both exist. Within each bucket,
+        # priority desc + id asc as before.
+        #
+        # Cycle DQ (2026-06-01) follow-up to cycle DM-2: the dispatcher
+        # fix de-prioritized near-cap reworks at the persona level
+        # (cycle/persona.py 2a), but here in _fetch_assigned_features
+        # the coder was still picking stuck reworks because the priority
+        # sort put them at the top. Canonical: DocumentSign #1178 has
+        # higher priority than 1101/1104/etc; with fix_attempts=4 it
+        # kept winning even though it's doomed.
+        #
+        # This sort must mirror cycle/persona.py's REWORK_CAP_PROXIMITY
+        # threshold (3). Move stuck reworks to the end of the bucketed
+        # list — they still get picked when no fresh codeable exists,
+        # so they can hit cap-Block naturally.
+        _REWORK_CAP_PROXIMITY = 3
+
+        def _is_stuck_rework(f: dict) -> bool:
+            return (
+                f.get("status") == "Implementing"
+                and f.get("review_outcome") == "changes_requested"
+                and (f.get("fix_attempts") or 0) >= _REWORK_CAP_PROXIMITY
+            )
+
+        features.sort(key=lambda f: (
+            1 if _is_stuck_rework(f) else 0,
+            -(f.get("priority") or 0),
+            f.get("id") or 0,
+        ))
         selected = features[:max_count]
         log.info(f"[assign] persona={persona} assigned {len(selected)}/{len(features)} features")
         return [
