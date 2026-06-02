@@ -1814,6 +1814,26 @@ async def api_update_feature(
                                   # 20+ Implemented↔Implementing transitions
                                   # in ~4 hours, no progress to Reviewing,
                                   # which is why "nothing is getting pushed".
+        "drift-scanner:auto-heal",  # added 2026-06-02 (cycle FG): drift-scanner
+                                  # auto-heal for category=design_doc_missing
+                                  # demotes a stale-pathed feature from
+                                  # Designed(rank 3) → Approved(rank 1) so the
+                                  # designer dispatcher re-picks it up to
+                                  # re-author. That IS a downgrade, and the
+                                  # transition (Designed, Approved) is not in
+                                  # _FEATURE_ALLOWED_BACKWARD, so without the
+                                  # bypass every auto-heal PATCH got silent-
+                                  # 422'd. The _BLOCKED_DATA_CLEANUP_CALLERS
+                                  # carve-out above covered Blocked features
+                                  # but NOT non-Blocked Designed ones — that
+                                  # was the actual common case.
+                                  # Canonical 2026-06-02 DocumentSign #1221,
+                                  # #1222, #1223: drift-scanner posted three
+                                  # design_doc_missing findings at 06:40:40
+                                  # and 06:47:39; each auto-heal PATCH
+                                  # returned 422; design_doc_path stayed set
+                                  # on all three; the next designer/coder
+                                  # cycle would have read a phantom path.
     }
     if new_status_for_rank and _caller not in _RANK_GUARD_BYPASS:
         cur_rank = _FEATURE_PROGRESS_RANK.get(feature.status, 0)
