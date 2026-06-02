@@ -1957,9 +1957,48 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
         result["passed"] = False
         result["first_failure"] = first or "see test output below"
         return result
+    except _sp.TimeoutExpired as e:
+        # Cycle DX (2026-06-02): a pytest TIMEOUT is almost always the
+        # coder's test hanging (e.g. spawning a long-running locust
+        # process, infinite loop, network call to a missing endpoint),
+        # NOT the test runner being missing. The previous catch-all
+        # treated it as env_broken (no fix_attempts bump), so each
+        # cycle re-ran the same hanging test and the feature looped
+        # forever with no circuit-breaker.
+        #
+        # Canonical 2026-06-02 cycle DX: feature #1080 (Load testing
+        # infrastructure) had the agent ship code that imports locust
+        # and instantiates a Locust user class at import time. pytest
+        # collection hung; subprocess.run timed out; previous code
+        # classified env_broken with fix_attempts unchanged. Comment
+        # 1879 was the only signal. Without a cap-route bump, the
+        # supervisor's rapid_flap (10 status transitions/h) was the
+        # only stop-gap — ~80 min wasted before triggering.
+        #
+        # Treat TimeoutExpired as a real test failure: bump
+        # fix_attempts via the normal bounce path (Implementing+
+        # changes_requested), cap-route catches at 5.
+        result["passed"] = False
+        result["env_broken"] = False
+        result["first_failure"] = (
+            f"pytest timed out after {e.timeout}s — test code hangs "
+            "(common: locust/subprocess.Popen without timeout, infinite "
+            "loop, network call to missing endpoint). Make the test "
+            "complete in under the timeout, or mark the feature Blocked "
+            "with a specific reason."
+        )
+        result["output"] = (
+            f"_post_coder_test_check TimeoutExpired after {e.timeout}s: "
+            f"{(e.cmd or 'pytest')!r}\n"
+            f"stdout (truncated): {(e.stdout or b'')[:600]!r}\n"
+            f"stderr (truncated): {(e.stderr or b'')[:600]!r}"
+        )
+        return result
     except Exception as e:
-        # Tooling failure (timeout, subprocess.SubprocessError, etc.) →
-        # treat as env_broken (don't blame the coder). Caller alerts.
+        # Other tooling failures (subprocess.SubprocessError variants
+        # other than timeout, OSError, etc.) → still treat as env_broken.
+        # These usually indicate a genuinely missing runner, broken
+        # PATH, or similar infra issue the coder can't fix.
         result["env_broken"] = True
         result["passed"] = False
         result["output"] = f"_post_coder_test_check tooling error: {e}"
