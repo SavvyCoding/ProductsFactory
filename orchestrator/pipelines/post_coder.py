@@ -1356,6 +1356,18 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
                 continue
             for name in (_top_level_names(old_r.stdout)
                          - _top_level_names(new_src)):
+                # Skip single-character symbol names — `d`, `c`, `x` etc. are
+                # essentially never meaningful public API and the word-grep
+                # `git grep -w <name>` produces overwhelming false positives
+                # against any local variable in any tracked .py file.
+                # Canonical 2026-06-02 cycle FZ DocumentSign #1075: coder
+                # correctly deleted stray `test_ac3.py` (flagged by reviewer)
+                # which had a module-level `d = tempfile.mkdtemp()`. Guard 17
+                # flagged `d` as "still referenced in tests/test_*.py" and
+                # bounced the rework. fix_attempts hit 5, feature cap-Blocked
+                # despite the coder doing exactly what the reviewer asked.
+                if len(name) < 2:
+                    continue
                 removed_symbols.append((path, name))
 
         if removed_symbols:
