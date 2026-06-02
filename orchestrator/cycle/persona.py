@@ -145,11 +145,57 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
                                    and f.get("review_outcome") == "changes_requested"
                                    and (f.get("fix_attempts") or 0) >= _REWORK_CAP_PROXIMITY)]
 
+        # Cycle IU (2026-06-02): open-PR serialization gate. Only one
+        # coder session PR open per product at a time. If any feature for
+        # this product already has pr_number set and is not yet terminal
+        # (Pushed/Rejected/Deferred/Reverted/Blocked), the system already
+        # has an in-flight session PR — claiming a fresh first-pass
+        # feature here would open a 2nd PR.
+        #
+        # This is the actual root cause of the merge-conflict cap-Block
+        # cascade (canonical 2026-06-02 DocumentSign #1074 cycle GW and
+        # #1223 cycles II/IP): coder kept claiming fresh Designed
+        # features while 1223's PR #326 was in rework, which let #324/
+        # #325/#327 merge to main and move the base branch forward.
+        # By the time the reviewer approved 1223, its branch was three
+        # merges behind main → auto-merge 405 conflicts → status revert
+        # Reviewed→Implementing → fix_attempts++ → cap-Block.
+        #
+        # With this gate, only ONE in-flight PR exists per product at any
+        # moment. Sibling merges can't move main forward while a PR is in
+        # rework. The PR ships or gets Blocked before the next one opens.
+        #
+        # Rework (step 2a above) still runs because it reuses the
+        # existing PR — no 2nd PR risk. Reviewer (step 1) still runs.
+        # Designer still runs because designs don't carry PRs. The gate
+        # is narrow: only first-pass coder claims that would open a NEW
+        # PR get blocked.
+        #
+        # The trade-off is lower parallel throughput per product, but
+        # it removes the entire class of stale-branch cap-Blocks. Net
+        # throughput should improve because no features get killed by
+        # infrastructure-side branch staleness.
+        _PR_OPEN_STATUSES = frozenset({
+            "Implementing", "Implemented", "Reviewing", "Reviewed",
+        })
+        open_session_pr_count = sum(
+            1 for f in non_terminal
+            if f.get("pr_number") and f.get("status") in _PR_OPEN_STATUSES
+        )
+
         if approved_no_design and first_pass_codeable:
             # Both queues have work: run whichever is deeper. Ties go
             # to coder so PRs reach Reviewing and merging — the system's
             # ultimate throughput metric.
-            if len(first_pass_codeable) >= len(approved_no_design):
+            #
+            # …unless an open session PR already exists for this product,
+            # in which case the coder is gated out to preserve the
+            # 1-PR-at-a-time invariant; designer still runs.
+            coder_gated_by_open_pr = open_session_pr_count >= 1
+            if (
+                len(first_pass_codeable) >= len(approved_no_design)
+                and not coder_gated_by_open_pr
+            ):
                 return {"action": "launch_session", "persona": "coder",
                         "product_id": product_id,
                         "reason": (
@@ -160,15 +206,27 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
             return {"action": "launch_session", "persona": "designer",
                     "product_id": product_id,
                     "reason": (
-                        f"{len(approved_no_design)} Approved features need design docs "
-                        f"(deeper queue than coder's "
-                        f"{len(first_pass_codeable)} first-pass)"
+                        f"{len(approved_no_design)} Approved features need design docs"
+                        + (
+                            f" (coder gated by {open_session_pr_count} open session PR(s))"
+                            if coder_gated_by_open_pr
+                            else f" (deeper queue than coder's {len(first_pass_codeable)} first-pass)"
+                        )
                     )}
         if approved_no_design:
             return {"action": "launch_session", "persona": "designer",
                     "product_id": product_id,
                     "reason": f"{len(approved_no_design)} Approved features need design docs"}
         if first_pass_codeable:
+            if open_session_pr_count >= 1:
+                # No designer work and the coder is gated — let the
+                # in-flight PR finish before claiming another first-pass.
+                return {"action": "exit",
+                        "reason": (
+                            f"PR-serialization gate: {open_session_pr_count} open session "
+                            f"PR(s) in flight; deferring {len(first_pass_codeable)} first-pass "
+                            f"feature(s) until the open PR ships or Blocks"
+                        )}
             return {"action": "launch_session", "persona": "coder",
                     "product_id": product_id,
                     "reason": f"{len(first_pass_codeable)} features ready to code (first-pass)"}
