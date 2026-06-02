@@ -311,7 +311,10 @@ def _workspace_symlink(working_dir: str, product_name: str = "?"):
         _purge_workspace()
 
 
-def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> list[str]:
+def _post_coder_lint_check(
+    working_dir: str, _run, product_name: str = "?",
+    debris_files_out: list[str] | None = None,
+) -> list[str]:
     """
     Deterministic lint guards on the files in the most recent commit.
 
@@ -844,6 +847,15 @@ def _post_coder_lint_check(working_dir: str, _run, product_name: str = "?") -> l
             if "AGENT_DEBRIS_EXEMPT" in first:
                 continue
             debris_hits.append(f"{f} (matches {debris_match})")
+            # Cycle IV (2026-06-02): expose the raw file path so the
+            # caller can auto-rm and self-heal instead of bouncing the
+            # whole feature. Only category 13a (filename antipattern)
+            # is safe to auto-clean — the filename itself signals
+            # debris regardless of content. Categories 13b/13c/13d may
+            # contain content the agent meant to write, so they stay
+            # hard-bounce-only.
+            if debris_files_out is not None:
+                debris_files_out.append(f)
             continue
         # 13b: tracked files in scratch directories the template marks
         # as never-committed
@@ -3130,7 +3142,141 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     # cluster in 3-4 grep-able categories. Catching them here saves a slow
     # reviewer cycle (avg 15-60 min per rejection) and gives the next coder
     # cycle deterministic feedback in {reviewer_feedback}.
-    lint_violations = _post_coder_lint_check(working_dir, _run, pname)
+    # Cycle IV (2026-06-02): expose category-13a debris files so we can
+    # auto-clean and self-heal instead of burning a full rework cycle on a
+    # `git rm one.bak && commit` operation the system can do itself.
+    # Canonical incidents: 1131 (session 7101, 48 min compute → bounced
+    # on tests/test_usage_enforcement.py.bak), 1073 (contributed to
+    # cycle GY cap-Block cascade), 1061 (2026-05-31), 1125 (2026-05-30).
+    _debris_files_13a: list[str] = []
+    lint_violations = _post_coder_lint_check(
+        working_dir, _run, pname, debris_files_out=_debris_files_13a,
+    )
+    # Self-heal path: when the only lint violation is the agent-debris
+    # category AND every debris file came from category 13a (filename
+    # antipattern — safe to delete), `git rm` them in place, amend the
+    # session commit, force-push, and clear the violations list so the
+    # rest of the pipeline (test-check / verify-check / Reviewing
+    # transition) proceeds. The agent's substantive work survives.
+    # `# AGENT_DEBRIS_EXEMPT:` annotation is still honoured upstream in
+    # the detector — exempt files never reach _debris_files_13a.
+    # Mixed cases (debris + qa_pair_hits, or debris + other guards) still
+    # hard-bounce because the non-debris violations require agent attention.
+    if (
+        lint_violations
+        and _debris_files_13a
+        and len(lint_violations) == 1
+        and lint_violations[0].startswith("agent-debris file(s) in commit:")
+    ):
+        n_cleaned = len(_debris_files_13a)
+        log.info(
+            f"[post-coder] {pname}: lint-guard auto-cleaning {n_cleaned} "
+            f"agent-debris file(s) (category 13a) and continuing: "
+            f"{', '.join(_debris_files_13a[:5])}"
+            f"{'...' if n_cleaned > 5 else ''}"
+        )
+        _self_healed = False
+        try:
+            _rm_r = _run(
+                ["git", "rm", "-f", "--ignore-unmatch", "--", *_debris_files_13a],
+                cwd=working_dir, timeout=30,
+            )
+            if _rm_r.returncode != 0:
+                log.warning(
+                    f"[post-coder] {pname}: lint-guard auto-clean `git rm` "
+                    f"failed (exit {_rm_r.returncode}); falling through to "
+                    f"normal bounce. stderr: "
+                    f"{(_rm_r.stderr or '')[:200]}"
+                )
+            else:
+                _amend_r = _run(
+                    ["git", "commit", "--amend", "--no-edit"],
+                    cwd=working_dir, timeout=30,
+                )
+                if _amend_r.returncode != 0:
+                    log.warning(
+                        f"[post-coder] {pname}: lint-guard auto-clean "
+                        f"`git commit --amend` failed (exit "
+                        f"{_amend_r.returncode}); falling through to bounce. "
+                        f"stderr: {(_amend_r.stderr or '')[:200]}"
+                    )
+                else:
+                    # Force-push the amended commit to the session branch.
+                    # rework_pr_mode below already force-pushes anyway, but
+                    # at this point the pipeline hasn't reached the push
+                    # step yet. We push here so that test-check / verify-
+                    # check / drift-scanner operate on the cleaned tree.
+                    # `--force-with-lease` is safer than `--force` against
+                    # the race where some other writer touched the branch,
+                    # but pre-push happens before any other writer for this
+                    # session, so either flag is acceptable.
+                    _branch_r = _run(
+                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                        cwd=working_dir, timeout=10,
+                    )
+                    _branch = (_branch_r.stdout or "").strip()
+                    if _branch and _branch != "HEAD":
+                        # Note: we deliberately don't push here — the
+                        # downstream rework_pr_mode push handles it. The
+                        # amend has rewritten the local commit; the next
+                        # `git push --force-with-lease` to the session
+                        # branch carries the cleaned tree to remote.
+                        pass
+                    # Post an informational comment so the audit trail
+                    # shows what was cleaned and why no fix_attempt was
+                    # burned.
+                    try:
+                        with httpx.Client(base_url=PM_API_URL, timeout=10) as _hc:
+                            for _feat in assigned_features:
+                                _fid = _feat["id"]
+                                _hc.post(
+                                    f"/api/features/{_fid}/comments",
+                                    json={
+                                        "author": "post-coder:lint-guard",
+                                        "body": (
+                                            f"ℹ post-coder lint-guard auto-cleaned "
+                                            f"{n_cleaned} agent-debris file(s) "
+                                            f"(category 13a filename antipattern) "
+                                            f"and continued the pipeline. No "
+                                            f"`fix_attempts` bump.\n\n"
+                                            + "\n".join(
+                                                f"- removed `{p}`"
+                                                for p in _debris_files_13a[:20]
+                                            )
+                                            + (
+                                                f"\n- … and {n_cleaned - 20} more"
+                                                if n_cleaned > 20 else ""
+                                            )
+                                            + "\n\nTo block this auto-clean for a "
+                                            "specific file (e.g. an intentional "
+                                            "operator backup), put "
+                                            "`# AGENT_DEBRIS_EXEMPT: <reason>` "
+                                            "on its first non-empty line. Cycle "
+                                            "IV (2026-06-02) introduced this "
+                                            "self-heal — canonical incidents: "
+                                            "#1131, #1073, #1061, #1125."
+                                        ),
+                                    },
+                                )
+                    except Exception as _e:
+                        log.warning(
+                            f"[post-coder] {pname}: lint-guard auto-clean "
+                            f"info-comment post failed: {_e}"
+                        )
+                    lint_violations = []
+                    _self_healed = True
+        except Exception as _e:
+            log.warning(
+                f"[post-coder] {pname}: lint-guard auto-clean raised "
+                f"{_e}; falling through to normal bounce"
+            )
+        if _self_healed:
+            log.info(
+                f"[post-coder] {pname}: lint-guard self-heal complete "
+                f"({n_cleaned} debris file(s) removed); proceeding to "
+                f"test-check"
+            )
+
     if lint_violations:
         log.warning(
             f"[post-coder] {pname}: lint-guard fired ({len(lint_violations)} "
