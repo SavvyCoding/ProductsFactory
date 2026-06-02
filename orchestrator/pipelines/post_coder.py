@@ -3381,15 +3381,59 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         )
     if verify_result["checked"] and not verify_result["passed"]:
         n_fail = len(verify_result["failures"])
-        log.warning(
-            f"[post-coder] {pname}: verify-check found {n_fail} AC recipe "
-            f"mismatch(es); bouncing features to Implementing+changes_requested"
-        )
-        # Group failures by feature so each bounced feature gets one
+        # Group failures by feature so each bounced/advised feature gets one
         # actionable comment with all its failing ACs.
         per_feature: dict[int, list[dict]] = {}
         for f in verify_result["failures"]:
             per_feature.setdefault(f["feature_id"], []).append(f)
+        # Cycle GJ (2026-06-02): cap verify-check at 1 hard-bounce per feature.
+        # A feature that has already received a `post-coder:verify-check`
+        # comment in the last 24h gets advisory-mode on this round: the new
+        # mismatch comment is still posted (so the reviewer sees it), but the
+        # feature is NOT bounced — it proceeds to Reviewing. The reviewer
+        # (LLM, smarter than recipe-grep) can judge whether the AC mismatch
+        # reflects a real bug or a stale designer recipe and approve/reject
+        # accordingly. Test-check + lint-guard bounces are unchanged.
+        # Canonical 2026-06-02 cycle GJ DocumentSign: 17 verify-check bounces
+        # in 4h on features 1073/1074/1075/1119/1126/1221/1101/1102, with
+        # only 1 reviewer engagement total. Designer-authored AC recipes have
+        # systematic antipatterns (env-var-after-app-import, brittle
+        # exact-string output expectations) that no coder can satisfy and
+        # bounce-loop until cap-Block. Net throughput: 0 features merged in
+        # 4h despite ~30 coder sessions. Symmetric in spirit to
+        # supervisor.detect_repeated_review_feedback which Blocks features
+        # with N matching reviewer comments — here we convert the gate
+        # itself to advisory after the first fire.
+        verify_advisory_fids: set[int] = set()
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=10) as advisory_client:
+                for fid in list(per_feature.keys()):
+                    try:
+                        comments_r = advisory_client.get(
+                            f"/api/features/{fid}/comments",
+                            params={"limit": 50},
+                        )
+                        if 200 <= comments_r.status_code < 300:
+                            recent = comments_r.json() or []
+                            if any(
+                                isinstance(c, dict)
+                                and c.get("author") == "post-coder:verify-check"
+                                for c in recent
+                            ):
+                                verify_advisory_fids.add(fid)
+                    except Exception:
+                        # On client error, fall back to hard-bounce (safer
+                        # default — bouncing is the conservative move).
+                        pass
+        except Exception:
+            pass
+        n_advisory = len(verify_advisory_fids)
+        n_bounce = len([fid for fid in per_feature if fid not in verify_advisory_fids])
+        log.warning(
+            f"[post-coder] {pname}: verify-check found {n_fail} AC recipe "
+            f"mismatch(es); bouncing {n_bounce} feature(s), advisory-mode "
+            f"for {n_advisory} (already had prior verify-check comment)"
+        )
         try:
             with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
                 for feat in assigned_features:
@@ -3397,6 +3441,7 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                     fails = per_feature.get(fid)
                     if not fails:
                         continue
+                    is_advisory = fid in verify_advisory_fids
                     bullets = []
                     for f in fails:
                         bullets.append(
@@ -3405,28 +3450,62 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                             f"  actual stdout `{(f['actual_stdout'] or '').strip()[:200]}` "
                             f"(exit {f['actual_exit']})"
                         )
+                    if is_advisory:
+                        header = (
+                            f"⚠ post-coder verify-check ADVISORY "
+                            f"({len(fails)} AC recipe mismatch(es)) — "
+                            f"NOT bouncing (already had a prior verify-check "
+                            f"comment; gate is advisory on repeats so the "
+                            f"reviewer can judge):"
+                        )
+                        footer = (
+                            "\n\nThe verify recipes diverged from Expected "
+                            "again. Cycle GJ caps verify-check at 1 hard "
+                            "bounce per feature, so this is informational — "
+                            "the reviewer will see this comment alongside "
+                            "your code and decide whether the AC mismatch "
+                            "reflects a real bug or a stale designer recipe."
+                        )
+                    else:
+                        header = (
+                            f"❌ post-coder verify-check auto-reject "
+                            f"({len(fails)} AC recipe mismatch(es)):"
+                        )
+                        footer = (
+                            "\n\nThese are the per-AC `Verify:` recipes the "
+                            "designer wrote into the story doc. The pipeline "
+                            "ran each one and the actual output diverged from "
+                            "`Expected:`. Either your implementation doesn't "
+                            "satisfy the AC, or your `session_summary.md` "
+                            "AC verification block was self-reported without "
+                            "running the recipe. Re-run each Verify command "
+                            "yourself, observe the actual output, and fix the "
+                            "code until it matches Expected. "
+                            "Do NOT paste fake outputs into session_summary "
+                            "to make this go away — the gate runs the recipes "
+                            "independently. Next repeat verify-check failure "
+                            "on this feature will be advisory-only (gate "
+                            "caps at 1 hard bounce per feature)."
+                        )
                     body = (
-                        f"❌ post-coder verify-check auto-reject "
-                        f"({len(fails)} AC recipe mismatch(es)):\n\n"
+                        header + "\n\n"
                         + "\n".join(bullets)
-                        + "\n\nThese are the per-AC `Verify:` recipes the "
-                          "designer wrote into the story doc. The pipeline "
-                          "ran each one and the actual output diverged from "
-                          "`Expected:`. Either your implementation doesn't "
-                          "satisfy the AC, or your `session_summary.md` "
-                          "AC verification block was self-reported without "
-                          "running the recipe. Re-run each Verify command "
-                          "yourself, observe the actual output, and fix the "
-                          "code until it matches Expected. "
-                          "Do NOT paste fake outputs into session_summary "
-                          "to make this go away — the gate runs the recipes "
-                          "independently."
+                        + footer
                     )
                     try:
                         client.post(
                             f"/api/features/{fid}/comments",
                             json={"author": "post-coder:verify-check", "body": body},
                         )
+                        # Cycle GJ (2026-06-02): advisory-mode features do
+                        # NOT get bounced. The comment above is informational;
+                        # the feature stays at its current status (typically
+                        # Implemented, post-coder push already succeeded) and
+                        # the downstream Reviewing-PATCH below proceeds. Skip
+                        # the rest of this block (status downgrade + fix_attempts
+                        # bump) only when this is the first verify-check bounce.
+                        if is_advisory:
+                            continue
                         # Cycle DG (2026-06-01): explicitly compute and PATCH
                         # the bumped fix_attempts. The website's auto-bump
                         # only fires on a real status transition (Implemented
@@ -3470,10 +3549,32 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             log.warning(
                 f"[post-coder] {pname}: verify-check PM client error: {e}"
             )
-        _filter_session_result_by_id(
-            working_dir, {f["id"] for f in assigned_features}, pname,
+        # Cycle GJ (2026-06-02): if every feature was advisory (all already
+        # had a prior verify-check comment), don't filter or return — let the
+        # downstream Reviewing-PATCH run so these features reach the reviewer.
+        # If any feature was hard-bounced, we still drop here (the bounced
+        # feature(s) need the reconcile-filter to prevent state churn). For
+        # mixed cases (some advisory, some bounced) we still drop — the
+        # advisory features will get picked up on the next coder cycle if
+        # the bounced one(s) are reworked successfully; this preserves the
+        # invariant that a session result reflects a single coherent outcome.
+        all_advisory = (
+            verify_result["failures"]
+            and verify_advisory_fids
+            and all(
+                f["feature_id"] in verify_advisory_fids
+                for f in verify_result["failures"]
+            )
         )
-        return pushed_ids
+        if not all_advisory:
+            _filter_session_result_by_id(
+                working_dir, {f["id"] for f in assigned_features}, pname,
+            )
+            return pushed_ids
+        log.info(
+            f"[post-coder] {pname}: verify-check all-advisory — "
+            f"proceeding to Reviewing for {len(verify_advisory_fids)} feature(s)"
+        )
 
     # 5. Mark assigned features as Reviewing + link to the PR via direct PM
     # API PATCH. Until 2026-05-06 this used a session_result.json append +
