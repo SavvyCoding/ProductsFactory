@@ -110,27 +110,40 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
                     "product_id": product_id,
                     "reason": f"{len(rework_codeable)} rework features (changes_requested)"}
 
-        # 2b/2c. Designer vs fresh-coder — balance by queue depth.
-        # Whichever backlog is larger goes first; if only one has work,
-        # it goes alone. This is the stable balancing rule that avoids
-        # BOTH starvation modes the system has hit:
+        # 2b/2c. Strict priority: first-pass coder > designer.
         #
-        #   - 2026-06-01 cycle H: coder-first starved the designer.
-        #     41 Approved features waited for design while the coder
-        #     cycled 10 sessions on a handful of pre-designed features.
-        #     0 features pushed for ~90 minutes.
-        #   - 2026-06-01 cycle DD: designer-first starved the coder.
-        #     44 Designed features ready to code, 9 Approved features
-        #     needing design — designer monopolized every cycle for
-        #     ~1.5 hours, ZERO coder runs, nothing reaching Reviewing,
-        #     nothing merging. User-reported as "nothing has been
-        #     shipped in last many hours."
+        # The system's throughput metric is Pushed-features-per-hour,
+        # which is downstream of the CODER. Designer just primes the
+        # pump — Approved-without-design is a near-zero-cost backlog
+        # row, but Designed-without-being-coded is wasted work (the
+        # design doc goes stale, sibling features ship in between,
+        # conflicts emerge at merge time). So bias all dispatch toward
+        # draining toward Pushed; refill the Designed queue only when
+        # it would otherwise empty.
         #
-        # Naive priority orderings (designer-first OR coder-first) are
-        # unstable: whichever persona is faster monopolizes; the slower
-        # persona's queue grows unbounded. Balancing by depth keeps both
-        # queues bounded — when one queue is larger, it runs; equilibrium
-        # is when both are roughly equal.
+        # History — two prior orderings failed:
+        #   - 2026-06-01 cycle H: coder-first starved designer
+        #     because a rework loop monopolized the coder (same
+        #     feature bounced lint-guard repeatedly, step 2a kept
+        #     re-claiming it).
+        #   - 2026-06-01 cycle DD: designer-first starved coder
+        #     when Approved backlog stayed large.
+        # Both were patched at the dispatcher layer with balance-by-
+        # queue-depth. That was a workaround for the cycle-H bounce-
+        # loop bug — which is now bounded by independent guards:
+        #   * IU gate (cycle JV fix E + cycle KI fix F): ONE PR per
+        #     product at a time. The coder can only rework the open
+        #     PR's feature; it cannot cycle across multiple features.
+        #   * Cycle DM-2 deprioritization: fa ≥ 3 rework falls out
+        #     of step 2a and joins first_pass_codeable.
+        #   * Cap-Block circuit (fa = 5): bounded rework attempts.
+        # Together these prevent a rework loop from running more than
+        # ~5 sessions on any single feature — the cycle-H failure mode
+        # is no longer reachable.
+        #
+        # So strict priority is safe to restore here. Coder runs whenever
+        # there's first-pass work the IU gate permits; designer fills
+        # in when the coder is gated or has no work.
         approved_no_design = [f for f in non_terminal
                               if f.get("status") == "Approved" and not f.get("design_doc_path")]
         first_pass_codeable = [f for f in non_terminal
@@ -220,52 +233,49 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
         # _fetch_assigned_features picks the rework path safely.
         first_pass_rework = [f for f in first_pass_codeable if f.get("pr_number")]
 
-        if approved_no_design and first_pass_codeable:
-            # Both queues have work: run whichever is deeper. Ties go
-            # to coder so PRs reach Reviewing and merging — the system's
-            # ultimate throughput metric.
-            #
-            # …unless an open session PR already exists for this product
-            # AND no rework-eligible candidate exists, in which case the
-            # coder is gated out to preserve the 1-PR-at-a-time
-            # invariant; designer still runs.
-            coder_gated_by_open_pr = (
-                open_session_pr_count >= 1 and not first_pass_rework
-            )
-            if (
-                len(first_pass_codeable) >= len(approved_no_design)
-                and not coder_gated_by_open_pr
-            ):
-                return {"action": "launch_session", "persona": "coder",
-                        "product_id": product_id,
-                        "reason": (
-                            f"{len(first_pass_codeable)} features ready to code "
-                            f"(first-pass; deeper queue than designer's "
-                            f"{len(approved_no_design)} Approved"
-                            + (f"; {len(first_pass_rework)} rework-eligible"
-                               if first_pass_rework and open_session_pr_count >= 1
-                               else "")
-                            + ")"
-                        )}
+        # Strict priority: coder runs whenever first_pass_codeable has
+        # work AND the IU gate permits. The gate permits when either:
+        #   (a) no open session PR exists for this product, OR
+        #   (b) at least one first_pass candidate has its own pr_number
+        #       set (rework path — reuses the existing PR, no 2nd PR
+        #       opened). See cycle KI fix F for the rework-aware refinement.
+        coder_gated_by_open_pr = (
+            open_session_pr_count >= 1 and not first_pass_rework
+        )
+        if first_pass_codeable and not coder_gated_by_open_pr:
+            return {"action": "launch_session", "persona": "coder",
+                    "product_id": product_id,
+                    "reason": (
+                        f"{len(first_pass_codeable)} features ready to code "
+                        f"(first-pass; strict priority over designer's "
+                        f"{len(approved_no_design)} Approved"
+                        + (f"; {len(first_pass_rework)} rework-eligible"
+                           if first_pass_rework and open_session_pr_count >= 1
+                           else "")
+                        + ")"
+                    )}
+        # Designer — coder is either out of work or gated by an open PR
+        # whose rework candidate isn't in first_pass_codeable.
+        if approved_no_design:
             return {"action": "launch_session", "persona": "designer",
                     "product_id": product_id,
                     "reason": (
                         f"{len(approved_no_design)} Approved features need design docs"
                         + (
                             f" (coder gated by {open_session_pr_count} open session PR(s))"
-                            if coder_gated_by_open_pr
-                            else f" (deeper queue than coder's {len(first_pass_codeable)} first-pass)"
+                            if coder_gated_by_open_pr and first_pass_codeable
+                            else (
+                                ""
+                                if not first_pass_codeable
+                                else f" (no first-pass work; designer drains backlog)"
+                            )
                         )
                     )}
-        if approved_no_design:
-            return {"action": "launch_session", "persona": "designer",
-                    "product_id": product_id,
-                    "reason": f"{len(approved_no_design)} Approved features need design docs"}
         if first_pass_codeable:
+            # No designer work, the coder is gated, AND no rework-
+            # eligible candidate exists — let the in-flight PR
+            # finish before claiming another first-pass.
             if open_session_pr_count >= 1 and not first_pass_rework:
-                # No designer work, the coder is gated, AND no rework-
-                # eligible candidate exists — let the in-flight PR
-                # finish before claiming another first-pass.
                 return {"action": "exit",
                         "reason": (
                             f"PR-serialization gate: {open_session_pr_count} open session "
