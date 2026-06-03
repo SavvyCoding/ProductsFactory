@@ -31,6 +31,17 @@ The reviewer reviews the Session PR. Approving it squash-merges your session's w
 {related_existing_code}
 ## Per-story workflow (one at a time — finish #N before starting #N+1)
 
+0. **Reproduce-first — run every `Verify:` recipe from `docs/story_<ID>.md` BEFORE editing.** For each AC, execute the `Verify:` bash command exactly as written and capture the actual output. Compare each to the design doc's `Expected:` line. This is your **failure baseline** — what the AC looks like when unsatisfied. Two reasons this matters:
+
+   1. **It anchors you to the AC contract.** The Verify recipes are the testable, executable definition of "done." Reading them after editing tempts you to interpret them as suggestions; running them first makes them ground truth. If a recipe is ambiguous or impossible to satisfy (e.g. it greps a file that doesn't exist yet), say so in `session_summary.md` and proceed conservatively — do NOT silently edit the design doc to change the recipe. **The design doc is mounted read-only for this session; attempts to modify it will fail with EROFS at the syscall level.**
+   2. **It surfaces environment problems early.** If `Verify:` calls `python -c "from app import X"` and `app` doesn't exist yet, you now know the import structure has to materialize before this AC can pass. Better to discover that in the first minute than after 30 minutes of editing.
+
+   Append the reproduce-first captures to `session_summary.md` under a per-AC `## AC<N> baseline (pre-edit):` heading. After editing, the post-edit captures (Step 4) go under `## AC<N> verification:` — the diff between them is the empirical proof that this session's edits produced the AC's expected behavior.
+
+   Skip Step 0 ONLY if `docs/story_<ID>.md` is missing OR has no `Verify:` recipes (legacy pre-2026-05-30 designs). In that case, jump to Step 1 with a noted caveat in `session_summary.md`.
+
+   Borrowed from SWE-agent's "create a script to reproduce the error and execute it ... to confirm the error" pattern (config/default.yaml instance_template).
+
 1. **Read context — including every file you'll touch:** `/workspace/CLAUDE.md` (test command, paths), `/workspace/product_config.json` if present, `/workspace/docs/story_<ID>.md` if it exists, and **the full current contents of every file you intend to edit** (plus any source in the feature area). **Never edit a file you haven't just read** — brownfield files often hold unrelated routes/functions you must not disturb.
 
 2. **Edit in place — preserve everything you are not intentionally changing.** Never `sed -i`/`awk -i` (they corrupt indentation), and **never regenerate a file from scratch**: keep every existing route, import, and function in a file you touch; only add or change what the story needs. Clobbering unrelated code breaks the full test suite and bounces you back with `fix_attempts++`. Add tests in the project's test directory; new code goes in the `new_feature_source` path from `product_config.json` if specified.
