@@ -1495,6 +1495,51 @@ def auto_heal_unproductive_coder(
         if not pid:
             return out
 
+        # Cycle JV (2026-06-03): also skip when the post-coder pipeline
+        # DID push the session branch + open/reuse the PR but then bounced
+        # features via a downstream gate (lint-guard / test-check /
+        # verify-check). In that flow, post_coder_pushed is empty
+        # (no feature reached the final "Reviewing" PATCH) yet the branch
+        # IS on origin and the PR IS open — there is no plumbing failure
+        # to diagnose. Bouncing through pause→checklist→resume is pure
+        # cosmetic noise: 6+ false-positive pause/resume pairs observed
+        # across cycles JJ/JL/JM/JV on DocumentSign 1131, MyTracking 1292
+        # (twice), DocumentSign 1136, MyTracking 1262.
+        #
+        # post_coder.py writes `branch_name = coder/<session-prefix>` to
+        # every assigned feature row IMMEDIATELY after a successful git
+        # push, BEFORE the lint/test/verify gates run (line ~2944). So a
+        # fresh fetch tells us "did this session's push actually land on
+        # remote?" without needing a refactor of the pipeline's return
+        # signature.
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=5) as _bp_client:
+                for _f in assigned_list:
+                    _fid = _f.get("id") if isinstance(_f, dict) else None
+                    if not isinstance(_fid, int):
+                        continue
+                    try:
+                        _r = _bp_client.get(f"/api/features/{_fid}")
+                        if not (200 <= _r.status_code < 300):
+                            continue
+                        _bn = (_r.json() or {}).get("branch_name") or ""
+                        # post-coder always names the branch coder/<uid-prefix>;
+                        # the prefix is the first 8 chars of session_uid.
+                        if _bn and session_uid and _bn.startswith("coder/") \
+                                and session_uid.startswith(_bn[len("coder/"):]):
+                            log.info(
+                                f"[auto-heal] {pname}: session {session_uid} "
+                                f"pushed branch {_bn} (gate bounced features "
+                                f"but push + PR are on remote) — skipping "
+                                f"pause/diagnosis trigger"
+                            )
+                            return out
+                    except Exception:
+                        continue
+        except Exception:
+            # Best-effort; on failure fall through to the original behavior.
+            pass
+
         out["triggered"] = True
         log.warning(
             f"[auto-heal] {pname}: coder session {session_uid} exit=0 with "
