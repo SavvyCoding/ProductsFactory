@@ -1435,18 +1435,22 @@ def _post_coder_lint_check(
     # such a file, the guard fires — a deliberately incremental cleanup.
     _PYPI_NAME_MAP = {
         # import name → pypi distribution name
-        "yaml":       "pyyaml",
-        "jwt":        "PyJWT",
-        "cv2":        "opencv-python",
-        "PIL":        "Pillow",
-        "sklearn":    "scikit-learn",
-        "bs4":        "beautifulsoup4",
-        "dateutil":   "python-dateutil",
-        "dotenv":     "python-dotenv",
-        "magic":      "python-magic",
-        "MySQLdb":    "mysqlclient",
-        "google":     "google-cloud-storage",  # best-effort; google.* is huge
-        "OpenSSL":    "pyOpenSSL",
+        "yaml":         "pyyaml",
+        "jwt":          "PyJWT",
+        "jose":         "python-jose",  # cycle: MyJira 2026-06-03 #1334
+        "cv2":          "opencv-python",
+        "PIL":          "Pillow",
+        "sklearn":      "scikit-learn",
+        "bs4":          "beautifulsoup4",
+        "dateutil":     "python-dateutil",
+        "dotenv":       "python-dotenv",
+        "magic":        "python-magic",
+        "MySQLdb":      "mysqlclient",
+        "google":       "google-cloud-storage",  # best-effort; google.* is huge
+        "OpenSSL":      "pyOpenSSL",
+        "Crypto":       "pycryptodome",
+        "serial":       "pyserial",
+        "Levenshtein":  "python-Levenshtein",
     }
     try:
         from pathlib import Path as _PPath
@@ -2529,12 +2533,19 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         log.exception(f"[post-coder] {pname}: agent-handled detection failed — running pipeline")
 
     def _run(cmd: list[str], **kw) -> _sp.CompletedProcess:
-        # Pop timeout from kw so the caller's override doesn't collide with the
-        # default we pass into _sp.run. Without this, e.g. _run(..., timeout=180)
-        # raises TypeError("got multiple values for keyword argument 'timeout'")
-        # — which crashes the whole pipeline before our diagnostic checks run.
+        # Pop timeout and cwd from kw so the caller's override doesn't collide
+        # with the defaults we pass into _sp.run. Without this, e.g.
+        # _run(..., timeout=180) raises TypeError("got multiple values for
+        # keyword argument 'timeout'") — which crashes the whole pipeline
+        # before our diagnostic checks run. cwd needs the same treatment:
+        # canonical 2026-06-03 cycle KU MyJira #1320 — Guard 13 category 13a
+        # self-heal called _run(..., cwd=working_dir, timeout=30) and crashed
+        # with "subprocess.run() got multiple values for keyword argument
+        # 'cwd'"; self-heal aborted, debris file left in the commit, feature
+        # bounced unnecessarily.
         timeout = kw.pop("timeout", 120)
-        return _sp.run(cmd, cwd=working_dir, capture_output=True, text=True, timeout=timeout, **kw)
+        cwd = kw.pop("cwd", working_dir)
+        return _sp.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, **kw)
 
     # 1. Detect changes — anything uncommitted in the tree, OR committed-but-
     # not-pushed (the agent may have committed itself; we still need to push).
