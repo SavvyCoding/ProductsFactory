@@ -201,15 +201,37 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
             if f.get("pr_number") and f.get("status") != "Blocked"
         )
 
+        # Cycle KD-KH (2026-06-03): Fix E correctly closed the stale-
+        # branch cap-Block escape (1130/1131/1261), but accidentally
+        # blocks the rework-recovery path. When reset_stuck moves a
+        # near-cap rework feature from Implementing → Designed while
+        # preserving pr_number, fix E now counts that pr_number against
+        # the gate. The feature cannot be claimed for rework — even
+        # though claiming would force-push to the EXISTING PR (no 2nd
+        # PR opened). Result: feature self-deadlocks. Canonical
+        # incidents: DocumentSign #1136 + MyTracking #1262 (both
+        # 2026-06-03 cycle KD), idle for hours waiting on coder.
+        #
+        # Refinement: distinguish first_pass candidates that would
+        # REUSE an existing PR (have pr_number) from those that would
+        # OPEN a new one (no pr_number). Only the latter would violate
+        # the 1-PR-per-product invariant. If at least one rework-
+        # eligible candidate exists, the gate doesn't block — downstream
+        # _fetch_assigned_features picks the rework path safely.
+        first_pass_rework = [f for f in first_pass_codeable if f.get("pr_number")]
+
         if approved_no_design and first_pass_codeable:
             # Both queues have work: run whichever is deeper. Ties go
             # to coder so PRs reach Reviewing and merging — the system's
             # ultimate throughput metric.
             #
-            # …unless an open session PR already exists for this product,
-            # in which case the coder is gated out to preserve the
-            # 1-PR-at-a-time invariant; designer still runs.
-            coder_gated_by_open_pr = open_session_pr_count >= 1
+            # …unless an open session PR already exists for this product
+            # AND no rework-eligible candidate exists, in which case the
+            # coder is gated out to preserve the 1-PR-at-a-time
+            # invariant; designer still runs.
+            coder_gated_by_open_pr = (
+                open_session_pr_count >= 1 and not first_pass_rework
+            )
             if (
                 len(first_pass_codeable) >= len(approved_no_design)
                 and not coder_gated_by_open_pr
@@ -219,7 +241,11 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
                         "reason": (
                             f"{len(first_pass_codeable)} features ready to code "
                             f"(first-pass; deeper queue than designer's "
-                            f"{len(approved_no_design)} Approved)"
+                            f"{len(approved_no_design)} Approved"
+                            + (f"; {len(first_pass_rework)} rework-eligible"
+                               if first_pass_rework and open_session_pr_count >= 1
+                               else "")
+                            + ")"
                         )}
             return {"action": "launch_session", "persona": "designer",
                     "product_id": product_id,
@@ -236,9 +262,10 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
                     "product_id": product_id,
                     "reason": f"{len(approved_no_design)} Approved features need design docs"}
         if first_pass_codeable:
-            if open_session_pr_count >= 1:
-                # No designer work and the coder is gated — let the
-                # in-flight PR finish before claiming another first-pass.
+            if open_session_pr_count >= 1 and not first_pass_rework:
+                # No designer work, the coder is gated, AND no rework-
+                # eligible candidate exists — let the in-flight PR
+                # finish before claiming another first-pass.
                 return {"action": "exit",
                         "reason": (
                             f"PR-serialization gate: {open_session_pr_count} open session "
