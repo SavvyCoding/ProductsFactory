@@ -48,6 +48,30 @@ The reviewer reviews the Session PR. Approving it squash-merges your session's w
 
 3. **Run tests scoped to the files you changed first**, then run the full suite once before `task_done`. Scoped first (e.g. `pytest tests/test_<feature>.py -q`) is fast feedback while you iterate. Full suite second (`pytest -q --no-header` from `/workspace`) catches cross-module regressions — the post-coder gate runs the full suite anyway, and if a test you didn't touch goes red there, you bounce with `fix_attempts++` (canonical 2026-05-30 DocumentSign failures: changed metrics module, broke `tests/test_health_unit.py::test_readiness_all_healthy` which nobody scoped-ran). Skip the full-suite step only if it provably exceeds the turn budget on this product — note that decision in `session_summary.md`. If a previously-passing test now fails: investigate, fix or revert. If stuck after 2 attempts, write `BLOCKED: <reason>` to `/workspace/session_summary.md` and exit cleanly.
 
+   ⚠️ **In-session red→green loop — DO NOT exit with red tests.** Treat the test command as a hard gate that must return clean before `task_done`, not a passive report. The loop:
+
+   ```
+   while True:
+       result = pytest <scoped paths> --tb=short -x
+       if result.returncode == 0:
+           break
+       # READ the actual failure (stderr, traceback, assertion line) — don't guess.
+       # EDIT the code to fix exactly the named failure.
+       # Loop back; do NOT exit and hope the next session catches it.
+   ```
+
+   Each post-coder bounce is a 5–10 min round-trip with `fix_attempts++`; the supervisor's `rapid_flap` detector Blocks features at 10 status transitions. **In-session fixes are free; cross-session fixes cost rework rounds. Always prefer the in-session fix.**
+
+   The 2-attempts cap above is for genuinely-stuck cases (a broken test you can't read, a missing dependency you can't install, an OS-level issue). It is NOT a license to call `task_done` after one failing run because "the next coder will figure it out." If pytest is red at exit and you haven't either fixed it or written `BLOCKED:` with a specific blocker, you've shipped a failing session that will bounce as soon as the post-coder gate runs the same suite.
+
+   **Pre-task_done lint pre-check.** The post-coder pipeline runs deterministic lint guards (Guard 5 hardcoded-secret, Guard 13 agent-debris, Guard 14 config-as-gate, Guard 17 deletion-safety, Guard 18 deps-coherence, Guard 19 doc-only-commit). Catching these in-session is much cheaper than bouncing through post-coder:
+
+   - **Untracked debris** — run `git status --porcelain` and remove anything matching `*.bak`, `*_old_*`, `*_v\d+_*`, `*_complete_*`, `temp_fixed*`, `debug_*`, `final_*`, `test_*_qa.py` siblings of `test_*.py`. These are Guard 13 catches.
+   - **Deps coherence (Guard 18)** — for every NEW import you added (not pre-existing in main), confirm: `python -c "import <pkg>"` works AND the canonical PyPI distribution name appears in `requirements.txt` (or `requirements-dev.txt` for test-only). Common confusions you must NOT make: write `import yaml` not `import pyyaml` (PyYAML installs as `yaml`); write `from jose import jwt` not `from python_jose` (python-jose installs as `jose`); write `from Crypto.Cipher import AES` not `import pycryptodome` (pycryptodome installs as `Crypto`); write `from bs4 import BeautifulSoup` not `import beautifulsoup4` (beautifulsoup4 installs as `bs4`).
+   - **Deletion safety (Guard 17)** — if you deleted any public top-level symbol (`def name(...)`, `class Name`, module-level `NAME = ...`), grep the surviving codebase for callers: `grep -rn "\b<symbol>\b" --include='*.py' src/ tests/`. Every caller you find must either be removed or updated; orphan references will fail Guard 17's AST-diff caller-grep at the gate.
+
+   Borrowed from Aider's auto-lint + auto-test loop (`aider/coders/base_coder.py::lint_edited` + `cmd_test`): the model re-runs lint and tests after every edit cycle and feeds the failure back to itself instead of waiting for an external gate to catch it. The throughput delta from this single discipline is the difference between shipping in 2–3 minutes and bouncing for 30.
+
 4. **Verify each AC empirically — pytest green is NOT enough.** `docs/story_<id>.md` lists per-AC `Verify:` bash commands and `Expected:` outputs. For each AC, run the Verify command and paste the **actual output** into `/workspace/session_summary.md` under a `## AC<N> verification:` heading. Compare it to the design doc's Expected line — if it diverges, fix the code (or, rarely, fix the Verify recipe and note it in a comment). Pytest reports "no exception raised" — that's compatible with `def test_x(): pass` and with `time.strftime("%Y-%m-%dT%H:%M:%S.%f")` silently emitting the literal `%f`. The Verify recipe runs against the actual production code and produces text you can read; bugs that look right in code are visible in the recipe's output.
 
    ```bash
@@ -73,6 +97,9 @@ The reviewer reviews the Session PR. Approving it squash-merges your session's w
 
 The reviewer flags these same items every cycle — handling them now saves a rework round (each adds 20–60 min and bumps `fix_attempts` toward the auto-block cap of 5). For each implemented story:
 
+- [ ] **Tests are GREEN at exit — not just "I ran them once."** Re-run `pytest <scoped paths> --tb=short -x` *as the last action before `task_done`* and confirm `exit code = 0`. If red: read the failure, edit, re-run, repeat. **Calling `task_done` while pytest is red is a guaranteed bounce + `fix_attempts++`** — the post-coder gate runs the same suite within 30s of your exit. Aider's "auto-test loop" — closing this loop in-session is the highest-leverage habit you have.
+- [ ] **No new undeclared imports.** For every `import X` / `from X.Y import Z` you added in this session, verify `X` is in `requirements.txt` (or `requirements-dev.txt` for test-only). Use the canonical PyPI distribution name (PyYAML for `import yaml`, python-jose for `from jose`, etc. — see Step 3's pre-task_done lint pre-check). The post-coder Guard 18 will catch this; catching it here is one round-trip cheaper.
+- [ ] **No agent debris staged.** `git status --porcelain` returns nothing matching `*.bak`, `*_old_*`, `debug_*`, `temp_fixed*`, `final_*`, `test_*_qa.py` siblings of `test_*.py`. Post-coder Guard 13 catches these; in-session removal saves the bounce.
 - [ ] **Acceptance criteria covered** — re-read `docs/story_<id>.md`; every numbered AC has both a code path and a non-skipped test exercising it.
 - [ ] **AC Verify recipes executed** — for each AC in `docs/story_<id>.md`, the `Verify:` command ran AND the actual output is pasted in `session_summary.md` under `## AC<N> verification:` AND the output matches the AC's `Expected:` line. Legacy docs without recipes: ad-hoc empirical-check block pasted per AC instead. **A pasted "## AC<N> verification:" block with output that matches Expected is the single strongest signal you actually built the AC** — much stronger than "pytest is green," because pytest is satisfied by hollow tests but a Verify recipe with concrete Expected output is not.
 - [ ] **HARD STOP: tests must actually run the AC behavior — not pretend to.** Recently this is the #1 reviewer-rejection reason. Banned patterns the lint-guard or reviewer will reject:
