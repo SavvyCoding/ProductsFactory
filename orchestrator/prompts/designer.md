@@ -204,6 +204,15 @@ correctly, design it normally — don't recursively split.
    - Skim 1-2 existing design docs in `/workspace/docs/` for codebase
      pattern calibration
 
+   ⚠️ **If the story's intent is ambiguous and the context above doesn't disambiguate it — STOP and flag rather than guess.** Write the design doc up to the first ambiguous AC and put `[NEEDS CLARIFICATION: <one specific question>]` on that line, then call `task_done`. The post-doc pipeline rejects any design doc containing the marker, rolls the feature back to Approved (no fix_attempts bump), and posts a comment surfacing the question to the PM. Concrete examples of when to flag:
+   - The story says "add rate limiting" without specifying the limit (10/min? per-user? per-IP? sliding window?). → `[NEEDS CLARIFICATION: rate limit value, scope (per-user/per-IP), and window?]`
+   - The story says "use the existing user model" but you can't find one (e.g., MyJira #1307 was Blocked before User model existed). → `[NEEDS CLARIFICATION: which file defines the User model? Auth foundation features blocked or not yet shipped?]`
+   - The story implies an integration with a third-party service whose API surface you don't know (Stripe, Twilio, Sentry). → `[NEEDS CLARIFICATION: which API version / SDK package? Sandbox or live keys?]`
+
+   The wrong move: fabricate a plausible-but-brittle interpretation and ship a design doc with invented verify recipes. The coder will then optimize for the invented recipes, the reviewer will reject, fix_attempts will climb, and the feature will end up Blocked. The right move is to flag ONCE and let the PM (or a follow-up cycle once the foundation lands) provide the missing context.
+
+   Borrowed from GitHub spec-kit's `[NEEDS CLARIFICATION]` convention (templates/spec-template.md). The whole point of the marker is to make ambiguity *visible* in the artifact instead of hidden in the LLM's guess.
+
 2. **Write the design doc** to `/workspace/docs/story_{feature_id:03d}.md`.
    Use this template EXACTLY — every section is required, the order is
    required, and the headings must match verbatim so the coder's and
@@ -254,6 +263,22 @@ correctly, design it normally — don't recursively split.
    Numeric-only outputs still go in backticks: `` Expected: `1`. ``
 
    For ACs where the behavior is truly internal (e.g. a refactor with no observable change, a state transition with no external side-effect), write `Verify: see unit test` and lean on the unit test alone — but be honest about it. Most "internal" ACs have an observable consequence somewhere (a log line, a metric, a DB row, a function return value); the verify recipe should target that consequence.
+
+   ⚠️ **Verify recipes test BEHAVIOR, not source-code artifacts.** The point of `Verify:` is to give the coder a behavioral target — what the *running* code does. Source-grep recipes test the implementation, not the behavior, and produce brittle code that ships hollow tests.
+
+   - **BANNED verify patterns** (the coder will optimize for these and you'll ship brittle code):
+     - `grep -rn "<symbol>" src/` to confirm a function/class/constant exists — tests source, not behavior. The coder's "fix" is to leave the symbol exactly where you grep'd; refactoring breaks the test.
+     - `grep -c "<pattern>" file.py` to count occurrences — same issue, and you've forced the coder to count instead of test.
+     - `wc -l <file>` / `find -name X | wc -l` — counts files, not behavior.
+     - Regex over `.py` / `.sql` / `.js` source files to check declarations. (Canonical anti-pattern: MyJira `test_ac1_projects_table_declared_exactly_once_in_init_db` — greps src/db.py for `CREATE TABLE.*projects`; passes whether or not `init_db()` actually runs.)
+
+   - **REQUIRED verify patterns** (these target observable behavior):
+     - `python -c "from app import X; assert X(input) == expected"` — call the function, assert the output. The coder cannot pass this without the production code returning the right value.
+     - `curl -fsS localhost:N/path -X POST -d '...' | jq -e '.field == "expected"'` — hit the running endpoint, check the response. Forces the route to exist AND be wired correctly.
+     - `python -c "import app; app.do_thing(); import sqlite3; assert sqlite3.connect(...).execute('select count(*) from t').fetchone()[0] == 1"` — call the operation, query the DB, assert state. Tests the side effect.
+     - For library code with no I/O: import the symbol, call it, assert the return value. NOT `grep "def name"`.
+
+   Borrowed from GitHub spec-kit's "what not how" rule. If your AC's only verifiable property is "the source file contains a certain string," the AC is testing the implementation, not the requirement. Re-write it to test what the *running* code does.
 
    ## Anchored Patterns
    For each AC, name the existing decorator / helper / convention the
