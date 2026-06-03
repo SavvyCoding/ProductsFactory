@@ -175,12 +175,30 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
         # it removes the entire class of stale-branch cap-Blocks. Net
         # throughput should improve because no features get killed by
         # infrastructure-side branch staleness.
-        _PR_OPEN_STATUSES = frozenset({
-            "Implementing", "Implemented", "Reviewing", "Reviewed",
-        })
+        #
+        # Cycle JV (2026-06-03): the gate used to filter on a fixed
+        # _PR_OPEN_STATUSES = {Implementing, Implemented, Reviewing,
+        # Reviewed}. That set missed Designed / Approved / Designing —
+        # which is the state a feature lands in when drift-scanner
+        # auto-heal clears its design_doc_path mid-cycle, or when the
+        # reconciler resets a Reviewed-but-conflict-blocked feature
+        # back. Canonical incidents (all ended cap-Blocked despite
+        # having open PRs): DocumentSign #1130 (cycle JH), #1131
+        # (cycle JQ), MyTracking #1261 (cycle JU). In each case the
+        # feature had pr_number set + a live PR on GitHub, but its
+        # transient status was Designed at the moment the dispatcher
+        # ran — so the gate count saw 0, a fresh coder claim
+        # succeeded, sibling PRs merged ahead, the original PR went
+        # stale, auto-merge 405'd, fix_attempts hit 5, cap-Block.
+        #
+        # Fix: trust pr_number, not status. Any non-terminal feature
+        # with a pr_number IS an in-flight session PR regardless of
+        # its momentary status. Exclude Blocked defensively (the
+        # terminal-PR-closer should have cleared pr_number on Block,
+        # but a stale row would otherwise gate the dispatcher forever).
         open_session_pr_count = sum(
             1 for f in non_terminal
-            if f.get("pr_number") and f.get("status") in _PR_OPEN_STATUSES
+            if f.get("pr_number") and f.get("status") != "Blocked"
         )
 
         if approved_no_design and first_pass_codeable:
