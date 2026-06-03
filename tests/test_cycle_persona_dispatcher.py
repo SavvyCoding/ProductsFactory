@@ -1,12 +1,11 @@
-"""Tests for orchestrator.cycle.persona._decide_action — specifically the
-designer/coder balancing rule (cycle DD 2026-06-01).
+"""Tests for orchestrator.cycle.persona._decide_action.
 
-The dispatcher's old "designer always before fresh-coder" rule starved the
-coder whenever the designer was faster than the coder (canonical 2026-06-01
-incident: 44 Designed features waited while 9 Approved features kept the
-designer running every cycle for ~1.5h, zero merges). The flipped order
-("coder always before designer") starves the designer instead. The fix:
-balance by queue depth — pick whichever queue is deeper.
+Priority ordering (2026-06-03 onward — strict): reviewer > rework <fa3 >
+first-pass coder > designer. The first-pass branch runs whenever the
+IU gate permits, regardless of designer-queue depth. Designer fills in
+when coder has no work or is PR-gated. Replaces the prior balance-by-
+queue-depth heuristic; the cycle-H bounce-loop failure mode that
+motivated the balance is now bounded by IU gate + cycle DM-2 + cap-Block.
 """
 from __future__ import annotations
 
@@ -79,9 +78,16 @@ class TestDispatcherBalance:
         )
         assert "44" in result["reason"] and "9" in result["reason"]
 
-    def test_deeper_designer_queue_runs_designer(self):
-        """41 Approved-no-design + 5 Designed: designer should win.
-        This is the canonical cycle H starvation case (opposite shape)."""
+    def test_deeper_designer_queue_still_runs_coder(self):
+        """Strict-priority change (2026-06-03): even when the designer
+        queue is much deeper, the coder runs as long as first-pass work
+        exists and the IU gate permits. Designer fills in only when
+        coder has no work or is PR-gated.
+
+        Under the prior balance-by-depth rule, 41 Approved vs 5 Designed
+        would have run designer; the new rule drains the 5 Designed via
+        coder first (each ship turns into a row in features.merge_notes
+        that ARCHITECTURE.md can absorb)."""
         features = (
             [_feature(1000 + i, "Approved", design_doc_path=None)
              for i in range(41)]
@@ -91,11 +97,41 @@ class TestDispatcherBalance:
         client = _client_for_features(features)
         result = _decide_action(product_id=25, client=client)
         assert result["action"] == "launch_session"
-        assert result["persona"] == "designer", (
-            f"designer should win — designer backlog (41) > coder backlog (5), "
+        assert result["persona"] == "coder", (
+            f"strict priority: coder runs whenever first-pass exists, "
             f"got {result}"
         )
-        assert "41" in result["reason"]
+        assert "5" in result["reason"]
+
+    def test_designer_runs_when_coder_pr_gated_no_rework(self):
+        """When the IU gate blocks fresh first-pass (open PR exists but
+        no rework-eligible candidate in first_pass_codeable), designer
+        runs to drain the Approved queue.
+
+        This is the only path where designer takes priority over fresh
+        first-pass work — preserving the 1-PR-per-product invariant."""
+        features = (
+            # One feature already in flight (open PR, gating)
+            [_feature(900, "Reviewing", pr_number=42)]
+            # Designer queue
+            + [_feature(1000 + i, "Approved", design_doc_path=None)
+               for i in range(10)]
+            # Fresh first-pass (would open a 2nd PR if claimed)
+            + [_feature(2000 + i, "Designed", design_doc_path=f"docs/{2000+i}.md")
+               for i in range(5)]
+        )
+        client = _client_for_features(features)
+        result = _decide_action(product_id=25, client=client)
+        # Step 1 reviewer would catch this; bypass by using Implemented
+        # status on the open PR feature.
+        features[0] = _feature(900, "Implemented", pr_number=42)
+        client = _client_for_features(features)
+        result = _decide_action(product_id=25, client=client)
+        assert result["persona"] == "designer", (
+            f"designer wins when coder is PR-gated with no rework candidate, "
+            f"got {result}"
+        )
+        assert "gated" in result["reason"]
 
     def test_equal_queues_tiebreak_to_coder(self):
         """Equal queue depths: tie goes to coder (PRs reach Reviewing
