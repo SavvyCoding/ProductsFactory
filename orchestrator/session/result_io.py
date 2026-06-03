@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -23,6 +24,140 @@ from orchestrator.session.state_machine import _apply_session_entry
 log = logging.getLogger("poller.docker")
 
 PM_API_URL = os.environ["PM_API_URL"]
+
+
+def _validate_reviewer_outcome_consistency(entry: dict, pm_client, log_prefix: str) -> tuple[str, str]:
+    """
+    Enforce text-vs-structured consistency on reviewer session_result entries.
+
+    The structured `review_outcome` field and the most recent reviewer comment
+    body MUST agree:
+        ``approved``           ⇔ comment opens with ✅ / "LGTM" / "APPROVED"
+                                 (first 200 chars) AND no ❌ / "changes_requested" /
+                                 "REJECT" anywhere in the body.
+        ``changes_requested``  ⇔ comment contains ❌ / "changes_requested" /
+                                 "REJECT" anywhere in the body.
+
+    Mixed-but-changes-requested ("✅ prior X addressed. ❌ new Y" pattern) is
+    allowed: presence of ❌ anywhere downgrades the verdict to changes_requested,
+    and the structured outcome must match.
+
+    Returns ``(decision, reason)`` where decision is one of:
+      - ``"apply"`` — entry passes (or validation didn't apply because the entry
+                     is not a reviewer outcome). Caller applies normally.
+      - ``"reject"`` — first mismatch detected this session. Caller MUST NOT
+                       apply the entry; a ``system:reviewer-validation`` comment
+                       has been posted on the feature explaining the rejection
+                       and the feature is left in ``Reviewing`` so the next
+                       dispatcher cycle re-launches a reviewer.
+      - ``"apply_trust_json"`` — repeat mismatch (validation comment already
+                                 exists in the last 2h). Caller applies the
+                                 structured outcome as authoritative and logs a
+                                 critical alert.
+
+    Canonical incident: 2026-06-03 cycle JR DocumentSign #1131. Reviewer wrote
+    "✅ Commits 067a5bd + fbfd876: LGTM — functional/tests/security pass" in
+    the comment body but set ``review_outcome=changes_requested`` in
+    session_result.json. The structured field was applied as-is; fix_attempts
+    bumped 4→5; cap-Block fired; PR #332 closed unmerged; a genuinely-approved
+    commit was lost. This guard rejects that pattern at the apply gate.
+
+    Best-effort: any PM-API failure during the comment fetch causes the entry
+    to apply normally (we don't want validation to break the live-poll path).
+    """
+    if not isinstance(entry, dict):
+        return ("apply", "")
+    review_outcome = entry.get("review_outcome")
+    if review_outcome not in ("approved", "changes_requested"):
+        return ("apply", "")
+    fid = entry.get("id")
+    if not isinstance(fid, int):
+        return ("apply", "")
+
+    try:
+        r = pm_client.get(f"/api/features/{fid}/comments")
+        if r.status_code != 200:
+            return ("apply", "")
+        comments = r.json()
+        if not isinstance(comments, list):
+            comments = []
+    except Exception:
+        return ("apply", "")
+
+    comments.sort(key=lambda c: (c.get("created_at") or ""))
+    reviewer_comments = [
+        c for c in comments
+        if (c.get("author") or "").lower() == "reviewer"
+    ]
+    if not reviewer_comments:
+        return ("apply", "")
+
+    latest_body = (reviewer_comments[-1].get("body") or "")
+    head = latest_body[:200]
+    head_upper = head.upper()
+    body_upper = latest_body.upper()
+
+    has_pos_head = ("✅" in head) or ("LGTM" in head_upper) or ("APPROVED" in head_upper)
+    has_neg_body = ("❌" in latest_body) or ("CHANGES_REQUESTED" in body_upper) or ("REJECT" in body_upper)
+
+    mismatch = False
+    kind = ""
+    if review_outcome == "changes_requested" and has_pos_head and not has_neg_body:
+        mismatch = True
+        kind = "structured=changes_requested but comment opens with ✅/LGTM/approved and contains no ❌"
+    elif review_outcome == "approved" and has_neg_body:
+        # approval with ❌ anywhere — downgrade by definition; structured must match.
+        mismatch = True
+        kind = "structured=approved but comment body contains ❌/changes_requested/reject"
+
+    if not mismatch:
+        return ("apply", "")
+
+    # Has the system already posted a validation comment for this feature in
+    # the last 2 hours? If yes, the reviewer has had a chance to fix the
+    # mismatch; trust the JSON now and let the operator triage via alert.
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    repeat = any(
+        (c.get("author") or "").startswith("system:reviewer-validation")
+        and (c.get("created_at") or "") >= cutoff
+        for c in comments
+    )
+    if repeat:
+        log.error(
+            f"{log_prefix} feature #{fid}: REPEAT reviewer text-vs-structured "
+            f"mismatch within 2h window ({kind}); applying structured outcome "
+            f"as authoritative — operator should triage."
+        )
+        return ("apply_trust_json", kind)
+
+    validation_body = (
+        f"⚠️ system:reviewer-validation — comment text and structured "
+        f"`review_outcome` are inconsistent. The session_result entry was "
+        f"REJECTED and the feature is left in `Reviewing` for re-review.\n\n"
+        f"- Detected: {kind}\n"
+        f"- structured: `{review_outcome}`\n"
+        f"- comment body opens: `{head[:120]!r}`\n\n"
+        f"To approve: comment opens with ✅ / LGTM AND `review_outcome=approved` "
+        f"AND no ❌ in body. To request changes: comment contains ❌ AND "
+        f"`review_outcome=changes_requested`. Re-emit a consistent session_result "
+        f"line — see reviewer.md Step 5 'Outcome FIRST, prose SECOND'. Canonical "
+        f"failure this guards: 2026-06-03 cycle JR DocumentSign #1131."
+    )
+    try:
+        pm_client.post(
+            f"/api/features/{fid}/comments",
+            json={"author": "system:reviewer-validation", "body": validation_body},
+            timeout=5,
+        )
+    except Exception:
+        pass  # best-effort
+
+    log.warning(
+        f"{log_prefix} feature #{fid}: REJECTED reviewer outcome — text-vs-"
+        f"structured mismatch ({kind}); session_result entry not applied; "
+        f"feature left in Reviewing for re-review."
+    )
+    return ("reject", kind)
 
 
 def _read_session_result(working_dir: str) -> list[dict]:
@@ -214,6 +349,17 @@ def _live_poll_session_result(working_dir: str, stop_event: threading.Event, per
                         # Coder/reviewer must not write Pushed — PRs must go through GitHub merge.
                         elif persona in ("coder", "reviewer") and entry.get("status") == "Pushed":
                             log.warning(f"[{label}] Blocked agent-written Pushed for feature #{entry.get('id')} (persona={persona}) — PRs must merge via GitHub")
+                        elif persona == "reviewer" and entry.get("review_outcome") in ("approved", "changes_requested"):
+                            # Borrowed from Aider's structured-outcome-first pattern.
+                            # See _validate_reviewer_outcome_consistency() for the
+                            # canonical incident (cycle JR DocumentSign #1131).
+                            decision, _reason = _validate_reviewer_outcome_consistency(
+                                entry, client, f"[{label}]",
+                            )
+                            if decision != "reject":
+                                _apply_session_entry(client, entry, working_dir=working_dir)
+                            # else: rejected, do not apply; counter still advances
+                            # below so we don't reprocess this line every tick.
                         else:
                             _apply_session_entry(client, entry, working_dir=working_dir)
                     except Exception:

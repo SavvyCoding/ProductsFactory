@@ -107,6 +107,13 @@ For each assigned feature (in order, up to {max_features_per_run}):
    - **APPROVE** if all three sections pass.
    - **REQUEST CHANGES** if any section fails. Cite exact files + line numbers in your comment so the rework coder has a fix list (the orchestrator pipes feature comments into the rework coder's prompt).
 
+   ⚠️ **Outcome FIRST, prose SECOND — the structured outcome and the comment body MUST agree.** Decide `review_outcome` *before* writing the comment, then write a body whose sentiment matches:
+   - `review_outcome = approved` ⇔ comment opens with `✅` or contains `LGTM` (in the first 200 chars)
+   - `review_outcome = changes_requested` ⇔ comment contains `❌` somewhere in the body
+   - **Mixed comments** (acknowledge prior fix + flag new issue) MUST contain BOTH `✅` AND `❌` and pair with `changes_requested` — e.g. `✅ Prior X addressed. ❌ Tests: <new issue>.` This is the supported way to keep the divergent-feedback detector happy.
+
+   The orchestrator validates this BEFORE applying your `session_result.json` line. Mismatched entries (LGTM-toned body with `changes_requested` JSON, or `❌`-toned body with `approved` JSON) are **rejected**, a `system:reviewer-validation` comment is posted on the feature explaining the rejection, the feature is left in `Reviewing` for re-review, and you (or the next reviewer session) will see the rejection comment when re-reading prior comments. The canonical failure this guards against: **2026-06-03 cycle JR DocumentSign #1131** — reviewer wrote "✅ Commits 067a5bd + fbfd876: LGTM" but pasted `review_outcome=changes_requested`; auto-merge attempted, hit 405, fix_attempts cap-Blocked at 5, the PR was closed unmerged, and a fully-approved commit was discarded.
+
    ⚠️ **Before posting a `changes_requested`, re-read your prior comments on this feature.** `curl -s {pm_api_url}/api/features/<id>/comments | python3 -m json.tool | tail -200` shows them. The supervisor's `divergent_review_feedback` detector auto-Blocks a feature when three consecutive review rounds flag *different* issues (pairwise Jaccard similarity < 0.25 on comment bodies) — the assumption being the reviewer is chasing a moving target while the original bug stays unfixed. To stay on the right side of that detector:
    - If a previously-flagged issue is **still unaddressed**, lead this comment with it (verbatim wording from your prior comment is fine — the detector matches on signature). Don't skip past it to a new finding.
    - If a previously-flagged issue **IS now fixed**, say so explicitly: `✅ Prior comment about <topic> addressed in <sha>.` This resets the divergence signal and gives the coder a clear "you fixed X, now do Y" reading.
@@ -160,6 +167,7 @@ For each assigned feature (in order, up to {max_features_per_run}):
    - [ ] One JSON line in `session_result.json` for **every** assigned feature?
    - [ ] Each line uses `"Reviewed"` or `"Implementing"` (never `"Reviewing"`)?
    - [ ] Per-feature comments posted via `POST /api/features/<id>/comments` (one per failing section for changes_requested)?
+   - [ ] **For each feature, comment body sentiment matches `review_outcome`?** (`approved` ↔ `✅`/`LGTM` in first 200 chars; `changes_requested` ↔ `❌` in body.) Mismatches are rejected by the orchestrator and force re-review.
 
    When all boxes are ✓, call `task_done` with a one-line summary. The harness rejects `git commit/add/push/rebase/merge/reset/tag`, `sed -i`, `awk -i` — read-only verbs (`git checkout`, `fetch`, `pull`, `log`, `diff`, `show`) are fine.
 
