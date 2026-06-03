@@ -278,6 +278,29 @@ def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
         )
         return
 
+    # Clarification guard -- refuse the commit if any staged design doc
+    # contains a [NEEDS CLARIFICATION: ...] marker. Borrowed from GitHub
+    # spec-kit's templates/spec-template.md convention. Reverts the feature
+    # to Approved (no fix_attempts bump) and posts a comment surfacing the
+    # question(s) to the PM. The right move is to NOT advance an ambiguous
+    # design — the coder will optimize for the designer's guess and ship
+    # brittle code that the reviewer rejects, multiplied across rework
+    # rounds until rapid_flap blocks the feature.
+    clarification_violations = _post_doc_clarification_check(
+        working_dir, _run, assigned_features, pname,
+    )
+    if clarification_violations:
+        log.warning(
+            f"[post-{persona}] {pname}: clarification-guard fired "
+            f"({len(clarification_violations)} unresolved question(s)) -- "
+            f"refusing commit, rolling features back to Approved for PM "
+            f"triage"
+        )
+        _bounce_doc_features_for_clarification(
+            product, assigned_features, persona, clarification_violations,
+        )
+        return
+
     feat_summary = ", ".join(f"#{f['id']}" for f in assigned_features)
     # product_planner merged into designer 2026-05-06 — both produce per-
     # feature design docs, single verb is fine.
@@ -494,3 +517,160 @@ def _bounce_doc_features_for_lint(
                     )
     except Exception as e:
         log.warning(f"[post-{persona}] {pname}: lint-guard PM client error: {e}")
+
+
+def _post_doc_clarification_check(
+    working_dir: str,
+    _run,
+    assigned_features: list[dict],
+    product_name: str = "?",
+) -> list[tuple[int, str, str]]:
+    """Refuse a designer commit whose staged design doc contains a
+    ``[NEEDS CLARIFICATION: ...]`` marker.
+
+    Returns a list of ``(feature_id, story_filename, question)`` tuples;
+    empty list means clean. The marker convention is borrowed from
+    GitHub spec-kit's ``templates/spec-template.md`` — the designer is
+    instructed to flag ambiguous intent rather than guess. The post-doc
+    pipeline catches the marker before push so the feature is reverted
+    to ``Approved`` for PM triage instead of advancing into a coder
+    cycle that's destined to bounce.
+
+    Idempotent and side-effect-free. Best-effort: any subprocess /
+    decode failure returns an empty list so the pipeline proceeds.
+    """
+    from pathlib import Path as _PPath
+    import re as _re
+
+    findings: list[tuple[int, str, str]] = []
+    try:
+        diff_r = _run(["git", "diff", "--cached", "--name-only"], timeout=15)
+    except Exception:
+        return findings
+    if diff_r.returncode != 0:
+        return findings
+
+    staged_docs = [
+        ln.strip() for ln in (diff_r.stdout or "").splitlines()
+        if ln.strip().startswith("docs/story_") and ln.strip().endswith(".md")
+    ]
+    if not staged_docs:
+        return findings
+
+    # Map staged filenames back to assigned feature ids when possible.
+    # The convention is docs/story_{feature_id:03d}.md but pre-2026-04
+    # products use docs/story_<id>.md without zero-padding. Try the
+    # exact integer first, then strip a leading zero pad.
+    _by_id = {int(f["id"]): f for f in assigned_features if isinstance(f.get("id"), int)}
+
+    marker_re = _re.compile(r"\[NEEDS\s+CLARIFICATION(?:\s*:\s*([^\]]+))?\]", _re.I)
+    wd = _PPath(working_dir)
+    for doc_path in staged_docs:
+        try:
+            content = (wd / doc_path).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for m in marker_re.finditer(content):
+            question = (m.group(1) or "").strip() or "(no question text — designer wrote bare marker)"
+            # Best-effort feature_id extraction from filename.
+            try:
+                stem = doc_path.rsplit("/", 1)[-1]      # "story_007.md"
+                num = stem.split("_", 1)[1].split(".", 1)[0]
+                fid = int(num)
+                if fid not in _by_id:
+                    # try un-padded form for sanity
+                    fid = int(num.lstrip("0") or "0")
+            except Exception:
+                fid = -1
+            findings.append((fid, doc_path, question))
+
+    if findings:
+        log.info(
+            f"[post-doc] {product_name}: clarification-guard found "
+            f"{len(findings)} [NEEDS CLARIFICATION] marker(s) across "
+            f"{len({d for _, d, _ in findings})} doc(s); refusing commit"
+        )
+    return findings
+
+
+def _bounce_doc_features_for_clarification(
+    product: dict,
+    assigned_features: list[dict],
+    persona: str,
+    findings: list[tuple[int, str, str]],
+) -> None:
+    """Post the unresolved-question list as a feature comment then revert
+    the feature to ``Approved`` (no fix_attempts bump). Mirrors
+    ``_bounce_doc_features_for_lint`` but addressed to PM rather than the
+    next designer cycle — the design doc is being held until human input
+    clarifies intent.
+
+    Uses ``changed_by="post-doc:rollback"`` (already in the rank-guard
+    bypass allowlist) so we don't need a new bypass label.
+    """
+    pname = product.get("name", "?")
+    # Group findings by feature_id so we post one comment per feature.
+    by_feature: dict[int, list[tuple[str, str]]] = {}
+    for fid, doc, question in findings:
+        by_feature.setdefault(fid, []).append((doc, question))
+
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            for f in assigned_features:
+                fid = f["id"]
+                f_findings = by_feature.get(fid) or []
+                if not f_findings:
+                    # Sibling story flagged something — still bounce this
+                    # feature to keep the commit unified, but use a softer
+                    # comment so the PM understands this is a co-bounce.
+                    f_findings = [(
+                        "(sibling design doc)",
+                        "Sibling design in same commit flagged clarification "
+                        "needs; this feature reverted alongside.",
+                    )]
+                body = (
+                    f"⚠️ post-doc clarification-guard auto-reject "
+                    f"({len(f_findings)} unresolved question(s) in staged design):\n\n"
+                    + "\n".join(
+                        f"- **{q}**\n  *(in `{d}`)*"
+                        for d, q in f_findings
+                    )
+                    + "\n\nThe designer flagged ambiguity in the story intent "
+                      "rather than guessing. This feature is back to `Approved` "
+                      "(no fix_attempts bump) so a PM can answer the question "
+                      "above and the next designer cycle has a concrete contract "
+                      "to write. The local design doc has been discarded by the "
+                      "next workspace reset.\n\n"
+                      "Convention is GitHub spec-kit's `[NEEDS CLARIFICATION: ...]` "
+                      "marker (see orchestrator/prompts/designer.md Step 1)."
+                )
+                try:
+                    client.post(
+                        f"/api/features/{fid}/comments",
+                        json={"author": "clarification-guard", "body": body},
+                    )
+                except Exception as e:
+                    log.warning(
+                        f"[post-{persona}] {pname}: clarification-guard comment "
+                        f"for #{fid} failed: {e}"
+                    )
+                try:
+                    client.patch(
+                        f"/api/features/{fid}",
+                        json={
+                            "status": "Approved",
+                            "design_doc_path": None,
+                            "changed_by": "post-doc:rollback",
+                        },
+                    )
+                    log.info(
+                        f"[post-{persona}] {pname}: feature #{fid} bounced by "
+                        f"clarification-guard ({len(f_findings)} question(s))"
+                    )
+                except Exception as e:
+                    log.warning(
+                        f"[post-{persona}] {pname}: clarification-guard PATCH "
+                        f"for #{fid} failed: {e}"
+                    )
+    except Exception as e:
+        log.warning(f"[post-{persona}] {pname}: clarification-guard PM client error: {e}")
