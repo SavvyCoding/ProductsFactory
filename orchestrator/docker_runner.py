@@ -269,6 +269,22 @@ def _build_pm_curated_ro_mounts(
     # Everyone else: prepend it so it gets the RO overlay.
     if persona != "architect":
         files_to_mount.insert(0, "ARCHITECTURE.md")
+    # OSS borrowing #4 (Agentless-style immutable reproducer / SWE-agent
+    # "the design doc is the contract"): the coder and reviewer must not
+    # be able to "fix" a failing AC by editing the design doc instead of
+    # the code. Designer writes docs/story_*.md; everyone else reads.
+    # Architect (the maintenance reviewer of doc state) is also RO here —
+    # ARCHITECTURE.md is its write target, not story docs.
+    if persona in ("coder", "reviewer", "architect"):
+        try:
+            import glob as _glob
+            docs_dir = os.path.join(working_dir, "docs")
+            if os.path.isdir(docs_dir):
+                for path in _glob.glob(os.path.join(docs_dir, "story_*.md")):
+                    rel = os.path.relpath(path, working_dir).replace("\\", "/")
+                    files_to_mount.append(rel)
+        except Exception:
+            pass  # best-effort; skip-if-missing logic below handles it
     for filename in files_to_mount:
         # Use the in-process working_dir for the file-exists check (the
         # orchestrator can stat its own bind-mounted /products path).
@@ -555,6 +571,14 @@ def _fetch_recent_review_comments(feature_id: int, limit: int = 25) -> list[dict
                 # tags); env_broken fired twice in a row at 19:16:22 and
                 # 19:27:41 with identical state.
                 "post-coder:test-env",
+                # system:reviewer-validation: reviewer text-vs-structured
+                # mismatch rejections (shipped 2026-06-03 OSS borrowing #1
+                # in orchestrator/session/result_io.py). Surfacing the
+                # rejection reason ensures the next session — which may be
+                # a coder if the reviewer outcome lands on changes_requested
+                # via the trust_json fallback — sees the prior validation
+                # complaint and doesn't repeat it.
+                "system:reviewer-validation",
             }
             relevant = [c for c in data
                         if (c.get("author") or "").lower() in _ALLOWED_AUTHORS]
