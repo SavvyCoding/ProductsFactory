@@ -1555,22 +1555,66 @@ def _post_coder_lint_check(
                 )
             )
             if _missing:
+                # Common Python "the import name is NOT the package name"
+                # gotchas. When one of these surfaces as a "missing dep",
+                # the fix is almost always to use the correct import,
+                # NOT to add the wrong name to requirements.txt. Canonical
+                # 2026-06-03 MyJira #1336/1337: agent wrote `import pyyaml`
+                # (invalid — package PyYAML installs as `yaml` module),
+                # Guard 18 reported `pyyaml` missing, agent added
+                # `pyyaml` to requirements.txt, `pip install pyyaml` then
+                # `import pyyaml` still failed at test time, test-env-
+                # broken fired, rapid_flap eventually Blocked the
+                # feature. The error message steers the agent to the
+                # correct import rather than the wrong dep.
+                _IMPORT_GOTCHAS = {
+                    "pyyaml":             "use `import yaml` (the package PyYAML installs as the `yaml` module — `import pyyaml` is invalid Python)",
+                    "python-jose":        "use `from jose import jwt` (the package python-jose installs as the `jose` module)",
+                    "pyjwt":              "use `import jwt` (the package PyJWT installs as the `jwt` module)",
+                    "opencv-python":      "use `import cv2` (the package opencv-python installs as the `cv2` module)",
+                    "pillow":             "use `from PIL import Image` (the package Pillow installs as `PIL`)",
+                    "scikit-learn":       "use `import sklearn` (the package scikit-learn installs as `sklearn`)",
+                    "beautifulsoup4":     "use `from bs4 import BeautifulSoup` (the package beautifulsoup4 installs as `bs4`)",
+                    "python-dateutil":    "use `import dateutil` (the package python-dateutil installs as `dateutil`)",
+                    "python-dotenv":      "use `from dotenv import load_dotenv` (the package python-dotenv installs as `dotenv`)",
+                    "python-magic":       "use `import magic` (the package python-magic installs as `magic`)",
+                    "mysqlclient":        "use `import MySQLdb` (the package mysqlclient installs as `MySQLdb`)",
+                    "pyopenssl":          "use `import OpenSSL` (the package pyOpenSSL installs as `OpenSSL`)",
+                    "pycryptodome":       "use `from Crypto.Cipher import AES` (the package pycryptodome installs as `Crypto`)",
+                    "pyserial":           "use `import serial` (the package pyserial installs as `serial`)",
+                    "python-levenshtein": "use `import Levenshtein` (the package python-Levenshtein installs as `Levenshtein`)",
+                }
+                _gotchas: list[str] = []
+                for pkg in _missing:
+                    hint = _IMPORT_GOTCHAS.get(pkg)
+                    if hint:
+                        _gotchas.append(f"  - `{pkg}`: {hint}")
                 sample = ", ".join(
                     f"`{pkg}` (used in {_imported[pkg]})" for pkg in _missing[:5]
                 )
                 more = f" ... ({len(_missing) - 5} more)" if len(_missing) > 5 else ""
-                violations.append(
+                violation_msg = (
                     "imports use packages not declared in "
                     + " / ".join(_req_present) + " (deps-coherence): "
                     + sample + more
                     + ". The agent image masks this because it pre-installs "
                     "common Python libs; the reviewer and any fresh `pip "
                     "install -r requirements.txt && pytest` will fail.\n"
+                )
+                if _gotchas:
+                    violation_msg += (
+                        "\n"
+                        "⚠️ DETECTED PYTHON IMPORT GOTCHA(S) — fix the IMPORT "
+                        "in the source file, do NOT just add the wrong name to "
+                        "requirements.txt:\n"
+                        + "\n".join(_gotchas) + "\n"
+                    )
+                violation_msg += (
                     "\n"
-                    "CORRECT FIX: append the missing package(s) to "
-                    "requirements.txt (or requirements-dev.txt for "
-                    "test-only deps). Pin a version range, e.g. "
-                    "`pytest>=8.0,<10`.\n"
+                    "CORRECT FIX (when there is no import gotcha above): append "
+                    "the missing package(s) to requirements.txt (or "
+                    "requirements-dev.txt for test-only deps). Pin a version "
+                    "range, e.g. `pytest>=8.0,<10`.\n"
                     "\n"
                     "WRONG FIX (do NOT do this): removing the import "
                     "from the source file, or deleting tests that "
@@ -1580,6 +1624,7 @@ def _post_coder_lint_check(
                     "it; the violating import must remain AND the "
                     "package must appear in a requirements file."
                 )
+                violations.append(violation_msg)
     except Exception:
         log.debug("Guard 18 deps-coherence raised", exc_info=True)
 
