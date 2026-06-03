@@ -782,6 +782,143 @@ def detect_divergent_review_feedback(
                 "reason": "exception (logged)"}
 
 
+# ── Detector: reviewer LGTM-text vs structured-changes_requested mismatch ────
+# The reviewer LLM writes both a comment body AND a structured
+# review_outcome field in session_result.json. Most of the time they
+# agree: ✅/LGTM comments come with review_outcome=approved; ❌
+# comments come with review_outcome=changes_requested.
+#
+# Single observed mismatch (2026-06-03 cycle JR, DocumentSign #1131):
+# reviewer wrote "✅ Commits 067a5bd + fbfd876: LGTM —
+# functional/tests/security pass. All three ACs verified..." in the
+# body, but set review_outcome=changes_requested in the structured
+# slot. Downstream: PM API received the changes_requested PATCH,
+# fix_attempts bumped 4→5, cap-Block circuit fired, PR #332 closed
+# unmerged. A genuinely-approved commit was discarded.
+#
+# This detector is DEFENSIVE — alert-only, no override. Auto-flipping
+# the outcome from a heuristic text scan would be wrong: it would
+# silently approve real rejections when the reviewer happened to
+# mention "this part is LGTM" in a body that's overall ❌. Instead
+# fire an operator alert + supervisor_action row so PM sees the
+# mismatch and can recover the feature manually (PATCH out of
+# Blocked, re-merge the existing branch).
+#
+# Hook point: docker_runner.py's post-reviewer block, right after
+# detect_repeated_review_feedback / detect_divergent_review_feedback,
+# only when the session entry carries review_outcome=changes_requested.
+
+def detect_reviewer_outcome_text_mismatch(
+    *,
+    feature_id: int,
+    product_id: int | None = None,
+    review_outcome: str | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """Compare the reviewer's latest comment body sentiment against the
+    structured ``review_outcome``. Alert on mismatch; never override.
+
+    Returns ``{"action": "no-op|insufficient|matched|mismatch",
+               "reason": "..."}``.
+
+    Best-effort — never raises.
+    """
+    cfg = _get_supervisor_config()
+    if cfg.get("supervisor_dry_run_only"):
+        dry_run = True
+    if not cfg.get("supervisor_reviewer_text_mismatch_enabled", True):
+        return {"action": "no-op",
+                "reason": "detector disabled in system_config"}
+
+    if not review_outcome:
+        return {"action": "insufficient",
+                "reason": "no structured review_outcome to compare"}
+
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            comments_resp = client.get(f"/api/features/{feature_id}/comments")
+            comments = comments_resp.json() if comments_resp.status_code == 200 else []
+            if not isinstance(comments, list) or not comments:
+                return {"action": "insufficient",
+                        "reason": "no comments available to scan"}
+
+            comments.sort(key=lambda c: (c.get("created_at") or ""))
+            reviewer_comments = [
+                (c.get("body") or "") for c in comments
+                if (c.get("author") or "").lower() == "reviewer"
+            ]
+            if not reviewer_comments:
+                return {"action": "insufficient",
+                        "reason": "no reviewer-authored comment to scan"}
+
+            latest = reviewer_comments[-1]
+            upper = latest.upper()
+            # Positive sentiment markers — start-of-line ✅ or explicit LGTM.
+            # We look at the OPENING of the comment specifically because
+            # reviewer comments may say "✅ this part" mid-body even when
+            # the overall verdict is changes_requested.
+            head = latest[:200]
+            head_upper = upper[:200]
+            has_pos_head = ("✅" in head) or ("LGTM" in head_upper) \
+                or ("APPROVED" in head_upper)
+            has_neg_anywhere = ("❌" in latest) or ("CHANGES_REQUESTED" in upper) \
+                or ("REJECT" in upper)
+
+            mismatch = False
+            kind = ""
+            if review_outcome == "changes_requested" and has_pos_head \
+                    and not has_neg_anywhere:
+                mismatch = True
+                kind = "structured=changes_requested but comment opens with ✅/LGTM"
+            elif review_outcome == "approved" and has_neg_anywhere \
+                    and not has_pos_head:
+                mismatch = True
+                kind = "structured=approved but comment contains ❌/reject"
+
+            if not mismatch:
+                return {"action": "matched",
+                        "reason": (
+                            f"comment sentiment is consistent with "
+                            f"review_outcome={review_outcome}"
+                        )}
+
+            reason = (
+                f"Reviewer text-vs-structured mismatch on feature "
+                f"#{feature_id}: {kind}. Feature will follow structured "
+                f"outcome; operator should verify whether the reviewer "
+                f"meant approve or changes_requested. Canonical 2026-06-03 "
+                f"cycle JR DocumentSign #1131 cap-Blocked a reviewer-LGTM "
+                f"commit because of this exact pattern."
+            )
+            _record_action(
+                detector="reviewer_outcome_text_mismatch",
+                product_id=product_id,
+                target_type="feature",
+                target_id=feature_id,
+                action="alert",
+                reason=reason,
+                dry_run=dry_run,
+            )
+            try:
+                send_alert(
+                    "warning",
+                    f"reviewer text-vs-structured mismatch on feature "
+                    f"#{feature_id} ({kind}). PM should verify intent.",
+                )
+            except Exception:
+                pass
+            log.warning(
+                f"[reviewer_outcome_text_mismatch] Feature #{feature_id}: {kind}"
+            )
+            return {"action": "mismatch", "reason": reason}
+    except Exception:
+        log.exception(
+            f"detect_reviewer_outcome_text_mismatch crashed for "
+            f"feature #{feature_id}"
+        )
+        return {"action": "no-op", "reason": "exception (logged)"}
+
+
 # ── Detector B: coder false-success ──────────────────────────────────────────
 # Coder session ended exit_code=0 but features_pushed=0 AND no fix_attempts
 # bump happened on its assigned features. The agent gamed the no-edit gate
