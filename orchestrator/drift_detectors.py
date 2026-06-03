@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -151,22 +152,67 @@ def detect_shell_artifact_files(
 # ────────────────────────────────────────────────────────────────────────────
 
 
+def _ls_tree_origin_main(working_dir: Path) -> set[str] | None:
+    """Return the set of file paths tracked on ``origin/main`` (or
+    ``origin/master`` if main isn't present). Returns ``None`` when the
+    lookup fails so the caller can fall back to the working-tree check.
+
+    Used by detect_design_doc_mismatch to decide whether a feature's
+    declared design_doc_path landed on main — answering the real
+    question, "did the designer's commit actually merge?" — rather
+    than the working-tree question, which gives stale-branch false
+    positives when the scan runs on a coder session branch cut before
+    sibling design-doc commits landed.
+
+    Canonical false-positive cycles (all on coder session branches that
+    pre-dated subsequent designer commits to main): 2026-06-03 cycle
+    JN (8 MyTracking features wrongly reset after PR #3 merged), cycle
+    JQ (DocumentSign 1301/1302 wrongly reset after 1131's PR #332
+    force-push), cycle JU (9 more MyTracking features wrongly reset).
+    """
+    for ref in ("origin/main", "origin/master"):
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(working_dir), "ls-tree", "-r",
+                 "--name-only", ref],
+                capture_output=True, text=True, timeout=15, check=True,
+            )
+            return set(result.stdout.splitlines())
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                FileNotFoundError):
+            continue
+    return None
+
+
 def detect_design_doc_mismatch(
     working_dir: str | Path, features: list[dict]
 ) -> list[Finding]:
     """Features whose ``design_doc_path`` points to a file that doesn't
-    exist on the current branch. The DB believes the designer landed a
-    doc; the filesystem disagrees. Real-world cause (2026-05-27 calcv2,
-    features 995/996): designer wrote the doc to /workspace/docs/ and
-    posted ``{"design_doc_path": ...}`` to session_result.json, but the
+    exist on ``origin/main``. The DB believes the designer landed a
+    doc; main disagrees. Real-world cause (2026-05-27 calcv2, features
+    995/996): designer wrote the doc to /workspace/docs/ and posted
+    ``{"design_doc_path": ...}`` to session_result.json, but the
     post-doc commit didn't include the file (e.g. allowlist stripped it
     or it was wiped by a workspace reset before the commit). Reconcile
-    updates the DB from session_result.json; the file never lands.
+    updates the DB from session_result.json; the file never lands on
+    main.
 
     Future coder sessions on the same feature read an empty
     design_doc_path → /workspace/docs/X.md, find nothing, improvise.
+
+    Why check origin/main rather than the working tree: drift-scanner
+    runs after the post-coder pipeline, on the session branch's
+    working tree. That branch was cut from main at some prior moment;
+    every sibling design-doc commit that landed on main AFTER the
+    branch was cut is correctly absent from the working tree but
+    present on main. The working-tree check produced ~20 false
+    positives across cycles JN/JQ/JU (2026-06-03), each wasting a
+    designer re-run for a doc that already existed on main. Switching
+    to origin/main eliminates this entirely. Fallback to working tree
+    when the git lookup fails (degenerates to the prior behavior).
     """
     wd = Path(working_dir)
+    main_files = _ls_tree_origin_main(wd)
     findings: list[Finding] = []
     for f in features or []:
         doc_path = f.get("design_doc_path") or ""
@@ -175,8 +221,12 @@ def detect_design_doc_mismatch(
         fid = f.get("id")
         if not isinstance(fid, int):
             continue
-        if (wd / doc_path).is_file():
-            continue
+        if main_files is not None:
+            if doc_path in main_files:
+                continue
+        else:
+            if (wd / doc_path).is_file():
+                continue
         findings.append(Finding(
             category="design_doc_missing",
             severity="high",
@@ -185,7 +235,7 @@ def detect_design_doc_mismatch(
             feature_id=fid,
             detail=(
                 f"Feature #{fid} has design_doc_path=`{doc_path}` in the "
-                "DB, but that file does not exist in the working tree. "
+                "DB, but that file does not exist on origin/main. "
                 "Coder sessions on this feature have no spec to read."
             ),
             fix_hint=(
