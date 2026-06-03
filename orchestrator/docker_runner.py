@@ -1522,11 +1522,31 @@ def _finalize_session(
                 from orchestrator.supervisor import (
                     detect_repeated_review_feedback,
                     detect_divergent_review_feedback,
+                    detect_reviewer_outcome_text_mismatch,
                 )
                 for _entry in _session_features:
                     if (isinstance(_entry, dict)
                             and _entry.get("review_outcome") == "changes_requested"
                             and _entry.get("id")):
+                        # Cycle JV (2026-06-03): defensive alert when the
+                        # reviewer's comment text disagrees with the
+                        # structured review_outcome (LGTM body + structured
+                        # changes_requested). Alert-only, no override —
+                        # see detect_reviewer_outcome_text_mismatch
+                        # docstring. Canonical case: cycle JR #1131
+                        # cap-Blocked despite ✅ LGTM commit. Best-effort.
+                        try:
+                            detect_reviewer_outcome_text_mismatch(
+                                feature_id=_entry["id"],
+                                product_id=product["id"],
+                                review_outcome=_entry.get("review_outcome"),
+                            )
+                        except Exception:
+                            log.exception(
+                                f"detect_reviewer_outcome_text_mismatch "
+                                f"failed for {product.get('name')} feature "
+                                f"#{_entry['id']}"
+                            )
                         # Convergent cascade: same feedback N× in a row.
                         _result = detect_repeated_review_feedback(
                             feature_id=_entry["id"],
