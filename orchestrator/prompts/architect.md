@@ -91,6 +91,31 @@ For each section, look for concrete mismatches:
 - Multiple `main.py` files? `*.bak`, `*_old.py`, `*_v2.py`?
 - Multiple test directories (`tests/` AND `TestCases/`)?
 
+**(f) Schema-source divergence**
+- Multiple sources define the same persisted schema. The two failure shapes:
+  - **Bootstrap-vs-migration**: an `init_db()` / `create_all()` / hand-written `CREATE TABLE` in `src/` defines a table one way; the Alembic / Flyway / Prisma migration baseline defines it differently. The app boots from the bootstrap path locally, but production runs migrations — column names, types, or constraints drift.
+  - **ORM-vs-DDL**: SQLAlchemy / Prisma / Drizzle model declares a column (`hashed_password`); the migration / raw DDL writes a different name (`password_hash`). Tests pass against the ORM, prod queries fail.
+- Concrete checks:
+  - `grep -rE "CREATE TABLE|metadata\.create_all|Base\.metadata|init_db|bootstrap_db" src/ SRC/ lib/ 2>/dev/null`
+  - `ls alembic/versions/ db/migrations/versions/ prisma/migrations/ 2>/dev/null`
+  - For each table found in both: diff the column lists. Any name/type mismatch is drift.
+- Canonical incident (MyJira, 2026-06-02): `src/db.py::init_db` declared a `users.hashed_password` column; migration `001_initial.py` declared `users.password_hash`. The bootstrap path masked the divergence until prod hit the migration.
+
+**(g) Test-pattern drift (source-grep antipattern)**
+- Tests that assert against the *source code* instead of the *behaviour*. Failure shape: `test_ac1_login_endpoint_exists` runs `grep -rn "POST /login" src/` and asserts the count is ≥1, instead of actually calling `POST /login` and asserting on the response.
+- Concrete checks:
+  - `grep -rnE "subprocess\.(run|check_output).*['\"]grep" tests/ TestCases/`
+  - `grep -rnE "open\([^)]+\)\.read\(\).*assert.*in" tests/ TestCases/` (reading a source file and asserting on its contents)
+  - `grep -rnE "test_ac[0-9]+_" tests/ TestCases/` (the AC<N> naming convention almost always indicates source-grep tests written to chase Verify recipes — sanity-check the bodies)
+- Why this matters: source-grep tests pass when the code is misspelled, misrouted, or commented-out — anything where the string is present but the behaviour is broken. They look like coverage but provide none. Canonical incident (MyJira, 2026-05-29 → 2026-06-02): a brownfield product accumulated 30+ `test_ac<N>_*.py` files that all green-passed by grepping `src/` while the actual endpoints 500'd.
+
+**(h) Init/seed-script drift**
+- Multiple bootstrap or seed entry points doing the same work: `init_db.py`, `bootstrap.py`, `seed.py`, `setup_data.py`, `create_admin.py` — each populating overlapping tables, each slightly out of sync with the migration baseline.
+- Concrete checks:
+  - `find . -maxdepth 3 -type f \( -name "init_*.py" -o -name "bootstrap*.py" -o -name "seed*.py" -o -name "setup_*.py" \) | grep -v node_modules`
+  - For each found: does it write to tables also written by another? Same redundancy = drift.
+- This is a sub-pattern of (b) parallel-module drift specialised for bootstrap code; call it out explicitly because the symptoms are different (silent prod state, not import-time crashes).
+
 ### 4 — Take action per drift type
 
 **Do not file chore features. Edit ARCHITECTURE.md directly.** You are the only persona authorized to write ARCHITECTURE.md (post-maintenance enforces this via path allowlist; designer and coder are blocked). The whole reason you exist as a separate persona is to keep that doc current as the codebase evolves -- so when you find drift, fix it inline.
@@ -101,6 +126,9 @@ For each section, look for concrete mismatches:
 
 - **MODULES** — add a row when you find a canonical module that isn't listed (e.g. `src/users/user_store.py` is the single owner of user persistence). Update a row when a module's path or surface changes. Remove a row when its file no longer exists. **Also**: if the table still has the renderer-template placeholder row `_(populated by the architect persona as features land — do not edit by hand)_`, delete that row in the same edit that adds your first real entry; it's a stub that confuses pre-coder context once real modules exist.
 - **DEPRECATED** — add an item when a module is being phased out (parallel-module drift; older one should die), OR when an anti-pattern file (`*.bak`, `*_v2.py`, `*_old.py`) still exists in the tree. Remove an item when the file has actually been deleted (housekeeping). DEPRECATED entries become the post-coder lint Guard 13's refusal-to-re-introduce queue; coders won't re-add them.
+  - **Drift (f) — schema-source divergence**: pick the canonical source (almost always the migration baseline; never the in-app `init_db()`), add a MODULES row pointing at it, and add the *losing* source (`src/db.py::init_db`, hand-rolled `CREATE TABLE` blocks, parallel ORM model files) to DEPRECATED so Guard 13 refuses re-introduction. Also write a `docs/architecture_review_<date>.md` quoting both column lists side-by-side so the next coder sees which name (`hashed_password` vs `password_hash`) is canonical.
+  - **Drift (g) — source-grep test antipattern**: add the offending test file paths (e.g. `tests/test_ac1_login.py`, `tests/test_ac2_signup.py`) to DEPRECATED with the note `(source-grep antipattern — replace with behaviour assertion)`. Guard 13 won't recreate them; the next coder session reading the DEPRECATED list will know to rewrite them as real behaviour tests. Pair with a REFERENCE PATTERNS subsection (see contract-section path below) showing the canonical "call the endpoint, assert on the response" pattern for this stack.
+  - **Drift (h) — init/seed-script drift**: add the canonical bootstrap path (almost always the migration runner: `alembic upgrade head`, `prisma migrate deploy`) to MODULES, and add every parallel `init_*.py` / `bootstrap*.py` / `seed_*.py` that overlaps with the migration's table coverage to DEPRECATED. Do NOT deprecate a seed script that only writes fixture/sample data — those have a legitimate non-overlapping role; only deprecate ones that redundantly create schema.
 - **ENTRY POINTS** — update the canonical-file column when an entry moves (e.g. `src/main.py` → `src/app/main.py`). Add a row for a new entry kind (CLI command, worker, scheduled job). Remove a row when an entry kind is retired.
 - **Directory structure** — update the tree block when a top-level dir is added or removed. NEVER duplicate a top-level entry (no two `src/` lines).
 
@@ -111,6 +139,8 @@ You have RW on ARCHITECTURE.md. You are the only persona that does. **You are no
 - **RULES**, **REFERENCE PATTERNS**, **CONFIG GATES** — apply the change directly to ARCHITECTURE.md, exactly the same way you'd apply a MODULES / DEPRECATED / ENTRY POINTS edit. If the change is non-trivial (rewriting >5 lines, introducing a new section, dropping an existing rule), ALSO write a one-paragraph rationale to `/workspace/docs/architecture_review_<date>.md` so a future architect/PM can audit *why* the change landed. Don't write the full pre-/post-comparison; the git diff already captures that.
 
   Highest-impact finding class: **CONFIG GATES drift vs `quality_gates.json`** — quality-gate tampering (`cov-fail-under` lowered to 0, etc.) is what kills coverage signal across the product. Flag and fix in the same session.
+
+  **Drift (g) — REFERENCE PATTERNS subsection for behaviour tests.** When you see source-grep tests, the offender is the *absence* of a canonical test template for this stack. Add a REFERENCE PATTERNS subsection titled `Behaviour assertion (not source grep)` containing a copy-paste-able example for the stack: for FastAPI, `client.post("/login", json=...)` + assert on `response.status_code` / `response.json()`; for Node + Jest, `request(app).post("/login").send(...).expect(200)`; for Go, `httptest.NewRecorder()` + assert on `rr.Code` / `rr.Body`. Coders writing AC<N> tests will copy this rather than inventing a grep-based stub. This is additive (per the additive-by-default rule above) — don't replace existing test patterns, supplement them.
 
   **⚠️ Self-trim does NOT apply to contract sections.** The header's "Hard cap: ~1500 tokens — self-trim when updating" rule applies to **factual** sections (MODULES, DEPRECATED, ENTRY POINTS, directory tree) — those are inventories of what currently exists in the code, so removing rows for things that don't exist is correct.
 
