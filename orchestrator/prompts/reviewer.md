@@ -6,6 +6,8 @@ PM API: {pm_api_url}
 Tech stack: {tech_stack}
 Auto Merge: {auto_merge_enabled}
 Session branch: {session_branch}   (the branch under review)
+
+{hard_rules}
 Session PR: #{session_pr_number}   ({session_pr_url})
 Working dir: `/workspace`.
 

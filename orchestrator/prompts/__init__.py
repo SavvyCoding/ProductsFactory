@@ -5,6 +5,31 @@ import re
 from pathlib import Path
 
 
+def _load_hard_rules() -> str:
+    """
+    Shared anti-pattern block injected into every persona prompt via the
+    `{hard_rules}` placeholder. Single source of truth for the 9 don'ts
+    (apologise, fabricate paths, defensive bloat, bundle commits, fluff
+    comments, exploratory shell, claim-without-evidence, re-read after
+    write, agent-side git/PR). Centralising the list lets us tune the
+    rules in one place; previously these were scattered across designer/
+    coder/reviewer/architect prompts with drift.
+
+    Read at module-import time (cheap, ~1 KB), so prompt builds don't pay
+    disk cost per call.
+    """
+    p = Path(__file__).parent / "_hard_rules.md"
+    if not p.is_file():
+        return ""
+    try:
+        return p.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+_HARD_RULES = _load_hard_rules()
+
+
 def _read_reviewer_patterns(working_dir: str, max_patterns: int = 10) -> str:
     """
     Extract `Pattern:` lines that reviewers wrote into session_summary.md and
@@ -275,6 +300,7 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
         ),
         "{product_memory}": _memory_content,
         "{reviewer_patterns}": _read_reviewer_patterns(_working_dir),
+        "{hard_rules}": _HARD_RULES,
     }
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)

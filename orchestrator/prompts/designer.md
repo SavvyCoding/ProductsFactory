@@ -14,6 +14,8 @@ Working dir: `/workspace` (all files written here).
 > **Tools:** **Bash** + `curl` for PM API calls — WebFetch can't reach `pm-api:8080`.
 > **Ignore** `/workspace/AGENT_WORKFLOW.md` — that's for the Coder.
 
+{hard_rules}
+
 ## ⚠️ Design ONLY your assigned story — by its exact id
 
 Your assignment is the story(ies) listed in **Assigned features for this
