@@ -3607,6 +3607,23 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         # with N matching reviewer comments — here we convert the gate
         # itself to advisory after the first fire.
         verify_advisory_fids: set[int] = set()
+        # Agentless-style progress tiebreaker (OSS borrowing #6, 2026-06-04):
+        # capture the AC-failure count from the most-recent prior verify-check
+        # comment for each feature so the new comment can include the delta.
+        # If the count is decreasing across iterations, surface "📈 progress"
+        # in the new comment so the reviewer and the next coder see "this is
+        # iterating constructively." If it's increasing, surface "📉
+        # regression" so the reviewer knows the last rework backslid. Spirit
+        # of Agentless's repair-tiebreaker (compare patch variants by failing
+        # test count, prefer the one that passes more); adapted to our
+        # rework-cycle model where there's only one variant at a time but
+        # we want trend visibility.
+        #
+        # Tag format embedded in verify-check comments (machine-parseable;
+        # invisible to humans because HTML comment): <!-- ac_fails=N -->
+        prior_ac_fails: dict[int, int] = {}
+        import re as _vre
+        _AC_FAILS_TAG_RE = _vre.compile(r"<!--\s*ac_fails=(\d+)\s*-->")
         try:
             with httpx.Client(base_url=PM_API_URL, timeout=10) as advisory_client:
                 for fid in list(per_feature.keys()):
@@ -3617,12 +3634,29 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                         )
                         if 200 <= comments_r.status_code < 300:
                             recent = comments_r.json() or []
-                            if any(
-                                isinstance(c, dict)
+                            # Find the most-recent verify-check comment to
+                            # both flag advisory mode AND extract its
+                            # prior failure count (if tagged).
+                            verify_comments = [
+                                c for c in recent
+                                if isinstance(c, dict)
                                 and c.get("author") == "post-coder:verify-check"
-                                for c in recent
-                            ):
+                            ]
+                            if verify_comments:
                                 verify_advisory_fids.add(fid)
+                                # Comments come newest-first or oldest-first
+                                # depending on impl; sort defensively by
+                                # created_at to find the actual latest.
+                                verify_comments.sort(
+                                    key=lambda c: (c.get("created_at") or "")
+                                )
+                                latest_body = (verify_comments[-1].get("body") or "")
+                                m = _AC_FAILS_TAG_RE.search(latest_body)
+                                if m:
+                                    try:
+                                        prior_ac_fails[fid] = int(m.group(1))
+                                    except ValueError:
+                                        pass
                     except Exception:
                         # On client error, fall back to hard-bounce (safer
                         # default — bouncing is the conservative move).
@@ -3652,6 +3686,39 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                             f"  actual stdout `{(f['actual_stdout'] or '').strip()[:200]}` "
                             f"(exit {f['actual_exit']})"
                         )
+                    # Agentless tiebreaker: compute progress trend if we have
+                    # a prior count. delta < 0 = fewer failures than last
+                    # attempt (progress); delta > 0 = more failures
+                    # (regression); delta == 0 = stagnant.
+                    prior_n = prior_ac_fails.get(fid)
+                    current_n = len(fails)
+                    trend_line = ""
+                    if prior_n is not None:
+                        delta = current_n - prior_n
+                        if delta < 0:
+                            trend_line = (
+                                f"📈 **Progress detected**: {current_n} mismatch(es) "
+                                f"this attempt vs {prior_n} previously (Δ={delta}). "
+                                f"The rework is reducing failures — keep going, "
+                                f"reviewer should weigh this when judging.\n\n"
+                            )
+                        elif delta > 0:
+                            trend_line = (
+                                f"📉 **Regression detected**: {current_n} mismatch(es) "
+                                f"this attempt vs {prior_n} previously (Δ=+{delta}). "
+                                f"The latest rework introduced MORE AC failures "
+                                f"than it fixed. Reviewer should weigh this — "
+                                f"may indicate the coder is editing the wrong "
+                                f"surface or misreading the recipe.\n\n"
+                            )
+                        else:
+                            trend_line = (
+                                f"➖ **Stagnant**: {current_n} mismatch(es) this "
+                                f"attempt, same as last time. The same AC(s) keep "
+                                f"failing — coder may need different guidance. "
+                                f"Reviewer should consider whether the recipe "
+                                f"itself is unsatisfiable.\n\n"
+                            )
                     if is_advisory:
                         header = (
                             f"⚠ post-coder verify-check ADVISORY "
@@ -3689,10 +3756,17 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                             "on this feature will be advisory-only (gate "
                             "caps at 1 hard bounce per feature)."
                         )
+                    # Embed the structured ac_fails tag for the next
+                    # verify-check run to parse. HTML comments render as
+                    # nothing in Markdown so this is invisible to humans
+                    # but machine-parseable by the regex above.
+                    machine_tag = f"\n\n<!-- ac_fails={current_n} -->"
                     body = (
-                        header + "\n\n"
+                        trend_line
+                        + header + "\n\n"
                         + "\n".join(bullets)
                         + footer
+                        + machine_tag
                     )
                     try:
                         client.post(
