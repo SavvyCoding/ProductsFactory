@@ -3429,6 +3429,73 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         first_failure = test_result.get("first_failure", "")
         collection_errors = test_result.get("collection_errors", 0)
         output_excerpt = (test_result.get("output") or "")[:1500]
+        # Cycle GK (2026-06-04): cap consecutive env_broken bounces per
+        # feature. The env_broken path was added so true infra failures
+        # (jest missing, pip-install errors, `<tool> not on PATH`
+        # assertions) wouldn't punish the coder — it rolls back to
+        # Designed without bumping fix_attempts. But it MISFIRES on
+        # fixture-setup AssertionErrors that look infra-shaped but are
+        # actually feature-specific (a new dep's autouse fixture probes
+        # for a CLI that isn't in the agent image, or the feature
+        # rewrote a shared fixture and broke unrelated test files).
+        # Without a cap, the coder rewrites → env_broken → rollback →
+        # coder rewrites → ... forever, until the supervisor's
+        # rapid_flap detector trips at 10 transitions/hour and Blocks
+        # the feature. Canonical 2026-06-04 cycle: features 1307 (Auth
+        # and DB skeleton, 6 status transitions in 26 min, all
+        # Implemented→Designed env_broken bounces) and 1256 (File
+        # attachment uploads, 4 transitions in 16 min). Both Blocked by
+        # rapid_flap with a misleading "rapid status flap" reason that
+        # hid the real env_broken misclassification.
+        #
+        # Cap rule: count prior `post-coder:test-env` comments per
+        # assigned feature. If ANY feature has >= 2 prior env_broken
+        # comments in its history, this round downgrades to a regular
+        # test-failure bounce — fix_attempts bumps, the coder sees the
+        # actual test output (E marks, fixture stack traces) instead
+        # of "test env broken, retry later", and after another 2
+        # bounces it hits the standard fix_attempts=5 cap-Block path
+        # with a real reason for the operator. Symmetric in spirit to
+        # the verify-check advisory-on-repeat above.
+        env_broken_cap_tripped = False
+        if env_broken:
+            try:
+                with httpx.Client(base_url=PM_API_URL, timeout=10) as cap_client:
+                    for feat in assigned_features:
+                        fid = feat["id"]
+                        try:
+                            r = cap_client.get(
+                                f"/api/features/{fid}/comments",
+                                params={"limit": 50},
+                            )
+                            if 200 <= r.status_code < 300:
+                                recent = r.json() or []
+                                prior_env = sum(
+                                    1 for c in recent
+                                    if isinstance(c, dict)
+                                    and c.get("author") == "post-coder:test-env"
+                                )
+                                if prior_env >= 2:
+                                    env_broken_cap_tripped = True
+                                    log.warning(
+                                        f"[post-coder] {pname}: env_broken cap "
+                                        f"tripped on #{fid} ({prior_env} prior "
+                                        f"post-coder:test-env comments); "
+                                        f"downgrading to test-failure bounce so "
+                                        f"fix_attempts climbs and agent sees "
+                                        f"actual output"
+                                    )
+                                    break
+                        except Exception:
+                            # Cap is a safety net; on client error fall
+                            # back to legacy env_broken behaviour (the
+                            # conservative move — don't punish the agent
+                            # if we can't read the history).
+                            pass
+            except Exception as e:
+                log.warning(f"[post-coder] {pname}: env_broken cap client error: {e}")
+            if env_broken_cap_tripped:
+                env_broken = False
         if env_broken:
             log.error(
                 f"[post-coder] {pname}: test env broken — NOT bumping "
