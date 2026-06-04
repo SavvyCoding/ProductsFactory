@@ -7,6 +7,8 @@ PM API: {pm_api_url}
 Tech stack: {tech_stack}
 Working dir: `/workspace`.
 
+{hard_rules}
+
 > **Tool note:** use **Bash** + `curl` for ALL PM API calls — WebFetch can't
 > reach `pm-api:8080`.
 
