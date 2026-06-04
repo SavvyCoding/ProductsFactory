@@ -1739,6 +1739,94 @@ def _introduced_failures(feature_failed: list[str], baseline_failed: set[str]) -
     return [t for t in feature_failed if t not in baseline_failed]
 
 
+def _excerpt_pytest_tracebacks(
+    run_out: str, max_blocks: int = 2, max_per_block: int = 500
+) -> str:
+    """
+    Extract the first N pytest traceback blocks (from FAILURES + ERRORS
+    sections) into a compact excerpt that's actually actionable for the
+    coder agent.
+
+    Why this exists: the bounce-back comment used to dump the first 800
+    chars of raw pytest output, which on a multi-file failing suite is
+    100% dot/F/E progress markers (`tests/test_x.py FFF...E....`) — zero
+    signal about WHICH test or WHY. The detailed `=== FAILURES ===` /
+    `=== ERRORS ===` sections sit AFTER the progress markers in pytest
+    output and get truncated off. Agents see the bounce, can't tell what
+    to fix, retry blindly, ping-pong to cap-Block.
+
+    Canonical 2026-06-04 incident: MyJira features 1344, 1346, 1249 each
+    bounced 3-4x on "First failure: \\`\\`" (empty backticks) with 800
+    chars of dot-progress excerpt. Real failure was a single
+    `assert hashed_password == password_hash` AssertionError that never
+    made it into the bounce body.
+
+    Output shape: per traceback block we keep
+      - the test-name header line (`____ test_x.test_y ____`)
+      - the TAIL of the block (last `max_per_block` chars) because the
+        actual assertion / exception message is at the bottom of the
+        traceback, with stack frames at the top.
+
+    Returns "" when the input has no recognisable FAILURES/ERRORS
+    sections, so callers can fall back to the legacy raw-excerpt path.
+    """
+    if not run_out:
+        return ""
+    # pytest section markers look like:
+    #   =================================== FAILURES ===================================
+    #   ==================================== ERRORS ====================================
+    # Capture from either header until the next "===... <CAPS> ===..." section
+    # marker (next is usually "short test summary info" or "warnings summary").
+    section_re = re.compile(
+        r"^=+\s+(FAILURES|ERRORS)\s+=+\s*$", re.M
+    )
+    end_re = re.compile(r"^=+\s+\S.*\s+=+\s*$", re.M)
+    blocks: list[str] = []
+    for m in section_re.finditer(run_out):
+        start = m.end()
+        nxt = end_re.search(run_out, start + 1)
+        end = nxt.start() if nxt else len(run_out)
+        section_body = run_out[start:end]
+        # Split section into per-test traceback blocks. pytest uses
+        # `____ test_name ____` (long underscores) as the per-test
+        # divider. The first block before the first divider is usually
+        # blank.
+        divider_re = re.compile(r"^_{3,}\s+(.+?)\s+_{3,}\s*$", re.M)
+        last_pos = 0
+        last_name = ""
+        for dm in divider_re.finditer(section_body):
+            if last_name:
+                body = section_body[last_pos:dm.start()].strip()
+                if body:
+                    blocks.append(f"____ {last_name} ____\n{body[-max_per_block:]}")
+                    if len(blocks) >= max_blocks:
+                        break
+            last_name = dm.group(1).strip()
+            last_pos = dm.end()
+        if len(blocks) < max_blocks and last_name:
+            body = section_body[last_pos:].strip()
+            if body:
+                blocks.append(f"____ {last_name} ____\n{body[-max_per_block:]}")
+        if len(blocks) >= max_blocks:
+            break
+    if not blocks:
+        return ""
+    # Also try to capture the short summary line(s) for these blocks if
+    # present — they include the one-line "<test> - <exception type>:
+    # <message>" form that's the most actionable single line.
+    summary_lines: list[str] = []
+    summary_re = re.compile(r"^(?:FAILED|ERROR)\s+\S.*", re.M)
+    for line in summary_re.findall(run_out):
+        summary_lines.append(line.strip())
+        if len(summary_lines) >= max_blocks:
+            break
+    parts: list[str] = []
+    if summary_lines:
+        parts.append("\n".join(summary_lines))
+    parts.extend(blocks)
+    return "\n\n".join(parts)
+
+
 def _baseline_pytest_failures(working_dir: str, test_ids: list[str],
                               timeout: int) -> set[str]:
     """Run `test_ids` against a throwaway git worktree at origin/main and return
@@ -2020,10 +2108,16 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
                 return result
         # non-pytest, or pytest with no parseable FAILED ids → bounce on any
         # failure. pytest: "FAILED tests/X::test_Y"; jest: "FAIL tests/X.test.js";
-        # go: "--- FAIL: TestFoo"
+        # go: "--- FAIL: TestFoo".
+        # Also match pytest's "ERROR tests/X::test_Y - <Exception>" short-summary
+        # lines (setup-error case): the canonical 2026-06-04 MyJira 1344/1346/1249
+        # cascade had ALL fixture-setup errors and no `FAILED` lines, so this
+        # loop found nothing and `first_failure` rendered as empty backticks in
+        # the bounce body — agent got zero signal about WHICH test failed.
         first = ""
         for ln in run_out.splitlines():
             if ln.startswith("FAILED ") or ln.startswith("FAIL ") \
+                    or ln.startswith("ERROR ") \
                     or "--- FAIL:" in ln:
                 first = ln[:200]
                 break
@@ -3587,10 +3681,23 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                                 f"the story with zero coverage."
                             )
                         else:
+                            # Cycle GL (2026-06-04): prefer the structured
+                            # FAILURES/ERRORS traceback excerpt over the raw
+                            # output dot-progress dump. On suites where every
+                            # failure is a fixture-setup ERROR, the raw
+                            # excerpt is 100% `tests/test_x.py EEEEE` markers
+                            # and the agent has no idea WHICH test or WHY.
+                            # _excerpt_pytest_tracebacks surfaces the first
+                            # two real tracebacks (test name + tail of stack)
+                            # so the bounce-back is actually actionable.
+                            # Canonical: MyJira 1344/1346/1249 cascade.
+                            tb_excerpt = _excerpt_pytest_tracebacks(
+                                test_result.get("output") or ""
+                            )
                             body = (
                                 f"❌ post-coder test-check auto-reject ({reason}):\n"
                                 f"First failure: `{first_failure}`\n\n"
-                                f"```\n{output_excerpt[:800]}\n```\n"
+                                f"```\n{tb_excerpt or output_excerpt[:800]}\n```\n"
                                 f"Fix the failing test(s) and re-push. If tests reference "
                                 f"symbols that don't exist (collection error), align the "
                                 f"test file with the actual code or delete the orphan test."
