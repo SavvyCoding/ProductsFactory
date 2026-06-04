@@ -640,14 +640,14 @@ class TestFileCorrectiveChores:
         assert body["feature_type"] == "chore"
         assert body["status"] == "Approved"
         assert body["source"] == "ai"
-        # priority MUST be 99 — the orchestrator's session-launcher path
-        # (_fetch_assigned_features) sorts by -priority DESC, so the
-        # HIGHEST number is picked first. Standard features land at
-        # priority 50 (recommender) or 70 (planner); 99 beats both and
-        # leaves 100 as headroom for explicit "PM urgent." Pre-2026-05-30
-        # this was priority=1 (mistaken assumption of ASC ordering) and
-        # chores sorted to the BACK of the designer queue.
-        assert body["priority"] == 99
+        # priority MUST be 1 — under the unified ASC convention (cycle
+        # GM 2026-06-04: docker_runner._fetch_assigned_features now
+        # matches the PM API's ASC sort), LOWEST number wins. Standard
+        # features default to 50; chores at 1 jump ahead of all
+        # priority>=2 standard work. Pre-cycle-GM the dispatcher used
+        # `-priority` DESC and this filer used priority=99 as a
+        # workaround; both were unified to ASC together.
+        assert body["priority"] == 1
         assert "<!-- reconciler-key: duplicate_ddl:calculations -->" in body["description"]
         assert "src/f0.py:0" in body["description"]
 

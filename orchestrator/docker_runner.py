@@ -410,7 +410,7 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
         # Sort: stuck-rework features (Implementing+changes_requested AND
         # fix_attempts >= REWORK_CAP_PROXIMITY) go LAST so the coder picks
         # a healthy fresh feature when both exist. Within each bucket,
-        # priority desc + id asc as before.
+        # priority ASC (LOWER number = higher rank) + id asc.
         #
         # Cycle DQ (2026-06-01) follow-up to cycle DM-2: the dispatcher
         # fix de-prioritized near-cap reworks at the persona level
@@ -419,6 +419,20 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
         # sort put them at the top. Canonical: DocumentSign #1178 has
         # higher priority than 1101/1104/etc; with fix_attempts=4 it
         # kept winning even though it's doomed.
+        #
+        # Cycle GM (2026-06-04): the priority direction was wrong. The
+        # PM API (`/api/features/next-for-persona` and
+        # `website/main.py:739`) sorts ASC — LOWER priority number means
+        # HIGHER priority. This dispatcher used `-priority` DESC, which
+        # inverted the convention. Canonical incident: chore #1358
+        # (Fix setup_test_env fixture, filed at priority=5) sat
+        # unpicked by designer for 3+ hours while designer kept picking
+        # priority=50–60 features that ranked HIGHER under the DESC
+        # convention. Flipped to ASC to match the PM API. Note that
+        # drift_detectors had been working around this bug by filing
+        # chores at priority=99; that workaround is now retired (see
+        # drift_detectors.py docstring) and new chores file at
+        # priority=1.
         #
         # This sort must mirror cycle/persona.py's REWORK_CAP_PROXIMITY
         # threshold (3). Move stuck reworks to the end of the bucketed
@@ -435,7 +449,7 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
 
         features.sort(key=lambda f: (
             1 if _is_stuck_rework(f) else 0,
-            -(f.get("priority") or 0),
+            f.get("priority") if f.get("priority") is not None else 50,
             f.get("id") or 0,
         ))
         selected = features[:max_count]
