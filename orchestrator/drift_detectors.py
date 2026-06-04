@@ -1077,20 +1077,19 @@ def file_corrective_chores(
       - status="Approved"  → skips the PM gate; immediately eligible. The
         internal API bypasses PM_ALLOWED_TRANSITIONS, so create-as-Approved
         is permitted for this caller.
-      - priority=99        → the actual session-launcher path
-        (`orchestrator/docker_runner._fetch_assigned_features`) sorts
-        features by `-priority` DESC (highest number wins) to match the
-        codebase convention (planner default=70, recommender default=50,
-        model default=50, schema validator range 1-100). Chores need a
-        priority HIGHER than 70 to jump the queue ahead of standard
-        features. 99 leaves 100 as headroom for explicit "PM urgent."
-        Pre-2026-05-30 wiring used priority=1 based on the website's
-        /api/features/next-for-persona ASC ordering — but the orchestrator
-        doesn't go through that endpoint at launch time, so chores at
-        priority=1 actually sorted to the BACK of the designer queue and
-        sat unpicked. Canonical DocumentSign 2026-05-30 incident: 5 chores
-        filed at priority=1, designer 6442 picked feature #1076 (priority=77)
-        over all of them.
+      - priority=1         → LOWEST number = HIGHEST rank under the unified
+        ASC convention. Both the PM API
+        (`/api/features/next-for-persona`, `website/main.py:739`) and
+        the session-launcher path
+        (`orchestrator/docker_runner._fetch_assigned_features`, as of
+        cycle GM 2026-06-04) sort priority ASC. Chores at priority=1
+        jump ahead of standard features (default=50) and PM-urgent
+        (manual values 2–10). Pre-cycle-GM the dispatcher used DESC
+        and this filer used priority=99 to compensate; the convention
+        is now unified ASC and priority=1 is correct. Existing in-DB
+        chores at priority=99 from the old convention are mostly in
+        Deferred/Blocked status and don't get picked anyway; no
+        migration needed.
       - source="ai"        → schema validator allows only 'pm'|'ai'.
       - feature_type="chore".
     (skip_design and labels are not FeatureCreate fields — omitted in v1;
@@ -1115,7 +1114,7 @@ def file_corrective_chores(
                 "description":  _chore_body(f),
                 "feature_type": "chore",
                 "status":       "Approved",
-                "priority":     99,
+                "priority":     1,
                 "source":       "ai",
             })
             if 200 <= resp.status_code < 300:
