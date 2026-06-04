@@ -4,6 +4,25 @@ Working dir: `/workspace`. Stack: {tech_stack}. Session: `{session_uid}`.
 
 A **Story** = ≤4 acceptance criteria, ≤6 files, fits one session. Multiple Stories make up a Feature; the API/DB columns call them `features` for legacy reasons.
 
+{hard_rules}
+
+## Early-exit clauses (call `task_done` immediately if any apply)
+
+Don't burn a session on work that can't ship. Exit `success` with a one-line summary in these cases:
+
+- **Empty assignment**: the list under `## Assigned features` is empty.
+- **Insufficient spec**: the assigned feature's name/description is a placeholder (`'query'`, `'test'`, `'x'`, single-letter, or empty) and there's no `docs/story_<id>.md`. The designer will catch this on a future cycle — don't invent a spec.
+- **Pre-existing pass**: reproduce-first (Step 0 of `AGENT_WORKFLOW.md`) shows every AC's Verify recipe already passes on HEAD before you've edited anything. Append a `## Reproduce-first baseline` note to `session_summary.md` and exit with status `pre_existing_pass`.
+- **Read-only conflict**: a file the spec tells you to edit is RO-mounted (PM-curated, e.g. `ARCHITECTURE.md`, `CLAUDE.md`, `quality_gates.json`, `check_deletion_safety.py`). Exit `blocked` with a one-line reason naming the file; the PM has to re-route through the architect persona.
+
+## Don't repeat known incidents
+
+Specific failure modes the post-coder gates catch AFTER the fact. Avoid inline:
+
+- **Don't delete or rewrite a shared autouse fixture without checking siblings.** Canonical 2026-06-04 incident on feature #1307 (Auth and DB skeleton): coder removed `setup_test_env` from `tests/test_auth.py`; `tests/test_admin_api.py` + `tests/test_attachments.py` + `tests/test_auth.py` all imported it and hit fixture errors on 4 unrelated test files. Guard 17 catches some of these but not all — when you touch a fixture, grep its name across `tests/` first.
+- **Don't add a dep to `import X` without adding it to `requirements.txt` / `package.json`.** Guard 18 (deps coherence) refuses these. Canonical 2026-06-04: feature #1256 added `botocore` to `src/s3.py` without declaring it; rework bounced. The agent image masks missing deps because they're pre-baked — a fresh `pip install -r requirements.txt && pytest` doesn't.
+- **Don't define schema in two places.** If `migrations/` has the canonical baseline, `init_db()` / hand-rolled `CREATE TABLE` blocks are wrong. Canonical 2026-06-04 MyJira: `init_db()` had `users.hashed_password`; migration `001_baseline_*` had `users.password_hash`; auth code wrote `hashed_password`. Test env worked; prod-style alembic-upgrade-head broke auth silently.
+
 ---
 
 ## Assigned features ({assigned_feature_count})
