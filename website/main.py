@@ -1066,6 +1066,26 @@ async def change_feature_status_form(
     return RedirectResponse(f"/product/{product_id}", status_code=303)
 
 
+@app.post("/product/{product_id}/phase/{phase_id}/approve")
+async def approve_phase_form(
+    product_id: int, phase_id: int,
+    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
+):
+    """PM approves a phase at the human-in-loop gate, latching it 'approved' so
+    the orchestrator unlocks the next phase. Only valid from 'awaiting_review'
+    (the detector must have settled the phase and written its report first)."""
+    phase = await db.get(Phase, phase_id)
+    if not phase or phase.product_id != product_id:
+        raise HTTPException(status_code=404, detail="Phase not found")
+    if phase.gate_state != "awaiting_review":
+        raise HTTPException(
+            status_code=422,
+            detail=f"Phase gate is {phase.gate_state!r}; can only approve from 'awaiting_review'",
+        )
+    phase.gate_state = "approved"
+    return RedirectResponse(f"/product/{product_id}", status_code=303)
+
+
 @app.post("/product/{product_id}/approve")
 async def approve_product(
     product_id: int,
@@ -2947,6 +2967,176 @@ async def api_plan_phases(
         await db.flush()
 
     return {"phases_created": phases_created, "features_assigned": features_assigned}
+
+
+# ── Phase gate report (migration 045, human-in-loop) ─────────────────────────
+
+# Feature statuses that represent "no longer actively being worked." A phase
+# whose every feature is settled is eligible to settle the gate. Blocked /
+# Reverted are settled-but-unresolved — they don't keep the phase open, they
+# become the SUBJECT of the report's blockers + dependency warnings.
+_SETTLED_STATUSES = frozenset({"Pushed", "Deferred", "Rejected", "Reverted", "Blocked"})
+_UNRESOLVED_STATUSES = frozenset({"Blocked", "Reverted"})
+
+
+async def _build_phase_report(phase: Phase, db: AsyncSession) -> dict:
+    """Assemble a phase summary from data the system already records, plus a
+    best-effort LLM narration. Deterministic facts (stats, blockers, the
+    forward-dependency walk) are computed in Python so they are trustworthy;
+    only the prose (summary / code_quality / challenges / recommendations) is
+    LLM-generated. Pure function of the DB — does not mutate the phase.
+    """
+    feats = (await db.execute(
+        select(Feature).where(Feature.phase_id == phase.id)
+        .order_by(Feature.priority.asc(), Feature.id.asc())
+    )).scalars().all()
+
+    # Phase order/name lookup for the whole product, to label downstream
+    # features by which (later) phase they sit in.
+    phase_rows = (await db.execute(
+        select(Phase).where(Phase.product_id == phase.product_id)
+    )).scalars().all()
+    phase_meta = {p.id: {"order": p.order, "name": p.name} for p in phase_rows}
+
+    unresolved = [f for f in feats if f.status in _UNRESOLVED_STATUSES]
+
+    # Forward-dependency walk: for each unresolved feature U, find features V
+    # that depend on it (via the typed feature_links graph or the depends_on
+    # FK) and live in a LATER phase — those will be blocked downstream. This is
+    # the "future features X, Y will be blocked" warning the gate decision needs.
+    blockers: list[dict] = []
+    for u in unresolved:
+        links = (await db.execute(
+            select(FeatureLink).where(
+                ((FeatureLink.source_id == u.id) & (FeatureLink.link_type == "blocks"))
+                | ((FeatureLink.target_id == u.id) & (FeatureLink.link_type == "is_blocked_by"))
+            )
+        )).scalars().all()
+        downstream_ids = {
+            (lk.target_id if lk.source_id == u.id else lk.source_id) for lk in links
+        }
+        # depends_on FK: any feature pointing at U is downstream of it.
+        dep_rows = (await db.execute(
+            select(Feature.id).where(Feature.depends_on == u.id)
+        )).scalars().all()
+        downstream_ids.update(dep_rows)
+
+        downstream_blocked = []
+        for vid in downstream_ids:
+            v = (await db.execute(select(Feature).where(Feature.id == vid))).scalar_one_or_none()
+            if not v or v.phase_id is None:
+                continue
+            v_meta = phase_meta.get(v.phase_id)
+            # Only warn about features in a strictly LATER phase.
+            if v_meta and v_meta["order"] > phase.order:
+                downstream_blocked.append({
+                    "feature_id": v.id, "name": v.name,
+                    "phase": v_meta["name"], "phase_order": v_meta["order"],
+                })
+        blockers.append({
+            "feature_id": u.id, "name": u.name, "status": u.status,
+            "reason": u.blocked_reason or u.review_notes or "",
+            "fix_attempts": u.fix_attempts,
+            "downstream_blocked": sorted(downstream_blocked, key=lambda d: d["phase_order"]),
+        })
+
+    # Quality signal already on record.
+    supervisor_rows = (await db.execute(
+        select(SupervisorAction).where(
+            SupervisorAction.product_id == phase.product_id,
+            SupervisorAction.target_type == "feature",
+            SupervisorAction.target_id.in_([str(f.id) for f in feats] or [""]),
+        ).order_by(SupervisorAction.created_at.desc()).limit(25)
+    )).scalars().all()
+
+    stats = {
+        "total": len(feats),
+        "pushed": sum(1 for f in feats if f.status == "Pushed"),
+        "blocked": sum(1 for f in feats if f.status == "Blocked"),
+        "reverted": sum(1 for f in feats if f.status == "Reverted"),
+        "deferred": sum(1 for f in feats if f.status == "Deferred"),
+        "rejected": sum(1 for f in feats if f.status == "Rejected"),
+        "total_fix_attempts": sum(f.fix_attempts or 0 for f in feats),
+        "changes_requested": sum(1 for f in feats if f.review_outcome == "changes_requested"),
+    }
+
+    facts = {
+        "phase": {"id": phase.id, "name": phase.name, "goal": phase.goal, "order": phase.order},
+        "stats": stats,
+        "shipped": [{"id": f.id, "name": f.name, "merge_notes": f.merge_notes}
+                    for f in feats if f.status == "Pushed"],
+        "blockers": blockers,
+        "supervisor_actions": [{"detector": s.detector, "action": s.action, "reason": s.reason}
+                               for s in supervisor_rows],
+        "high_friction": [{"id": f.id, "name": f.name, "fix_attempts": f.fix_attempts}
+                          for f in feats if (f.fix_attempts or 0) >= 3],
+    }
+
+    # Best-effort LLM narration. If it fails, the deterministic report still
+    # stands so the gate can advance — the prose is a convenience, not a gate.
+    narrative = {"summary": "", "code_quality": "", "challenges": "", "recommendations": []}
+    try:
+        raw = await _llm_call(
+            "You are a senior engineering manager writing a phase-completion report "
+            "for a human reviewer who must decide whether to approve advancing to the "
+            "next phase. Base everything ONLY on the facts below — do not invent.\n\n"
+            f"FACTS (JSON):\n{json.dumps(facts, indent=2, default=str)}\n\n"
+            "Write a tight report. Call out unresolved blockers and, critically, which "
+            "LATER-phase features they will block (from blockers[].downstream_blocked). "
+            "Recommend whether blockers should be resolved before moving on.\n\n"
+            "Return ONLY JSON, no other text:\n"
+            '{\n'
+            '  "summary": "2-3 sentences on what shipped and overall health",\n'
+            '  "code_quality": "what the friction/supervisor/review signal says about quality",\n'
+            '  "challenges": "notable challenges this phase",\n'
+            '  "recommendations": ["actionable items, blockers-first, before next phase"]\n'
+            '}',
+            db=db,
+            max_tokens=1500,
+        )
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        parsed = json.loads(raw.strip())
+        for k in narrative:
+            if k in parsed:
+                narrative[k] = parsed[k]
+    except Exception as e:  # noqa: BLE001 — narration is best-effort
+        narrative["summary"] = f"(LLM narration unavailable: {e})"
+
+    return {
+        "phase_id": phase.id,
+        "phase_name": phase.name,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "stats": stats,
+        "shipped": facts["shipped"],
+        "blockers": blockers,
+        **narrative,
+    }
+
+
+@app.post("/api/phases/{phase_id}/report")
+async def api_generate_phase_report(phase_id: int, db: AsyncSession = Depends(get_db)):
+    """Generate (or regenerate) the phase summary report and move the gate to
+    'awaiting_review'. Idempotent — safe to call repeatedly; each call rebuilds
+    the report from current data. Called by the orchestrator's
+    detect_completed_phases sweep when a phase settles, and available manually.
+
+    Does NOT touch a phase already 'approved' (the human latched it).
+    """
+    phase = await db.get(Phase, phase_id)
+    if not phase:
+        raise HTTPException(status_code=404, detail="Phase not found")
+    if phase.gate_state == "approved":
+        return {"phase_id": phase.id, "gate_state": "approved",
+                "skipped": "phase already approved", "report": phase.report}
+
+    report = await _build_phase_report(phase, db)
+    phase.report = report
+    phase.gate_state = "awaiting_review"
+    await db.flush()
+    return {"phase_id": phase.id, "gate_state": phase.gate_state, "report": report}
 
 
 @app.post("/api/features/{feature_id}/links", response_model=schemas.FeatureLinkOut, status_code=201)
