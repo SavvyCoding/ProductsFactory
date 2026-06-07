@@ -2909,9 +2909,16 @@ async def api_plan_phases(
             "1. **Group features into coherent phases** by theme. Each phase tells a story "
             "(e.g. 'Foundation', 'Core Workflow', 'Integrations', 'Polish').\n"
             "2. **Every feature lands in exactly one phase.** No feature left orphaned.\n"
-            "3. **Foundational features go in earliest phases.** Auth, data models, CI go before user-facing flows.\n"
-            "4. **No per-phase size limit.** A phase can hold 1 feature or 50. Group by theme, not by size.\n"
-            "5. **Phase names are user-facing labels.** 'Authentication & User Management' beats 'Phase 1'.\n\n"
+            "3. **Aim for about 5 phases.** Use fewer for a small backlog, slightly more "
+            "only if themes genuinely do not compress. Do NOT pad to exactly 5 with "
+            "trivial phases, and do NOT cram everything into 1-2 giant phases.\n"
+            "4. **Order phases by dependency — foundational first.** Each phase should only "
+            "depend on earlier ones: infrastructure / auth / data models / CI come first, "
+            "then the core user journey, then integrations, then polish. Emit phases in "
+            "this dependency order (the first array element is built first). A phase that "
+            "needs something from a later phase is mis-ordered.\n"
+            "5. **No per-phase size limit.** A phase can hold 1 feature or 50. Group by theme, not by size.\n"
+            "6. **Phase names are user-facing labels.** 'Authentication & User Management' beats 'Phase 1'.\n\n"
             "Return ONLY a JSON array, no other text:\n"
             '[\n'
             '  {\n'
@@ -3855,6 +3862,20 @@ async def api_flapping_features(
 # ══════════════════════════════════════════════════════════════════════════════
 # REST API — Misc
 # ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/alerts", response_model=schemas.AlertOut, status_code=201)
+async def api_create_alert(body: schemas.AlertCreate, db: AsyncSession = Depends(get_db)):
+    """Create a dashboard alert row (surfaced in the PM nav badge via
+    /api/alerts/unread). Internal — used by the orchestrator's
+    detect_completed_phases sweep to notify a human that a phase is awaiting
+    review. `level` ∈ info|warning|error|critical (CHECK-constrained)."""
+    if body.level not in ("info", "warning", "error", "critical"):
+        raise HTTPException(status_code=422, detail=f"Invalid alert level: {body.level!r}")
+    alert = Alert(product_id=body.product_id, level=body.level, message=body.message)
+    db.add(alert)
+    await db.flush()
+    return alert
+
 
 @app.get("/api/alerts/unread", response_model=list[schemas.AlertOut])
 async def api_unread_alerts(

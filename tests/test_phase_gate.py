@@ -106,6 +106,25 @@ class TestPhaseReport:
         assert r.status_code == 404
 
 
+class TestAlertCreate:
+    def test_create_alert_row(self, client, db):
+        prod = make_product(db, "/projects/gate-alert")
+        r = client.post("/api/alerts", json={
+            "product_id": prod.id, "level": "info", "message": "Phase X awaiting review",
+        })
+        assert r.status_code == 201
+        body = r.json()
+        assert body["message"] == "Phase X awaiting review"
+        assert body["delivered"] is False
+        # Surfaces in the unread feed the dashboard nav badge reads.
+        unread = client.get("/api/alerts/unread", auth=AUTH).json()
+        assert any(a["id"] == body["id"] for a in unread)
+
+    def test_create_alert_rejects_bad_level(self, client, db):
+        r = client.post("/api/alerts", json={"level": "bogus", "message": "x"})
+        assert r.status_code == 422
+
+
 class TestPhaseApproveForm:
     def test_approve_from_awaiting_review(self, client, db):
         prod = make_product(db, "/projects/gate-d")

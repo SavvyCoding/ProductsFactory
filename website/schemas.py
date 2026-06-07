@@ -334,6 +334,12 @@ class PollerHeartbeatRequest(BaseModel):
 
 # ── Alerts ───────────────────────────────────────────────────────────────────
 
+class AlertCreate(BaseModel):
+    product_id: Optional[int] = None
+    level:      str = "info"
+    message:    str
+
+
 class AlertOut(BaseModel):
     id:          int
     product_id:  Optional[int]
