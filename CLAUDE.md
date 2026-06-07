@@ -82,6 +82,14 @@ python scripts/build_pf_video.py
 
 Local pytest is authoritative for development, but CI catches Windows-vs-Linux path/encoding regressions that don't surface on the host. "Green locally" ≠ "green in CI."
 
+### Prompt regression evals (`evals/`)
+
+`evals/` is a standalone harness that catches persona-prompt quality regressions *before* a bad rollout burns sessions of compute. **Run `pytest evals/ -v` after editing anything under `orchestrator/prompts/`.** Two tiers:
+- **Tier 1 — contract checks** (`test_prompt_contracts.py`, always on, no LLM): structural invariants on each built prompt — required output format present, non-negotiable constraints intact (e.g. "security auditor MUST NOT modify code"), correct working-dir paths. Catches the common drift where a refactor silently drops a security instruction.
+- **Tier 2 — live LLM evals** (`test_live_evals.py`, opt-in via `RUN_LIVE_EVALS=1`): builds the persona prompt for each scenario under `evals/scenarios/`, calls the backend, applies deterministic scorers (`scoring.py`).
+
+Baseline-vs-candidate is the main workflow: `python -m evals.runner <out.json>` on master, edit a prompt, run again, then `python -m evals.compare baseline.json candidate.json` — exits non-zero on any pass→fail regression or >1% overall score drop (a CI pre-merge gate on prompt-touching PRs). Backend selected by `EVAL_BACKEND` (`stub` replays `stub_response` fields token-free for CI self-test; `ollama` matches the production path, model from `EVAL_OLLAMA_MODEL`).
+
 ## Architecture
 
 ### Session-PR merge flow (1-PR-per-feature → main)
@@ -106,7 +114,7 @@ After the coder agent exits, `_run_post_coder_pipeline` (`orchestrator/pipelines
 - **`_post_coder_lint_check`** (Phases 2–4) — 18 guards (1–11, 13, 14, 12, 15–18 — numbering preserved historically; Guard 12 was reordered after 14). Notable ones: hardcoded secret fallbacks in token/crypto calls (Guard 5); state-changing API routes (`POST/PUT/PATCH/DELETE`) without an auth check, opt-out via `// PUBLIC_ROUTE:` or `# PUBLIC_ROUTE:` annotation (Guard 6); agent-debris filenames — `*.bak`, `*_old_*`, `*_v\d+_*`, `*_complete_*`, `temp_fixed*`, files under `Temp/` or `temp_storage/`, `test_X_qa.py` siblings of `test_X.py` (Guard 13); config-as-gate integrity — refuses commits that lower bars declared in `quality_gates.json` by editing `pytest.ini` / `package.json` directly (Guard 14); alembic-branch detection + revision-ID coherence (Guards 15–16); **AST-diff deletion safety** (Guard 17) — parses pre/post-commit Python ASTs, takes the set difference of public top-level `def`/`class`/module-level assignments, then word-greps surviving callers across tracked `.py` files (excluding co-modified files) and bounces on dangling refs (paired with the pre-commit self-review helper `templates/check_deletion_safety.py` invoked at `AGENT_WORKFLOW.md` Step 5b, RO-mounted so the agent can't tamper with it); **deps coherence** (Guard 18) — AST-walks imports in changed `.py` files and bounces when packages used in code are missing from `requirements.txt`, catching the failure mode where the pre-baked agent image hides missing deps inside the container but a fresh `pip install -r requirements.txt && pytest` fails on collect (canonical 2026-05-22 MyDocusign incident).
 - **`_post_coder_test_check`** (Phase 5) — runs the stack's test command and classifies the outcome four ways:
   - `passed`: continue to push.
-  - `env_broken` (jest missing, ENOENT on node_modules, ModuleNotFoundError pytest): roll back to `Approved`/`Designed`, send operator alert, **do NOT bump `fix_attempts`** (infra failures must not auto-Block features after 5 attempts).
+  - `env_broken` (jest missing, ENOENT on node_modules, ModuleNotFoundError pytest): roll back to `Approved`/`Designed`, send operator alert, **do NOT bump `fix_attempts`** (infra failures must not auto-Block features after 5 attempts). **Consecutive-`env_broken` cap** (2026-06-04 cycle GK, `post_coder.py` ~L3526): if any assigned feature already has ≥2 prior `post-coder:test-env` comments, this round is downgraded to a regular test-failure bounce (fix_attempts bumps, coder sees the real test output). Prevents a fixture-setup `AssertionError` that merely *looks* infra-shaped from looping coder→env_broken→rollback forever until the supervisor's `rapid_flap` detector Blocks the feature with a misleading reason.
   - `collection_errors > 0`: pytest collect-only errors → bounce to `Implementing` with the first failing import quoted.
   - test failures: bounce to `Implementing` with the first failure quoted.
 
@@ -268,6 +276,7 @@ FastAPI evaluates routes in definition order. The parameterized `GET /api/featur
 - **Idempotent operations**: `setup_product.py` discovery is safe to run multiple times; templates only written if missing
 - **Model changes require a migration**: add the column to `website/models.py` AND create a new `db/migrations/versions/NNN_*.py` file — Alembic does not auto-generate these
 - **Route ordering matters**: in `website/main.py`, parameterized routes (`/api/features/{id}`) must come after all static routes at the same path prefix to avoid shadowing
+- **Feature priority is ASC — LOWER number = HIGHER rank** (unified 2026-06-04, cycle GM). The PM API (`website/main.py` `ORDER BY Feature.priority`) and the orchestrator's session launcher (`docker_runner._fetch_assigned_features`) both sort `priority ASC, id ASC`. The dispatcher previously used `-priority DESC` — the inverse — so a `priority=5` chore the dashboard showed as top-of-queue was outranked by `priority=60` work in the actual session. When adding any feature-selection query, sort ASC.
 - **No linter/formatter configured**: there is no ruff, black, flake8, or eslint config — code style is enforced by convention only
 - **Shared requirements file**: `requirements.txt` covers both website and orchestrator (no separate dev/test requirements)
 
