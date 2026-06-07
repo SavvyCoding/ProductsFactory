@@ -353,17 +353,36 @@ class FeatureLabel(Base):
 
 
 class Phase(Base):
-    """Pure UI grouping of features. No lifecycle, no DoD, no completion timing —
-    phases are labels with an ordering. The sprint runtime they previously
-    anchored was retired in migration 043 (phases→features flat model).
+    """UI grouping of features with an ordering. The sprint runtime phases
+    previously anchored was retired in migration 043 (phases→features flat
+    model).
+
+    Migration 045 added an *opt-in* human-in-the-loop gate at phase
+    boundaries (`gate_state` + `report`), enabled per-product via
+    `product.config.human_gate_phases`. When that flag is off the columns
+    are inert and behavior matches the flat 043 model. This is NOT the old
+    sprint/DoD machinery — there is no completion timing, sign-off endpoint,
+    or per-phase cap; just a state latch and a denormalized report blob.
     """
     __tablename__ = "phases"
+    __table_args__ = (
+        CheckConstraint(
+            "gate_state IN ('open', 'awaiting_review', 'approved')",
+            name="ck_phases_gate_state",
+        ),
+    )
 
     id:         Mapped[int]           = mapped_column(Integer, primary_key=True)
     product_id: Mapped[int]           = mapped_column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
     name:       Mapped[str]           = mapped_column(Text, nullable=False)
     goal:       Mapped[Optional[str]] = mapped_column(Text)
     order:      Mapped[int]           = mapped_column(Integer, nullable=False, default=0)
+    # Human-in-loop gate (migration 045). 'open' → 'awaiting_review' → 'approved'.
+    # The detector drives open⇄awaiting_review; only a human latches 'approved'.
+    gate_state: Mapped[str]           = mapped_column(Text, nullable=False, server_default="open")
+    # Phase summary (code-quality / challenges / blockers / dependency warnings
+    # / recommendations) written when the phase settles. NULL until generated.
+    report:     Mapped[Optional[dict]] = mapped_column(JSONB)
 
     features: Mapped[List["Feature"]] = relationship(
         "Feature", back_populates="phase", foreign_keys="Feature.phase_id",
