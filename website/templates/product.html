@@ -1236,6 +1236,27 @@
       </form>
     </div>
 
+    <!-- Workflow: human-in-loop phase gate (migration 045) -->
+    <div class="settings-card">
+      <div class="settings-card-title">
+        <span class="title-icon icon-config">🚦</span>
+        Workflow
+      </div>
+      <form method="post" action="/product/{{ product.id }}/workflow-settings">
+        <div class="form-group">
+          <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
+            <input type="checkbox" name="human_gate_phases" value="on" style="width:auto"
+                   {% if product.config and product.config.get('human_gate_phases') %}checked{% endif %}>
+            Require human approval between phases
+          </label>
+          <p class="field-hint">When on, the system freezes each phase's successors until you review the
+            phase report and approve it. When off (default), phases run fully autonomously. Approve a
+            settled phase from its card on the board.</p>
+        </div>
+        <button type="submit">Save workflow</button>
+      </form>
+    </div>
+
     <!-- Custom Prompt -->
     <div class="settings-card">
       <div class="settings-card-title">
