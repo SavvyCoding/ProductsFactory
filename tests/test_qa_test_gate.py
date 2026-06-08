@@ -60,7 +60,18 @@ class TestContainerTestRun:
     def test_no_markers_no_install_prefix(self, tmp_path, monkeypatch):
         calls = _capture(monkeypatch)
         pc._container_test_run(str(tmp_path))(["echo", "hi"])
-        assert calls["cmd"][-1] == "echo hi"          # nothing prepended
+        # No install prefix, but the hard-timeout backstop still wraps the cmd.
+        assert calls["cmd"][-1] == "timeout 300s echo hi"
+
+    def test_ci_env_and_timeout_backstop(self, tmp_path, monkeypatch):
+        (tmp_path / "package.json").write_text('{"scripts": {"test": "vitest"}}')
+        calls = _capture(monkeypatch)
+        pc._container_test_run(str(tmp_path))(["npm", "test"], timeout=300)
+        cmd = calls["cmd"]
+        # CI=true disables watch mode (the MyCalc1 vitest hang); timeout is the
+        # backstop that kills a stuck runner instead of hanging the pipeline.
+        assert "CI=true" in cmd
+        assert "timeout 300s npm test" in cmd[-1]
 
     def test_npm_takes_precedence_over_requirements(self, tmp_path, monkeypatch):
         (tmp_path / "package.json").write_text('{"scripts": {"test": "jest"}}')
