@@ -21,7 +21,12 @@ surgical change rather than a rewrite.
 from __future__ import annotations
 
 import json
+import os
 from typing import Callable, Protocol
+
+# Sentinel prefix marking a synthetic context-elision message so repeated
+# windowing passes don't re-summarize their own markers.
+_ELISION_MARK = "[context-elided]"
 
 
 class Backend(Protocol):
@@ -55,6 +60,8 @@ class AgentLoop:
         max_turns: int = 80,
         system_prompt: str = "",
         log: Callable[[str], None] = lambda _m: None,
+        window_token_budget: int | None = None,
+        keep_recent_exchanges: int | None = None,
     ) -> None:
         self.backend = backend
         self.tool_specs = tool_specs
@@ -62,6 +69,128 @@ class AgentLoop:
         self.max_turns = max_turns
         self.system_prompt = system_prompt
         self.log = log
+        # Context-window management. The loop re-sends the full message history
+        # every turn, so without bounding it the per-turn input — and, on
+        # token-billed backends like Ollama Cloud, the cost — grows without
+        # limit (observed: 1.9M cumulative input tokens in a single 67-turn
+        # session). _window() keeps the pinned anchors (system + initial task)
+        # plus the most recent exchanges, eliding the middle. 0/negative budget
+        # disables windowing entirely (full history, legacy behavior).
+        self.window_token_budget = (
+            window_token_budget if window_token_budget is not None
+            else int(os.environ.get("AGENT_CONTEXT_WINDOW_BUDGET", "60000"))
+        )
+        self.keep_recent_exchanges = (
+            keep_recent_exchanges if keep_recent_exchanges is not None
+            else int(os.environ.get("AGENT_KEEP_RECENT_EXCHANGES", "8"))
+        )
+
+    # ── Context-window management ────────────────────────────────────────────
+
+    @staticmethod
+    def _is_assistant(msg: dict) -> bool:
+        """A backend (assistant) turn. Backend messages carry no explicit role
+        (see Backend protocol) — anything that isn't system/user/tool is one."""
+        return msg.get("role") not in ("system", "user", "tool")
+
+    @staticmethod
+    def _est_tokens(msg: dict) -> int:
+        """Cheap token estimate (~4 chars/token) over content + any tool_calls.
+        Good enough to budget against; avoids a tokenizer dependency."""
+        n = len(str(msg.get("content") or ""))
+        tc = msg.get("tool_calls")
+        if tc:
+            n += len(json.dumps(tc, default=str))
+        return n // 4 + 4  # +4 per-message structural overhead
+
+    def _est_total(self, messages: list[dict]) -> int:
+        return sum(self._est_tokens(m) for m in messages)
+
+    def _elision_marker(self, evicted: list[dict]) -> dict:
+        """A single synthetic user message summarizing evicted turns — keeps the
+        action breadcrumb (one line per evicted assistant turn) while dropping
+        the bulky tool results. Skips prior markers so it doesn't compound."""
+        intents: list[str] = []
+        for m in evicted:
+            if not self._is_assistant(m):
+                continue
+            first = (str(m.get("content") or "").strip().splitlines() or [""])[0]
+            if first and not first.startswith(_ELISION_MARK):
+                intents.append(f"- {first[:160]}")
+        intents = intents[-15:]  # most recent breadcrumbs only
+        body = (
+            f"{_ELISION_MARK} {len(evicted)} earlier message(s) were trimmed to "
+            f"stay within the context window."
+        )
+        if intents:
+            body += " Recent actions before this point:\n" + "\n".join(intents)
+        body += "\nRe-read any file whose current contents you need — older tool output was dropped."
+        return {"role": "user", "content": body}
+
+    def _window(self, messages: list[dict]) -> list[dict]:
+        """Return a length-bounded view of `messages`. Pins the leading system
+        prompt + the initial task (first user message), keeps whole recent
+        (assistant + its tool/nudge) exchanges within the token budget, and
+        replaces the evicted middle with one elision marker. Tool_call/result
+        pairs are never split (eviction is by whole exchange). Best-effort:
+        any failure returns the original list unchanged."""
+        try:
+            if self.window_token_budget <= 0:
+                return messages
+            if self._est_total(messages) <= self.window_token_budget:
+                return messages
+
+            # Pinned prefix = leading system (if present) + the first user
+            # message (the task). Everything before/incl. the first user role.
+            pin_end = 0
+            for i, m in enumerate(messages):
+                if m.get("role") == "user":
+                    pin_end = i + 1
+                    break
+            else:
+                return messages  # no task anchor found — don't risk it
+            pinned = messages[:pin_end]
+            tail = messages[pin_end:]
+            if not tail:
+                return messages
+
+            # Group the tail into assistant-led exchanges. Leading non-assistant
+            # messages (e.g. a prior elision marker) attach to the first group.
+            groups: list[list[dict]] = []
+            for m in tail:
+                if self._is_assistant(m) or not groups:
+                    groups.append([m])
+                else:
+                    groups[-1].append(m)
+
+            budget = self.window_token_budget - self._est_total(pinned) - 256  # marker reserve
+            kept_rev: list[list[dict]] = []
+            running = 0
+            for g in reversed(groups):
+                gsize = sum(self._est_tokens(m) for m in g)
+                if kept_rev and running + gsize > budget and len(kept_rev) >= self.keep_recent_exchanges:
+                    break
+                kept_rev.append(g)
+                running += gsize
+            kept = list(reversed(kept_rev))
+            evicted_count = len(groups) - len(kept)
+            if evicted_count <= 0:
+                return messages  # nothing to gain
+
+            evicted_msgs = [m for g in groups[:evicted_count] for m in g]
+            result = list(pinned)
+            result.append(self._elision_marker(evicted_msgs))
+            for g in kept:
+                result.extend(g)
+            self.log(
+                f"[window] trimmed {evicted_count} exchange(s) / "
+                f"{len(evicted_msgs)} msg(s); ~{self._est_total(result)} tok kept "
+                f"(budget {self.window_token_budget})"
+            )
+            return result
+        except Exception as e:  # never break the loop over windowing
+            self.log(f"[window] skipped (error: {e})")
+            return messages
 
     def run(self, initial_prompt: str) -> int:
         """Run the loop until done or max_turns.
@@ -91,6 +220,11 @@ class AgentLoop:
 
         for turn in range(1, self.max_turns + 1):
             self.log(f"Turn {turn}/{self.max_turns}")
+
+            # Bound the history before each call. Reassigned (not copied) so the
+            # elision persists across turns — new messages append to the trimmed
+            # list rather than the unbounded original.
+            messages = self._window(messages)
 
             try:
                 message = self.backend(messages, self.tool_specs)
