@@ -171,6 +171,15 @@ A "Feature" in product-speak (e.g. "Contact Management") is usually a `phases` r
 
 **Release notes**: `GET /api/phases/{id}/release-notes` collates the `merge_notes` field of all Pushed features in the phase. Each coder session writes `features.merge_notes` on push (set in `post_coder.py`).
 
+### Phase gate (opt-in human-in-loop, migration 045)
+
+Off by default — when `product.config.human_gate_phases` is **not** set, the flat 043 model is unchanged and the system is fully autonomous. When set, a per-phase human checkpoint is inserted:
+
+- **State machine** on `phases.gate_state`: `open → awaiting_review → approved`. `approved` is a one-way latch only a human sets (PM Approve button → `POST /product/{id}/phase/{id}/approve`, valid only from `awaiting_review`). The detector drives `open⇄awaiting_review` to track feature reality.
+- **Detector** (`deploy/orchestrator/tools.py::_run_phase_gate_detector`, run per-product each cycle): a phase whose features are all *settled* (no `Pending/Approved/Designing/Designed/Implementing/Reviewing/Reviewed`) and has a real outcome (≥1 `Pushed`, or any `Blocked`/`Reverted`) → `POST /api/phases/{id}/report` (sets `awaiting_review`) + one dashboard `alerts` row on the transition. An `awaiting_review` phase that regains active work (PM un-blocked a feature) is reopened to `open` → re-settles → re-reports. This is the **rework loop**: resolve a blocker by moving it `Blocked → Approved`; the gate stays put until the PM clicks Approve.
+- **Read side** (`orchestrator/cycle/persona.py::_decide_action`): features in phases ordered *after* the lowest-order non-`approved` phase are excluded from the coder/designer/rework dispatch pools (empty-set no-op when the flag is off). Reviewer and the planner are intentionally **not** gated. So only the current gating phase makes progress; approving it unlocks the next.
+- **Report** (`website/main.py::_build_phase_report`): deterministic facts (stats, shipped, blockers) computed in Python — including a **forward-dependency walk** that follows `feature_links` (`blocks`/`is_blocked_by`) and the `depends_on` FK from each unresolved feature into *strictly later* phases to warn which downstream features will be blocked — plus a best-effort `_llm_call` narration (summary/code_quality/challenges/recommendations). LLM failure degrades to facts-only; the gate still advances.
+
 **Historical planning docs in the repo root** (`futureplan.md`, `futureplan_v2.md`) are SUPERSEDED — `futureplan_v2.md`'s own header (line 3) marks it superseded by migration 043. Read them for *reasoning* (sizing-cap rationale, planner output spec) but **do not** treat them as live specs; the current model is documented here and in `orchestrator/INVARIANTS.md` Vocabulary.
 
 ### Per-Product Configuration
@@ -180,6 +189,7 @@ A "Feature" in product-speak (e.g. "Contact Management") is usually a `phases` r
 - `quiet_hours_start` / `quiet_hours_end` — Hour of day (0–23) to suppress sessions
 - `daily_session_cap` — Max sessions per day for this product
 - `max_features_per_run` — Per-product override for the global `MAX_FEATURES_PER_RUN`
+- `human_gate_phases` — Opt-in (bool, default off) human-in-loop phase gate (migration 045). When on, the orchestrator freezes later phases until a PM approves the current one. Off = fully autonomous, unchanged. See **Phase gate** below.
 (Under the flat phases→features model the legacy `sprint_pr_mode` toggle and its bare-branch False branch are retired. Every coder session opens its own session PR unconditionally.)
 
 Additionally, a `product_config.json` file in the product working directory (read by `setup_product.py` on discovery) can seed:
@@ -195,7 +205,7 @@ Additionally, a `product_config.json` file in the product working directory (rea
 - Key tables: `products`, `features`, `sessions`, `alerts`, `feature_reviews`, `phases` (no `sprints` — dropped by migration 043)
 - JIRA-like tracking tables: `feature_comments` (per-feature discussion), `feature_changelog` (auto-tracked field-level audit trail), `labels` + `feature_labels` (product-scoped color tags, many-to-many), `feature_links` (directed relationships: blocks/is_blocked_by/relates_to/duplicates)
 - Notable columns on `features`: `skip_design`, `design_doc`, `design_doc_path`, `review_outcome`, `review_notes`, `feature_type` (`feature | bug | chore`), `due_date`, `story_points`, `fix_attempts`, `blocked_reason`, **`phase_id`** (FK→phases; SET NULL on phase delete), **`parent_id`** (self-FK for designer-sizing splits), **`merge_notes`** (free-text, written by the coder on push; collated by `/api/phases/{id}/release-notes`)
-- `phases` columns: `name`, `goal`, `order` — no `status`, no `completed_at`, no DoD JSONB
+- `phases` columns: `name`, `goal`, `order`, plus the **opt-in human-in-loop gate** (migration 045): `gate_state` (`open`→`awaiting_review`→`approved`, CHECK-constrained) and `report` (JSONB phase-summary blob). Still no `completed_at`/DoD JSONB — the gate is a lightweight state latch + denormalized report, NOT a sprints/DoD resurrection. Inert unless `product.config.human_gate_phases` is set (see Phase gate below)
 - Tests use real PostgreSQL (not mocks) — each test runs inside a rolled-back transaction for isolation. **`TEST_DATABASE_URL` is required and must contain `test` in the database name.** No fallback to `DATABASE_URL`; conftest aborts the session on a banned name (`productfactory`, `postgres`) or any name without a `test` substring. Engine teardown does NOT call `drop_all` — per-test rollback is the only cleanup. Set up the test DB once with `createdb productfactory_test` then `alembic upgrade head` against it.
 
 **Feature tracking REST endpoints** (agents and PM can call these):
@@ -211,7 +221,9 @@ Additionally, a `product_config.json` file in the product working directory (rea
 - `GET /api/phases/{id}/features` — features in this phase
 - `GET /api/products/{id}/feature-tree` — full features tree, parents-first (parent_id graph)
 - `GET /api/phases/{id}/release-notes` — collated `merge_notes` of Pushed features
-- `POST /api/products/{id}/plan-phases` — LLM auto-plans phases from unphased Approved/Designed features
+- `POST /api/products/{id}/plan-phases` — LLM auto-plans phases from unphased Approved/Designed features (targets ~5 dependency-ordered phases, foundational-first)
+- `POST /api/phases/{id}/report` — (migration 045) generate/regenerate the phase gate report and move `gate_state` to `awaiting_review`; skips an `approved` phase
+- `POST /api/alerts` — create a dashboard alert row (the `alerts` table; surfaced via `GET /api/alerts/unread`)
 
 ### Docker Network Model
 

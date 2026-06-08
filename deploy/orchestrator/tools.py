@@ -1029,7 +1029,12 @@ def _run_phase_gate_detector(product: dict) -> None:
         if not feats:
             continue
         active = any(f.get("status") in _GATE_ACTIVE_STATUSES for f in feats)
-        pushed = sum(1 for f in feats if f.get("status") == "Pushed")
+        # A phase warrants a report once it can make no further autonomous
+        # progress (no active work) AND has a real outcome to review — shipped
+        # work OR unresolved blockers. An all-Blocked/Reverted phase still fires
+        # (surface, don't silently freeze — this is the Q1 decision); a phase
+        # that is purely Deferred/Rejected (deliberately dropped) does not.
+        reportable = any(f.get("status") in ("Pushed", "Blocked", "Reverted") for f in feats)
 
         if active:
             # Live work in the phase. If it was awaiting review, the PM must have
@@ -1044,7 +1049,7 @@ def _run_phase_gate_detector(product: dict) -> None:
             continue
 
         # All features settled. Generate the report + alert once on transition.
-        if pushed >= 1 and gate != "awaiting_review":
+        if reportable and gate != "awaiting_review":
             try:
                 with _pm_client() as client:
                     rep = client.post(f"/api/phases/{ph['id']}/report")
@@ -1054,8 +1059,9 @@ def _run_phase_gate_detector(product: dict) -> None:
                             "product_id": pid,
                             "level": "info",
                             "message": (
-                                f"Phase '{ph.get('name')}' is complete and awaiting "
-                                f"your review before the next phase unlocks."
+                                f"Phase '{ph.get('name')}' has settled and is awaiting "
+                                f"your review before the next phase unlocks. "
+                                f"See the phase report for blockers and downstream impact."
                             ),
                         })
                     log.info(f"phase-gate: phase {ph['id']} settled → awaiting_review + alert")
