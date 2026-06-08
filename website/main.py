@@ -1431,6 +1431,25 @@ async def save_custom_prompt(
     return RedirectResponse(f"/product/{product_id}?tab=settings", status_code=303)
 
 
+@app.post("/product/{product_id}/workflow-settings")
+async def save_workflow_settings(
+    product_id: int,
+    human_gate_phases: str = Form(""),
+    db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
+):
+    """Save per-product workflow settings — currently the human-in-loop phase
+    gate (migration 045). MERGES into the config JSONB (reassigns a new dict so
+    SQLAlchemy flags the change) so sibling keys — scheduling, last_*_at
+    maintenance timestamps — are preserved. An unchecked checkbox submits no
+    field → falsey → gate off."""
+    product = await _get_product_or_404(product_id, db)
+    cfg = dict(product.config or {})
+    cfg["human_gate_phases"] = human_gate_phases.strip().lower() in ("on", "true", "1", "yes")
+    product.config = cfg
+    await db.flush()
+    return RedirectResponse(f"/product/{product_id}?tab=settings", status_code=303)
+
+
 @app.post("/product/{product_id}/merge-pr/{pr_number}")
 async def merge_pr_action(
     product_id: int, pr_number: int,

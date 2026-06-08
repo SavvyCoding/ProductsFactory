@@ -125,6 +125,35 @@ class TestAlertCreate:
         assert r.status_code == 422
 
 
+class TestWorkflowSettingsForm:
+    def test_enables_flag_and_preserves_siblings(self, client, db):
+        prod = make_product(db, "/projects/gate-wf1",
+                            config={"daily_session_cap": 3, "last_architect_at": "2026-06-01T00:00:00"})
+        r = client.post(f"/product/{prod.id}/workflow-settings",
+                        data={"human_gate_phases": "on"}, auth=AUTH, follow_redirects=False)
+        assert r.status_code == 303
+        db.refresh(prod)
+        assert prod.config["human_gate_phases"] is True
+        # Sibling config keys must survive the merge.
+        assert prod.config["daily_session_cap"] == 3
+        assert prod.config["last_architect_at"] == "2026-06-01T00:00:00"
+
+    def test_unchecked_checkbox_disables(self, client, db):
+        prod = make_product(db, "/projects/gate-wf2", config={"human_gate_phases": True})
+        # Unchecked checkbox => field absent from the POST body.
+        r = client.post(f"/product/{prod.id}/workflow-settings",
+                        data={}, auth=AUTH, follow_redirects=False)
+        assert r.status_code == 303
+        db.refresh(prod)
+        assert prod.config["human_gate_phases"] is False
+
+    def test_requires_auth(self, client, db):
+        prod = make_product(db, "/projects/gate-wf3")
+        r = client.post(f"/product/{prod.id}/workflow-settings",
+                        data={"human_gate_phases": "on"}, follow_redirects=False)
+        assert r.status_code == 401
+
+
 class TestPhaseApproveForm:
     def test_approve_from_awaiting_review(self, client, db):
         prod = make_product(db, "/projects/gate-d")
