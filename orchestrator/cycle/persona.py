@@ -69,17 +69,10 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
             prod_resp = client.get(f"/api/products/{product_id}")
             prod_cfg = (prod_resp.json().get("config") or {}) if prod_resp.is_success else {}
             if prod_cfg.get("human_gate_phases"):
+                from orchestrator.cycle.phase_gate import gated_out_feature_ids
                 ph_resp = client.get(f"/api/products/{product_id}/phases")
                 phases = ph_resp.json() if ph_resp.is_success else []
-                unapproved_orders = [p["order"] for p in phases
-                                     if p.get("gate_state") != "approved"]
-                if unapproved_orders:
-                    current_order = min(unapproved_orders)
-                    order_by_phase = {p["id"]: p["order"] for p in phases}
-                    for f in features:
-                        ph_id = f.get("phase_id")
-                        if ph_id is not None and order_by_phase.get(ph_id, current_order) > current_order:
-                            gated_out_ids.add(f.get("id"))
+                gated_out_ids = gated_out_feature_ids(features, phases, prod_cfg)
         except Exception:
             log.exception("phase-gate read failed; proceeding ungated")
 
