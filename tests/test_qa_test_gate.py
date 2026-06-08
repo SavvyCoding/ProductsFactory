@@ -88,6 +88,17 @@ class TestContainerTestRun:
         for flag in ("--cap-drop", "--security-opt", "--network", "--pids-limit", "--memory"):
             assert flag in cmd, f"missing hardening flag {flag}"
 
+    def test_per_product_download_cache_mounted(self, tmp_path, monkeypatch):
+        (tmp_path / "requirements.txt").write_text("flask\n")
+        calls = _capture(monkeypatch)
+        pc._container_test_run(str(tmp_path))(["pytest", "-q"])
+        cmd = calls["cmd"]
+        assert any(a.endswith(":/cache") for a in cmd)          # cache bind-mount
+        assert "PIP_CACHE_DIR=/cache/pip" in cmd
+        assert "npm_config_cache=/cache/npm" in cmd
+        # Cache lives outside the repo (sibling .pf-cache), never under the workspace.
+        assert (tmp_path.parent / ".pf-cache" / tmp_path.name).exists()
+
     def test_outer_timeout_exceeds_inner(self, tmp_path, monkeypatch):
         (tmp_path / "requirements.txt").write_text("flask\n")
         calls = _capture(monkeypatch)
