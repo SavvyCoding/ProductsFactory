@@ -407,6 +407,28 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
             else:
                 features = []
 
+            # Human-in-loop phase gate (migration 045). This selector runs
+            # INDEPENDENTLY of cycle/persona._decide_action, so it must apply
+            # the SAME gate or a session launched for the current phase could
+            # still claim a later-phase feature — and the priority-ASC sort
+            # below would let a low-priority-number later-phase feature outrank
+            # current-phase work. No-op when human_gate_phases is off.
+            try:
+                from orchestrator.cycle.phase_gate import gated_out_feature_ids
+                prod = client.get(f"/api/products/{product_id}").json()
+                phases_resp = client.get(f"/api/products/{product_id}/phases")
+                phases = phases_resp.json() if phases_resp.is_success else []
+                blocked = gated_out_feature_ids(
+                    features, phases if isinstance(phases, list) else [],
+                    prod.get("config") if isinstance(prod, dict) else None,
+                )
+                if blocked:
+                    features = [f for f in features if f.get("id") not in blocked]
+                    log.info(f"[assign] phase-gate froze {len(blocked)} later-phase "
+                             f"feature(s) for persona={persona}")
+            except Exception:
+                log.exception("[assign] phase-gate filter failed; proceeding ungated")
+
         # Sort: stuck-rework features (Implementing+changes_requested AND
         # fix_attempts >= REWORK_CAP_PROXIMITY) go LAST so the coder picks
         # a healthy fresh feature when both exist. Within each bucket,
