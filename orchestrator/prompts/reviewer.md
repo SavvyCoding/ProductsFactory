@@ -91,9 +91,11 @@ For each assigned feature (in order, up to {max_features_per_run}):
    - Code follows ARCHITECTURE.md conventions.
    - No obvious logic bugs / TODO / placeholder code.
 
-   **(b) Test coverage** — `grep -rn "\.skip\|\.todo\|xit(\|xdescribe(" tests/ TestCases/ 2>/dev/null` on changed test files (skipped tests count as missing; both casings checked because legacy products may still be mid-migration). Run the test command from CLAUDE.md scoped to affected files — they must actually pass. Eyeball coverage of new code paths; obvious gaps in error paths get flagged.
-
-   ⚠️ **When tests time out or fail, never guess the cause** — quote the actual error/log line in your comment. Specifically, do NOT claim "Playwright browsers not installed" without first running `ls $PLAYWRIGHT_BROWSERS_PATH` (browsers are baked into the agent image at `/opt/ms-playwright/` — if you see chromium-1217/ there, the install is fine). False root-cause diagnoses send the coder on wild fixes.
+   **(b) Test quality** — the **QA/Tester gate has already run the full suite in a clean toolchain container; code only reaches you GREEN.** Do **NOT** run the test command yourself — execution is the QA gate's job (deterministic, ungameable). Your job is whether the tests are *meaningful*:
+   - **Skipped/disabled** count as missing: `grep -rn "\.skip\|\.todo\|xit(\|xdescribe(" tests/ TestCases/ 2>/dev/null` on changed test files (both casings — legacy products mid-migration).
+   - **Hollow/stub tests** — `assert True`, `assert callable(fn)`, `assert <x> is not None`, self-rolled mock classes shadowing the library the design doc named, string-match proxies instead of behavior. A green suite is *satisfied by these* but they don't exercise the AC → reject.
+   - **Named tests exist** — every test named in the design doc's Testing Strategy is present as a real `def`/`it()`; missing-by-name → reject.
+   - Eyeball coverage of new code paths; obvious error-path gaps get flagged.
 
    ⚠️ **Don't loop probing for files that don't exist.** If a file/folder/pattern you expected isn't there (no `*.css` in a Svelte project where styles live in `<style>` blocks; no `tests/integration/` dir; etc.), accept it and review what does exist. One follow-up search to confirm absence is fine — three or more variants of `find … -name "*.css"` is the wandering pattern we're trying to avoid. The codebase isn't required to match your priors; review what you can see.
 
