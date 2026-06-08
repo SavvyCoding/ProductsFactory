@@ -35,6 +35,7 @@ import httpx
 from orchestrator.integrations.docker_cli import _chmod_workspace_via_alpine
 from orchestrator.integrations.github import _get_gh_token, _parse_repo_slug
 from orchestrator.session.result_io import _filter_session_result_by_id
+from orchestrator.paths import host_path
 
 log = logging.getLogger("poller.docker")
 
@@ -1872,6 +1873,60 @@ def _baseline_pytest_failures(working_dir: str, test_ids: list[str],
         _sh.rmtree(base_root, ignore_errors=True)
 
 
+def _container_test_run(working_dir: str):
+    """Return a `_run`-compatible callable that executes a command INSIDE a
+    throwaway agent-image container — the QA/Tester gate.
+
+    The agent image carries the full toolchain (node/npm, python/pip, go); the
+    orchestrator process does NOT. Running the stack's tests in-process was the
+    root cause of the test gate dying with "npm not found" → `env_broken` →
+    divergent-review cascade for every non-Python product (canonical: MyCalc1
+    feature #1370). Executing in the agent image fixes it for every stack at
+    once and makes it a true clean-room run (fresh dependency install), which
+    is what the gate was always meant to be.
+
+    Deterministic (no LLM): the gate is `docker run … sh -lc "<install> &&
+    <cmd>"` and the verdict is the container's exit code + stdout, classified
+    by `_post_coder_test_check` exactly as before. A stack-appropriate install
+    is prepended so deps are present on a clean checkout (retires the old
+    in-orchestrator `pip install` band-aid and adds the missing `npm install`).
+    """
+    import shlex as _shlex
+    wd = Path(working_dir)
+    img = os.environ.get("AGENT_IMAGE", "productfactory-agent")
+    if (wd / "package.json").exists():
+        install = "npm ci 2>/dev/null || npm install"
+    elif (wd / "requirements.txt").exists():
+        install = ("pip install --quiet --disable-pip-version-check --no-input "
+                   "-r requirements.txt; "
+                   "[ -f requirements-dev.txt ] && pip install --quiet "
+                   "--disable-pip-version-check --no-input -r requirements-dev.txt; true")
+    elif (wd / "go.mod").exists():
+        install = "go mod download"
+    else:
+        install = ""
+
+    def _run(cmd, **kw):
+        timeout = kw.pop("timeout", 300)
+        kw.pop("cwd", None)  # always /workspace inside the container
+        inner = _shlex.join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+        full = f"{install} && {inner}" if install else inner
+        docker_cmd = [
+            "docker", "run", "--rm",
+            "--network", "productfactory-net",
+            "--add-host", "pm-api:host-gateway",
+            "--memory", "4g", "--cpus", "2", "--pids-limit", "512",
+            "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+            "-v", f"{host_path(working_dir)}:/workspace",
+            "-w", "/workspace",
+            img, "sh", "-lc", full,
+        ]
+        # Outer timeout covers install + test; add headroom over the inner cap.
+        return _sp.run(docker_cmd, capture_output=True, text=True, timeout=timeout + 120)
+
+    return _run
+
+
 def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
                             timeout: int = 300) -> dict:
     """
@@ -3516,8 +3571,12 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     # for the duration of the pytest run and cleans up after. Tracked for
     # removal once the designer/coder prompts forbid absolute /workspace
     # paths and the in-flight features are reauthored.
-    with _workspace_symlink(working_dir, pname):
-        test_result = _post_coder_test_check(working_dir, _run, pname)
+    # QA/Tester gate: run the stack's tests in a throwaway agent-image
+    # container (full toolchain present) rather than in-process. No /workspace
+    # symlink needed — the container mounts the workspace at /workspace
+    # natively. Deterministic (exit-code based); _post_coder_test_check's
+    # detection + classification are unchanged.
+    test_result = _post_coder_test_check(working_dir, _container_test_run(working_dir), pname)
     if test_result.get("framework") != "none" and not test_result.get("passed"):
         env_broken = test_result.get("env_broken", False)
         first_failure = test_result.get("first_failure", "")
