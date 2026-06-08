@@ -93,6 +93,7 @@ PROMPT_INVARIANTS: dict[str, list[str]] = {
         "[feature-",                # must reference the per-feature commit tag
         "functional",               # tri-section review
         "security",                 # tri-section review
+        "QA/Tester gate",           # tests run in the deterministic QA gate, not the reviewer
         # "Decision before task_done" rule — added 2026-05-09 after the
         # silent-task_done loop on feature #395. The reviewer model hit
         # Ollama 500s and exited via task_done WITHOUT writing a decision,
