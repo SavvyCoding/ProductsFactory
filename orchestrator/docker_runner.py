@@ -2032,6 +2032,12 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             "-e", f"MAX_TURNS={effective_max_turns}",
             "-e", f"BASH_TIMEOUT={effective_bash_timeout}",
         ]
+        # Context-window tuning passthrough: forward these from the orchestrator
+        # env into the agent container when set, so num_ctx + AgentLoop windowing
+        # can be tuned at runtime via .env without rebuilding the agent image.
+        # Agent code supplies defaults (131072 / 60000 / 8) when unset.
+        ollama_env += [a for v in ("OLLAMA_NUM_CTX", "AGENT_CONTEXT_WINDOW_BUDGET", "AGENT_KEEP_RECENT_EXCHANGES")
+                       if os.environ.get(v) for a in ("-e", f"{v}={os.environ[v]}")]
         # Ollama backend: no Claude OAuth mount needed
         claude_mount = []
         log.info(f"Using Ollama backend — host={effective_ollama_host} persona={persona} model={effective_persona_model}")
