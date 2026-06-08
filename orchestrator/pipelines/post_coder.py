@@ -1910,18 +1910,28 @@ def _container_test_run(working_dir: str):
         timeout = kw.pop("timeout", 300)
         kw.pop("cwd", None)  # always /workspace inside the container
         inner = _shlex.join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
-        full = f"{install} && {inner}" if install else inner
+        # Hard `timeout` backstop on the test command: a watch-mode runner
+        # (e.g. bare `vitest`/`jest` without `run`/`--ci`) would otherwise hang
+        # the container forever (caught live on MyCalc1, whose test script is
+        # bare `vitest`). CI=true below makes most JS runners exit on their own;
+        # `timeout` is belt-and-suspenders so a stuck command is killed (exit
+        # 124) and classified as a failure rather than hanging the pipeline.
+        guarded = f"timeout {timeout}s {inner}"
+        full = f"{install} && {guarded}" if install else guarded
         docker_cmd = [
             "docker", "run", "--rm",
             "--network", "productfactory-net",
             "--add-host", "pm-api:host-gateway",
             "--memory", "4g", "--cpus", "2", "--pids-limit", "512",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+            # CI=true → vitest/jest/most runners run once and exit instead of
+            # entering interactive watch mode.
+            "-e", "CI=true",
             "-v", f"{host_path(working_dir)}:/workspace",
             "-w", "/workspace",
             img, "sh", "-lc", full,
         ]
-        # Outer timeout covers install + test; add headroom over the inner cap.
+        # Outer timeout covers install + test; headroom over the inner cap.
         return _sp.run(docker_cmd, capture_output=True, text=True, timeout=timeout + 120)
 
     return _run
