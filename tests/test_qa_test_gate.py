@@ -30,6 +30,38 @@ def _capture(monkeypatch):
     return calls
 
 
+class TestAllFailingTests:
+    """Runner-agnostic parsing of the FULL failing-test set (widened rework
+    feedback) — so the coder fixes every failure, not just the first."""
+
+    def test_vitest_lists_all_failing_files(self):
+        out = (
+            " ✓ tests/engine.test.ts (6 tests) 2ms\n"
+            " ❯ tests/Calculator.test.tsx (0 test)\n"
+            " ❯ tests/scaffolding.test.ts (4 tests | 2 failed) 7346ms\n"
+        )
+        got = pc._all_failing_tests(out)
+        assert "tests/Calculator.test.tsx" in got
+        assert "tests/scaffolding.test.ts" in got
+        assert "tests/engine.test.ts" not in got        # passing file excluded
+
+    def test_pytest_lists_all_failed_ids(self):
+        out = "FAILED tests/test_a.py::test_x\nFAILED tests/test_b.py::test_y\n"
+        got = pc._all_failing_tests(out)
+        assert got == ["tests/test_a.py::test_x", "tests/test_b.py::test_y"]
+
+    def test_go_failures(self):
+        assert "TestFoo" in pc._all_failing_tests("--- FAIL: TestFoo (0.01s)\n")
+
+    def test_strips_ansi_and_dedupes(self):
+        out = "\x1b[31mFAILED tests/x.py::t\x1b[0m\nFAILED tests/x.py::t\n"
+        assert pc._all_failing_tests(out) == ["tests/x.py::t"]
+
+    def test_empty_on_no_failures(self):
+        assert pc._all_failing_tests("all good\n") == []
+        assert pc._all_failing_tests("") == []
+
+
 class TestContainerTestRun:
     def test_npm_install_prefixed(self, tmp_path, monkeypatch):
         (tmp_path / "package.json").write_text('{"scripts": {"test": "jest"}}')
@@ -87,6 +119,17 @@ class TestContainerTestRun:
         cmd = calls["cmd"]
         for flag in ("--cap-drop", "--security-opt", "--network", "--pids-limit", "--memory"):
             assert flag in cmd, f"missing hardening flag {flag}"
+
+    def test_per_product_download_cache_mounted(self, tmp_path, monkeypatch):
+        (tmp_path / "requirements.txt").write_text("flask\n")
+        calls = _capture(monkeypatch)
+        pc._container_test_run(str(tmp_path))(["pytest", "-q"])
+        cmd = calls["cmd"]
+        assert any(a.endswith(":/cache") for a in cmd)          # cache bind-mount
+        assert "PIP_CACHE_DIR=/cache/pip" in cmd
+        assert "npm_config_cache=/cache/npm" in cmd
+        # Cache lives outside the repo (sibling .pf-cache), never under the workspace.
+        assert (tmp_path.parent / ".pf-cache" / tmp_path.name).exists()
 
     def test_outer_timeout_exceeds_inner(self, tmp_path, monkeypatch):
         (tmp_path / "requirements.txt").write_text("flask\n")
