@@ -1906,6 +1906,32 @@ def _container_test_run(working_dir: str):
     else:
         install = ""
 
+    # Per-product package-DOWNLOAD cache (pip wheels / npm tarballs / go mod
+    # cache), persisted across runs so the clean install is fast WITHOUT
+    # undermining the clean-room check — we cache the download cache, NOT the
+    # installed deps, so `npm ci`/`pip install` still does a real fresh install
+    # and still validates declared deps (Guard 18 intact). Bind-mount, not a
+    # named volume: a fresh named volume is root-owned and the gate runs as the
+    # non-root agent user (uid 1001) so it couldn't write; the orchestrator runs
+    # as root and pre-creates the dir mode-0777 (Windows Docker Desktop
+    # bind-mounts are uid-agnostic-writable regardless). Lives OUTSIDE the
+    # product repo (sibling .pf-cache/) so post-coder's `git add -A` never
+    # stages it. Best-effort: on any failure the gate just runs without a cache.
+    cache_args = []
+    try:
+        cache_dir = wd.parent / ".pf-cache" / wd.name
+        os.makedirs(cache_dir, exist_ok=True)
+        os.chmod(cache_dir, 0o777)
+        cache_args = [
+            "-v", f"{host_path(str(cache_dir))}:/cache",
+            "-e", "PIP_CACHE_DIR=/cache/pip",
+            "-e", "npm_config_cache=/cache/npm",
+            "-e", "GOMODCACHE=/cache/go",
+            "-e", "GOCACHE=/cache/gobuild",
+        ]
+    except Exception:
+        cache_args = []
+
     def _run(cmd, **kw):
         timeout = kw.pop("timeout", 300)
         kw.pop("cwd", None)  # always /workspace inside the container
@@ -1927,6 +1953,7 @@ def _container_test_run(working_dir: str):
             # CI=true → vitest/jest/most runners run once and exit instead of
             # entering interactive watch mode.
             "-e", "CI=true",
+            *cache_args,                       # persistent per-product download cache
             "-v", f"{host_path(working_dir)}:/workspace",
             "-w", "/workspace",
             img, "sh", "-lc", full,
