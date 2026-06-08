@@ -55,6 +55,34 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
 
         non_terminal = [f for f in features if f.get("status") not in _TERMINAL]
 
+        # Human-in-loop phase gate (migration 045). Opt-in per product via
+        # config.human_gate_phases; fully no-op (empty set) otherwise, so the
+        # decision tree below is byte-for-byte the autonomous behavior when the
+        # flag is off. When on: features in phases ordered AFTER the current
+        # gating phase (the lowest-order phase not yet 'approved') are FROZEN —
+        # excluded from the coder/designer/rework dispatch pools — until a human
+        # approves the gating phase. Reviewer (step 1) and the planner (step 0)
+        # are intentionally left unfiltered: the planner must keep phasing the
+        # backlog, and any in-flight PR should still be reviewable.
+        gated_out_ids: set = set()
+        try:
+            prod_resp = client.get(f"/api/products/{product_id}")
+            prod_cfg = (prod_resp.json().get("config") or {}) if prod_resp.is_success else {}
+            if prod_cfg.get("human_gate_phases"):
+                ph_resp = client.get(f"/api/products/{product_id}/phases")
+                phases = ph_resp.json() if ph_resp.is_success else []
+                unapproved_orders = [p["order"] for p in phases
+                                     if p.get("gate_state") != "approved"]
+                if unapproved_orders:
+                    current_order = min(unapproved_orders)
+                    order_by_phase = {p["id"]: p["order"] for p in phases}
+                    for f in features:
+                        ph_id = f.get("phase_id")
+                        if ph_id is not None and order_by_phase.get(ph_id, current_order) > current_order:
+                            gated_out_ids.add(f.get("id"))
+        except Exception:
+            log.exception("phase-gate read failed; proceeding ungated")
+
         # 0. Phase planner — plan whenever any Approved feature is unphased.
         # Restores pre-fe54264 semantics: phase planning runs eagerly, not
         # after the designer drains the backlog. detect_auto_plan still
@@ -104,7 +132,8 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
         rework_codeable = [f for f in non_terminal
                            if f.get("status") == "Implementing"
                            and f.get("review_outcome") == "changes_requested"
-                           and (f.get("fix_attempts") or 0) < _REWORK_CAP_PROXIMITY]
+                           and (f.get("fix_attempts") or 0) < _REWORK_CAP_PROXIMITY
+                           and f.get("id") not in gated_out_ids]
         if rework_codeable:
             return {"action": "launch_session", "persona": "coder",
                     "product_id": product_id,
@@ -145,18 +174,20 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
         # there's first-pass work the IU gate permits; designer fills
         # in when the coder is gated or has no work.
         approved_no_design = [f for f in non_terminal
-                              if f.get("status") == "Approved" and not f.get("design_doc_path")]
+                              if f.get("status") == "Approved" and not f.get("design_doc_path")
+                              and f.get("id") not in gated_out_ids]
         first_pass_codeable = [f for f in non_terminal
-                               if f.get("status") == "Designed"
-                               or (f.get("status") == "Approved"
-                                   and f.get("design_doc_path"))
-                               # Cycle DM-2 (2026-06-01): rework features
-                               # at/near the cap also land here so they
-                               # compete fairly with fresh work via the
-                               # queue-depth balancer instead of preempting.
-                               or (f.get("status") == "Implementing"
-                                   and f.get("review_outcome") == "changes_requested"
-                                   and (f.get("fix_attempts") or 0) >= _REWORK_CAP_PROXIMITY)]
+                               if (f.get("status") == "Designed"
+                                   or (f.get("status") == "Approved"
+                                       and f.get("design_doc_path"))
+                                   # Cycle DM-2 (2026-06-01): rework features
+                                   # at/near the cap also land here so they
+                                   # compete fairly with fresh work via the
+                                   # queue-depth balancer instead of preempting.
+                                   or (f.get("status") == "Implementing"
+                                       and f.get("review_outcome") == "changes_requested"
+                                       and (f.get("fix_attempts") or 0) >= _REWORK_CAP_PROXIMITY))
+                               and f.get("id") not in gated_out_ids]
 
         # Cycle IU (2026-06-02): open-PR serialization gate. Only one
         # coder session PR open per product at a time. If any feature for
