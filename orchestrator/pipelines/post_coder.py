@@ -1873,6 +1873,39 @@ def _baseline_pytest_failures(working_dir: str, test_ids: list[str],
         _sh.rmtree(base_root, ignore_errors=True)
 
 
+def _all_failing_tests(output: str) -> list[str]:
+    """Parse the FULL set of currently-failing tests/files from a runner's
+    output, runner-agnostically (pytest / vitest / jest / go). Used to WIDEN
+    the rework feedback so the coder sees EVERY failing test, not just the
+    first — preventing the fix-one-break-another thrash (canonical MyCalc1
+    #1370: round 1 the tailwind tests fail; the coder fixes them but breaks
+    Calculator.test.tsx → round 2; only the latest single failure was surfaced
+    each round). Best-effort: returns [] when nothing parses, and the caller
+    falls back to the first-failure + raw excerpt."""
+    import re as _re
+    if not output:
+        return []
+    clean = _re.sub(r"\x1b\[[0-9;]*m", "", output)   # strip ANSI colour codes
+    found: list[str] = []
+    seen: set = set()
+    patterns = [
+        r"^FAILED\s+(\S+)",                  # pytest
+        r"^ERROR\s+(\S+)",                   # pytest collection error
+        r"^\s*FAIL\s+(\S+\.\w+)",            # jest / vitest file-level FAIL
+        r"❯\s+(\S+\.\w+)[^\n]*\bfailed\b",   # vitest file summary "❯ x.test.ts (.. | N failed)"
+        r"❯\s+(\S+\.\w+)\s*\(0 test",        # vitest file collected 0 tests (error)
+        r"---\s*FAIL:\s+(\S+)",              # go
+        r"^\s*[×✗✕]\s+(.+\S)\s*$",           # vitest / jest individual failing test
+    ]
+    for pat in patterns:
+        for m in _re.finditer(pat, clean, _re.M):
+            name = m.group(1).strip()
+            if name and name not in seen:
+                seen.add(name)
+                found.append(name)
+    return found[:25]   # cap to keep the comment / prompt bounded
+
+
 def _container_test_run(working_dir: str):
     """Return a `_run`-compatible callable that executes a command INSIDE a
     throwaway agent-image container — the QA/Tester gate.
@@ -3790,13 +3823,26 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                             tb_excerpt = _excerpt_pytest_tracebacks(
                                 test_result.get("output") or ""
                             )
+                            # Widen to the FULL current failure set, not just the
+                            # first failure — so the rework coder fixes every
+                            # failing test in one pass instead of trading one for
+                            # another across rounds (the divergent fix-A-break-B
+                            # thrash that drove #1370 toward cap-Block).
+                            all_fail = _all_failing_tests(test_result.get("output") or "")
+                            fail_list = ("\n".join(f"- `{t}`" for t in all_fail)
+                                         if all_fail
+                                         else f"- `{first_failure or 'see output below'}`")
                             body = (
                                 f"❌ post-coder test-check auto-reject ({reason}):\n"
-                                f"First failure: `{first_failure}`\n\n"
+                                f"**All currently-failing tests ({len(all_fail) or 1}) — "
+                                f"fix EVERY one this round, and do NOT regress the tests "
+                                f"that currently pass:**\n{fail_list}\n\n"
                                 f"```\n{tb_excerpt or output_excerpt[:800]}\n```\n"
-                                f"Fix the failing test(s) and re-push. If tests reference "
-                                f"symbols that don't exist (collection error), align the "
-                                f"test file with the actual code or delete the orphan test."
+                                f"Run the full suite locally and confirm it is entirely "
+                                f"green before pushing — a fix that breaks a previously-"
+                                f"passing test bounces again. If a test references symbols "
+                                f"that don't exist (collection error), align the test file "
+                                f"with the actual code or delete the orphan test."
                             )
                         try:
                             client.post(
