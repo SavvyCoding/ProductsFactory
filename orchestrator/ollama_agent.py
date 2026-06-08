@@ -81,6 +81,16 @@ MAX_TURNS        = int(os.environ.get("MAX_TURNS",         "80"))
 OLLAMA_TIMEOUT   = int(os.environ.get("OLLAMA_TIMEOUT",    "300"))  # seconds for model inference
 BASH_TIMEOUT     = int(os.environ.get("BASH_TIMEOUT",      "180"))  # seconds for shell commands
 RETRY_SLEEP      = int(os.environ.get("OLLAMA_RETRY_SLEEP", "2"))   # seconds between retries
+# Context window allocated per Ollama request. Was hardcoded at 32768, which
+# silently truncated the context for the large-window cloud models actually in
+# use (qwen3-coder:480b = 256K, deepseek-v4-pro = 1M, etc.) — once a session's
+# accumulated context crossed 32K, Ollama dropped the system prompt + tool
+# schema from the front and the model degenerated into text-only turns. 131072
+# (128K) is safe for every model in the current ollama_model_map (smallest is
+# gemma3:27b at exactly 128K). Env-overridable so it can be tuned per
+# deployment without a rebuild. Pair with AgentLoop history windowing to keep
+# the working set — and per-turn token spend — bounded well under this ceiling.
+OLLAMA_NUM_CTX   = int(os.environ.get("OLLAMA_NUM_CTX", "131072"))
 
 # WORKSPACE_DIR: inside Docker this is /workspace; for local test_run.py it's the real product path
 WORKSPACE_DIR  = os.environ.get("WORKSPACE_DIR",  "/workspace")
@@ -805,7 +815,7 @@ class _OllamaBackend:
                 "stream":      False,
                 "options": {
                     "temperature": 0.2,    # low temp for deterministic code generation
-                    "num_ctx":     32768,
+                    "num_ctx":     OLLAMA_NUM_CTX,
                 },
             }
             tail = "" if model_idx == 0 else f" (fallback {model_idx}/{len(self.models)-1})"
