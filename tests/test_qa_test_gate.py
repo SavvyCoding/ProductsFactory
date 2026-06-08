@@ -30,6 +30,38 @@ def _capture(monkeypatch):
     return calls
 
 
+class TestAllFailingTests:
+    """Runner-agnostic parsing of the FULL failing-test set (widened rework
+    feedback) — so the coder fixes every failure, not just the first."""
+
+    def test_vitest_lists_all_failing_files(self):
+        out = (
+            " ✓ tests/engine.test.ts (6 tests) 2ms\n"
+            " ❯ tests/Calculator.test.tsx (0 test)\n"
+            " ❯ tests/scaffolding.test.ts (4 tests | 2 failed) 7346ms\n"
+        )
+        got = pc._all_failing_tests(out)
+        assert "tests/Calculator.test.tsx" in got
+        assert "tests/scaffolding.test.ts" in got
+        assert "tests/engine.test.ts" not in got        # passing file excluded
+
+    def test_pytest_lists_all_failed_ids(self):
+        out = "FAILED tests/test_a.py::test_x\nFAILED tests/test_b.py::test_y\n"
+        got = pc._all_failing_tests(out)
+        assert got == ["tests/test_a.py::test_x", "tests/test_b.py::test_y"]
+
+    def test_go_failures(self):
+        assert "TestFoo" in pc._all_failing_tests("--- FAIL: TestFoo (0.01s)\n")
+
+    def test_strips_ansi_and_dedupes(self):
+        out = "\x1b[31mFAILED tests/x.py::t\x1b[0m\nFAILED tests/x.py::t\n"
+        assert pc._all_failing_tests(out) == ["tests/x.py::t"]
+
+    def test_empty_on_no_failures(self):
+        assert pc._all_failing_tests("all good\n") == []
+        assert pc._all_failing_tests("") == []
+
+
 class TestContainerTestRun:
     def test_npm_install_prefixed(self, tmp_path, monkeypatch):
         (tmp_path / "package.json").write_text('{"scripts": {"test": "jest"}}')
