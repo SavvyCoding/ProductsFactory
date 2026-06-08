@@ -518,6 +518,17 @@ def run_cycle(args: dict, **kwargs) -> str:
             except Exception:
                 log.exception(f"supervisor per-product detectors failed for product {p.get('id')}")
 
+        # Human-in-loop phase gate (migration 045). Opt-in per product via
+        # config.human_gate_phases; no-op otherwise. Settles completed phases
+        # into 'awaiting_review' (+ report + dashboard alert) and reopens a
+        # phase when the PM un-blocks a feature. The persona decision tree
+        # reads gate_state to freeze later phases until a human approves.
+        for p in ready:
+            try:
+                _run_phase_gate_detector(p)
+            except Exception:
+                log.exception(f"phase-gate detector failed for product {p.get('id')}")
+
         # Per-cycle architect scheduler. Queues the architect persona when
         # features-pushed delta crosses N (default 3) or the 7-day fallback
         # elapses. Sets run_persona_now="architect" so the Priority-0 block
@@ -957,6 +968,105 @@ def _run_supervisor_per_product_detectors(product: dict) -> None:
             detect_rapid_flap(product_id=pid, flapping_features=flapping)
     except Exception:
         log.exception(f"rapid_flap detector failed for product {pid}")
+
+
+# Feature statuses that mean "still actively being worked." Any of these in a
+# phase keeps its gate open. The complement (Pushed/Deferred/Rejected/Reverted/
+# Blocked) is "settled" — Blocked/Reverted are settled-but-unresolved and become
+# the SUBJECT of the phase report, not a reason to keep the gate open. Mirrors
+# website.main._SETTLED_STATUSES.
+_GATE_ACTIVE_STATUSES = frozenset({
+    "Pending", "Approved", "Designing", "Designed",
+    "Implementing", "Reviewing", "Reviewed",
+})
+
+
+def _run_phase_gate_detector(product: dict) -> None:
+    """Human-in-loop phase gate sweep (migration 045). Opt-in per product via
+    ``config.human_gate_phases``. Keeps each phase's gate_state in sync with
+    feature reality so the persona decision tree (orchestrator/cycle/persona.py)
+    can freeze later phases until a human approves:
+
+      - active features present → 'open' (also REOPENS an awaiting_review phase
+        when the PM un-blocks a feature back into the pipeline — the rework loop)
+      - all features settled + ≥1 Pushed → POST the report (which sets
+        'awaiting_review') and raise ONE dashboard alert on the transition
+      - 'approved' is a one-way latch only the human sets; never touched here
+
+    Best-effort; never raises. Alert dedup is structural: the report/alert only
+    fire while gate is 'open', and the report flips it to 'awaiting_review', so
+    each settle transition alerts exactly once.
+    """
+    cfg = product.get("config") or {}
+    if not cfg.get("human_gate_phases"):
+        return
+    pid = product.get("id")
+    if not pid:
+        return
+
+    try:
+        with _pm_client() as client:
+            ph_resp = client.get(f"/api/products/{pid}/phases")
+            phases = ph_resp.json() if ph_resp.is_success else []
+            feat_resp = client.get(f"/api/products/{pid}/features")
+            features = feat_resp.json() if feat_resp.is_success else []
+    except Exception:
+        log.exception(f"phase-gate detector fetch failed for product {pid}")
+        return
+    if not isinstance(phases, list) or not isinstance(features, list):
+        return
+
+    by_phase: dict = {}
+    for f in features:
+        if f.get("phase_id") is not None:
+            by_phase.setdefault(f["phase_id"], []).append(f)
+
+    for ph in phases:
+        gate = ph.get("gate_state", "open")
+        if gate == "approved":
+            continue
+        feats = by_phase.get(ph["id"], [])
+        if not feats:
+            continue
+        active = any(f.get("status") in _GATE_ACTIVE_STATUSES for f in feats)
+        # A phase warrants a report once it can make no further autonomous
+        # progress (no active work) AND has a real outcome to review — shipped
+        # work OR unresolved blockers. An all-Blocked/Reverted phase still fires
+        # (surface, don't silently freeze — this is the Q1 decision); a phase
+        # that is purely Deferred/Rejected (deliberately dropped) does not.
+        reportable = any(f.get("status") in ("Pushed", "Blocked", "Reverted") for f in feats)
+
+        if active:
+            # Live work in the phase. If it was awaiting review, the PM must have
+            # un-blocked a feature — reopen so it re-settles and re-reports.
+            if gate == "awaiting_review":
+                try:
+                    with _pm_client() as client:
+                        client.patch(f"/api/phases/{ph['id']}", json={"gate_state": "open"})
+                    log.info(f"phase-gate: reopened phase {ph['id']} (active work returned)")
+                except Exception:
+                    log.exception(f"phase-gate reopen failed for phase {ph['id']}")
+            continue
+
+        # All features settled. Generate the report + alert once on transition.
+        if reportable and gate != "awaiting_review":
+            try:
+                with _pm_client() as client:
+                    rep = client.post(f"/api/phases/{ph['id']}/report")
+                if rep.is_success:
+                    with _pm_client() as client:
+                        client.post("/api/alerts", json={
+                            "product_id": pid,
+                            "level": "info",
+                            "message": (
+                                f"Phase '{ph.get('name')}' has settled and is awaiting "
+                                f"your review before the next phase unlocks. "
+                                f"See the phase report for blockers and downstream impact."
+                            ),
+                        })
+                    log.info(f"phase-gate: phase {ph['id']} settled → awaiting_review + alert")
+            except Exception:
+                log.exception(f"phase-gate report/alert failed for phase {ph['id']}")
 
 
 _DEFAULT_ARCHITECT_PUSHED_THRESHOLD = 3

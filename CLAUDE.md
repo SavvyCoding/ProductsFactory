@@ -82,6 +82,14 @@ python scripts/build_pf_video.py
 
 Local pytest is authoritative for development, but CI catches Windows-vs-Linux path/encoding regressions that don't surface on the host. "Green locally" ≠ "green in CI."
 
+### Prompt regression evals (`evals/`)
+
+`evals/` is a standalone harness that catches persona-prompt quality regressions *before* a bad rollout burns sessions of compute. **Run `pytest evals/ -v` after editing anything under `orchestrator/prompts/`.** Two tiers:
+- **Tier 1 — contract checks** (`test_prompt_contracts.py`, always on, no LLM): structural invariants on each built prompt — required output format present, non-negotiable constraints intact (e.g. "security auditor MUST NOT modify code"), correct working-dir paths. Catches the common drift where a refactor silently drops a security instruction.
+- **Tier 2 — live LLM evals** (`test_live_evals.py`, opt-in via `RUN_LIVE_EVALS=1`): builds the persona prompt for each scenario under `evals/scenarios/`, calls the backend, applies deterministic scorers (`scoring.py`).
+
+Baseline-vs-candidate is the main workflow: `python -m evals.runner <out.json>` on master, edit a prompt, run again, then `python -m evals.compare baseline.json candidate.json` — exits non-zero on any pass→fail regression or >1% overall score drop (a CI pre-merge gate on prompt-touching PRs). Backend selected by `EVAL_BACKEND` (`stub` replays `stub_response` fields token-free for CI self-test; `ollama` matches the production path, model from `EVAL_OLLAMA_MODEL`).
+
 ## Architecture
 
 ### Session-PR merge flow (1-PR-per-feature → main)
@@ -106,7 +114,7 @@ After the coder agent exits, `_run_post_coder_pipeline` (`orchestrator/pipelines
 - **`_post_coder_lint_check`** (Phases 2–4) — 18 guards (1–11, 13, 14, 12, 15–18 — numbering preserved historically; Guard 12 was reordered after 14). Notable ones: hardcoded secret fallbacks in token/crypto calls (Guard 5); state-changing API routes (`POST/PUT/PATCH/DELETE`) without an auth check, opt-out via `// PUBLIC_ROUTE:` or `# PUBLIC_ROUTE:` annotation (Guard 6); agent-debris filenames — `*.bak`, `*_old_*`, `*_v\d+_*`, `*_complete_*`, `temp_fixed*`, files under `Temp/` or `temp_storage/`, `test_X_qa.py` siblings of `test_X.py` (Guard 13); config-as-gate integrity — refuses commits that lower bars declared in `quality_gates.json` by editing `pytest.ini` / `package.json` directly (Guard 14); alembic-branch detection + revision-ID coherence (Guards 15–16); **AST-diff deletion safety** (Guard 17) — parses pre/post-commit Python ASTs, takes the set difference of public top-level `def`/`class`/module-level assignments, then word-greps surviving callers across tracked `.py` files (excluding co-modified files) and bounces on dangling refs (paired with the pre-commit self-review helper `templates/check_deletion_safety.py` invoked at `AGENT_WORKFLOW.md` Step 5b, RO-mounted so the agent can't tamper with it); **deps coherence** (Guard 18) — AST-walks imports in changed `.py` files and bounces when packages used in code are missing from `requirements.txt`, catching the failure mode where the pre-baked agent image hides missing deps inside the container but a fresh `pip install -r requirements.txt && pytest` fails on collect (canonical 2026-05-22 MyDocusign incident).
 - **`_post_coder_test_check`** (Phase 5) — runs the stack's test command and classifies the outcome four ways:
   - `passed`: continue to push.
-  - `env_broken` (jest missing, ENOENT on node_modules, ModuleNotFoundError pytest): roll back to `Approved`/`Designed`, send operator alert, **do NOT bump `fix_attempts`** (infra failures must not auto-Block features after 5 attempts).
+  - `env_broken` (jest missing, ENOENT on node_modules, ModuleNotFoundError pytest): roll back to `Approved`/`Designed`, send operator alert, **do NOT bump `fix_attempts`** (infra failures must not auto-Block features after 5 attempts). **Consecutive-`env_broken` cap** (2026-06-04 cycle GK, `post_coder.py` ~L3526): if any assigned feature already has ≥2 prior `post-coder:test-env` comments, this round is downgraded to a regular test-failure bounce (fix_attempts bumps, coder sees the real test output). Prevents a fixture-setup `AssertionError` that merely *looks* infra-shaped from looping coder→env_broken→rollback forever until the supervisor's `rapid_flap` detector Blocks the feature with a misleading reason.
   - `collection_errors > 0`: pytest collect-only errors → bounce to `Implementing` with the first failing import quoted.
   - test failures: bounce to `Implementing` with the first failure quoted.
 
@@ -163,6 +171,15 @@ A "Feature" in product-speak (e.g. "Contact Management") is usually a `phases` r
 
 **Release notes**: `GET /api/phases/{id}/release-notes` collates the `merge_notes` field of all Pushed features in the phase. Each coder session writes `features.merge_notes` on push (set in `post_coder.py`).
 
+### Phase gate (opt-in human-in-loop, migration 045)
+
+Off by default — when `product.config.human_gate_phases` is **not** set, the flat 043 model is unchanged and the system is fully autonomous. When set, a per-phase human checkpoint is inserted:
+
+- **State machine** on `phases.gate_state`: `open → awaiting_review → approved`. `approved` is a one-way latch only a human sets (PM Approve button → `POST /product/{id}/phase/{id}/approve`, valid only from `awaiting_review`). The detector drives `open⇄awaiting_review` to track feature reality.
+- **Detector** (`deploy/orchestrator/tools.py::_run_phase_gate_detector`, run per-product each cycle): a phase whose features are all *settled* (no `Pending/Approved/Designing/Designed/Implementing/Reviewing/Reviewed`) and has a real outcome (≥1 `Pushed`, or any `Blocked`/`Reverted`) → `POST /api/phases/{id}/report` (sets `awaiting_review`) + one dashboard `alerts` row on the transition. An `awaiting_review` phase that regains active work (PM un-blocked a feature) is reopened to `open` → re-settles → re-reports. This is the **rework loop**: resolve a blocker by moving it `Blocked → Approved`; the gate stays put until the PM clicks Approve.
+- **Read side** (`orchestrator/cycle/persona.py::_decide_action`): features in phases ordered *after* the lowest-order non-`approved` phase are excluded from the coder/designer/rework dispatch pools (empty-set no-op when the flag is off). Reviewer and the planner are intentionally **not** gated. So only the current gating phase makes progress; approving it unlocks the next.
+- **Report** (`website/main.py::_build_phase_report`): deterministic facts (stats, shipped, blockers) computed in Python — including a **forward-dependency walk** that follows `feature_links` (`blocks`/`is_blocked_by`) and the `depends_on` FK from each unresolved feature into *strictly later* phases to warn which downstream features will be blocked — plus a best-effort `_llm_call` narration (summary/code_quality/challenges/recommendations). LLM failure degrades to facts-only; the gate still advances.
+
 **Historical planning docs in the repo root** (`futureplan.md`, `futureplan_v2.md`) are SUPERSEDED — `futureplan_v2.md`'s own header (line 3) marks it superseded by migration 043. Read them for *reasoning* (sizing-cap rationale, planner output spec) but **do not** treat them as live specs; the current model is documented here and in `orchestrator/INVARIANTS.md` Vocabulary.
 
 ### Per-Product Configuration
@@ -172,6 +189,7 @@ A "Feature" in product-speak (e.g. "Contact Management") is usually a `phases` r
 - `quiet_hours_start` / `quiet_hours_end` — Hour of day (0–23) to suppress sessions
 - `daily_session_cap` — Max sessions per day for this product
 - `max_features_per_run` — Per-product override for the global `MAX_FEATURES_PER_RUN`
+- `human_gate_phases` — Opt-in (bool, default off) human-in-loop phase gate (migration 045). When on, the orchestrator freezes later phases until a PM approves the current one. Off = fully autonomous, unchanged. See **Phase gate** below.
 (Under the flat phases→features model the legacy `sprint_pr_mode` toggle and its bare-branch False branch are retired. Every coder session opens its own session PR unconditionally.)
 
 Additionally, a `product_config.json` file in the product working directory (read by `setup_product.py` on discovery) can seed:
@@ -187,7 +205,7 @@ Additionally, a `product_config.json` file in the product working directory (rea
 - Key tables: `products`, `features`, `sessions`, `alerts`, `feature_reviews`, `phases` (no `sprints` — dropped by migration 043)
 - JIRA-like tracking tables: `feature_comments` (per-feature discussion), `feature_changelog` (auto-tracked field-level audit trail), `labels` + `feature_labels` (product-scoped color tags, many-to-many), `feature_links` (directed relationships: blocks/is_blocked_by/relates_to/duplicates)
 - Notable columns on `features`: `skip_design`, `design_doc`, `design_doc_path`, `review_outcome`, `review_notes`, `feature_type` (`feature | bug | chore`), `due_date`, `story_points`, `fix_attempts`, `blocked_reason`, **`phase_id`** (FK→phases; SET NULL on phase delete), **`parent_id`** (self-FK for designer-sizing splits), **`merge_notes`** (free-text, written by the coder on push; collated by `/api/phases/{id}/release-notes`)
-- `phases` columns: `name`, `goal`, `order` — no `status`, no `completed_at`, no DoD JSONB
+- `phases` columns: `name`, `goal`, `order`, plus the **opt-in human-in-loop gate** (migration 045): `gate_state` (`open`→`awaiting_review`→`approved`, CHECK-constrained) and `report` (JSONB phase-summary blob). Still no `completed_at`/DoD JSONB — the gate is a lightweight state latch + denormalized report, NOT a sprints/DoD resurrection. Inert unless `product.config.human_gate_phases` is set (see Phase gate below)
 - Tests use real PostgreSQL (not mocks) — each test runs inside a rolled-back transaction for isolation. **`TEST_DATABASE_URL` is required and must contain `test` in the database name.** No fallback to `DATABASE_URL`; conftest aborts the session on a banned name (`productfactory`, `postgres`) or any name without a `test` substring. Engine teardown does NOT call `drop_all` — per-test rollback is the only cleanup. Set up the test DB once with `createdb productfactory_test` then `alembic upgrade head` against it.
 
 **Feature tracking REST endpoints** (agents and PM can call these):
@@ -203,7 +221,9 @@ Additionally, a `product_config.json` file in the product working directory (rea
 - `GET /api/phases/{id}/features` — features in this phase
 - `GET /api/products/{id}/feature-tree` — full features tree, parents-first (parent_id graph)
 - `GET /api/phases/{id}/release-notes` — collated `merge_notes` of Pushed features
-- `POST /api/products/{id}/plan-phases` — LLM auto-plans phases from unphased Approved/Designed features
+- `POST /api/products/{id}/plan-phases` — LLM auto-plans phases from unphased Approved/Designed features (targets ~5 dependency-ordered phases, foundational-first)
+- `POST /api/phases/{id}/report` — (migration 045) generate/regenerate the phase gate report and move `gate_state` to `awaiting_review`; skips an `approved` phase
+- `POST /api/alerts` — create a dashboard alert row (the `alerts` table; surfaced via `GET /api/alerts/unread`)
 
 ### Docker Network Model
 
@@ -268,6 +288,7 @@ FastAPI evaluates routes in definition order. The parameterized `GET /api/featur
 - **Idempotent operations**: `setup_product.py` discovery is safe to run multiple times; templates only written if missing
 - **Model changes require a migration**: add the column to `website/models.py` AND create a new `db/migrations/versions/NNN_*.py` file — Alembic does not auto-generate these
 - **Route ordering matters**: in `website/main.py`, parameterized routes (`/api/features/{id}`) must come after all static routes at the same path prefix to avoid shadowing
+- **Feature priority is ASC — LOWER number = HIGHER rank** (unified 2026-06-04, cycle GM). The PM API (`website/main.py` `ORDER BY Feature.priority`) and the orchestrator's session launcher (`docker_runner._fetch_assigned_features`) both sort `priority ASC, id ASC`. The dispatcher previously used `-priority DESC` — the inverse — so a `priority=5` chore the dashboard showed as top-of-queue was outranked by `priority=60` work in the actual session. When adding any feature-selection query, sort ASC.
 - **No linter/formatter configured**: there is no ruff, black, flake8, or eslint config — code style is enforced by convention only
 - **Shared requirements file**: `requirements.txt` covers both website and orchestrator (no separate dev/test requirements)
 

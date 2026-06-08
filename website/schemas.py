@@ -334,6 +334,12 @@ class PollerHeartbeatRequest(BaseModel):
 
 # ── Alerts ───────────────────────────────────────────────────────────────────
 
+class AlertCreate(BaseModel):
+    product_id: Optional[int] = None
+    level:      str = "info"
+    message:    str
+
+
 class AlertOut(BaseModel):
     id:          int
     product_id:  Optional[int]
@@ -432,10 +438,14 @@ class PhaseCreate(BaseModel):
 
 
 class PhaseUpdate(BaseModel):
-    name:   Optional[str] = None
-    goal:   Optional[str] = None
-    order:  Optional[int] = None
-    status: Optional[str] = None
+    name:       Optional[str] = None
+    goal:       Optional[str] = None
+    order:      Optional[int] = None
+    # Human-in-loop gate (migration 045). PM PATCHes 'approved' to unlock the
+    # next phase. Replaces the prior orphan `status` field (which had no
+    # backing column). 'open'/'awaiting_review' are normally set by the
+    # detector, not the PM, but are accepted here for manual override.
+    gate_state: Optional[str] = None
 
 
 class PhaseOut(BaseModel):
@@ -444,6 +454,8 @@ class PhaseOut(BaseModel):
     name:       str
     goal:       Optional[str]
     order:      int
+    gate_state: str = "open"
+    report:     Optional[dict] = None
 
     model_config = {"from_attributes": True}
 
