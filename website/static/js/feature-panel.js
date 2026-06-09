@@ -82,7 +82,7 @@ function renderFeaturePanel(f, comments, changelog, labels, links, story) {
       <dt>Created</dt><dd>${f.created_at ? f.created_at.replace('T',' ').slice(0,16) : '—'}</dd>
       ${f.due_date ? `<dt>Due date</dt><dd>${f.due_date}</dd>` : ''}
       ${f.story_points != null ? `<dt>Story points</dt><dd>${f.story_points}</dd>` : ''}
-      ${f.pr_url ? `<dt>PR</dt><dd><a href="${f.pr_url}" target="_blank" style="color:var(--color-accent-fg)">#${f.pr_number} ↗</a></dd>` : ''}
+      ${f.pr_url ? `<dt>PR</dt><dd><a href="${f.pr_url}" target="_blank" style="color:var(--color-accent-fg)">#${f.pr_number || f.pr_url.split('/').pop()} ↗</a></dd>` : ''}
       ${f.sprint_id ? `<dt>Feature</dt><dd>Feature #${f.sprint_id}</dd>` : ''}
     </dl>
   </div>`;
