@@ -222,7 +222,14 @@ RUN chmod -R 0777 "$PYENV_ROOT/shims"
 USER agent
 ENV HOME=/home/agent
 ENV GOPATH=/home/agent/go
-ENV PATH=$PYENV_ROOT/bin:$PYENV_ROOT/shims:$GOROOT/bin:/home/agent/go/bin:/usr/local/bin:$PATH
+# /home/agent/.local/bin is where a NON-ROOT `pip install` (the coder declaring
+# a tool in requirements-dev.txt) puts console scripts. Without it on PATH,
+# `shutil.which("locust")` / `subprocess.run(["tool"])` fail even though the
+# tool installed fine — so the coder concluded the tool was "missing" and
+# reached for fake-script/PATH hacks (testingcalc #1438 locust loop, 2026-06-09).
+# This line completes the "declare pip-installable tools in requirements-dev.txt"
+# strategy: declared CLI tools are now actually reachable.
+ENV PATH=$PYENV_ROOT/bin:$PYENV_ROOT/shims:/home/agent/.local/bin:$GOROOT/bin:/home/agent/go/bin:/usr/local/bin:$PATH
 
 # ── Runtime mounts (provided by poller at launch — never baked in) ───────────
 # /home/agent/.claude      ← ~/.claude from Windows host  :ro  (OAuth session)
