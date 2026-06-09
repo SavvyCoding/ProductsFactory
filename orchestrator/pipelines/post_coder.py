@@ -2151,18 +2151,47 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
                 )
                 if ri.returncode != 0:
                     install_out = (ri.stdout or "") + "\n" + (ri.stderr or "")
-                    # All pip install failures classified env_broken:
-                    # operator alert fires, fix_attempts not bumped. If the
-                    # agent put a bogus package in requirements.txt, the
-                    # operator sees it. Better than bouncing forever on a
-                    # transient network issue or wheel-unavailable case.
-                    result["env_broken"] = True
                     result["passed"] = False
                     result["output"] = (
                         f"pip install -r {req_name} failed "
                         f"(exit={ri.returncode}):\n{install_out[:2000]}"
                     )
-                    result["first_failure"] = f"pip install -r {req_name} failed"
+                    # Tightened classification (2026-06-08): a pip install
+                    # failure is the CODER's fault when requirements.txt declares
+                    # a package pip cannot resolve (bogus name, nonexistent
+                    # version, unsatisfiable constraint) — that's a real bug they
+                    # must fix, so bounce with fix_attempts++ and a pointed
+                    # message. Only genuine infra/transient failures (network,
+                    # wheel-build toolchain, disk) stay env_broken (no bump,
+                    # operator alert). Counting bad-dependency failures as
+                    # env_broken let features OSCILLATE instead of climbing to a
+                    # clean cap-Block (canonical: testingcalc #1423 — Guard 18
+                    # told the coder to declare deps, it declared an
+                    # unresolvable package, env_broken kept resetting it without
+                    # bumping fix_attempts → flap loop → rapid_flap Block).
+                    _bad_dep = _re.search(
+                        r"No matching distribution found for"
+                        r"|Could not find a version that satisfies the requirement"
+                        r"|No matching distribution"
+                        r"|Invalid requirement"
+                        r"|is not a valid (?:requirement|editable requirement)"
+                        r"|ResolutionImpossible"
+                        r"|because these package versions have conflicting dependencies"
+                        r"|ERROR: Could not find a version",
+                        install_out, _re.I,
+                    )
+                    if _bad_dep:
+                        result["env_broken"] = False   # coder's bug → real bounce
+                        result["first_failure"] = (
+                            f"requirements.txt declares a package pip cannot "
+                            f"install — fix the package name/version: "
+                            f"{_bad_dep.group(0)[:120]}"
+                        )
+                    else:
+                        result["env_broken"] = True    # infra/transient → no bump
+                        result["first_failure"] = (
+                            f"pip install -r {req_name} failed (infra/transient)"
+                        )
                     return result
 
         # ---- collection check (pytest only — surfaces import errors fast) ----
