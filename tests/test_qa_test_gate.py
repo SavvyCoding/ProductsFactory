@@ -88,6 +88,43 @@ class TestVerifyCheckInContainer:
         assert "cmd" not in calls                  # never launched a container
 
 
+class TestEnvBrokenClassification:
+    """A pip install failure from a CODER-declared bad dependency (unresolvable
+    package) must be a real bounce (fix_attempts++), not env_broken — only
+    genuine infra/transient failures stay env_broken (testingcalc #1423)."""
+
+    def _check(self, tmp_path, install_stderr):
+        (tmp_path / "pytest.ini").write_text("[pytest]\n")
+        (tmp_path / "requirements.txt").write_text("somepkg\n")
+
+        def fake_run(cmd, **kw):
+            class _R:
+                returncode = 1
+                stdout = ""
+                stderr = install_stderr
+            return _R()
+
+        return pc._post_coder_test_check(str(tmp_path), fake_run, "test")
+
+    def test_unresolvable_package_is_real_bounce(self, tmp_path):
+        res = self._check(tmp_path,
+            "ERROR: Could not find a version that satisfies the requirement bogus==9.9")
+        assert res["env_broken"] is False            # coder's fault → fix_attempts++
+        assert res["passed"] is False
+        assert "requirements.txt" in res["first_failure"]
+
+    def test_no_matching_distribution_is_real_bounce(self, tmp_path):
+        res = self._check(tmp_path,
+            "ERROR: No matching distribution found for nonexistent-pkg-xyz")
+        assert res["env_broken"] is False
+
+    def test_transient_network_stays_env_broken(self, tmp_path):
+        res = self._check(tmp_path,
+            "WARNING: Retrying (Retry(total=4)) ... Connection broken: Read timed out")
+        assert res["env_broken"] is True             # infra/transient → no bump
+        assert res["passed"] is False
+
+
 class TestContainerTestRun:
     def test_npm_install_prefixed(self, tmp_path, monkeypatch):
         (tmp_path / "package.json").write_text('{"scripts": {"test": "jest"}}')
