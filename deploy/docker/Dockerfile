@@ -180,6 +180,17 @@ COPY deploy/docker/pf-verify-env.sh /usr/local/bin/pf-verify-env.sh
 RUN sed -i 's/\r$//' /usr/local/bin/pf-verify-env.sh \
  && chmod +x /usr/local/bin/pf-verify-env.sh
 
+# ── Make the pyenv shims dir writable by the non-root agent ──────────────────
+# The earlier `chmod -R a+rx /opt/pyenv` grants read+execute but NOT write. pip
+# is a pyenv shim: after installing a console-script package (uvicorn/fastapi/
+# alembic/...) it runs `pyenv rehash`, which writes new shim files into
+# /opt/pyenv/shims. Without write perms the rehash fails ("cannot rehash:
+# /opt/pyenv/shims isn't writable") and `pip install` exits non-zero even though
+# the deps installed fine — which the post-coder test-check read as env_broken,
+# infinitely looping every Python product with console-script deps (testingcalc
+# #1423, 2026-06-08). Must run AFTER the last pyenv operation, before USER agent.
+RUN chmod -R 0777 "$PYENV_ROOT/shims"
+
 # ── Switch to non-root agent user ────────────────────────────────────────────
 USER agent
 ENV HOME=/home/agent
