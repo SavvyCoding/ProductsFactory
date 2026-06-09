@@ -1246,7 +1246,7 @@
         <div class="form-group">
           <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
             <input type="checkbox" name="human_gate_phases" value="on" style="width:auto"
-                   {% if product.config and product.config.get('human_gate_phases') %}checked{% endif %}>
+                   {% if (product.config or {}).get('human_gate_phases', True) %}checked{% endif %}>
             Require human approval between phases
           </label>
           <p class="field-hint">When on, the system freezes each phase's successors until you review the

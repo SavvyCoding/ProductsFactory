@@ -998,7 +998,7 @@ def _run_phase_gate_detector(product: dict) -> None:
     each settle transition alerts exactly once.
     """
     cfg = product.get("config") or {}
-    if not cfg.get("human_gate_phases"):
+    if cfg.get("human_gate_phases", True) is False:   # ON by default (2026-06-09)
         return
     pid = product.get("id")
     if not pid:

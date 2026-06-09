@@ -21,13 +21,14 @@ Both call gated_out_feature_ids() so the two points stay consistent.
 def gated_out_feature_ids(features, phases, config) -> set:
     """Return the set of feature ids frozen by the phase gate.
 
-    Empty set when the gate is off (``config.human_gate_phases`` falsey) or
-    when every phase is approved — i.e. a no-op that preserves fully-autonomous
-    behavior. A feature is frozen when its phase is ordered strictly AFTER the
-    current gating phase (the lowest-order phase not yet ``approved``).
-    Unphased features are never frozen (the planner phases them later).
+    The gate is **ON by default** (2026-06-09): it engages unless
+    ``config.human_gate_phases`` is explicitly ``False``. Empty set when the
+    gate is off (explicitly disabled) or when every phase is approved. A feature
+    is frozen when its phase is ordered strictly AFTER the current gating phase
+    (the lowest-order phase not yet ``approved``). Unphased features are never
+    frozen (the planner phases them later).
     """
-    if not (config or {}).get("human_gate_phases"):
+    if (config or {}).get("human_gate_phases", True) is False:
         return set()
     phases = phases or []
     unapproved_orders = [p.get("order") for p in phases if p.get("gate_state") != "approved"]
