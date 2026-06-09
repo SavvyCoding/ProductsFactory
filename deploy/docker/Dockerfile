@@ -31,6 +31,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq unzip \
     && rm -rf /var/lib/apt/lists/*
 
+# ── Layer 1b: Common runtime system binaries (DB clients, diagram + doc tools) ─
+# Non-pip-installable binaries products commonly invoke from AC recipes/tests,
+# so the coder doesn't Block on them (runtime-tool rule: pip tools → declare in
+# requirements-dev.txt; system binaries → must be pre-baked here).
+#   Tier 1: psql (postgresql-client; factory is Postgres-centric), sqlite3,
+#           redis-cli (redis-tools), dot (graphviz, diagram generation).
+#   Tier 2 (doc/PDF products, e.g. DocumentSign): poppler-utils (pdftotext),
+#           pandoc, wkhtmltopdf, tesseract-ocr (OCR).
+# Queued 2026-06-09; activates on next agent-image build.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    postgresql-client sqlite3 redis-tools graphviz \
+    poppler-utils pandoc wkhtmltopdf tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
+
 # ── Layer 2: GitHub CLI (gh) ──────────────────────────────────────────────────
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
