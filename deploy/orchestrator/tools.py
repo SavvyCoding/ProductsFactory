@@ -537,6 +537,16 @@ def run_cycle(args: dict, **kwargs) -> str:
         for p in ready:
             try:
                 _check_architect_due(p)
+                # On the architect cadence, also run the deterministic main-suite
+                # health check (run_persona_now is set to "architect" by the line
+                # above, or by a PM click). Out-of-band in a daemon thread — it
+                # runs a containerized pytest on main (~1-2 min) and must NOT block
+                # the cycle loop. Files a deduped chore + alert if main is red.
+                if p.get("run_persona_now") == "architect":
+                    import threading as _th
+                    from orchestrator.main_suite_health import detect_broken_main_suite
+                    _th.Thread(target=detect_broken_main_suite, args=(dict(p),),
+                               daemon=True).start()
             except Exception:
                 log.exception(f"architect-scheduler failed for product {p.get('id')}")
 
