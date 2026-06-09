@@ -3853,45 +3853,62 @@ async def api_flapping_features(
     product_id: int,
     window_hours: int = 1,
     min_transitions: int = 5,
+    min_revisits: int = 3,
     db: AsyncSession = Depends(get_db),
 ):
-    """Features whose status transitioned >=min_transitions times in the last
-    window_hours. Used by supervisor.detect_rapid_flap to find features
-    stuck in agent flap loops with no progress.
+    """Features stuck OSCILLATING — re-entering the same status repeatedly — in
+    the last window_hours. Used by supervisor.detect_rapid_flap.
 
-    Counts only status-field rows in feature_changelog scoped to this
-    product. Returns [{feature_id, transitions, window_hours}], newest
-    first by transition count.
+    A feature is flagged when some single status was entered >= min_revisits
+    times (the oscillation signal) AND it had >= min_transitions total status
+    changes, EXCLUDING terminal-state features. Raw transition count alone is
+    NOT a flap: a feature that simply PROGRESSED through the pipeline
+    (Designing→Designed→Implementing→…→Pushed) racks up transitions without
+    being stuck — each status is entered once (max_revisits=1). True flapping
+    re-enters a status (Implementing→Implemented→Designed→Implementing… — a
+    rework/env-broken loop). Raw-count flagging Blocked features that
+    legitimately shipped (testingcalc #1421).
+
+    Returns [{feature_id, transitions, max_revisits, window_hours}], most-
+    oscillating first.
     """
     await _get_product_or_404(product_id, db)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, int(window_hours)))
-    rows = await db.execute(
+    # Inner: how many times the feature ENTERED each distinct status in-window.
+    per_status = (
         select(
-            FeatureChangelog.feature_id,
-            func.count(FeatureChangelog.id).label("transitions"),
+            FeatureChangelog.feature_id.label("fid"),
+            func.count(FeatureChangelog.id).label("cnt"),
         )
         .join(Feature, Feature.id == FeatureChangelog.feature_id)
         .where(
             Feature.product_id == product_id,
             FeatureChangelog.field == "status",
             FeatureChangelog.changed_at >= cutoff,
-            # Exclude features that have reached a terminal state — a feature
-            # that PROGRESSED to Pushed (success), or is already Rejected/
-            # Reverted/Deferred/Blocked, is not "stuck in a flap loop." Counting
-            # its transitions would let rapid_flap Block a feature AFTER it
-            # successfully merged (canonical: testingcalc #1421 — Reviewed→
-            # Pushed at 02:38:21, Pushed→Blocked by rapid_flap one second later
-            # because the normal pipeline progression + an env_broken rollback
-            # summed to >= min_transitions).
+            # Terminal features are DONE, not stuck — never flag them (a feature
+            # that progressed to Pushed must not be Block-able; #1421).
             Feature.status.notin_(["Pushed", "Rejected", "Reverted", "Deferred", "Blocked"]),
         )
-        .group_by(FeatureChangelog.feature_id)
-        .having(func.count(FeatureChangelog.id) >= int(min_transitions))
-        .order_by(func.count(FeatureChangelog.id).desc())
+        .group_by(FeatureChangelog.feature_id, FeatureChangelog.new_value)
+        .subquery()
+    )
+    # Outer: per feature, the max re-entry count (oscillation) + total changes.
+    rows = await db.execute(
+        select(
+            per_status.c.fid.label("feature_id"),
+            func.sum(per_status.c.cnt).label("transitions"),
+            func.max(per_status.c.cnt).label("max_revisits"),
+        )
+        .group_by(per_status.c.fid)
+        .having(
+            (func.max(per_status.c.cnt) >= int(min_revisits))
+            & (func.sum(per_status.c.cnt) >= int(min_transitions))
+        )
+        .order_by(func.max(per_status.c.cnt).desc())
     )
     return [
-        {"feature_id": r.feature_id, "transitions": r.transitions,
-         "window_hours": int(window_hours)}
+        {"feature_id": r.feature_id, "transitions": int(r.transitions),
+         "max_revisits": int(r.max_revisits), "window_hours": int(window_hours)}
         for r in rows.all()
     ]
 
