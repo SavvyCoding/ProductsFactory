@@ -58,7 +58,7 @@ RUN pyenv global 3.12.4 && \
         pytest pytest-cov pytest-json-report pytest-asyncio \
         httpx requests \
         pydantic \
-        ruff pre-commit black flake8 mypy \
+        ruff pre-commit black flake8 mypy playwright \
         Pillow moviepy edge-tts && \
     pyenv global 3.11.9 && \
     pip install --no-cache-dir --upgrade pip && \
@@ -67,7 +67,7 @@ RUN pyenv global 3.12.4 && \
         pytest pytest-cov pytest-json-report pytest-asyncio \
         httpx requests \
         pydantic \
-        ruff pre-commit black flake8 mypy \
+        ruff pre-commit black flake8 mypy playwright \
         Pillow moviepy edge-tts && \
     pyenv global 3.12.4
 
@@ -179,6 +179,19 @@ RUN sed -i 's/\r$//' /usr/local/bin/agent-entrypoint.sh \
 COPY deploy/docker/pf-verify-env.sh /usr/local/bin/pf-verify-env.sh
 RUN sed -i 's/\r$//' /usr/local/bin/pf-verify-env.sh \
  && chmod +x /usr/local/bin/pf-verify-env.sh
+
+# ── Layer: Playwright + Chromium for browser-automation features ─────────────
+# Browser-automation ACs (Playwright e2e, screenshots, headless chromium) can't
+# pip-install the browser binary — it needs `playwright install`. Pre-bake it so
+# those features stop Blocking (canonical Playwright cascade: 1089/1090/1091/
+# 1095). Browsers live in a shared, world-readable path so the non-root agent
+# can use them; PLAYWRIGHT_BROWSERS_PATH persists into the runtime env. The
+# `playwright` pip pkg is installed in the toolchain layer above. Queued
+# 2026-06-09; activates on the next agent-image build.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN pyenv global 3.12.4 && \
+    python -m playwright install --with-deps chromium && \
+    chmod -R a+rx /ms-playwright
 
 # ── Make the pyenv shims dir writable by the non-root agent ──────────────────
 # The earlier `chmod -R a+rx /opt/pyenv` grants read+execute but NOT write. pip
