@@ -62,6 +62,32 @@ class TestAllFailingTests:
         assert pc._all_failing_tests("") == []
 
 
+class TestVerifyCheckInContainer:
+    """The verify-check (per-AC Verify recipes) must run in the agent container
+    too — the recipes invoke stack tools (npx/tsc/node) the orchestrator lacks
+    (the MyCalc1 #1370 `npx: command not found` false-bounce)."""
+
+    def test_recipe_runs_in_agent_container(self, tmp_path, monkeypatch):
+        (tmp_path / "package.json").write_text('{"scripts": {"test": "vitest"}}')
+        calls = _capture(monkeypatch)
+        res = pc._run_verify("npx tsc --noEmit", cwd=str(tmp_path), timeout=60)
+        cmd = calls["cmd"]
+        assert cmd[:3] == ["docker", "run", "--rm"]
+        assert "productfactory-agent" in cmd
+        assert any(a.endswith(":/workspace") for a in cmd)
+        script = cmd[-1]
+        assert "npx tsc --noEmit" in script        # the recipe (via bash -c)
+        assert "timeout 60s" in script             # hard timeout backstop
+        assert ">/dev/null 2>&1" in script         # install silenced
+        assert res["skipped"] is False
+
+    def test_server_required_recipe_still_skipped_without_container(self, tmp_path, monkeypatch):
+        calls = _capture(monkeypatch)
+        res = pc._run_verify("curl -s http://localhost:8000/health", cwd=str(tmp_path), timeout=30)
+        assert res["skipped"] is True              # pre-detected, no docker run
+        assert "cmd" not in calls                  # never launched a container
+
+
 class TestContainerTestRun:
     def test_npm_install_prefixed(self, tmp_path, monkeypatch):
         (tmp_path / "package.json").write_text('{"scripts": {"test": "jest"}}')
