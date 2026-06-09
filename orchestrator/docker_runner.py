@@ -751,17 +751,45 @@ def _format_reviewer_feedback(features: list[dict]) -> str:
                            or (f.get("fix_attempts") or 0) > 0)]
     if not rework_features:
         return ""
+    # Did any prior attempt actually PUSH a branch? The post-coder gates
+    # (lint-guard / test-check / verify-check) all run BEFORE the push, so a
+    # feature bounced by them has fix_attempts>0 but no branch/PR — its prior
+    # work was never committed and the next session starts on a CLEAN default
+    # branch, NOT a prior coder branch. The "patch in place, prior code is in
+    # your tree" framing is true ONLY when a branch was pushed; otherwise the
+    # coder must reimplement. (Decoupled 2026-06-08: 47/50 reworks were
+    # pre-push bounces with no branch, yet all got the patch-in-place framing —
+    # telling the coder to patch code that doesn't exist. This proxy mirrors
+    # _find_rework_branch's Strategy 1 (branch_name) + Strategy 2 (pr_number).)
+    has_prior_branch = any(
+        f.get("branch_name") or isinstance(f.get("pr_number"), int)
+        for f in rework_features
+    )
+    if has_prior_branch:
+        _workspace_para = (
+            "Your workspace IS the previous coder branch — the prior "
+            "implementation is already in your tree (open `git log` to see). "
+            "**Patch the listed items in place — do not reimplement from "
+            "scratch.** Keep every working part of the prior code; only "
+            "change what the listed feedback names."
+        )
+    else:
+        _workspace_para = (
+            "Your prior attempt **failed a pre-push gate (lint-guard / "
+            "test-check / verify-check) and was never committed** — your "
+            "workspace is a clean checkout of the default branch, NOT a prior "
+            "coder branch, so there is no prior code to patch (your `git log` "
+            "shows only mainline history). **Reimplement the feature cleanly "
+            "and make sure every item below is addressed** before you finish."
+        )
     sections: list[str] = [
         "## Latest feedback to address",
         "",
-        "These features are in a **rework cycle** — the most recent "
-        "reviewer or post-coder gate (lint-guard / test-check / "
-        "verify-check) flagged specific issues on the prior commit. "
-        "Your workspace IS the previous coder branch — the prior "
-        "implementation is already in your tree (open `git log` to see). "
-        "**Patch the listed items in place — do not reimplement from "
-        "scratch.** Keep every working part of the prior code; only "
-        "change what the listed feedback names.",
+        "These features are in a **rework cycle** — the most recent reviewer "
+        "or post-coder gate (lint-guard / test-check / verify-check) flagged "
+        "specific issues on your prior attempt.",
+        "",
+        _workspace_para,
         "",
         "Only the LATEST bounce's feedback is included below (the "
         "10-minute window around the most recent comment). Earlier "
@@ -770,10 +798,12 @@ def _format_reviewer_feedback(features: list[dict]) -> str:
         "either way, the items below are what's still outstanding.",
         "",
     ]
+    any_comments = False
     for f in rework_features:
         comments = _fetch_recent_review_comments(int(f["id"]))
         if not comments:
             continue
+        any_comments = True
         sections.append(f"### Feature #{f['id']} — {f.get('name','')}")
         sections.append(
             f"_review_outcome={f.get('review_outcome') or '-'}, "
@@ -787,7 +817,7 @@ def _format_reviewer_feedback(features: list[dict]) -> str:
             sections.append(f"**{ts} · {author}**")
             sections.append(body)
             sections.append("")
-    if len(sections) <= 4:  # only the header survived — no comments found
+    if not any_comments:   # header built but no feature had comments
         return ""
     return "\n".join(sections).rstrip() + "\n"
 
