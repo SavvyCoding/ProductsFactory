@@ -3875,6 +3875,15 @@ async def api_flapping_features(
             Feature.product_id == product_id,
             FeatureChangelog.field == "status",
             FeatureChangelog.changed_at >= cutoff,
+            # Exclude features that have reached a terminal state — a feature
+            # that PROGRESSED to Pushed (success), or is already Rejected/
+            # Reverted/Deferred/Blocked, is not "stuck in a flap loop." Counting
+            # its transitions would let rapid_flap Block a feature AFTER it
+            # successfully merged (canonical: testingcalc #1421 — Reviewed→
+            # Pushed at 02:38:21, Pushed→Blocked by rapid_flap one second later
+            # because the normal pipeline progression + an env_broken rollback
+            # summed to >= min_transitions).
+            Feature.status.notin_(["Pushed", "Rejected", "Reverted", "Deferred", "Blocked"]),
         )
         .group_by(FeatureChangelog.feature_id)
         .having(func.count(FeatureChangelog.id) >= int(min_transitions))
