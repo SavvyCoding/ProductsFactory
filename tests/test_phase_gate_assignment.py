@@ -27,9 +27,15 @@ def _feat(fid, phase_id):
 
 class TestGatedOutHelper:
     def test_off_returns_empty(self):
+        # Gate is ON by default (2026-06-09): only EXPLICIT False disables it.
         feats = [_feat(1, 10), _feat(2, 11)]
-        assert gated_out_feature_ids(feats, PHASES, {}) == set()
-        assert gated_out_feature_ids(feats, PHASES, None) == set()
+        assert gated_out_feature_ids(feats, PHASES, {"human_gate_phases": False}) == set()
+
+    def test_on_by_default_when_unset(self):
+        # Unset / empty config / None → gate ON → later phase frozen.
+        feats = [_feat(1, 10), _feat(2, 11)]
+        assert gated_out_feature_ids(feats, PHASES, {}) == {2}
+        assert gated_out_feature_ids(feats, PHASES, None) == {2}
 
     def test_freezes_later_phase_only(self):
         feats = [_feat(1, 10), _feat(2, 11)]
@@ -98,10 +104,13 @@ class TestFetchAssignedGate:
         selected, _, _ = dr._fetch_assigned_features(product_id=1, persona="designer", max_count=10)
         assert {f["id"] for f in selected} == {1}  # #2 frozen despite higher priority
 
-    def test_gate_off_picks_later_phase_first(self, monkeypatch):
-        client = _FakeClient(_FEATURES, PHASES, {"config": {}})
+    def test_gate_off_still_phase_ordered(self, monkeypatch):
+        """Even with the gate EXPLICITLY off, phase-ordered dispatch picks the
+        earlier-phase feature first — foundational-first by default. (#2 is in a
+        later phase but has the better priority number; phase order wins.)"""
+        client = _FakeClient(_FEATURES, PHASES, {"config": {"human_gate_phases": False}})
         monkeypatch.setattr("httpx.Client", lambda *a, **kw: client)
         selected, _, _ = dr._fetch_assigned_features(product_id=1, persona="designer", max_count=10)
         ids = [f["id"] for f in selected]
         assert set(ids) == {1, 2}
-        assert ids[0] == 2  # demonstrates the ungated bug: later phase ranks first
+        assert ids[0] == 1  # earlier phase (order 0) first, despite #2's priority=5

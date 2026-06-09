@@ -407,17 +407,20 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
             else:
                 features = []
 
-            # Human-in-loop phase gate (migration 045). This selector runs
-            # INDEPENDENTLY of cycle/persona._decide_action, so it must apply
-            # the SAME gate or a session launched for the current phase could
-            # still claim a later-phase feature — and the priority-ASC sort
-            # below would let a low-priority-number later-phase feature outrank
-            # current-phase work. No-op when human_gate_phases is off.
+            # Phase context: drives BOTH the human-in-loop gate (migration 045,
+            # hard freeze of later phases) AND phase-ordered dispatch (the sort
+            # below prefers earlier phases — foundational-first — regardless of
+            # the gate). This selector runs INDEPENDENTLY of cycle/persona.
+            # _decide_action, so it applies the same gate + ordering itself.
+            phase_order_by_id: dict = {}
             try:
                 from orchestrator.cycle.phase_gate import gated_out_feature_ids
                 prod = client.get(f"/api/products/{product_id}").json()
                 phases_resp = client.get(f"/api/products/{product_id}/phases")
                 phases = phases_resp.json() if phases_resp.is_success else []
+                if isinstance(phases, list):
+                    phase_order_by_id = {p.get("id"): p.get("order", 0)
+                                         for p in phases if isinstance(p, dict)}
                 blocked = gated_out_feature_ids(
                     features, phases if isinstance(phases, list) else [],
                     prod.get("config") if isinstance(prod, dict) else None,
@@ -427,7 +430,7 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                     log.info(f"[assign] phase-gate froze {len(blocked)} later-phase "
                              f"feature(s) for persona={persona}")
             except Exception:
-                log.exception("[assign] phase-gate filter failed; proceeding ungated")
+                log.exception("[assign] phase-gate/order fetch failed; proceeding ungated")
 
         # Sort: stuck-rework features (Implementing+changes_requested AND
         # fix_attempts >= REWORK_CAP_PROXIMITY) go LAST so the coder picks
@@ -469,8 +472,16 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                 and (f.get("fix_attempts") or 0) >= _REWORK_CAP_PROXIMITY
             )
 
+        # Phase-ordered dispatch (default 2026-06-09): earlier phases first, so
+        # foundational work is designed/coded before later phases REGARDLESS of
+        # the human gate — phases carry a build-order, and feature `priority`
+        # alone ignored it (testingcalc #1402: a phase-2 feature at priority 50
+        # outranked the phase-0 Foundation features at priority 69–79 and got
+        # designed first). Keys: stuck-rework LAST, then phase order ASC, then
+        # priority ASC, then id. Unphased features sort after all phased work.
         features.sort(key=lambda f: (
             1 if _is_stuck_rework(f) else 0,
+            phase_order_by_id.get(f.get("phase_id"), 9999),
             f.get("priority") if f.get("priority") is not None else 50,
             f.get("id") or 0,
         ))

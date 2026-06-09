@@ -183,9 +183,9 @@ A "Feature" in product-speak (e.g. "Contact Management") is usually a `phases` r
 
 **Release notes**: `GET /api/phases/{id}/release-notes` collates the `merge_notes` field of all Pushed features in the phase. Each coder session writes `features.merge_notes` on push (set in `post_coder.py`).
 
-### Phase gate (opt-in human-in-loop, migration 045)
+### Phase gate (human-in-loop, migration 045) — ON by default
 
-Off by default — when `product.config.human_gate_phases` is **not** set, the flat 043 model is unchanged and the system is fully autonomous. When set, a per-phase human checkpoint is inserted:
+**On by default (2026-06-09):** the gate engages unless `product.config.human_gate_phases` is explicitly `False`. (The three reads — `phase_gate.gated_out_feature_ids`, `tools._run_phase_gate_detector`, `persona._decide_action` — all default unset→on.) Separately, **phase-ordered dispatch is always on**: feature selection (`docker_runner._fetch_assigned_features` + `/api/features/next-for-persona`) sorts by `(phase_order, priority)` so foundational work is built first *regardless* of the gate — phases carry a build-order that bare `priority` ignored (canonical: testingcalc #1402, a phase-2 feature at priority 50 designed ahead of phase-0 Foundation features at priority 69–79). The gate adds the *hard freeze + human approval*; phase-ordered dispatch is the *soft* foundational-first ordering. A per-phase human checkpoint:
 
 - **State machine** on `phases.gate_state`: `open → awaiting_review → approved`. `approved` is a one-way latch only a human sets (PM Approve button → `POST /product/{id}/phase/{id}/approve`, valid only from `awaiting_review`). The detector drives `open⇄awaiting_review` to track feature reality.
 - **Detector** (`deploy/orchestrator/tools.py::_run_phase_gate_detector`, run per-product each cycle): a phase whose features are all *settled* (no `Pending/Approved/Designing/Designed/Implementing/Reviewing/Reviewed`) and has a real outcome (≥1 `Pushed`, or any `Blocked`/`Reverted`) → `POST /api/phases/{id}/report` (sets `awaiting_review`) + one dashboard `alerts` row on the transition. An `awaiting_review` phase that regains active work (PM un-blocked a feature) is reopened to `open` → re-settles → re-reports. This is the **rework loop**: resolve a blocker by moving it `Blocked → Approved`; the gate stays put until the PM clicks Approve.
@@ -204,7 +204,7 @@ Off by default — when `product.config.human_gate_phases` is **not** set, the f
 - `quiet_hours_start` / `quiet_hours_end` — Hour of day (0–23) to suppress sessions
 - `daily_session_cap` — Max sessions per day for this product
 - `max_features_per_run` — Per-product override for the global `MAX_FEATURES_PER_RUN`
-- `human_gate_phases` — Opt-in (bool, default off) human-in-loop phase gate (migration 045). When on, the orchestrator freezes later phases until a PM approves the current one. Off = fully autonomous, unchanged. See **Phase gate** below.
+- `human_gate_phases` — Human-in-loop phase gate (migration 045), **default ON** (engages unless explicitly `False`). When on, the orchestrator freezes later phases until a PM approves the current one; set `False` for fully-autonomous. Phase-ordered dispatch (foundational-first) applies regardless. See **Phase gate** below.
 (Under the flat phases→features model the legacy `sprint_pr_mode` toggle and its bare-branch False branch are retired. Every coder session opens its own session PR unconditionally.)
 
 Additionally, a `product_config.json` file in the product working directory (read by `setup_product.py` on discovery) can seed:

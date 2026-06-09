@@ -2305,7 +2305,16 @@ async def api_next_feature_for_persona(
     Optional product_id filter scopes to a single product.
     Returns null if nothing to do.
     """
-    q = select(Feature).order_by(Feature.priority, Feature.created_at).limit(1)
+    # Phase-ordered dispatch (default 2026-06-09): earlier phases first, then
+    # priority. Mirrors orchestrator/docker_runner._fetch_assigned_features so
+    # foundational work is picked before later phases regardless of the human
+    # gate. Unphased features (no Phase row) sort last via nulls_last.
+    q = (
+        select(Feature)
+        .outerjoin(Phase, Feature.phase_id == Phase.id)
+        .order_by(Phase.order.asc().nulls_last(), Feature.priority, Feature.created_at)
+        .limit(1)
+    )
 
     if persona == "designer":
         q = q.where(Feature.status == "Approved", Feature.design_doc_path.is_(None))

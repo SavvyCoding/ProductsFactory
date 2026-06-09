@@ -76,7 +76,7 @@ def _later_phase_codeable():
 class TestPhaseGate:
     def test_gate_off_dispatches_later_phase(self):
         """Flag off → the later-phase Designed feature is coded normally."""
-        client = _client(_later_phase_codeable(), _PHASES_OPEN, config={})
+        client = _client(_later_phase_codeable(), _PHASES_OPEN, config={"human_gate_phases": False})
         result = _decide_action(product_id=25, client=client)
         assert _is_coder(result), result
 
