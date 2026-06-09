@@ -2151,6 +2151,30 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
                 )
                 if ri.returncode != 0:
                     install_out = (ri.stdout or "") + "\n" + (ri.stderr or "")
+                    # Benign pyenv-rehash false failure: pip installs the deps
+                    # fine, but the pyenv `pip` shim's post-install `pyenv
+                    # rehash` hook exits non-zero because /opt/pyenv/shims is
+                    # root-owned and the container runs as the non-root `agent`
+                    # user. The deps ARE installed (the collection check below
+                    # catches anything genuinely missing), so this must NOT
+                    # bounce. Without it, EVERY Python product whose deps ship
+                    # console scripts (uvicorn/fastapi/alembic/...) false-bounced
+                    # env_broken on a clean install — an infinite loop the coder
+                    # can't fix (canonical: testingcalc #1423, surfaced 2026-06-08
+                    # when the test-check moved into the agent container). The
+                    # durable fix is making the shims dir agent-writable in the
+                    # Dockerfile; this guard is belt-and-suspenders. Skip only
+                    # when NO real pip error accompanies the rehash message.
+                    if (("isn't writable" in install_out or "cannot rehash" in install_out)
+                            and not _re.search(
+                                r"ERROR:|No matching distribution|Could not find a version"
+                                r"|ResolutionImpossible|Invalid requirement"
+                                r"|conflicting dependencies|Failed building wheel",
+                                install_out, _re.I)):
+                        log.info(f"[post-coder] {product_name}: ignoring benign "
+                                 f"pyenv-rehash exit on `pip install -r {req_name}` "
+                                 f"(deps installed; not env_broken)")
+                        continue
                     result["passed"] = False
                     result["output"] = (
                         f"pip install -r {req_name} failed "
