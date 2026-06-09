@@ -61,7 +61,7 @@ async function toggleHistoryRow(row) {
             ? `<span class="hist-review-outcome ${rv.outcome==='approved'?'rv-ok':'rv-changes'}">${rv.outcome==='approved'?'✓ Approved':'↩ Changes'}</span>`
             : '';
           const prLink = a.pr_url
-            ? `<a href="${a.pr_url}" target="_blank" class="pr-link" onclick="event.stopPropagation()">PR #${a.pr_number} ↗</a>`
+            ? `<a href="${a.pr_url}" target="_blank" class="pr-link" onclick="event.stopPropagation()">PR #${a.pr_number || a.pr_url.split('/').pop()} ↗</a>`
             : '';
           const typeLabel = a.feature_type !== 'feature'
             ? `<span class="type-badge type-${a.feature_type}">${a.feature_type}</span>` : '';
