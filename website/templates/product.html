@@ -625,7 +625,7 @@
               {% else %}<span class="fbt-muted">—</span>{% endif %}
             </td>
             <td>
-              {% if f.pr_url %}<a href="{{ f.pr_url }}" target="_blank" onclick="event.stopPropagation()">#{{ f.pr_number }} ↗</a>
+              {% if f.pr_url %}<a href="{{ f.pr_url }}" target="_blank" onclick="event.stopPropagation()">#{{ f.pr_number or f.pr_url.split('/')[-1] }} ↗</a>
               {% else %}<span class="fbt-muted">—</span>{% endif %}
             </td>
             <td class="fbt-date">{% if f.updated_at %}{{ f.updated_at.strftime('%Y-%m-%d %H:%M') }}{% else %}—{% endif %}</td>
@@ -853,7 +853,7 @@
         </div>
         <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;margin-left:6px">
           <span class="badge badge-status-{{ f.status | lower }}" style="font-size:10px">{{ f.status }}</span>
-          {% if f.pr_number %}<a href="{{ f.pr_url }}" target="_blank" style="font-size:11px;color:var(--blue);text-decoration:none" title="View PR">#{{ f.pr_number }}</a>{% endif %}
+          {% if f.pr_url %}<a href="{{ f.pr_url }}" target="_blank" style="font-size:11px;color:var(--blue);text-decoration:none" title="View PR">#{{ f.pr_number or f.pr_url.split('/')[-1] }}</a>{% endif %}
         </div>
       </div>
       {% endfor %}
