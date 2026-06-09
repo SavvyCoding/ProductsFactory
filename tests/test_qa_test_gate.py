@@ -145,6 +145,34 @@ class TestEnvBrokenClassification:
         assert res["passed"] is True                 # install OK → tests ran & passed
 
 
+class TestVerifyActionableHint:
+    """Verify-check feedback must be ACTIONABLE — surface the recipe's asserts
+    and name the re-raise-vs-return-status fix (testingcalc #1423)."""
+
+    def test_surfaces_recipe_asserts(self):
+        cmd = "python -c \"\nresp = client.get('/x')\nassert resp.status_code == 200\nprint('OK')\""
+        hint = pc._verify_actionable_hint(cmd, "OK\n", 0)
+        assert "AC requires" in hint
+        assert "status_code == 200" in hint
+
+    def test_reraise_diagnosis_on_propagated_exception(self):
+        cmd = "python -c \"\nresp = client.get('/crash')\nassert resp.status_code == 500\nprint('OK')\""
+        actual = '{"level":"ERROR"}\nTraceback (most recent call last):\nRuntimeError: simulated boom'
+        hint = pc._verify_actionable_hint(cmd, actual, 1)
+        assert "RAISED instead of returning 500" in hint
+        assert "RETURN a response" in hint
+
+    def test_no_status_assert_no_reraise_hint(self):
+        cmd = "python -c \"\nassert resp.status_code == 500\nprint('OK')\""
+        # asserts surfaced, but no exception in output → no re-raise diagnosis
+        hint = pc._verify_actionable_hint(cmd, "OK\n", 0)
+        assert "AC requires" in hint
+        assert "RAISED instead" not in hint
+
+    def test_empty_when_nothing_actionable(self):
+        assert pc._verify_actionable_hint("echo hi", "hi", 0) == ""
+
+
 class TestContainerTestRun:
     def test_npm_install_prefixed(self, tmp_path, monkeypatch):
         (tmp_path / "package.json").write_text('{"scripts": {"test": "jest"}}')
