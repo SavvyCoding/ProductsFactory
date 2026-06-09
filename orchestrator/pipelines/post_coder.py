@@ -2599,6 +2599,43 @@ def _check_expected(actual_stdout: str, actual_exit: int, expected: str) -> bool
     return False
 
 
+def _verify_actionable_hint(command: str, actual_stdout: str, actual_exit) -> str:
+    """Turn a verify-check mismatch into ACTIONABLE feedback. Two structural
+    aids that apply to every product / AC (added 2026-06-08):
+
+    1. Surface the recipe's internal `assert` statements — that, not the bare
+       `Expected: OK` sentinel, is the behavioral contract the coder must
+       satisfy. Coders stalled because `expected: OK / actual: <trace>` never
+       named what the recipe was actually checking.
+    2. When an unhandled exception propagated out of the recipe WHILE it asserts
+       an HTTP status code, name the specific fix: handle the error and RETURN
+       the status, never re-raise. Canonical: testingcalc #1423 — a log-and-
+       re-raise middleware vs AC3's `assert resp.status_code == 500`; the coder
+       logged correctly but re-raised, so the exception propagated and the
+       status assertion never ran.
+
+    Returns text to append under the AC bullet ("" when nothing to add)."""
+    import re as _r
+    hints: list[str] = []
+    asserts = _r.findall(r"^\s*assert\s+(.+)$", command or "", _r.M)
+    if asserts:
+        shown = "; ".join(a.strip().rstrip(",")[:100] for a in asserts[:4])
+        hints.append(f"  ↳ AC requires (recipe asserts): `{shown}`")
+    out = actual_stdout or ""
+    status_assert = _r.search(r"status_code\s*==\s*(\d{3})", command or "")
+    raised = ("Traceback (most recent call last)" in out
+              or bool(_r.search(r"\b\w*(?:Error|Exception)\b:", out)))
+    if status_assert and raised:
+        code = status_assert.group(1)
+        hints.append(
+            f"  ↳ Your code RAISED instead of returning {code}. An error "
+            f"handler / logging middleware must LOG **and RETURN a response** "
+            f"(status {code}) — never `raise`/re-raise or let the exception "
+            f"propagate, or the `status_code == {code}` assertion never runs."
+        )
+    return ("\n" + "\n".join(hints)) if hints else ""
+
+
 def _post_coder_verify_check(
     working_dir: str,
     product_name: str,
@@ -4064,6 +4101,8 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                             f"  expected `{f['expected'][:120]}`\n"
                             f"  actual stdout `{(f['actual_stdout'] or '').strip()[:200]}` "
                             f"(exit {f['actual_exit']})"
+                            + _verify_actionable_hint(
+                                f['command'], f['actual_stdout'], f['actual_exit'])
                         )
                     # Agentless tiebreaker: compute progress trend if we have
                     # a prior count. delta < 0 = fewer failures than last
