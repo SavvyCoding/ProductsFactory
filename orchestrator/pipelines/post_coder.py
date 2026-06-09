@@ -26,6 +26,7 @@ import json as _json
 import logging
 import os
 import re
+import shlex as _shlex
 import shutil
 import subprocess as _sp
 from pathlib import Path
@@ -1906,25 +1907,22 @@ def _all_failing_tests(output: str) -> list[str]:
     return found[:25]   # cap to keep the comment / prompt bounded
 
 
-def _container_test_run(working_dir: str):
-    """Return a `_run`-compatible callable that executes a command INSIDE a
-    throwaway agent-image container — the QA/Tester gate.
+def _agent_container_base(working_dir: str):
+    """Shared `docker run` prefix + stack-install command for executing a shell
+    script INSIDE the agent image (full toolchain: node/npm/npx, python/pip, go;
+    plus the per-product download cache + workspace mount + sandbox hardening).
 
-    The agent image carries the full toolchain (node/npm, python/pip, go); the
-    orchestrator process does NOT. Running the stack's tests in-process was the
-    root cause of the test gate dying with "npm not found" → `env_broken` →
-    divergent-review cascade for every non-Python product (canonical: MyCalc1
-    feature #1370). Executing in the agent image fixes it for every stack at
-    once and makes it a true clean-room run (fresh dependency install), which
-    is what the gate was always meant to be.
+    Used by BOTH post-coder gates that EXECUTE product/stack code — the
+    test-check and the verify-check. (Static-analysis checks — lint guards,
+    drift-scanner, deletion-safety — stay in the orchestrator and do NOT use
+    this: they only parse files + use git, which the orchestrator already has.)
+    The principle: *run product/stack code in the toolchain container; analyze
+    source statically in the control plane.*
 
-    Deterministic (no LLM): the gate is `docker run … sh -lc "<install> &&
-    <cmd>"` and the verdict is the container's exit code + stdout, classified
-    by `_post_coder_test_check` exactly as before. A stack-appropriate install
-    is prepended so deps are present on a clean checkout (retires the old
-    in-orchestrator `pip install` band-aid and adds the missing `npm install`).
+    Returns (docker_prefix, install). docker_prefix is the argv up to and
+    including `sh -lc`; the caller appends the final script string. install is
+    the stack-appropriate dependency install ("" for unknown/no-dep stacks).
     """
-    import shlex as _shlex
     wd = Path(working_dir)
     img = os.environ.get("AGENT_IMAGE", "productfactory-agent")
     if (wd / "package.json").exists():
@@ -1942,14 +1940,10 @@ def _container_test_run(working_dir: str):
     # Per-product package-DOWNLOAD cache (pip wheels / npm tarballs / go mod
     # cache), persisted across runs so the clean install is fast WITHOUT
     # undermining the clean-room check — we cache the download cache, NOT the
-    # installed deps, so `npm ci`/`pip install` still does a real fresh install
-    # and still validates declared deps (Guard 18 intact). Bind-mount, not a
-    # named volume: a fresh named volume is root-owned and the gate runs as the
-    # non-root agent user (uid 1001) so it couldn't write; the orchestrator runs
-    # as root and pre-creates the dir mode-0777 (Windows Docker Desktop
-    # bind-mounts are uid-agnostic-writable regardless). Lives OUTSIDE the
-    # product repo (sibling .pf-cache/) so post-coder's `git add -A` never
-    # stages it. Best-effort: on any failure the gate just runs without a cache.
+    # installed deps. Bind-mount (not a named volume — fresh named volumes are
+    # root-owned and the gate runs as non-root uid 1001); orchestrator (root)
+    # pre-creates it mode-0777. Lives OUTSIDE the repo (sibling .pf-cache/) so
+    # `git add -A` never stages it. Best-effort.
     cache_args = []
     try:
         cache_dir = wd.parent / ".pf-cache" / wd.name
@@ -1965,34 +1959,39 @@ def _container_test_run(working_dir: str):
     except Exception:
         cache_args = []
 
+    prefix = [
+        "docker", "run", "--rm",
+        "--network", "productfactory-net",
+        "--add-host", "pm-api:host-gateway",
+        "--memory", "4g", "--cpus", "2", "--pids-limit", "512",
+        "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+        # CI=true → vitest/jest/most runners run once and exit (no watch hang).
+        "-e", "CI=true",
+        *cache_args,                       # persistent per-product download cache
+        "-v", f"{host_path(working_dir)}:/workspace",
+        "-w", "/workspace",
+        img, "sh", "-lc",
+    ]
+    return prefix, install
+
+
+def _container_test_run(working_dir: str):
+    """Return a `_run`-compatible callable that runs the stack's TEST command in
+    the agent-image container (toolchain present), with a clean install
+    prepended. Deterministic (no LLM) — verdict is the container exit code +
+    stdout, classified by `_post_coder_test_check` unchanged. Fixed the
+    orchestrator-has-no-npm bug behind the MyCalc1 #1370 cascade."""
+    prefix, install = _agent_container_base(working_dir)
+
     def _run(cmd, **kw):
         timeout = kw.pop("timeout", 300)
         kw.pop("cwd", None)  # always /workspace inside the container
         inner = _shlex.join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
-        # Hard `timeout` backstop on the test command: a watch-mode runner
-        # (e.g. bare `vitest`/`jest` without `run`/`--ci`) would otherwise hang
-        # the container forever (caught live on MyCalc1, whose test script is
-        # bare `vitest`). CI=true below makes most JS runners exit on their own;
-        # `timeout` is belt-and-suspenders so a stuck command is killed (exit
-        # 124) and classified as a failure rather than hanging the pipeline.
+        # Hard `timeout` backstop: a watch-mode runner (bare `vitest`/`jest`)
+        # would otherwise hang the container forever (caught live on MyCalc1).
         guarded = f"timeout {timeout}s {inner}"
         full = f"{install} && {guarded}" if install else guarded
-        docker_cmd = [
-            "docker", "run", "--rm",
-            "--network", "productfactory-net",
-            "--add-host", "pm-api:host-gateway",
-            "--memory", "4g", "--cpus", "2", "--pids-limit", "512",
-            "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
-            # CI=true → vitest/jest/most runners run once and exit instead of
-            # entering interactive watch mode.
-            "-e", "CI=true",
-            *cache_args,                       # persistent per-product download cache
-            "-v", f"{host_path(working_dir)}:/workspace",
-            "-w", "/workspace",
-            img, "sh", "-lc", full,
-        ]
-        # Outer timeout covers install + test; headroom over the inner cap.
-        return _sp.run(docker_cmd, capture_output=True, text=True, timeout=timeout + 120)
+        return _sp.run(prefix + [full], capture_output=True, text=True, timeout=timeout + 120)
 
     return _run
 
@@ -2462,12 +2461,21 @@ def _run_verify(cmd: str, cwd: str, timeout: int) -> dict:
                 "skip_reason": "server-required (post-coder pipeline does "
                                "not start the app yet)"}
     try:
-        r = _sp.run(
-            ["bash", "-c", cmd],
-            cwd=cwd,
-            capture_output=True, text=True,
-            timeout=timeout,
-        )
+        # Run the recipe INSIDE the agent container (toolchain present), not
+        # in-process in the orchestrator. The designer's Verify recipes invoke
+        # stack tools (`npx tailwindcss`, `npx tsc`, `python -c "from app …"`)
+        # that don't exist in the orchestrator — running them here was a false-
+        # failure machine for every Node product (canonical: MyCalc1 #1370,
+        # `bash: npx: command not found`). The container also has /workspace
+        # natively, so this retires the verify-check's /workspace symlink
+        # band-aid too. Install is silenced (node_modules is usually already
+        # present from the test-check earlier in the same pipeline); the recipe
+        # runs LAST so the container's exit code + stdout are the recipe's.
+        prefix, install = _agent_container_base(cwd)
+        script = ((f"{install} >/dev/null 2>&1; " if install else "")
+                  + f"timeout {timeout}s bash -c {_shlex.quote(cmd)}")
+        r = _sp.run(prefix + [script], capture_output=True, text=True,
+                    timeout=timeout + 180)
         stderr = (r.stderr or "")[:500]
         if any(mk in stderr for mk in _SERVER_UNAVAILABLE_MARKERS):
             return {"exit_code": r.returncode, "stdout": r.stdout, "stderr": stderr,
@@ -2479,9 +2487,9 @@ def _run_verify(cmd: str, cwd: str, timeout: int) -> dict:
         return {"exit_code": 124, "stdout": "", "stderr": f"timed out after {timeout}s",
                 "skipped": False, "skip_reason": ""}
     except FileNotFoundError as e:
-        # `bash` not in PATH on this container — skip rather than bounce.
-        return {"exit_code": 127, "stdout": "", "stderr": f"shell unavailable: {e}",
-                "skipped": True, "skip_reason": "shell unavailable"}
+        # `docker` not in PATH — skip rather than bounce.
+        return {"exit_code": 127, "stdout": "", "stderr": f"container runtime unavailable: {e}",
+                "skipped": True, "skip_reason": "container runtime unavailable"}
 
 
 def _check_expected(actual_stdout: str, actual_exit: int, expected: str) -> bool:
@@ -3885,12 +3893,14 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     # resolve. Without the CM, the recipes consistently report stdout=""
     # and exit 1/2, which the matcher reads as a real mismatch and bounces
     # the feature (canonical 2026-05-31 cascade: features 1147/1148/1149).
-    with _workspace_symlink(working_dir, pname):
-        verify_result = _post_coder_verify_check(
-            working_dir=working_dir,
-            product_name=pname,
-            assigned_features=assigned_features,
-        )
+    # Recipes now run inside the agent container (toolchain present + /workspace
+    # mounted natively), so the orchestrator-side /workspace symlink band-aid is
+    # retired here too — and `npx`/node/tsc/python deps actually exist.
+    verify_result = _post_coder_verify_check(
+        working_dir=working_dir,
+        product_name=pname,
+        assigned_features=assigned_features,
+    )
     if verify_result["checked"] and verify_result["skipped"]:
         log.info(
             f"[verify-check] {pname}: {len(verify_result['skipped'])} recipe(s) "
