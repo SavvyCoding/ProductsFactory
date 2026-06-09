@@ -958,10 +958,14 @@ def _run_supervisor_per_product_detectors(product: dict) -> None:
             sc = sc_resp.json() if sc_resp.is_success else {}
         win = sc.get("supervisor_rapid_flap_window_hours") or 1
         thr = sc.get("supervisor_rapid_flap_min_transitions") or 5
+        # Oscillation threshold: flag only when a single status is re-entered
+        # this many times (default 3) — forward pipeline progression visits each
+        # status once and must NOT trip the flap detector.
+        rev = sc.get("supervisor_rapid_flap_min_revisits") or 3
         with _pm_client() as client:
             flap_resp = client.get(
                 f"/api/products/{pid}/flapping-features",
-                params={"window_hours": win, "min_transitions": thr},
+                params={"window_hours": win, "min_transitions": thr, "min_revisits": rev},
             )
             flapping = flap_resp.json() if flap_resp.is_success else []
         if isinstance(flapping, list) and flapping:
