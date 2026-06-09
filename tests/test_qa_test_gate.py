@@ -124,6 +124,26 @@ class TestEnvBrokenClassification:
         assert res["env_broken"] is True             # infra/transient → no bump
         assert res["passed"] is False
 
+    def test_benign_pyenv_rehash_is_ignored(self, tmp_path):
+        """pip exits non-zero ONLY because the pyenv rehash hook can't write the
+        root-owned shims dir (deps installed fine) → must NOT bounce; proceed to
+        tests (testingcalc #1423 infinite loop)."""
+        (tmp_path / "pytest.ini").write_text("[pytest]\n")
+        (tmp_path / "requirements.txt").write_text("fastapi\n")
+
+        def fake_run(cmd, **kw):
+            is_install = "install" in cmd
+            class _R:
+                returncode = 1 if is_install else 0
+                stdout = "" if is_install else "collected 1 item\n"
+                stderr = ("pyenv: cannot rehash: /opt/pyenv/shims isn't writable"
+                          if is_install else "")
+            return _R()
+
+        res = pc._post_coder_test_check(str(tmp_path), fake_run, "test")
+        assert res["env_broken"] is False            # benign rehash ignored
+        assert res["passed"] is True                 # install OK → tests ran & passed
+
 
 class TestContainerTestRun:
     def test_npm_install_prefixed(self, tmp_path, monkeypatch):
