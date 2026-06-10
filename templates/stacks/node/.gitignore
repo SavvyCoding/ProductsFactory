@@ -8,6 +8,12 @@ node_modules/
 out/
 dist/
 build/
+.nuxt/
+.svelte-kit/
+.turbo/
+.parcel-cache/
+*.tsbuildinfo
+*.pack.gz
 
 # Environment
 .env

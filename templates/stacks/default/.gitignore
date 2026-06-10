@@ -9,6 +9,19 @@ out/
 *.dylib
 *.exe
 
+# Framework build/cache dirs (the default stack serves products whose
+# stack string didn't match a known template — be generous here. MyCalc1
+# 2026-06: a "nextjs" product fell through to this file, which had no
+# `.next/` entry, and committed 20MB of webpack caches.)
+.next/
+.nuxt/
+.svelte-kit/
+.turbo/
+.angular/
+.parcel-cache/
+*.tsbuildinfo
+*.pack.gz
+
 # Common dependency dirs (covers many ecosystems)
 node_modules/
 .venv/
