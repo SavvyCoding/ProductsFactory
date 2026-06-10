@@ -718,6 +718,295 @@ def detect_mixed_error_envelopes(
     return findings
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# Detector 8: sandbox path literals fossilized into product code
+# ────────────────────────────────────────────────────────────────────────────
+
+# Extensions scanned by the code-literal detectors (8 and 10). Broader than
+# the *.py-only detectors above because the canonical incidents span stacks.
+_CODE_SCAN_EXTS = (".py", ".js", ".ts", ".tsx", ".jsx", ".go")
+# Exclude set for the code-literal detectors. Deliberately DOES include
+# scanning of tests/ (unlike _DDL_EXCLUDE_DIRS) — the canonical sandbox-
+# literal incidents were all IN test files.
+_CODE_SCAN_EXCLUDE_DIRS = frozenset({
+    ".git", ".venv", "venv", "env", "__pycache__", "node_modules",
+    "Temp", "Results", "dist", "build", ".pytest_cache", ".mypy_cache",
+    ".next", ".nuxt", "coverage", ".nyc_output", "docs",
+})
+
+_SANDBOX_LITERALS = ("/workspace", "/home/agent")
+
+
+def _walk_code_files(wd: Path):
+    """Yield (Path, relpath_str) for every code file under wd, honoring
+    _CODE_SCAN_EXCLUDE_DIRS. Shared by detectors 8 and 10."""
+    for root, dirs, files in os.walk(wd):
+        dirs[:] = [d for d in dirs if d not in _CODE_SCAN_EXCLUDE_DIRS]
+        for fn in files:
+            if not fn.endswith(_CODE_SCAN_EXTS):
+                continue
+            fpath = Path(root) / fn
+            yield fpath, os.path.relpath(fpath, wd).replace("\\", "/")
+
+
+def detect_sandbox_path_literals(
+    working_dir: str | Path, features: list[dict]
+) -> list[Finding]:
+    """Agent-container paths (`/workspace`, `/home/agent`) hardcoded into
+    product source/test files. The committed code then only works inside
+    the agent sandbox: the suite is green in the factory and red on every
+    other machine (CI, fresh clone, dev laptop).
+
+    Canonical incidents (2026-06-09 five-product audit):
+      - MyJira tests/test_db.py greps `/workspace/src` via subprocess
+      - Mytracking tests/test_ddl_dedup.py checks `/workspace/simple_db_test.py`
+      - testingcalc tests/test_alembic.py uses cwd="/workspace" and injects
+        `/home/agent/.local/bin` into PATH
+
+    One finding per offending file (occurrences carry the line numbers) so
+    the fix_hint is concrete. Report-only: lives in _DETECTORS (comment
+    path), not _CHORE_DETECTORS.
+    """
+    wd = Path(working_dir)
+    if not wd.is_dir():
+        return []
+    anchor = _pick_target_feature(features)
+    if anchor is None:
+        return []
+    pid = _product_id_from_features(features)
+    findings: list[Finding] = []
+    for fpath, rel in _walk_code_files(wd):
+        try:
+            text = fpath.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        hits: list[str] = []
+        for i, line in enumerate(text.splitlines(), start=1):
+            if any(lit in line for lit in _SANDBOX_LITERALS):
+                hits.append(f"{rel}:{i}")
+                if len(hits) >= 10:
+                    break
+        if not hits:
+            continue
+        findings.append(Finding(
+            category="sandbox_path_literal",
+            severity="medium",
+            target_type="file",
+            target_id=rel,
+            feature_id=anchor,
+            detail=(
+                f"`{rel}` hardcodes an agent-container path "
+                "(`/workspace` or `/home/agent`). This code only works "
+                "inside the factory's sandbox — it fails on CI, fresh "
+                "clones, and developer machines. Tests written this way "
+                "verify the factory environment, not the product."
+            ),
+            fix_hint=(
+                "Derive paths from the file's own location "
+                "(`Path(__file__).parent`) or the current working "
+                "directory — never an absolute container path. For PATH "
+                "injections, rely on the environment, not a hardcoded "
+                "`/home/agent/...` entry."
+            ),
+            occurrences=hits,
+            product_id=pid,
+        ))
+    return findings
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Detector 9: build artifacts / large binaries tracked in git
+# ────────────────────────────────────────────────────────────────────────────
+
+# Path SEGMENTS that mark a tracked file as build output / cache.
+_ARTIFACT_DIR_SEGMENTS = frozenset({
+    ".next", ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache",
+    "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache",
+    "coverage", ".nyc_output",
+})
+_ARTIFACT_SUFFIXES = (".pack.gz", ".tsbuildinfo", ".pyc")
+_ARTIFACT_SIZE_LIMIT = 1_000_000  # bytes; tracked binaries above this are flagged
+
+
+def _git_tracked_files(wd: Path) -> list[str] | None:
+    """`git ls-files` for the working tree. None when the lookup fails."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(wd), "ls-files"],
+            capture_output=True, text=True, timeout=15, check=True,
+        )
+        return [ln for ln in result.stdout.splitlines() if ln.strip()]
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            FileNotFoundError):
+        return None
+
+
+def detect_tracked_build_artifacts(
+    working_dir: str | Path, features: list[dict]
+) -> list[Finding]:
+    """Build output, dependency caches, or large binaries tracked in git.
+
+    Canonical incident: MyCalc1 2026-06 — commit 73b3226 swept the whole
+    `.next/` dev-build directory into the session branch (40 files incl. a
+    9.16MB webpack `pack.gz`), reviewer approved, auto-merge landed it, and
+    every rework re-committed a *grown* cache until `.git` hit 93MB on a
+    558-line product. Guard 13 covers debris FILENAMES (`*.bak`, `_old_`)
+    but has no concept of build directories or binary size.
+
+    Emits one finding per matched category-style reason, with occurrences
+    capped at 20 paths. severity="high" but kept on the comment path
+    (_DETECTORS) for the report-only soak; promotion to _CHORE_DETECTORS
+    (and a post-coder bounce guard) comes after false-positive review.
+    """
+    wd = Path(working_dir)
+    if not wd.is_dir():
+        return []
+    anchor = _pick_target_feature(features)
+    if anchor is None:
+        return []
+    tracked = _git_tracked_files(wd)
+    if not tracked:
+        return []
+    pid = _product_id_from_features(features)
+
+    offenders: list[str] = []
+    for rel in tracked:
+        segments = rel.split("/")
+        reason = ""
+        if any(seg in _ARTIFACT_DIR_SEGMENTS for seg in segments[:-1]):
+            reason = "build/cache directory"
+        elif rel.endswith(_ARTIFACT_SUFFIXES):
+            reason = "build artifact suffix"
+        else:
+            try:
+                size = (wd / rel).stat().st_size
+            except OSError:
+                continue
+            if size > _ARTIFACT_SIZE_LIMIT:
+                reason = f"large file ({size / 1_000_000:.1f}MB)"
+        if reason:
+            offenders.append(f"{rel} — {reason}")
+
+    if not offenders:
+        return []
+    shown = offenders[:20]
+    more = len(offenders) - len(shown)
+    if more > 0:
+        shown.append(f"... and {more} more")
+    return [Finding(
+        category="tracked_build_artifacts",
+        severity="high",
+        target_type="file",
+        target_id=shown[0].split(" — ")[0],
+        feature_id=anchor,
+        detail=(
+            f"{len(offenders)} tracked file(s) are build output, dependency "
+            "caches, or >1MB binaries. These bloat the repo permanently "
+            "(every rework commit re-adds a grown cache), leak local config "
+            "(telemetry ids, container paths), and bury real diffs."
+        ),
+        fix_hint=(
+            "`git rm -r --cached` the offending paths, add the directories/"
+            "patterns to .gitignore (factory-side — the file is RO-mounted), "
+            "and commit. For already-bloated history an operator must run "
+            "`git filter-repo`."
+        ),
+        occurrences=shown,
+        product_id=pid,
+    )]
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Detector 10: stub-confession comments in production code
+# ────────────────────────────────────────────────────────────────────────────
+
+# High-precision phrases agents write when shipping a placeholder while
+# claiming the feature complete. Deliberately narrow — each phrase comes
+# from a real shipped incident, and the comment path tolerates the
+# occasional benign hit.
+_STUB_CONFESSION_PHRASES = (
+    "in a real implementation",   # DocumentSign tasks.py — email stub that only logs
+    "in a real app",
+    "in a real system",
+    "in production, use",         # Mytracking db.py — static-salt SHA256 confession
+    "in a production system",
+    "this is a placeholder",
+    "for now, just log",
+)
+_TEST_DIR_NAMES = frozenset({"tests", "test", "__tests__", "testcases"})
+
+
+def detect_stub_confessions(
+    working_dir: str | Path, features: list[dict]
+) -> list[Finding]:
+    """Comments in NON-TEST code confessing the implementation is a stub
+    ("in a real implementation, this would send actual emails...") while
+    the feature shipped as complete.
+
+    Canonical incidents (2026-06-09 five-product audit):
+      - DocumentSign src/tasks.py: completion-email task logs instead of
+        sending — while a working SMTP module sat unused in src/lib/
+      - MyJira src/email_worker.py: `enqueue_email` that synchronously
+        sends, docstring promising a queue "in a real implementation"
+      - Mytracking src/db.py: static salt + "In production, use a proper
+        salt per user."
+
+    Test files are excluded (fakes/stubs are legitimate there). One
+    finding per file, occurrences carry line numbers. Report-only.
+    """
+    wd = Path(working_dir)
+    if not wd.is_dir():
+        return []
+    anchor = _pick_target_feature(features)
+    if anchor is None:
+        return []
+    pid = _product_id_from_features(features)
+    findings: list[Finding] = []
+    for fpath, rel in _walk_code_files(wd):
+        parts = rel.lower().split("/")
+        if any(p in _TEST_DIR_NAMES for p in parts[:-1]):
+            continue
+        base = parts[-1]
+        if base.startswith("test_") or base.endswith(("_test.py", ".test.ts", ".test.tsx", ".test.js", ".spec.ts", ".spec.js")):
+            continue
+        try:
+            text = fpath.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        hits: list[str] = []
+        for i, line in enumerate(text.splitlines(), start=1):
+            low = line.lower()
+            if any(p in low for p in _STUB_CONFESSION_PHRASES):
+                hits.append(f"{rel}:{i} — {line.strip()[:100]}")
+                if len(hits) >= 5:
+                    break
+        if not hits:
+            continue
+        findings.append(Finding(
+            category="stub_confession",
+            severity="medium",
+            target_type="file",
+            target_id=rel,
+            feature_id=anchor,
+            detail=(
+                f"`{rel}` contains a comment confessing the code is a "
+                "stub/placeholder ('in a real implementation...'). The "
+                "feature shipped as complete; the deferred half typically "
+                "never lands and the placeholder silently becomes "
+                "production behavior."
+            ),
+            fix_hint=(
+                "Either implement the real behavior now, or name the "
+                "function honestly (e.g. `send_email_now`, not "
+                "`enqueue_email`) and file a follow-up feature for the "
+                "deferred half — then delete the confession comment."
+            ),
+            occurrences=hits,
+            product_id=pid,
+        ))
+    return findings
+
+
 # Retired 2026-05-30: `detect_architect_review_pending` filed chores from
 # architect review docs but the actuator (coder) couldn't write to
 # ARCHITECTURE.md (RO-mounted via `_PM_CURATED_RO_FILES` for non-architect
@@ -738,6 +1027,13 @@ _DETECTORS = (
     detect_shell_artifact_files,
     detect_design_doc_mismatch,
     detect_placeholder_template_content,
+    # 2026-06-09 five-product-audit batch — all three are REPORT-ONLY
+    # (comment path) for the soak period; promotion to _CHORE_DETECTORS
+    # or post-coder bounce guards only after false-positive review across
+    # ≥2 products (Guard-17-tuning protocol).
+    detect_sandbox_path_literals,
+    detect_tracked_build_artifacts,
+    detect_stub_confessions,
 )
 
 # Objective code-drift detectors whose high-severity findings are routed to
