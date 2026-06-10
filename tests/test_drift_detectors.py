@@ -20,7 +20,10 @@ from orchestrator.drift_detectors import (  # noqa: E402
     detect_design_doc_mismatch,
     detect_duplicate_ddl,
     detect_placeholder_template_content,
+    detect_sandbox_path_literals,
     detect_shell_artifact_files,
+    detect_stub_confessions,
+    detect_tracked_build_artifacts,
     file_corrective_chores,
     post_findings,
     run_all,
@@ -842,5 +845,180 @@ class TestDetectMixedErrorEnvelopes:
     def test_no_errors_no_finding(self, tmp_path):
         _write(tmp_path / "src" / "calculate.py", "def calc(a, b): return a + b\n")
         assert detect_mixed_error_envelopes(tmp_path, [_feature(1, product_id=24)]) == []
+
+
+# ── detect_sandbox_path_literals ────────────────────────────────────────────
+
+
+class TestDetectSandboxPathLiterals:
+    def test_flags_workspace_literal_in_test_file(self, tmp_path):
+        # Canonical MyJira/Mytracking shape: grep against /workspace in tests.
+        _write(tmp_path / "tests" / "test_db.py", (
+            "import subprocess\n"
+            "def test_ddl_once():\n"
+            "    subprocess.run(['grep', '-rn', 'CREATE TABLE', '/workspace/src'])\n"
+        ))
+        out = detect_sandbox_path_literals(tmp_path, [_feature(1, product_id=24)])
+        assert len(out) == 1
+        assert out[0].category == "sandbox_path_literal"
+        assert out[0].target_id == "tests/test_db.py"
+        assert out[0].occurrences == ["tests/test_db.py:3"]
+
+    def test_flags_home_agent_path_injection(self, tmp_path):
+        # Canonical testingcalc shape: PATH injection of the agent homedir.
+        _write(tmp_path / "tests" / "test_tools.py", (
+            "import os\n"
+            "os.environ['PATH'] = '/home/agent/.local/bin:' + os.environ['PATH']\n"
+        ))
+        out = detect_sandbox_path_literals(tmp_path, [_feature(1)])
+        assert len(out) == 1
+
+    def test_one_finding_per_file_with_line_occurrences(self, tmp_path):
+        _write(tmp_path / "src" / "config.py", (
+            "BASE = '/workspace'\n"
+            "OTHER = '/workspace/src'\n"
+        ))
+        out = detect_sandbox_path_literals(tmp_path, [_feature(1)])
+        assert len(out) == 1
+        assert out[0].occurrences == ["src/config.py:1", "src/config.py:2"]
+
+    def test_clean_code_no_findings(self, tmp_path):
+        _write(tmp_path / "src" / "main.py", (
+            "from pathlib import Path\n"
+            "BASE = Path(__file__).parent\n"
+        ))
+        assert detect_sandbox_path_literals(tmp_path, [_feature(1)]) == []
+
+    def test_docs_and_excluded_dirs_not_scanned(self, tmp_path):
+        # Story docs legitimately quote /workspace (prompts use it).
+        _write(tmp_path / "docs" / "story_1.md", "run in /workspace\n")
+        _write(tmp_path / "node_modules" / "x" / "index.js", "p = '/workspace'\n")
+        assert detect_sandbox_path_literals(tmp_path, [_feature(1)]) == []
+
+    def test_non_code_extensions_not_scanned(self, tmp_path):
+        # Product CLAUDE.md / AGENT_WORKFLOW.md mention /workspace by design.
+        _write(tmp_path / "CLAUDE.md", "Working directory: /workspace\n")
+        assert detect_sandbox_path_literals(tmp_path, [_feature(1)]) == []
+
+    def test_no_anchor_feature_skips(self, tmp_path):
+        _write(tmp_path / "src" / "x.py", "p = '/workspace'\n")
+        assert detect_sandbox_path_literals(tmp_path, []) == []
+
+
+# ── detect_tracked_build_artifacts ──────────────────────────────────────────
+
+
+import subprocess as _sp_mod  # noqa: E402
+
+
+def _git_init_with(tmp_path, relpaths):
+    """Init a repo at tmp_path and commit the given relative paths."""
+    _sp_mod.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
+    for rel in relpaths:
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if not p.exists():
+            p.write_text("x", encoding="utf-8")
+    _sp_mod.run(["git", "-C", str(tmp_path), "add", "-f", "."], check=True)
+    _sp_mod.run(
+        ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c",
+         "user.name=t", "commit", "-q", "-m", "seed"],
+        check=True,
+    )
+
+
+class TestDetectTrackedBuildArtifacts:
+    def test_flags_next_build_dir(self, tmp_path):
+        # Canonical MyCalc1 shape: .next/ swept into the commit.
+        _git_init_with(tmp_path, [
+            ".next/cache/webpack/client-development/1.pack.gz",
+            "src/app/page.tsx",
+        ])
+        out = detect_tracked_build_artifacts(tmp_path, [_feature(1, product_id=24)])
+        assert len(out) == 1
+        assert out[0].category == "tracked_build_artifacts"
+        assert out[0].severity == "high"
+        assert any(".next/" in o for o in out[0].occurrences)
+        # The legit source file is not an offender.
+        assert not any("page.tsx" in o for o in out[0].occurrences)
+
+    def test_flags_artifact_suffix_outside_known_dirs(self, tmp_path):
+        _git_init_with(tmp_path, ["tsconfig.tsbuildinfo", "src/index.ts"])
+        out = detect_tracked_build_artifacts(tmp_path, [_feature(1)])
+        assert len(out) == 1
+        assert any("tsconfig.tsbuildinfo" in o for o in out[0].occurrences)
+
+    def test_flags_large_tracked_binary(self, tmp_path):
+        big = tmp_path / "assets" / "blob.bin"
+        big.parent.mkdir(parents=True)
+        big.write_bytes(b"\x00" * 1_100_000)
+        _git_init_with(tmp_path, ["assets/blob.bin", "src/main.py"])
+        out = detect_tracked_build_artifacts(tmp_path, [_feature(1)])
+        assert len(out) == 1
+        assert any("blob.bin" in o and "large file" in o for o in out[0].occurrences)
+
+    def test_clean_repo_no_findings(self, tmp_path):
+        _git_init_with(tmp_path, ["src/main.py", "tests/test_main.py", "README.md"])
+        assert detect_tracked_build_artifacts(tmp_path, [_feature(1)]) == []
+
+    def test_untracked_artifacts_not_flagged(self, tmp_path):
+        # .next exists on disk but is NOT tracked → gitignore is working;
+        # nothing to report.
+        _git_init_with(tmp_path, ["src/main.py"])
+        d = tmp_path / ".next" / "cache"
+        d.mkdir(parents=True)
+        (d / "0.pack.gz").write_text("x")
+        assert detect_tracked_build_artifacts(tmp_path, [_feature(1)]) == []
+
+    def test_not_a_git_repo_no_findings(self, tmp_path):
+        (tmp_path / "x.pyc").write_text("x")
+        assert detect_tracked_build_artifacts(tmp_path, [_feature(1)]) == []
+
+
+# ── detect_stub_confessions ─────────────────────────────────────────────────
+
+
+class TestDetectStubConfessions:
+    def test_flags_real_implementation_confession(self, tmp_path):
+        # Canonical DocumentSign tasks.py shape.
+        _write(tmp_path / "src" / "tasks.py", (
+            "def send_completion_email(doc_id):\n"
+            "    # In a real implementation, this would send actual emails.\n"
+            "    # For now, just log.\n"
+            "    log.info('Would send completion email')\n"
+        ))
+        out = detect_stub_confessions(tmp_path, [_feature(1, product_id=24)])
+        assert len(out) == 1
+        assert out[0].category == "stub_confession"
+        assert out[0].target_id == "src/tasks.py"
+        assert out[0].occurrences[0].startswith("src/tasks.py:2")
+
+    def test_flags_in_production_use_confession(self, tmp_path):
+        # Canonical Mytracking static-salt shape.
+        _write(tmp_path / "src" / "db.py", (
+            "salt = 'mytracking_salt'  # In production, use a proper salt per user\n"
+        ))
+        out = detect_stub_confessions(tmp_path, [_feature(1)])
+        assert len(out) == 1
+
+    def test_test_files_excluded(self, tmp_path):
+        # Stubs/fakes are legitimate in tests.
+        _write(tmp_path / "tests" / "test_mail.py",
+               "# in a real implementation we'd hit SMTP; the fake is fine here\n")
+        _write(tmp_path / "src" / "thing.test.ts",
+               "// in a real implementation ...\n")
+        assert detect_stub_confessions(tmp_path, [_feature(1)]) == []
+
+    def test_clean_code_no_findings(self, tmp_path):
+        _write(tmp_path / "src" / "mail.py", (
+            "def send_email(to, body):\n"
+            "    smtp.send(to, body)\n"
+        ))
+        assert detect_stub_confessions(tmp_path, [_feature(1)]) == []
+
+    def test_case_insensitive(self, tmp_path):
+        _write(tmp_path / "src" / "worker.py",
+               "# IN A REAL IMPLEMENTATION, this would add to a queue\n")
+        assert len(detect_stub_confessions(tmp_path, [_feature(1)])) == 1
 
 
