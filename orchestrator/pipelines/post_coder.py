@@ -829,10 +829,20 @@ def _post_coder_lint_check(
         _re.compile(r"_temp[._]"),
         _re.compile(r"_old[._]"),
         _re.compile(r"_fixed[._]"),
-        _re.compile(r"_v[0-9]+[._]"),
-        _re.compile(r"_complete[._]"),
         _re.compile(r"^temp_fixed"),
         _re.compile(r"^src_(head|tail)_"),
+    ]
+    # Patterns that ALSO match legitimate naming conventions — `api_v2.py`
+    # (REST API versioning), `mark_complete.py` / `order_complete.ts`
+    # (verb_noun handlers). 2026-06-09 five-product audit: because 13a is
+    # the AUTO-RM category, an unconditional match doesn't just bounce a
+    # legit file, it `git rm -f`s it out of the commit. These only count
+    # as debris when a bare-stem sibling exists in the same directory
+    # (`main.py` alongside `main_complete.py` = rework copy; `api_v2.py`
+    # with no `api.py` = versioned module, pass through).
+    _DEBRIS_SIBLING_PATTERNS = [
+        _re.compile(r"_v[0-9]+[._]"),
+        _re.compile(r"_complete[._]"),
     ]
     _SCRATCH_DIRS = ("Temp/", "temp/", "temp_storage/")
     _SOURCE_EXTENSIONS = (".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".rb")
@@ -843,6 +853,23 @@ def _post_coder_lint_check(
         fname = _PP(f).name
         # 13a: name patterns
         debris_match = next((p.pattern for p in _DEBRIS_PATTERNS if p.search(fname)), None)
+        if debris_match is None:
+            # Sibling-required patterns: debris ONLY when the bare-stem
+            # sibling exists (see _DEBRIS_SIBLING_PATTERNS comment).
+            for p in _DEBRIS_SIBLING_PATTERNS:
+                m_sib = p.search(fname)
+                if not m_sib:
+                    continue
+                # api_v2.py → api.py ; main_complete.py → main.py
+                sibling = fname[:m_sib.start()] + fname[m_sib.end() - 1:]
+                try:
+                    if sibling != fname and (
+                        (_PP(working_dir) / f).parent / sibling
+                    ).exists():
+                        debris_match = f"{p.pattern} (sibling {sibling} exists)"
+                        break
+                except Exception:
+                    pass
         if debris_match:
             # Honour the exemption marker on the first non-empty line
             first = next((ln for ln in _read(f).splitlines() if ln.strip()), "")
