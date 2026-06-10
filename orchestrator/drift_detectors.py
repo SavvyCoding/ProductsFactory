@@ -1295,6 +1295,100 @@ def detect_unreachable_emitted_urls(
     return findings[:5]  # cap per cycle
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# Detector 13: secret-sentinel — placeholder values standing in for secrets
+# ────────────────────────────────────────────────────────────────────────────
+
+# Guard 5 catches the DIRECT form (`jwt.encode(..., os.environ.get("S", "x"))`).
+# This detector catches the indirection the guard taught agents to write
+# instead: a helper that returns a sentinel string when the env var is unset,
+# which then flows into signing/hashing — textual compliance, semantic
+# violation. Canonical: Mytracking branch coder/9693adc8, `_get_env_var()`
+# returning the literal `"<MISSING_ENV_VAR_JWT_SECRET>"` used as the JWT
+# signing key (a predictable key = anyone can forge tokens).
+_SECRET_SENTINEL_RES = (
+    # The observed evasion shape: an angle-bracket MISSING/UNSET marker.
+    re.compile(r"['\"]<\s*(?:MISSING|UNSET|NO)_?ENV", re.I),
+    # Sentinel-named secret literals: "placeholder-secret", "changeme_key",
+    # "dummy-token", "default_password" ...
+    re.compile(r"['\"](?:placeholder|change[-_]?me|dummy|default|insecure|sample)[-_]?(?:secret|key|token|password)[^'\"]*['\"]", re.I),
+    # Fake credential material with the sentinel word EMBEDDED, e.g. the
+    # testingcalc seed rows: "$2b$12$placeholderhashplaceholderhash..." under
+    # a comment claiming they're valid bcrypt hashes (they are not — the
+    # first real login attempt raises ValueError → 500).
+    re.compile(r"['\"][^'\"]*placeholder[^'\"]*(?:hash|secret|key|token|password)[^'\"]*['\"]", re.I),
+    # env-get with a non-empty literal default on a secret-ish var name —
+    # anywhere, not just crypto call sites (Guard 5's scope).
+    re.compile(r"environ\.get\(\s*['\"][A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|API_KEY)[A-Z0-9_]*['\"]\s*,\s*['\"][^'\"]+['\"]", re.I),
+)
+
+
+def detect_secret_sentinel(
+    working_dir: str | Path, features: list[dict]
+) -> list[Finding]:
+    """Sentinel/placeholder strings standing in for secrets in NON-TEST code.
+    A predictable stand-in flowing into signing/hashing/auth is a hardcoded
+    secret in disguise — and it ships exactly when the env var is missing,
+    i.e. in the least-configured (most exposed) deployments. Test files are
+    excluded (fixed test secrets are legitimate there). One finding per
+    file. Report-only.
+    """
+    wd = Path(working_dir)
+    if not wd.is_dir():
+        return []
+    anchor = _pick_target_feature(features)
+    if anchor is None:
+        return []
+    pid = _product_id_from_features(features)
+    findings: list[Finding] = []
+    for fpath, rel in _walk_code_files(wd):
+        parts = rel.lower().split("/")
+        if any(p in _TEST_DIR_NAMES for p in parts[:-1]):
+            continue
+        base = parts[-1]
+        if base.startswith("test_") or base.endswith(
+            ("_test.py", ".test.ts", ".test.tsx", ".test.js", ".spec.ts", ".spec.js")
+        ):
+            continue
+        try:
+            text = fpath.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        hits: list[str] = []
+        for i, line in enumerate(text.splitlines(), start=1):
+            if any(p.search(line) for p in _SECRET_SENTINEL_RES):
+                hits.append(f"{rel}:{i} — {line.strip()[:100]}")
+                if len(hits) >= 5:
+                    break
+        if not hits:
+            continue
+        findings.append(Finding(
+            category="secret_sentinel",
+            severity="high",
+            target_type="file",
+            target_id=rel,
+            feature_id=anchor,
+            detail=(
+                f"`{rel}` uses a placeholder/sentinel value where a secret "
+                "belongs (or defaults a secret-named env var to a literal). "
+                "A predictable stand-in that flows into signing/hashing is "
+                "a hardcoded secret in disguise — it activates precisely "
+                "when the env var is missing."
+            ),
+            fix_hint=(
+                "Fail closed instead: if the secret env var is unset, raise "
+                "at startup or return 503 from the route — never substitute "
+                "a constant. (This is the INTENT behind the existing "
+                "hardcoded-fallback rule; routing the constant through a "
+                "helper does not satisfy it.)"
+            ),
+            occurrences=hits,
+            product_id=pid,
+            dedupe_key=f"secret_sentinel:{rel}",
+        ))
+    return findings
+
+
 # Retired 2026-05-30: `detect_architect_review_pending` filed chores from
 # architect review docs but the actuator (coder) couldn't write to
 # ARCHITECTURE.md (RO-mounted via `_PM_CURATED_RO_FILES` for non-architect
@@ -1324,6 +1418,7 @@ _DETECTORS = (
     detect_stub_confessions,
     detect_undeclared_backend_deps,
     detect_unreachable_emitted_urls,
+    detect_secret_sentinel,
 )
 
 # Objective code-drift detectors whose high-severity findings are routed to
