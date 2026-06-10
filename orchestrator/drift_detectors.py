@@ -1007,6 +1007,294 @@ def detect_stub_confessions(
     return findings
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# Detector 11: undeclared backend dependencies (Guard 18's blind spot)
+# ────────────────────────────────────────────────────────────────────────────
+
+# Import → (required distribution, why). Guard 18 walks DIRECT imports, so a
+# package whose import resolves to a declared dep but which needs an
+# UNDECLARED backend at runtime sails through — the agent image pre-bakes
+# the backend, the container gate passes, and a fresh
+# `pip install -r requirements.txt && pytest` fails. Canonical: MyJira
+# 2026-06-09 (`from passlib.hash import bcrypt` with no bcrypt dep;
+# `fastapi.testclient` with no httpx). Keep entries high-precision.
+_BACKEND_DEP_PAIRS: dict[str, tuple[str, str]] = {
+    "passlib": ("bcrypt", "passlib's bcrypt handler raises MissingBackendError without the bcrypt package"),
+    "fastapi.testclient": ("httpx", "fastapi.testclient.TestClient is httpx-based; httpx is not a fastapi dependency"),
+    "starlette.testclient": ("httpx", "starlette.testclient.TestClient is httpx-based; httpx is not a starlette dependency"),
+}
+
+_IMPORT_RE = re.compile(
+    r"^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import|import\s+([A-Za-z_][\w.]*))",
+    re.MULTILINE,
+)
+
+
+def _declared_requirements(wd: Path) -> set[str] | None:
+    """Distribution names declared in requirements*.txt (lowercased,
+    version specs stripped). None when no requirements file exists —
+    callers should skip (non-Python product or different dep system)."""
+    found_any = False
+    declared: set[str] = set()
+    for name in ("requirements.txt", "requirements-dev.txt", "requirements_dev.txt"):
+        req = wd / name
+        if not req.is_file():
+            continue
+        found_any = True
+        try:
+            for line in req.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.split("#", 1)[0].strip()
+                if not line or line.startswith("-"):
+                    continue
+                pkg = re.split(r"[<>=!~\[;\s]", line, maxsplit=1)[0].strip().lower()
+                if pkg:
+                    declared.add(pkg)
+        except Exception:
+            continue
+    return declared if found_any else None
+
+
+def detect_undeclared_backend_deps(
+    working_dir: str | Path, features: list[dict]
+) -> list[Finding]:
+    """Imports whose runtime BACKEND package is missing from requirements —
+    the one-level-deeper sibling of Guard 18 (deps coherence). The product
+    works inside the pre-baked agent image and fails on every fresh
+    install. One finding per missing backend. Report-only.
+    """
+    wd = Path(working_dir)
+    if not wd.is_dir():
+        return []
+    anchor = _pick_target_feature(features)
+    if anchor is None:
+        return []
+    declared = _declared_requirements(wd)
+    if declared is None:
+        return []
+    pid = _product_id_from_features(features)
+
+    # module-or-prefix → first occurrence site
+    triggered: dict[str, str] = {}
+    for fpath, rel in _walk_code_files(wd):
+        if not rel.endswith(".py"):
+            continue
+        try:
+            text = fpath.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for m in _IMPORT_RE.finditer(text):
+            mod = (m.group(1) or m.group(2) or "").lower()
+            for trigger in _BACKEND_DEP_PAIRS:
+                if mod == trigger or mod.startswith(trigger + "."):
+                    triggered.setdefault(trigger, rel)
+
+    findings: list[Finding] = []
+    for trigger, site in sorted(triggered.items()):
+        backend, why = _BACKEND_DEP_PAIRS[trigger]
+        if backend.lower() in declared:
+            continue
+        findings.append(Finding(
+            category="undeclared_backend_dep",
+            severity="high",
+            target_type="file",
+            target_id="requirements.txt",
+            feature_id=anchor,
+            detail=(
+                f"`{site}` imports `{trigger}` but `{backend}` is not in "
+                f"requirements*.txt — {why}. The agent image pre-bakes "
+                f"`{backend}` so the container gate passes, but a fresh "
+                "`pip install -r requirements.txt` install fails."
+            ),
+            fix_hint=f"Add `{backend}` to requirements.txt.",
+            occurrences=[f"{site} imports {trigger}; missing backend: {backend}"],
+            product_id=pid,
+            dedupe_key=f"undeclared_backend_dep:{backend}",
+        ))
+    return findings
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Detector 12: emitted URLs that no registered route serves
+# ────────────────────────────────────────────────────────────────────────────
+
+# Route registrations: Flask `@app.route("/x")`, FastAPI/Flask
+# `@router.get("/x")`, plus `add_url_rule("/x"` / `add_api_route("/x"`.
+_ROUTE_PATH_RE = re.compile(
+    r"@\w+\.(?:route|get|post|put|patch|delete|head|options)\s*\(\s*[fr]?['\"]([^'\"]+)['\"]"
+    r"|\.(?:add_url_rule|add_api_route)\s*\(\s*[fr]?['\"]([^'\"]+)['\"]",
+)
+# Emitted-URL candidates: a quoted app-relative path on a line that names a
+# URL-ish variable/key. Narrow on purpose — generic "/"-strings (file paths,
+# regexes) must not match.
+_URL_CONTEXT_RE = re.compile(r"url|href|link|redirect|location", re.IGNORECASE)
+_EMITTED_PATH_RE = re.compile(r"[fr]?['\"](/[A-Za-z0-9_\-{][^'\"\s]*)['\"]")
+_STATIC_SUFFIXES = (".css", ".js", ".png", ".jpg", ".svg", ".ico", ".map", ".woff", ".woff2", ".html")
+
+
+def _norm_segments(path: str) -> list[str]:
+    """Split a path into segments with `{param}`/`<param>` → "*"."""
+    segs = [s for s in path.split("?", 1)[0].split("/") if s]
+    out = []
+    for s in segs:
+        if "{" in s or "<" in s:
+            out.append("*")
+        else:
+            out.append(s)
+    return out
+
+
+def _segs_match(a: list[str], b: list[str]) -> bool:
+    """Same-length segment-wise match; "*" matches any single segment."""
+    if len(a) != len(b):
+        return False
+    return all(x == y or x == "*" or y == "*" for x, y in zip(a, b))
+
+
+def _route_serves(
+    candidate: list[str], route: list[str], prefixes: list[list[str]],
+) -> bool:
+    """Whether a registered `route` plausibly serves the emitted
+    `candidate` path. Three accepted shapes:
+
+      (a) full-length wildcard match (route registered with its full path);
+      (b) an explicitly collected mount prefix + route == candidate
+          (`APIRouter(prefix=...)` / `include_router(..., prefix=...)`);
+      (c) route is a TAIL of candidate with at least one LITERAL segment
+          equality — the conservative fallback for prefixes we failed to
+          collect. The literal-equality requirement is load-bearing: a
+          bare tail-match lets any candidate ending in a {param} segment
+          be "served" by every 1-segment route in the app (`/usage`
+          "matching" `/sign/{token}` — the DocumentSign miss during
+          detector development).
+    """
+    if not route:
+        return False
+    if _segs_match(candidate, route):
+        return True
+    for p in prefixes:
+        if _segs_match(candidate, p + route):
+            return True
+    if len(route) < len(candidate):
+        tail = candidate[len(candidate) - len(route):]
+        literal_hit = False
+        for c, r in zip(tail, route):
+            if c == r and c != "*":
+                literal_hit = True
+            elif c != r and c != "*" and r != "*":
+                return False
+        return literal_hit
+    return False
+
+
+_MOUNT_PREFIX_RE = re.compile(r"prefix\s*=\s*[fr]?['\"](/[^'\"]+)['\"]")
+
+
+def detect_unreachable_emitted_urls(
+    working_dir: str | Path, features: list[dict]
+) -> list[Finding]:
+    """App-relative URLs the product EMITS (signing links, redirects) that
+    no registered route serves. The deterministic slice of the "no session
+    owns the end-to-end journey" failure: one story generates
+    `signing_url=f"/sign/{token}"`, no story ever builds `/sign/...`, every
+    per-story gate passes, and the product's core flow 404s.
+
+    Canonical incidents (2026-06-09 five-product audit):
+      - DocumentSign: sending.py / zapier.py return `/sign/{token}`; no
+        /sign route exists anywhere — recipients cannot sign.
+      - testingcalc: OAuth callback redirects to `{FRONTEND_URL}/callback`
+        with no corresponding route.
+
+    Python-first. Candidates are quoted "/..." literals on lines that name
+    a URL-ish identifier (url/href/link/redirect/location). Matching is
+    segment-wise with `{param}`→"*" and TAIL-match so router prefixes
+    don't false-positive. Skips entirely when the product registers no
+    routes (not a web app / unparsed framework). Report-only.
+    """
+    wd = Path(working_dir)
+    if not wd.is_dir():
+        return []
+    anchor = _pick_target_feature(features)
+    if anchor is None:
+        return []
+    pid = _product_id_from_features(features)
+
+    routes: list[list[str]] = []
+    prefixes: list[list[str]] = []
+    emitted: list[tuple[str, str]] = []  # (path, "rel:line")
+    for fpath, rel in _walk_code_files(wd):
+        if not rel.endswith(".py"):
+            continue
+        try:
+            text = fpath.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for m in _ROUTE_PATH_RE.finditer(text):
+            path = m.group(1) or m.group(2)
+            if path and path.startswith("/"):
+                routes.append(_norm_segments(path))
+        for m in _MOUNT_PREFIX_RE.finditer(text):
+            prefixes.append(_norm_segments(m.group(1)))
+        for i, line in enumerate(text.splitlines(), start=1):
+            if _ROUTE_PATH_RE.search(line):
+                continue  # registration line, not an emission
+            if not _URL_CONTEXT_RE.search(line):
+                continue
+            for pm in _EMITTED_PATH_RE.finditer(line):
+                path = pm.group(1)
+                if path.rstrip("/") == "" or path.startswith("//"):
+                    continue
+                if path.lower().endswith(_STATIC_SUFFIXES):
+                    continue
+                if any(seg in ("static", "docs", "redoc", "openapi.json")
+                       for seg in path.split("/")[1:2]):
+                    continue
+                emitted.append((path, f"{rel}:{i}"))
+
+    if not routes or not emitted:
+        return []  # no parsed web framework, or nothing emitted — skip
+
+    findings: list[Finding] = []
+    seen: set[tuple[str, ...]] = set()
+    for path, site in emitted:
+        cand = _norm_segments(path)
+        if not cand:
+            continue
+        if any(_route_serves(cand, r, prefixes) for r in routes):
+            continue
+        # Dedupe on NORMALIZED segments — `f"/sign/{token}"` and
+        # `f"/sign/{token_row['token']}"` are the same unreachable route.
+        key = tuple(cand)
+        if key in seen:
+            continue
+        seen.add(key)
+        norm_path = "/" + "/".join(cand)
+        sites = [s for p, s in emitted if tuple(_norm_segments(p)) == key][:5]
+        findings.append(Finding(
+            category="unreachable_emitted_url",
+            severity="high",
+            target_type="code",
+            target_id=norm_path,
+            feature_id=anchor,
+            detail=(
+                f"The product emits the URL `{norm_path}` (assigned to a "
+                "url/link/redirect value; `*` = parameter) but no "
+                "registered route serves it. Users following this link "
+                "get a 404 — the classic seam between two stories that "
+                "each passed their own gates."
+            ),
+            fix_hint=(
+                f"Either register a route that serves `{norm_path}` or fix "
+                "the emitted URL to point at an existing route. If this is "
+                "a frontend-only path served by another app, ignore — and "
+                "tell the architect to note it in ARCHITECTURE.md."
+            ),
+            occurrences=sites,
+            product_id=pid,
+            dedupe_key=f"unreachable_emitted_url:{norm_path}",
+        ))
+    return findings[:5]  # cap per cycle
+
+
 # Retired 2026-05-30: `detect_architect_review_pending` filed chores from
 # architect review docs but the actuator (coder) couldn't write to
 # ARCHITECTURE.md (RO-mounted via `_PM_CURATED_RO_FILES` for non-architect
@@ -1027,13 +1315,15 @@ _DETECTORS = (
     detect_shell_artifact_files,
     detect_design_doc_mismatch,
     detect_placeholder_template_content,
-    # 2026-06-09 five-product-audit batch — all three are REPORT-ONLY
+    # 2026-06-09 five-product-audit batch — all five are REPORT-ONLY
     # (comment path) for the soak period; promotion to _CHORE_DETECTORS
     # or post-coder bounce guards only after false-positive review across
     # ≥2 products (Guard-17-tuning protocol).
     detect_sandbox_path_literals,
     detect_tracked_build_artifacts,
     detect_stub_confessions,
+    detect_undeclared_backend_deps,
+    detect_unreachable_emitted_urls,
 )
 
 # Objective code-drift detectors whose high-severity findings are routed to

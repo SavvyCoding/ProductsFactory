@@ -24,6 +24,8 @@ from orchestrator.drift_detectors import (  # noqa: E402
     detect_shell_artifact_files,
     detect_stub_confessions,
     detect_tracked_build_artifacts,
+    detect_undeclared_backend_deps,
+    detect_unreachable_emitted_urls,
     file_corrective_chores,
     post_findings,
     run_all,
@@ -1020,5 +1022,139 @@ class TestDetectStubConfessions:
         _write(tmp_path / "src" / "worker.py",
                "# IN A REAL IMPLEMENTATION, this would add to a queue\n")
         assert len(detect_stub_confessions(tmp_path, [_feature(1)])) == 1
+
+
+# ── detect_undeclared_backend_deps ──────────────────────────────────────────
+
+
+class TestDetectUndeclaredBackendDeps:
+    def test_passlib_without_bcrypt_flagged(self, tmp_path):
+        # Canonical MyJira shape.
+        _write(tmp_path / "requirements.txt", "passlib==1.7.4\nfastapi\n")
+        _write(tmp_path / "src" / "auth.py",
+               "from passlib.hash import bcrypt\n")
+        out = detect_undeclared_backend_deps(tmp_path, [_feature(1, product_id=24)])
+        assert len(out) == 1
+        assert out[0].category == "undeclared_backend_dep"
+        assert "bcrypt" in out[0].fix_hint
+
+    def test_testclient_without_httpx_flagged(self, tmp_path):
+        _write(tmp_path / "requirements.txt", "fastapi\n")
+        _write(tmp_path / "tests" / "test_api.py",
+               "from fastapi.testclient import TestClient\n")
+        out = detect_undeclared_backend_deps(tmp_path, [_feature(1)])
+        assert len(out) == 1
+        assert "httpx" in out[0].fix_hint
+
+    def test_backend_declared_passes(self, tmp_path):
+        _write(tmp_path / "requirements.txt", "passlib\nbcrypt>=4.0\n")
+        _write(tmp_path / "src" / "auth.py",
+               "from passlib.hash import bcrypt\n")
+        assert detect_undeclared_backend_deps(tmp_path, [_feature(1)]) == []
+
+    def test_backend_in_dev_requirements_passes(self, tmp_path):
+        _write(tmp_path / "requirements.txt", "fastapi\n")
+        _write(tmp_path / "requirements-dev.txt", "httpx\n")
+        _write(tmp_path / "tests" / "test_api.py",
+               "from fastapi.testclient import TestClient\n")
+        assert detect_undeclared_backend_deps(tmp_path, [_feature(1)]) == []
+
+    def test_no_requirements_file_skips(self, tmp_path):
+        # Node product / different dep system — not our concern.
+        _write(tmp_path / "src" / "auth.py",
+               "from passlib.hash import bcrypt\n")
+        assert detect_undeclared_backend_deps(tmp_path, [_feature(1)]) == []
+
+    def test_no_trigger_imports_no_findings(self, tmp_path):
+        _write(tmp_path / "requirements.txt", "fastapi\n")
+        _write(tmp_path / "src" / "main.py", "from fastapi import FastAPI\n")
+        assert detect_undeclared_backend_deps(tmp_path, [_feature(1)]) == []
+
+
+# ── detect_unreachable_emitted_urls ─────────────────────────────────────────
+
+
+class TestDetectUnreachableEmittedUrls:
+    def test_emitted_url_with_no_route_flagged(self, tmp_path):
+        # Canonical DocumentSign shape: /sign/{token} emitted, never built.
+        _write(tmp_path / "src" / "api" / "sending.py", (
+            "@router.post('/api/documents/send')\n"
+            "def send(doc_id):\n"
+            "    signing_url = f'/sign/{token}'\n"
+            "    return {'signing_url': signing_url}\n"
+        ))
+        out = detect_unreachable_emitted_urls(tmp_path, [_feature(1, product_id=24)])
+        assert len(out) == 1
+        assert out[0].category == "unreachable_emitted_url"
+        assert out[0].target_id == "/sign/*"  # params normalize to *
+
+    def test_emitted_url_with_matching_route_passes(self, tmp_path):
+        _write(tmp_path / "src" / "api" / "sending.py", (
+            "@router.post('/api/documents/send')\n"
+            "def send(doc_id):\n"
+            "    signing_url = f'/sign/{token}'\n"
+            "    return {'signing_url': signing_url}\n"
+        ))
+        _write(tmp_path / "src" / "api" / "signing.py", (
+            "@router.get('/sign/{token}')\n"
+            "def sign_page(token):\n"
+            "    return render(token)\n"
+        ))
+        assert detect_unreachable_emitted_urls(tmp_path, [_feature(1)]) == []
+
+    def test_prefix_mounted_route_tail_matches(self, tmp_path):
+        # Router registered with bare '/documents/{id}'; emission uses the
+        # mounted full path '/api/documents/{id}' — tail-match must pass.
+        _write(tmp_path / "src" / "api" / "documents.py", (
+            "@router.get('/documents/{doc_id}')\n"
+            "def get_doc(doc_id):\n"
+            "    return {}\n"
+        ))
+        _write(tmp_path / "src" / "api" / "pages.py", (
+            "@router.get('/pages')\n"
+            "def pages():\n"
+            "    doc_link = f'/api/documents/{doc.id}'\n"
+            "    return {'link': doc_link}\n"
+        ))
+        assert detect_unreachable_emitted_urls(tmp_path, [_feature(1)]) == []
+
+    def test_no_routes_at_all_skips(self, tmp_path):
+        # Not a web app (or unparsed framework) — never flag.
+        _write(tmp_path / "src" / "lib.py",
+               "download_url = '/files/export'\n")
+        assert detect_unreachable_emitted_urls(tmp_path, [_feature(1)]) == []
+
+    def test_static_asset_urls_ignored(self, tmp_path):
+        _write(tmp_path / "src" / "main.py", (
+            "@app.get('/')\n"
+            "def home():\n"
+            "    css_url = '/static/theme.css'\n"
+            "    return render(css_url)\n"
+        ))
+        assert detect_unreachable_emitted_urls(tmp_path, [_feature(1)]) == []
+
+    def test_plain_strings_without_url_context_ignored(self, tmp_path):
+        # A '/'-leading string on a non-URL line (file path) must not match.
+        _write(tmp_path / "src" / "main.py", (
+            "@app.get('/')\n"
+            "def home():\n"
+            "    data_file = open('/tmp/data.json')\n"
+            "    return data_file\n"
+        ))
+        assert detect_unreachable_emitted_urls(tmp_path, [_feature(1)]) == []
+
+    def test_dedupes_repeated_emissions(self, tmp_path):
+        _write(tmp_path / "src" / "a.py", (
+            "@app.get('/')\n"
+            "def a():\n"
+            "    url = '/sign/abc'\n"
+        ))
+        _write(tmp_path / "src" / "b.py", (
+            "def b():\n"
+            "    url = '/sign/abc'\n"
+        ))
+        out = detect_unreachable_emitted_urls(tmp_path, [_feature(1)])
+        assert len(out) == 1
+        assert len(out[0].occurrences) == 2
 
 
