@@ -20,7 +20,12 @@ from orchestrator.drift_detectors import (  # noqa: E402
     detect_design_doc_mismatch,
     detect_duplicate_ddl,
     detect_placeholder_template_content,
+    detect_sandbox_path_literals,
     detect_shell_artifact_files,
+    detect_stub_confessions,
+    detect_tracked_build_artifacts,
+    detect_undeclared_backend_deps,
+    detect_unreachable_emitted_urls,
     file_corrective_chores,
     post_findings,
     run_all,
@@ -842,5 +847,314 @@ class TestDetectMixedErrorEnvelopes:
     def test_no_errors_no_finding(self, tmp_path):
         _write(tmp_path / "src" / "calculate.py", "def calc(a, b): return a + b\n")
         assert detect_mixed_error_envelopes(tmp_path, [_feature(1, product_id=24)]) == []
+
+
+# ── detect_sandbox_path_literals ────────────────────────────────────────────
+
+
+class TestDetectSandboxPathLiterals:
+    def test_flags_workspace_literal_in_test_file(self, tmp_path):
+        # Canonical MyJira/Mytracking shape: grep against /workspace in tests.
+        _write(tmp_path / "tests" / "test_db.py", (
+            "import subprocess\n"
+            "def test_ddl_once():\n"
+            "    subprocess.run(['grep', '-rn', 'CREATE TABLE', '/workspace/src'])\n"
+        ))
+        out = detect_sandbox_path_literals(tmp_path, [_feature(1, product_id=24)])
+        assert len(out) == 1
+        assert out[0].category == "sandbox_path_literal"
+        assert out[0].target_id == "tests/test_db.py"
+        assert out[0].occurrences == ["tests/test_db.py:3"]
+
+    def test_flags_home_agent_path_injection(self, tmp_path):
+        # Canonical testingcalc shape: PATH injection of the agent homedir.
+        _write(tmp_path / "tests" / "test_tools.py", (
+            "import os\n"
+            "os.environ['PATH'] = '/home/agent/.local/bin:' + os.environ['PATH']\n"
+        ))
+        out = detect_sandbox_path_literals(tmp_path, [_feature(1)])
+        assert len(out) == 1
+
+    def test_one_finding_per_file_with_line_occurrences(self, tmp_path):
+        _write(tmp_path / "src" / "config.py", (
+            "BASE = '/workspace'\n"
+            "OTHER = '/workspace/src'\n"
+        ))
+        out = detect_sandbox_path_literals(tmp_path, [_feature(1)])
+        assert len(out) == 1
+        assert out[0].occurrences == ["src/config.py:1", "src/config.py:2"]
+
+    def test_clean_code_no_findings(self, tmp_path):
+        _write(tmp_path / "src" / "main.py", (
+            "from pathlib import Path\n"
+            "BASE = Path(__file__).parent\n"
+        ))
+        assert detect_sandbox_path_literals(tmp_path, [_feature(1)]) == []
+
+    def test_docs_and_excluded_dirs_not_scanned(self, tmp_path):
+        # Story docs legitimately quote /workspace (prompts use it).
+        _write(tmp_path / "docs" / "story_1.md", "run in /workspace\n")
+        _write(tmp_path / "node_modules" / "x" / "index.js", "p = '/workspace'\n")
+        assert detect_sandbox_path_literals(tmp_path, [_feature(1)]) == []
+
+    def test_non_code_extensions_not_scanned(self, tmp_path):
+        # Product CLAUDE.md / AGENT_WORKFLOW.md mention /workspace by design.
+        _write(tmp_path / "CLAUDE.md", "Working directory: /workspace\n")
+        assert detect_sandbox_path_literals(tmp_path, [_feature(1)]) == []
+
+    def test_no_anchor_feature_skips(self, tmp_path):
+        _write(tmp_path / "src" / "x.py", "p = '/workspace'\n")
+        assert detect_sandbox_path_literals(tmp_path, []) == []
+
+
+# ── detect_tracked_build_artifacts ──────────────────────────────────────────
+
+
+import subprocess as _sp_mod  # noqa: E402
+
+
+def _git_init_with(tmp_path, relpaths):
+    """Init a repo at tmp_path and commit the given relative paths."""
+    _sp_mod.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
+    for rel in relpaths:
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if not p.exists():
+            p.write_text("x", encoding="utf-8")
+    _sp_mod.run(["git", "-C", str(tmp_path), "add", "-f", "."], check=True)
+    _sp_mod.run(
+        ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c",
+         "user.name=t", "commit", "-q", "-m", "seed"],
+        check=True,
+    )
+
+
+class TestDetectTrackedBuildArtifacts:
+    def test_flags_next_build_dir(self, tmp_path):
+        # Canonical MyCalc1 shape: .next/ swept into the commit.
+        _git_init_with(tmp_path, [
+            ".next/cache/webpack/client-development/1.pack.gz",
+            "src/app/page.tsx",
+        ])
+        out = detect_tracked_build_artifacts(tmp_path, [_feature(1, product_id=24)])
+        assert len(out) == 1
+        assert out[0].category == "tracked_build_artifacts"
+        assert out[0].severity == "high"
+        assert any(".next/" in o for o in out[0].occurrences)
+        # The legit source file is not an offender.
+        assert not any("page.tsx" in o for o in out[0].occurrences)
+
+    def test_flags_artifact_suffix_outside_known_dirs(self, tmp_path):
+        _git_init_with(tmp_path, ["tsconfig.tsbuildinfo", "src/index.ts"])
+        out = detect_tracked_build_artifacts(tmp_path, [_feature(1)])
+        assert len(out) == 1
+        assert any("tsconfig.tsbuildinfo" in o for o in out[0].occurrences)
+
+    def test_flags_large_tracked_binary(self, tmp_path):
+        big = tmp_path / "assets" / "blob.bin"
+        big.parent.mkdir(parents=True)
+        big.write_bytes(b"\x00" * 1_100_000)
+        _git_init_with(tmp_path, ["assets/blob.bin", "src/main.py"])
+        out = detect_tracked_build_artifacts(tmp_path, [_feature(1)])
+        assert len(out) == 1
+        assert any("blob.bin" in o and "large file" in o for o in out[0].occurrences)
+
+    def test_clean_repo_no_findings(self, tmp_path):
+        _git_init_with(tmp_path, ["src/main.py", "tests/test_main.py", "README.md"])
+        assert detect_tracked_build_artifacts(tmp_path, [_feature(1)]) == []
+
+    def test_untracked_artifacts_not_flagged(self, tmp_path):
+        # .next exists on disk but is NOT tracked → gitignore is working;
+        # nothing to report.
+        _git_init_with(tmp_path, ["src/main.py"])
+        d = tmp_path / ".next" / "cache"
+        d.mkdir(parents=True)
+        (d / "0.pack.gz").write_text("x")
+        assert detect_tracked_build_artifacts(tmp_path, [_feature(1)]) == []
+
+    def test_not_a_git_repo_no_findings(self, tmp_path):
+        (tmp_path / "x.pyc").write_text("x")
+        assert detect_tracked_build_artifacts(tmp_path, [_feature(1)]) == []
+
+
+# ── detect_stub_confessions ─────────────────────────────────────────────────
+
+
+class TestDetectStubConfessions:
+    def test_flags_real_implementation_confession(self, tmp_path):
+        # Canonical DocumentSign tasks.py shape.
+        _write(tmp_path / "src" / "tasks.py", (
+            "def send_completion_email(doc_id):\n"
+            "    # In a real implementation, this would send actual emails.\n"
+            "    # For now, just log.\n"
+            "    log.info('Would send completion email')\n"
+        ))
+        out = detect_stub_confessions(tmp_path, [_feature(1, product_id=24)])
+        assert len(out) == 1
+        assert out[0].category == "stub_confession"
+        assert out[0].target_id == "src/tasks.py"
+        assert out[0].occurrences[0].startswith("src/tasks.py:2")
+
+    def test_flags_in_production_use_confession(self, tmp_path):
+        # Canonical Mytracking static-salt shape.
+        _write(tmp_path / "src" / "db.py", (
+            "salt = 'mytracking_salt'  # In production, use a proper salt per user\n"
+        ))
+        out = detect_stub_confessions(tmp_path, [_feature(1)])
+        assert len(out) == 1
+
+    def test_test_files_excluded(self, tmp_path):
+        # Stubs/fakes are legitimate in tests.
+        _write(tmp_path / "tests" / "test_mail.py",
+               "# in a real implementation we'd hit SMTP; the fake is fine here\n")
+        _write(tmp_path / "src" / "thing.test.ts",
+               "// in a real implementation ...\n")
+        assert detect_stub_confessions(tmp_path, [_feature(1)]) == []
+
+    def test_clean_code_no_findings(self, tmp_path):
+        _write(tmp_path / "src" / "mail.py", (
+            "def send_email(to, body):\n"
+            "    smtp.send(to, body)\n"
+        ))
+        assert detect_stub_confessions(tmp_path, [_feature(1)]) == []
+
+    def test_case_insensitive(self, tmp_path):
+        _write(tmp_path / "src" / "worker.py",
+               "# IN A REAL IMPLEMENTATION, this would add to a queue\n")
+        assert len(detect_stub_confessions(tmp_path, [_feature(1)])) == 1
+
+
+# ── detect_undeclared_backend_deps ──────────────────────────────────────────
+
+
+class TestDetectUndeclaredBackendDeps:
+    def test_passlib_without_bcrypt_flagged(self, tmp_path):
+        # Canonical MyJira shape.
+        _write(tmp_path / "requirements.txt", "passlib==1.7.4\nfastapi\n")
+        _write(tmp_path / "src" / "auth.py",
+               "from passlib.hash import bcrypt\n")
+        out = detect_undeclared_backend_deps(tmp_path, [_feature(1, product_id=24)])
+        assert len(out) == 1
+        assert out[0].category == "undeclared_backend_dep"
+        assert "bcrypt" in out[0].fix_hint
+
+    def test_testclient_without_httpx_flagged(self, tmp_path):
+        _write(tmp_path / "requirements.txt", "fastapi\n")
+        _write(tmp_path / "tests" / "test_api.py",
+               "from fastapi.testclient import TestClient\n")
+        out = detect_undeclared_backend_deps(tmp_path, [_feature(1)])
+        assert len(out) == 1
+        assert "httpx" in out[0].fix_hint
+
+    def test_backend_declared_passes(self, tmp_path):
+        _write(tmp_path / "requirements.txt", "passlib\nbcrypt>=4.0\n")
+        _write(tmp_path / "src" / "auth.py",
+               "from passlib.hash import bcrypt\n")
+        assert detect_undeclared_backend_deps(tmp_path, [_feature(1)]) == []
+
+    def test_backend_in_dev_requirements_passes(self, tmp_path):
+        _write(tmp_path / "requirements.txt", "fastapi\n")
+        _write(tmp_path / "requirements-dev.txt", "httpx\n")
+        _write(tmp_path / "tests" / "test_api.py",
+               "from fastapi.testclient import TestClient\n")
+        assert detect_undeclared_backend_deps(tmp_path, [_feature(1)]) == []
+
+    def test_no_requirements_file_skips(self, tmp_path):
+        # Node product / different dep system — not our concern.
+        _write(tmp_path / "src" / "auth.py",
+               "from passlib.hash import bcrypt\n")
+        assert detect_undeclared_backend_deps(tmp_path, [_feature(1)]) == []
+
+    def test_no_trigger_imports_no_findings(self, tmp_path):
+        _write(tmp_path / "requirements.txt", "fastapi\n")
+        _write(tmp_path / "src" / "main.py", "from fastapi import FastAPI\n")
+        assert detect_undeclared_backend_deps(tmp_path, [_feature(1)]) == []
+
+
+# ── detect_unreachable_emitted_urls ─────────────────────────────────────────
+
+
+class TestDetectUnreachableEmittedUrls:
+    def test_emitted_url_with_no_route_flagged(self, tmp_path):
+        # Canonical DocumentSign shape: /sign/{token} emitted, never built.
+        _write(tmp_path / "src" / "api" / "sending.py", (
+            "@router.post('/api/documents/send')\n"
+            "def send(doc_id):\n"
+            "    signing_url = f'/sign/{token}'\n"
+            "    return {'signing_url': signing_url}\n"
+        ))
+        out = detect_unreachable_emitted_urls(tmp_path, [_feature(1, product_id=24)])
+        assert len(out) == 1
+        assert out[0].category == "unreachable_emitted_url"
+        assert out[0].target_id == "/sign/*"  # params normalize to *
+
+    def test_emitted_url_with_matching_route_passes(self, tmp_path):
+        _write(tmp_path / "src" / "api" / "sending.py", (
+            "@router.post('/api/documents/send')\n"
+            "def send(doc_id):\n"
+            "    signing_url = f'/sign/{token}'\n"
+            "    return {'signing_url': signing_url}\n"
+        ))
+        _write(tmp_path / "src" / "api" / "signing.py", (
+            "@router.get('/sign/{token}')\n"
+            "def sign_page(token):\n"
+            "    return render(token)\n"
+        ))
+        assert detect_unreachable_emitted_urls(tmp_path, [_feature(1)]) == []
+
+    def test_prefix_mounted_route_tail_matches(self, tmp_path):
+        # Router registered with bare '/documents/{id}'; emission uses the
+        # mounted full path '/api/documents/{id}' — tail-match must pass.
+        _write(tmp_path / "src" / "api" / "documents.py", (
+            "@router.get('/documents/{doc_id}')\n"
+            "def get_doc(doc_id):\n"
+            "    return {}\n"
+        ))
+        _write(tmp_path / "src" / "api" / "pages.py", (
+            "@router.get('/pages')\n"
+            "def pages():\n"
+            "    doc_link = f'/api/documents/{doc.id}'\n"
+            "    return {'link': doc_link}\n"
+        ))
+        assert detect_unreachable_emitted_urls(tmp_path, [_feature(1)]) == []
+
+    def test_no_routes_at_all_skips(self, tmp_path):
+        # Not a web app (or unparsed framework) — never flag.
+        _write(tmp_path / "src" / "lib.py",
+               "download_url = '/files/export'\n")
+        assert detect_unreachable_emitted_urls(tmp_path, [_feature(1)]) == []
+
+    def test_static_asset_urls_ignored(self, tmp_path):
+        _write(tmp_path / "src" / "main.py", (
+            "@app.get('/')\n"
+            "def home():\n"
+            "    css_url = '/static/theme.css'\n"
+            "    return render(css_url)\n"
+        ))
+        assert detect_unreachable_emitted_urls(tmp_path, [_feature(1)]) == []
+
+    def test_plain_strings_without_url_context_ignored(self, tmp_path):
+        # A '/'-leading string on a non-URL line (file path) must not match.
+        _write(tmp_path / "src" / "main.py", (
+            "@app.get('/')\n"
+            "def home():\n"
+            "    data_file = open('/tmp/data.json')\n"
+            "    return data_file\n"
+        ))
+        assert detect_unreachable_emitted_urls(tmp_path, [_feature(1)]) == []
+
+    def test_dedupes_repeated_emissions(self, tmp_path):
+        _write(tmp_path / "src" / "a.py", (
+            "@app.get('/')\n"
+            "def a():\n"
+            "    url = '/sign/abc'\n"
+        ))
+        _write(tmp_path / "src" / "b.py", (
+            "def b():\n"
+            "    url = '/sign/abc'\n"
+        ))
+        out = detect_unreachable_emitted_urls(tmp_path, [_feature(1)])
+        assert len(out) == 1
+        assert len(out[0].occurrences) == 2
 
 

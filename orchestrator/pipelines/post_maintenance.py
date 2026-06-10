@@ -30,6 +30,7 @@ redoes the work.
 
 import logging
 import os
+import re
 import subprocess as _sp
 
 from orchestrator.integrations.docker_cli import _chmod_workspace_via_alpine
@@ -287,6 +288,95 @@ def _prune_phantom_deprecated(working_dir: str) -> int:
     return removed
 
 
+# Claim patterns the architect writes into bookkeeping files about edits to
+# ARCHITECTURE.md. Matched against the ADDED lines of the staged diff only.
+# Deliberately narrow — each pattern comes from a real false claim (MyJira /
+# testingcalc 2026-06-09 audit: "3 DEPRECATED entries added" reported across
+# two sessions while the DEPRECATED section stayed empty; testingcalc
+# architect claimed a `src/db.py::init_db` DEPRECATED entry that never
+# landed).
+_ARCH_EDIT_CLAIM_RES = (
+    re.compile(r"DEPRECATED\s+entr(?:y|ies)\b.{0,60}\b(added|updated|removed)", re.I),
+    re.compile(r"\b(added|updated|removed)\b.{0,60}DEPRECATED\s+entr", re.I),
+    re.compile(r"MODULES\s+(?:row|entr(?:y|ies))\b.{0,60}\b(added|updated|removed)", re.I),
+    re.compile(r"\b(added|updated|removed)\b.{0,60}\bMODULES\s+(?:row|entr)", re.I),
+    re.compile(r"\b(added|updated|edited)\b.{0,40}\bARCHITECTURE\.md", re.I),
+)
+
+_CLAIM_SCAN_FILES = ("product_memory.md", "session_summary.md")
+
+
+def _verify_architect_edit_claims(
+    working_dir: str, _run, product_name: str = "?",
+) -> int:
+    """Architect sessions report file edits ("3 DEPRECATED entries added")
+    in product_memory.md / review docs that were never actually persisted to
+    ARCHITECTURE.md. Once a false claim enters the bookkeeping files, later
+    sessions re-assert it as observation — the 2026-06-09 audit found the
+    same phantom claim propagated across 5 consecutive architect sessions.
+
+    Deterministic check, post-staging: if the staged ADDED lines of the
+    bookkeeping files (or a staged docs/architecture_review_*.md) claim an
+    ARCHITECTURE.md edit but ARCHITECTURE.md itself is NOT in the staged
+    diff, append a correction note to product_memory.md (and re-stage it)
+    so the false history is flagged at the source the next session reads.
+
+    Returns the number of unverified claims annotated. Best-effort: never
+    raises.
+    """
+    try:
+        staged_r = _run(["git", "diff", "--cached", "--name-only"], timeout=15)
+        if staged_r.returncode != 0:
+            return 0
+        staged_names = [ln.strip() for ln in (staged_r.stdout or "").splitlines() if ln.strip()]
+        if any(n.endswith("ARCHITECTURE.md") for n in staged_names):
+            return 0  # the claimed edit (whatever its content) exists — pass
+        claim_files = [
+            n for n in staged_names
+            if n in _CLAIM_SCAN_FILES
+            or (n.startswith("docs/") and "architecture_review" in n)
+        ]
+        if not claim_files:
+            return 0
+        claims: list[str] = []
+        for name in claim_files:
+            diff_r = _run(
+                ["git", "diff", "--cached", "-U0", "--", name], timeout=15,
+            )
+            if diff_r.returncode != 0:
+                continue
+            for raw in (diff_r.stdout or "").splitlines():
+                if not raw.startswith("+") or raw.startswith("+++"):
+                    continue
+                line = raw[1:].strip()
+                if any(p.search(line) for p in _ARCH_EDIT_CLAIM_RES):
+                    claims.append(f"{name}: {line[:120]}")
+        if not claims:
+            return 0
+        note_lines = "\n".join(f"> {c}" for c in claims[:5])
+        note = (
+            "\n[ORCHESTRATOR-NOTE post-architect] The following claim(s) "
+            "this session about ARCHITECTURE.md edits are UNVERIFIED — "
+            "ARCHITECTURE.md is not in the session's staged diff. Treat "
+            "them as not done; the next architect session should re-apply "
+            "the edit and verify it appears in `git diff` before reporting "
+            "it:\n" + note_lines + "\n"
+        )
+        memory_path = os.path.join(working_dir, "product_memory.md")
+        with open(memory_path, "a", encoding="utf-8") as f:
+            f.write(note)
+        _run(["git", "add", "--", "product_memory.md"], timeout=15)
+        log.warning(
+            f"[post-architect] {product_name}: {len(claims)} ARCHITECTURE.md "
+            f"edit claim(s) with no staged ARCHITECTURE.md change — "
+            f"annotated product_memory.md"
+        )
+        return len(claims)
+    except Exception:
+        log.debug("architect claim verification raised", exc_info=True)
+        return 0
+
+
 def _stage_allowed_paths(
     persona: str, working_dir: str, _run, product_name: str = "?",
 ) -> tuple[int, list[str]]:
@@ -524,6 +614,13 @@ def _run_post_maintenance_pipeline(product: dict, session_uid: str,
     # wiped by the next _reset_workspace; they never enter the commit.
     # Personas without an allowlist (or unknown ones) fall back to git add -A.
     staged_count, stripped = _stage_allowed_paths(persona, working_dir, _run, pname)
+
+    # Architect-only: verify that claims about ARCHITECTURE.md edits in the
+    # staged bookkeeping files are backed by a staged ARCHITECTURE.md change;
+    # annotate product_memory.md when they aren't (false-history containment
+    # — see _verify_architect_edit_claims).
+    if persona == "architect":
+        _verify_architect_edit_claims(working_dir, _run, pname)
 
     cached = _run(["git", "diff", "--cached", "--quiet"])
     if cached.returncode == 0:

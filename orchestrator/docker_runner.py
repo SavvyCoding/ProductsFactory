@@ -345,6 +345,61 @@ def _read_session_summary(working_dir: str) -> str:
         return ""
 
 
+def _annotate_session_summary_outcome(
+    working_dir: str,
+    session_uid: str,
+    assigned_features: list[dict],
+    pushed_ids: list[int],
+) -> None:
+    """Append an orchestrator-verified outcome trailer to session_summary.md
+    after the post-coder pipeline finishes.
+
+    Why: the summary is written by the AGENT during the session, and agents
+    routinely record "✅ all ACs passing" for work whose PR then bounces at
+    a gate or is never merged. Because the file survives workspace resets
+    (git-clean exclude) and is fed verbatim to the NEXT session as
+    {prev_session_summary}, those false claims compound — the 2026-06-09
+    five-product audit found every product's continuity docs describing
+    features that don't exist on main (MyCalc1 "scaffolding complete" with
+    the files stranded on an unmerged branch; MyJira a Kanban board that
+    was never merged). The trailer is deterministic pipeline state, not
+    agent claims, and lands at the END of the file so the tail-keep cap in
+    _read_session_summary always preserves it.
+
+    Best-effort: never raises (continuity annotation must not break the
+    finalize path).
+    """
+    try:
+        summary_file = Path(working_dir) / "session_summary.md"
+        if not summary_file.exists():
+            return
+        assigned_ids = [
+            f.get("id") for f in (assigned_features or [])
+            if isinstance(f.get("id"), int)
+        ]
+        if not assigned_ids:
+            return
+        pushed = sorted(set(pushed_ids or []) & set(assigned_ids))
+        not_advanced = sorted(set(assigned_ids) - set(pushed))
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        parts = [f"\n---\n[ORCHESTRATOR-VERIFIED {ts} session {session_uid}]"]
+        if pushed:
+            parts.append(
+                f" Pushed (PR opened, pending review): "
+                f"{', '.join(f'#{i}' for i in pushed)}."
+            )
+        if not_advanced:
+            parts.append(
+                f" NOT advanced: {', '.join(f'#{i}' for i in not_advanced)} — "
+                "bounced at a gate or unaddressed; treat any success claims "
+                "above for these features as UNVERIFIED."
+            )
+        with summary_file.open("a", encoding="utf-8") as fh:
+            fh.write("".join(parts) + "\n")
+    except Exception as e:
+        log.warning(f"Could not annotate session_summary.md outcome: {e}")
+
+
 def _fetch_assigned_features(product_id: int, persona: str | None, max_count: int = MAX_FEATURES_PER_SPRINT) -> tuple[list[dict], str | None, dict | None]:
     """
     Pre-fetch features the agent should work on this session.
@@ -1559,6 +1614,15 @@ def _finalize_session(
                 )
             except Exception:
                 log.exception(f"Post-coder pipeline failed for {product.get('name')}")
+            # Truthful-continuity trailer: stamp the pipeline's VERIFIED
+            # outcome onto session_summary.md so the next session's
+            # {prev_session_summary} carries ground truth alongside the
+            # agent's own claims (which survive even when the PR bounced).
+            _annotate_session_summary_outcome(
+                working_dir, session_uid,
+                product.get("_assigned_features", []),
+                post_coder_pushed,
+            )
             # Auto-heal: coder exited 0 but post-coder pushed nothing.
             # Pauses the product, runs the diagnostic checklist, applies known
             # fixes, then either resumes (status=ready) or escalates with a
