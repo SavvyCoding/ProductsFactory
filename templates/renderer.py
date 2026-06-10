@@ -22,6 +22,28 @@ TEMPLATES_DIR = Path(__file__).parent
 STACKS_DIR    = TEMPLATES_DIR / "stacks"
 KNOWN_STACKS  = {"python", "node", "go"}
 
+# Framework/ecosystem names PMs actually type → the stack template that
+# serves them. select_stack consults this AFTER the bare-name and
+# strip-qualifier checks fail. Canonical incident: MyCalc1 2026-06
+# (`preferred_stack: "nextjs"`) matched nothing → got the `default`
+# templates → generic .gitignore with no `.next/` entry → 40 build-cache
+# files (9.16MB webpack pack.gz) committed and auto-merged, .git grew to
+# 93MB. One unmapped string silently degraded every downstream gate
+# (.gitignore is RO-mounted, so the agent couldn't repair it either).
+STACK_SYNONYMS: dict[str, str] = {
+    # node ecosystem
+    "nextjs": "node", "next": "node", "react": "node", "vue": "node",
+    "nuxt": "node", "svelte": "node", "angular": "node", "express": "node",
+    "nestjs": "node", "vite": "node", "remix": "node", "astro": "node",
+    "typescript": "node", "javascript": "node", "ts": "node", "js": "node",
+    "nodejs": "node", "deno": "node", "bun": "node",
+    # python ecosystem
+    "fastapi": "python", "flask": "python", "django": "python",
+    "py": "python", "python3": "python",
+    # go ecosystem
+    "golang": "go",
+}
+
 # Placeholder defaults — overridden by product config and stack-specific values
 STACK_DEFAULTS: dict[str, dict] = {
     "python": {
@@ -101,17 +123,38 @@ def select_stack(tech_stack: list[str] | None) -> str:
     enforced coverage gate.
 
     Normalisation strategy: try the bare value first (for backward
-    compatibility), then strip a single framework qualifier on `_` and
-    retry against KNOWN_STACKS.
+    compatibility), then strip a single framework qualifier on `_`/`-`
+    and retry against KNOWN_STACKS, then consult STACK_SYNONYMS for
+    framework/ecosystem names (`nextjs`→node, `fastapi`→python, ...).
+
+    Falling through to "default" is logged at WARNING with the full
+    tech_stack value — the default templates have TODO test commands,
+    empty quality gates, and a framework-blind .gitignore, so a silent
+    fall-through degrades every downstream gate for the product's whole
+    life (see STACK_SYNONYMS docstring for the MyCalc1 incident).
     """
     for tech in (tech_stack or []):
         normalised = tech.lower()
         if normalised in KNOWN_STACKS:
             return normalised
-        # Framework-qualified like `python_fastapi` → try the bare language
-        base = normalised.split("_", 1)[0]
+        # Framework-qualified like `python_fastapi` / `node-react` →
+        # try the bare leading token.
+        base = re.split(r"[_\-]", normalised, maxsplit=1)[0]
         if base in KNOWN_STACKS:
             return base
+        # Framework/ecosystem synonym (`nextjs`, `fastapi`, `golang`, ...)
+        # — check both the full value and the leading token.
+        for candidate in (normalised, base):
+            if candidate in STACK_SYNONYMS:
+                return STACK_SYNONYMS[candidate]
+    if tech_stack:
+        log.warning(
+            "select_stack: no known stack or synonym for tech_stack=%r — "
+            "falling back to 'default' templates (TODO test command, empty "
+            "quality gates, framework-blind .gitignore). Add a synonym to "
+            "templates/renderer.STACK_SYNONYMS if this is a real stack.",
+            tech_stack,
+        )
     return "default"
 
 
