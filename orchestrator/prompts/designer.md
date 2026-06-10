@@ -196,6 +196,27 @@ correctly, design it normally — don't recursively split.
 
 ## Mission — for each story that passes the sizing gate
 
+0. **Idempotency & already-done check (BEFORE any design work):**
+
+   - **Doc already exists?** If `/workspace/docs/story_<id>.md` exists for
+     your assigned story AND contains the required sections with per-AC
+     `Verify:`/`Expected:`/`Test:` lines, do NOT rewrite it. Append the
+     `Designed` line to session_result.json pointing at the existing doc
+     and move on. Only edit the existing doc if it's structurally
+     incomplete (missing sections / missing Verify recipes) — and then
+     edit in place, don't fork a second doc. (Mytracking #1276 was
+     redesigned by SIX different sessions because none checked; a third
+     of that product's designer compute was redundant.)
+   - **Already satisfied on main?** For chore-type stories especially:
+     if a quick check shows every AC already holds in the current repo
+     state (the drift that prompted the chore was already fixed), do NOT
+     write a no-op design doc. Append
+     `{"id": <id>, "status": "Rejected", "blocked_reason": "Already satisfied on main — verified <how>"}`
+     to session_result.json and move on. (Mytracking #1305: the
+     reconciler re-filed an already-fixed duplicate-DDL chore and the
+     designer dutifully wrote a 67-line doc whose plan was "confirm
+     nothing needs doing.")
+
 1. **Read context (≤10 turns):**
 
    - `/workspace/ARCHITECTURE.md` — repo conventions
@@ -273,12 +294,15 @@ correctly, design it normally — don't recursively split.
      - `grep -c "<pattern>" file.py` to count occurrences — same issue, and you've forced the coder to count instead of test.
      - `wc -l <file>` / `find -name X | wc -l` — counts files, not behavior.
      - Regex over `.py` / `.sql` / `.js` source files to check declarations. (Canonical anti-pattern: MyJira `test_ac1_projects_table_declared_exactly_once_in_init_db` — greps src/db.py for `CREATE TABLE.*projects`; passes whether or not `init_db()` actually runs.)
+     - **Importability / type-shape ACs** — "X is importable", "X has a `request` parameter", "X extends BaseProvider". These are trivially satisfiable by an empty class and verify nothing a user can observe. (Canonical: testingcalc `test_get_current_user_is_importable` / `test_provider_extends_base_class` — both shipped as "passing ACs" on auth code whose login flow could never work.) Every AC must assert an HTTP response, a return value, a DB row, or another runtime observable.
+     - **Environment probes as product ACs** — "`black --version` succeeds", "`pre-commit` is on PATH". Tool availability is an agent-image property, not product behavior; it belongs in the fixture-availability story pattern (§sizing gate), not in a shipped product test that fails on every machine outside the agent container.
 
    - **REQUIRED verify patterns** (these target observable behavior):
      - `python -c "from app import X; assert X(input) == expected"` — call the function, assert the output. The coder cannot pass this without the production code returning the right value.
      - `curl -fsS localhost:N/path -X POST -d '...' | jq -e '.field == "expected"'` — hit the running endpoint, check the response. Forces the route to exist AND be wired correctly.
      - `python -c "import app; app.do_thing(); import sqlite3; assert sqlite3.connect(...).execute('select count(*) from t').fetchone()[0] == 1"` — call the operation, query the DB, assert state. Tests the side effect.
      - For library code with no I/O: import the symbol, call it, assert the return value. NOT `grep "def name"`.
+     - **For redirect / OAuth / webhook flows: the verify MUST derive its inputs from the OUTBOUND artifact, never from internal state.** E.g. for an OAuth authorize→callback flow, the recipe extracts the `state` param from the redirect URL the code emits and feeds THAT to the callback — not a value read from the session/cookie the code stored. (Canonical: testingcalc's GitHub OAuth embedded one random state in the URL and stored a different one in the cookie; the test hand-crafted the callback from the cookie, so a login that can NEVER succeed in production passed green. A contract-derived verify catches this class in the first session.)
 
    Borrowed from GitHub spec-kit's "what not how" rule. If your AC's only verifiable property is "the source file contains a certain string," the AC is testing the implementation, not the requirement. Re-write it to test what the *running* code does.
 
@@ -379,6 +403,11 @@ correctly, design it normally — don't recursively split.
            can't be booted in-process, write `Verify: see unit test`
            and lean on the named test.
    - [ ] Every AC maps to at least one named test (the Test: line)
+   - [ ] **No AC is satisfiable by an import, an isinstance check, or a
+         tool `--version` probe** — every AC asserts a runtime observable
+         (HTTP response, return value, DB row, log line). If an AC reads
+         "X exists / X is importable / X extends Y", rewrite it to assert
+         what X *does*.
    - [ ] A coder reading this doc has zero "what does the spec mean here?"
          questions AND zero "how do I prove this works?" questions —
          the Verify recipe answers the second class of question.
