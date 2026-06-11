@@ -490,50 +490,71 @@ def _post_coder_lint_check(
     # "placeholder" / "stub" strings inside thrown Errors or as comment markers;
     # raise NotImplementedError. Skips test files (Guard 2 owns those) and
     # legitimate JSX `placeholder="..."` attributes.
+    # 2026-06-11 diff-scoping rewrite: the guard used to grep the ENTIRE
+    # CONTENT of every changed implementation file, so a PRE-EXISTING
+    # placeholder line anywhere in a file the commit merely touched bounced
+    # the feature. Canonical: testingcalc #1418/#1465/#1466/#1467 — four
+    # unrelated features (LaTeX output, async-DB infra, auth/health
+    # refactors) all bounced on a legacy `# placeholder` in src/oauth2.py
+    # that none of them wrote. The guard now scans only the commit's ADDED
+    # lines (`git show -U0`), so it judges what THIS coder wrote — the
+    # pre-existing debt is the drift-scanner's/architect's job, not a
+    # reason to bounce bystanders. TODO/FIXME matching is also now
+    # case-SENSITIVE (the marker convention is uppercase; case-insensitive
+    # \btodo\b flagged every `todo.id` identifier in todo-app products).
     if src_files:
-        impl_files = [f for f in src_files if "test" not in f.lower()]
-        if impl_files:
-            try:
-                r = _run([
-                    "grep", "-n", "-iE",
-                    r"\b(TODO|FIXME|XXX|HACK)\b"
-                    r"|throw new Error\([\"'][^\"']*((not |un)?implemented|todo|placeholder|stub|coming soon)[^\"']*[\"']\)"
-                    r"|raise NotImplementedError"
-                    r"|NotImplementedError\(\)"
-                    r"|//\s*(placeholder|not implemented|stub)"
-                    r"|#\s*(placeholder|not implemented|stub)",
-                ] + impl_files, timeout=15)
-                if r.returncode == 0:
-                    raw_hits = [h for h in (r.stdout or "").splitlines() if h.strip()]
-                    # Skip JSX/HTML `placeholder="..."` attributes (common UX
-                    # text, not a stub marker).
-                    _ATTR_SKIPS = (
-                        'placeholder="', "placeholder='",
-                        "placeholder={",
-                    )
-                    bad_files = set()
-                    for h in raw_hits:
-                        parts = h.split(":", 2)
-                        if len(parts) < 3:
-                            continue
-                        fname, _lineno, line = parts
-                        if any(a in line for a in _ATTR_SKIPS):
-                            continue
-                        bad_files.add(fname)
-                    if bad_files:
-                        files_sample = sorted(bad_files)
-                        sample = ", ".join(files_sample[:3])
-                        more = "..." if len(files_sample) > 3 else ""
-                        violations.append(
-                            f"placeholder / TODO / NotImplementedError in "
-                            f"implementation files: {sample}{more}. Every "
-                            f"acceptance criterion in the design doc must be "
-                            f"backed by code that actually does the thing, "
-                            f"not a stub or comment marker. Remove the "
-                            f"markers and implement the real behavior."
-                        )
-            except Exception:
-                pass
+        impl_files = {f for f in src_files if "test" not in f.lower()}
+        try:
+            _MARKER_RE = re.compile(r"\b(TODO|FIXME|XXX|HACK)\b")
+            _STUB_RE = re.compile(
+                r"throw new Error\([\"'][^\"']*((not |un)?implemented|todo|placeholder|stub|coming soon)[^\"']*[\"']\)"
+                r"|raise NotImplementedError"
+                r"|NotImplementedError\(\)"
+                r"|//\s*(placeholder|not implemented|stub)"
+                r"|#\s*(placeholder|not implemented|stub)",
+                re.IGNORECASE,
+            )
+            # Skip JSX/HTML `placeholder="..."` attributes (common UX
+            # text, not a stub marker).
+            _ATTR_SKIPS = (
+                'placeholder="', "placeholder='",
+                "placeholder={",
+            )
+            diff_r = _run(["git", "show", "HEAD", "-U0", "--pretty="],
+                          timeout=30)
+            bad_files = set()
+            if diff_r.returncode == 0:
+                cur_file = None
+                for raw in (diff_r.stdout or "").splitlines():
+                    if raw.startswith("+++ b/"):
+                        cur_file = raw[6:].strip()
+                        continue
+                    if raw.startswith("+++"):
+                        cur_file = None
+                        continue
+                    if not raw.startswith("+") or raw.startswith("+++"):
+                        continue
+                    if cur_file is None or cur_file not in impl_files:
+                        continue
+                    line = raw[1:]
+                    if any(a in line for a in _ATTR_SKIPS):
+                        continue
+                    if _MARKER_RE.search(line) or _STUB_RE.search(line):
+                        bad_files.add(cur_file)
+            if bad_files:
+                files_sample = sorted(bad_files)
+                sample = ", ".join(files_sample[:3])
+                more = "..." if len(files_sample) > 3 else ""
+                violations.append(
+                    f"placeholder / TODO / NotImplementedError in "
+                    f"lines ADDED by this commit: {sample}{more}. Every "
+                    f"acceptance criterion in the design doc must be "
+                    f"backed by code that actually does the thing, "
+                    f"not a stub or comment marker. Remove the "
+                    f"markers and implement the real behavior."
+                )
+        except Exception:
+            pass
 
     # ── Quality-spec Phase 2 additions (2026-05-19) ─────────────────────────
     # Eight new guards motivated by the StockAnalysis + Calculator code
