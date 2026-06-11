@@ -26,20 +26,31 @@ log = logging.getLogger("poller.github")
 MAX_FIX_ATTEMPTS = int(os.environ.get("MAX_FIX_ATTEMPTS", "5"))
 
 
+# (timestamp, value) — see _resolve_max_fix_attempts. TTL < the 60s cycle
+# interval, so "read fresh each cycle" hot-reload semantics are preserved
+# while per-feature loop calls within one reconcile pass hit the cache.
+_max_fix_cache: tuple[float, int] | None = None
+
+
 def _resolve_max_fix_attempts() -> int:
     """Read max_fix_attempts from system_config; fall back to env constant.
 
-    Cheap one-shot HTTP call against the PM API (already a per-cycle
-    dependency for everything in this module). Never fails the caller —
-    on any error we return the env-default constant so the reconcile
-    sweep keeps working.
+    Cached for 55s: this is called once per candidate feature inside the
+    reconcile loops, which used to mean one HTTP round-trip per feature
+    per cycle. Never fails the caller — on any error we return the
+    env-default constant so the reconcile sweep keeps working.
     """
+    global _max_fix_cache
+    now = time.time()
+    if _max_fix_cache is not None and now - _max_fix_cache[0] < 55:
+        return _max_fix_cache[1]
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
             resp = client.get("/api/system-config")
             if resp.status_code == 200:
                 val = (resp.json() or {}).get("max_fix_attempts")
                 if isinstance(val, int) and val > 0:
+                    _max_fix_cache = (now, val)
                     return val
     except Exception:
         pass
