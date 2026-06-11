@@ -347,6 +347,16 @@ correctly, design it normally — don't recursively split.
 
    ## Edge Cases & Error Handling
    - Input edge cases (empty, oversized, malformed, missing auth).
+   - **Numeric/compute extremes (REQUIRED for any AC that computes):**
+     overflow (`exp(1000)`, `10^308*10`), infinity/NaN reaching the
+     serializer, inputs that explode cost (huge exponents, unbounded
+     `precision`/`iterations` parameters — cap them in the request
+     schema). At least ONE AC's Verify recipe must exercise an extreme
+     and assert the mapped error (e.g. 422 with a stable code), not a
+     500. Canonical miss (testingcalc 2026-06-11): every happy-path and
+     domain-error case shipped clean while the entire overflow/inf
+     class returned 500 — and one endpoint CACHED the inf before
+     serialization failed, turning the expression into a stored 500.
    - Concurrency cases if applicable.
    - Each error response from the API section must appear here with
      the trigger condition.
