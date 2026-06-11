@@ -33,12 +33,21 @@ Working dir: `/workspace`. Do NOT modify application code.
    {{
      "product_id": {product_id},
      "name": "DevOps: <short description>",
-     "description": "<Specific file and what needs to change. Why it matters for reliability/security/performance.>",
+     "description": "<1-line: specific file + why it matters>
+- <AC 1: observable outcome, e.g. CI job X passes / image size < Y>
+- <AC 2, max 4>",
      "feature_type": "chore",
      "priority": 50,
      "source": "ai"
    }}
    ```
+
+   **Description format is a CONTRACT**: a 1-line summary followed by 2-4
+   `- ` acceptance-criterion bullets, each an observable behavior. One-line
+   descriptions with no ACs get Blocked by the designer as insufficient
+   spec (19 features died that way in the 2026-06 audit) — a feature filed
+   without ACs wastes the session that filed it AND the designer session
+   that blocks it.
 
    Security issues (secrets in files, missing auth) → bump priority to 80+.
 
