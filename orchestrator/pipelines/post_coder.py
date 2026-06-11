@@ -1755,6 +1755,89 @@ def _post_coder_lint_check(
     except Exception:
         log.debug("Guard 19 doc-only-commit raised", exc_info=True)
 
+    # --- Guard 20: net test-file deletion (all languages) ---
+    # Guard 17's deletion safety is Python-AST-only and symbol-level; nothing
+    # protected whole test FILES in other stacks. Canonical incident
+    # (MyCalc1, 2026-06 audit): the third rework attempt on the scaffolding
+    # feature wholesale-deleted `tests/Calculator.test.tsx` — classic
+    # delete-the-test-to-pass-the-gate behavior, approved and merged.
+    #
+    # Rule: a commit that DELETES test file(s) while ADDING none is bounced.
+    #   - D + A in the same commit (rename / split / replace) passes — the
+    #     suite still has the coverage somewhere.
+    #   - Deleting a test listed in ARCHITECTURE.md's DEPRECATED section
+    #     passes — that's the sanctioned removal queue (e.g. the deprecated
+    #     source-grep antipattern tests the architect queues for deletion).
+    try:
+        ns_r = _run(["git", "show", "HEAD", "--name-status", "--pretty="],
+                    timeout=20)
+        if ns_r.returncode == 0:
+            def _is_test_file(path: str) -> bool:
+                pl = path.replace("\\", "/").lower()
+                name = pl.rsplit("/", 1)[-1]
+                in_test_dir = any(seg in ("tests", "test", "__tests__", "testcases")
+                                  for seg in pl.split("/")[:-1])
+                test_named = (
+                    name.startswith("test_")
+                    or name.endswith(("_test.py", "_test.go", "_test.rb",
+                                      ".test.ts", ".test.tsx", ".test.js",
+                                      ".test.jsx", ".spec.ts", ".spec.js",
+                                      ".spec.tsx"))
+                )
+                code_ext = name.endswith((".py", ".js", ".jsx", ".ts", ".tsx",
+                                          ".go", ".rb", ".java", ".rs"))
+                return code_ext and (test_named or in_test_dir)
+
+            deleted_tests: list[str] = []
+            added_tests = 0
+            for raw in (ns_r.stdout or "").splitlines():
+                parts = raw.split("\t")
+                if len(parts) < 2:
+                    continue
+                st, path = parts[0][:1], parts[-1].strip()
+                if not _is_test_file(path):
+                    continue
+                if st == "D":
+                    deleted_tests.append(path)
+                elif st in ("A", "R", "C"):
+                    added_tests += 1
+            if deleted_tests and added_tests == 0:
+                # DEPRECATED-list exemption: the architect queues sanctioned
+                # test removals (e.g. source-grep antipattern tests) there.
+                deprecated_blob = ""
+                try:
+                    arch_p = _PP(working_dir) / "ARCHITECTURE.md"
+                    if arch_p.is_file():
+                        txt = arch_p.read_text(encoding="utf-8", errors="replace")
+                        m_dep = _re.search(
+                            r"^##\s+DEPRECATED\b[^\n]*\n(.*?)(?=\n##\s|\Z)",
+                            txt, _re.S | _re.M)
+                        if m_dep:
+                            deprecated_blob = m_dep.group(1)
+                except Exception:
+                    pass
+                unsanctioned = [
+                    p for p in deleted_tests
+                    if p not in deprecated_blob
+                    and p.rsplit("/", 1)[-1] not in deprecated_blob
+                ]
+                if unsanctioned:
+                    violations.append(
+                        f"test file(s) deleted with no replacement: "
+                        f"{', '.join(unsanctioned[:4])}"
+                        f"{'...' if len(unsanctioned) > 4 else ''}. "
+                        f"Deleting tests is not a fix — the coverage they "
+                        f"provided is gone and the gate they failed will "
+                        f"pass vacuously. Restore the file and fix the code "
+                        f"under test (or fix the test if IT is wrong). If "
+                        f"the test is genuinely obsolete (e.g. a deprecated "
+                        f"source-grep antipattern test), it must be listed "
+                        f"in ARCHITECTURE.md's DEPRECATED section by the "
+                        f"architect BEFORE a coder may delete it."
+                    )
+    except Exception:
+        log.debug("Guard 20 test-deletion raised", exc_info=True)
+
     return violations
 
 
