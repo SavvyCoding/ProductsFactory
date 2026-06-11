@@ -43,10 +43,6 @@ REST API (used by poller — no auth on poller-only routes):
   POST /api/features/reset_stuck       — reset Implementing→Approved if >45min (poller)
   POST /api/labels                     — create label
   GET  /api/products/{id}/labels       — list labels for product
-  POST /api/sprints                    — create sprint
-  GET  /api/products/{id}/sprints      — list sprints
-  GET  /api/products/{id}/sprints/active — active sprint
-  PATCH /api/sprints/{id}              — update sprint
   GET  /api/system-config              — system config for poller (no auth)
   POST /api/recommend/features         — LLM-generated feature suggestions
   GET  /api/alerts/unread              — unread alerts for nav badge

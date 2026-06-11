@@ -1866,8 +1866,3 @@ def _fix_app_token(product: dict) -> dict | None:
     return None
 
 
-# _check_sprint_pr_mode / _fix_sprint_pr_mode and
-# _check_sprint_provisioned / _fix_sprint_provisioned were retired with
-# the 1-PR model (2026-05-15) and migration 043 (2026-05-26). Sprints no
-# longer exist; the orchestrator force-sets the equivalent in-memory flag
-# at every launch, so auto-healing the DB column was a no-op.
