@@ -1442,16 +1442,27 @@ async def save_custom_prompt(
 async def save_workflow_settings(
     product_id: int,
     human_gate_phases: str = Form(""),
+    reconciler_chores: str = Form(""),
     db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
 ):
-    """Save per-product workflow settings — currently the human-in-loop phase
-    gate (migration 045). MERGES into the config JSONB (reassigns a new dict so
-    SQLAlchemy flags the change) so sibling keys — scheduling, last_*_at
-    maintenance timestamps — are preserved. An unchecked checkbox submits no
-    field → falsey → gate off."""
+    """Save per-product workflow settings — the human-in-loop phase gate
+    (migration 045) and the reconciler corrective-chores controller. MERGES
+    into the config JSONB (reassigns a new dict so SQLAlchemy flags the
+    change) so sibling keys — scheduling, last_*_at maintenance timestamps —
+    are preserved. An unchecked checkbox submits no field → falsey → gate off.
+
+    reconciler_chores is tri-state by design: checked → config True
+    (per-product opt-in); unchecked → key REMOVED, so the product inherits
+    the orchestrator's RECONCILER_CHORES_ENABLED environment default. The
+    orchestrator reads config first, env second (post_coder.py drift block).
+    """
     product = await _get_product_or_404(product_id, db)
     cfg = dict(product.config or {})
     cfg["human_gate_phases"] = human_gate_phases.strip().lower() in ("on", "true", "1", "yes")
+    if reconciler_chores.strip().lower() in ("on", "true", "1", "yes"):
+        cfg["reconciler_chores"] = True
+    else:
+        cfg.pop("reconciler_chores", None)
     product.config = cfg
     await db.flush()
     return RedirectResponse(f"/product/{product_id}?tab=settings", status_code=303)
