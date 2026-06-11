@@ -4227,11 +4227,19 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                     is_advisory = fid in verify_advisory_fids
                     bullets = []
                     for f in fails:
+                        # Surface stderr when present: assertion tracebacks /
+                        # import errors land there, and a bare "exit 1" with
+                        # empty stdout gives the rework coder nothing to act
+                        # on (canonical 2026-06-11 DogTinder #1513 AC3/AC4 —
+                        # stderr was captured at the _run_verify layer but
+                        # dropped by this formatter).
+                        _err = (f.get('actual_stderr') or '').strip()
                         bullets.append(
                             f"- AC{f['ac']}: command `{f['command'][:140]}`\n"
                             f"  expected `{f['expected'][:120]}`\n"
                             f"  actual stdout `{(f['actual_stdout'] or '').strip()[:200]}` "
                             f"(exit {f['actual_exit']})"
+                            + (f"\n  stderr tail `{_err[:200]}`" if _err else "")
                             + _verify_actionable_hint(
                                 f['command'], f['actual_stdout'], f['actual_exit'])
                         )

@@ -405,6 +405,22 @@ correctly, design it normally — don't recursively split.
    - [ ] **Every Verify command references only code the coder will
          build in THIS story** — not modules that don't exist yet,
          not future ACs, not external services without a clear fixture.
+   - [ ] **No Expected literal pins framework internals you did not
+         spec** — route-table sizes (`len(app.routes)`), middleware list
+         lengths, auto-generated docs/schema entries. Frameworks add
+         their own bookkeeping (a bare `FastAPI()` app has 4 default
+         routes — /openapi.json, /docs, /docs/oauth2-redirect, /redoc —
+         not 2) and versions shift these numbers. Assert the surface the
+         AC itself specs: the title, YOUR route's response, the
+         middleware's observable effect — never the framework's internal
+         counts. And the recipe must agree with YOUR OWN design: if auth
+         is a route-level `Depends` (not middleware), a request to a
+         route that doesn't exist yet returns 404, not 401 — don't
+         assert auth behavior through routes a future story owns.
+         Canonical 2026-06-11 DogTinder #1513: `len_routes: 2` pinned
+         ("2 default routes from FastAPI"), correct bare app reported 4,
+         gate false-bounced a correct implementation; same doc's AC4
+         asserted 401 from the next story's unbuilt route.
    - [ ] **Every Verify command runs in a clean shell with only the
          committed code** — no assumption that `localhost:8000` is already
          up, no `docker-compose up` prerequisite, no out-of-band setup.
