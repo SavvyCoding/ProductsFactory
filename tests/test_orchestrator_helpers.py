@@ -28,41 +28,6 @@ import httpx
 os.environ.setdefault("PM_API_URL", "http://pm-api:8080")
 
 
-# ── github_client — count_open_prs ───────────────────────────────────────────
-
-class TestCountOpenPrs:
-    def test_returns_pr_count(self):
-        from orchestrator.github_client import count_open_prs
-
-        product = {"github_repo": "https://github.com/owner/repo.git"}
-
-        def mock_get(url, **kwargs):
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.json.return_value = [{}, {}, {}]  # 3 open PRs
-            return resp
-
-        with patch("httpx.get", side_effect=mock_get):
-            result = count_open_prs(product)
-
-        assert result == 3
-
-    def test_returns_zero_when_no_github_repo(self):
-        from orchestrator.github_client import count_open_prs
-        product = {"github_repo": ""}
-        assert count_open_prs(product) == 0
-
-    def test_returns_zero_on_api_error(self):
-        from orchestrator.github_client import count_open_prs
-
-        product = {"github_repo": "https://github.com/owner/repo.git"}
-
-        with patch("httpx.get", side_effect=httpx.ConnectError("refused")):
-            result = count_open_prs(product)
-
-        assert result == 0
-
-
 # ── integrations.github — _parse_repo_slug (canonical) ───────────────────────
 # Previously defined 3x with incompatible return shapes (tuple|None, str,
 # str|None) across github_client, integrations/github, and auto_merge.
@@ -146,10 +111,10 @@ class TestReconcileMergedPrs:
         assert any("feat-1" in p[0] and p[1].get("status") == "Pushed" for p in patch_calls)
         assert not any("feat-2" in p[0] for p in patch_calls), "Only merged PR's feature should update"
 
-    def test_route_to_blocked_uses_correct_product_id(self, monkeypatch):
-        """Regression: github_client.py:360 used undefined `product_id` instead of
-        `product['id']`. NameError was swallowed by the broad except, leaving
-        features Blocked but stranded on the original delivery sprint."""
+    def test_closed_pr_at_cap_blocks_feature(self, monkeypatch):
+        """A closed-without-merge PR on a feature at the fix-attempts cap
+        must PATCH the feature to Blocked (and no sprint routing — the
+        Blocked-sprint holdpen was retired with migration 043)."""
         monkeypatch.setenv("MAX_FIX_ATTEMPTS", "5")
         from orchestrator.github_client import reconcile_in_flight_prs
 
@@ -173,7 +138,7 @@ class TestReconcileMergedPrs:
                 return MagicMock(status_code=200)
             def post(self, path, json=None, **kwargs):
                 recorded.append(("POST", path, json))
-                return MagicMock(status_code=200, json=lambda: {"moved": 1})
+                return MagicMock(status_code=200, json=lambda: {})
 
         with patch("orchestrator.github_client._gh_get", return_value=pr_resp), \
              patch("httpx.Client", return_value=MockPMClient()):
@@ -184,14 +149,9 @@ class TestReconcileMergedPrs:
         assert any(c[2].get("status") == "Blocked" for c in patch_calls), \
             f"Expected Blocked PATCH, got {patch_calls}"
 
-        # POST must have routed to /api/products/42/sprints/blocked/route — NOT
-        # `/api/products/{product_id}/...` which would have raised NameError
-        # silently inside the except.
+        # Retired sprint routing must NOT fire (endpoint no longer exists)
         route_calls = [c for c in recorded if c[0] == "POST" and "blocked/route" in c[1]]
-        assert len(route_calls) == 1, f"Expected one route POST, got {route_calls}"
-        assert route_calls[0][1] == "/api/products/42/sprints/blocked/route", \
-            f"Expected product 42 in URL, got {route_calls[0][1]}"
-        assert route_calls[0][2]["feature_ids"] == [99]
+        assert not route_calls, f"Retired sprint routing fired: {route_calls}"
 
     def test_skips_when_no_merged_prs(self):
         from orchestrator.github_client import reconcile_merged_prs

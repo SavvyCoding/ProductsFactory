@@ -1351,16 +1351,9 @@ def detect_auto_plan(
     return True
 
 
-# ── Detector D: merge-stall alert (sprint-aware variant — retired) ──────────
-# The sprint-aware merge-stall detector was retired in migration 043
-# (phases→features flat model). Under the new model there are no sprints to
-# stall — each feature ships as its own session PR. A per-feature merge-stall
-# equivalent could be reintroduced later (alert if a feature has been
-# Reviewed-approved with PR open for > N minutes).
-
-def detect_merge_stall(*args, **kwargs) -> bool:
-    """No-op stub retained for callsite compatibility. Returns False."""
-    return False
+# ── Detector D: merge-stall alert — retired in migration 043 (phases→features
+# flat model; no sprints to stall). A per-feature equivalent could be
+# reintroduced later (alert if Reviewed-approved with PR open > N minutes).
 
 
 # ── Detector E: overlap-PR detector ──────────────────────────────────────────

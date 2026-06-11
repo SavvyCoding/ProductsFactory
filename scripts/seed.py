@@ -47,7 +47,7 @@ engine = create_engine(DATABASE_URL, echo=False)
 
 
 _DATA_TABLES = ("products", "features", "sessions", "alerts",
-                "sprints", "phases", "pm_users", "feature_comments")
+                "phases", "pm_users", "feature_comments")
 
 
 def is_db_populated(db: Session) -> list[tuple[str, int]]:
@@ -79,7 +79,6 @@ def seed(db: Session) -> None:
         id=1,
         products_root_dir="C:/Users/digvi/Personal/Products",
         github_org="SavvyCoding",
-        github_ssh_key_name="productfactory-deploy",
         max_sessions_per_day=20,
         poll_interval=60,
         session_timeout_minutes=90,

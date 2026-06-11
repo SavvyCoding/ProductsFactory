@@ -497,17 +497,6 @@ def run_cycle(args: dict, **kwargs) -> str:
         except Exception:
             log.exception("auto-merge sweep failed (non-fatal)")
 
-        # Phase 3 of PollerRevamp (INVARIANTS.md VIII.2): when an active
-        # sprint's security_clean gate is False and there are unsprinted bug
-        # features, route them into the active sprint so the coder can ship
-        # them. Side-effect only; determine_next_action's existing decision
-        # tree picks them up after they're sprinted.
-        for p in ready:
-            try:
-                _route_unsprinted_security_bugs(p)
-            except Exception:
-                log.exception(f"bug-routing failed for product {p.get('id')}")
-
         # Phase-1 supervisor detectors that operate per-product on data the
         # PM API already serves cheaply: orphan-Approved features and rapid
         # status flaps. Both run every cycle (each has its own cooldown to
@@ -1262,17 +1251,6 @@ def _check_architect_due(product: dict) -> None:
         log.exception(
             f"[architect-scheduler] could not queue architect for product {pid}"
         )
-
-
-def _route_unsprinted_security_bugs(product: dict) -> int:
-    """Retired with migration 043 (phases→features flat model).
-
-    The legacy sprint-DoD security_clean gate is gone — bug features
-    ship through the same per-feature session-PR pipeline as any other
-    feature; no sprint routing needed. Kept as a no-op stub so callsites
-    (cycle/persona.py et al.) don't break.
-    """
-    return 0
 
 
 def _run_supervisor_pr_detectors(product: dict) -> None:
