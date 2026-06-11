@@ -547,6 +547,14 @@ def run_cycle(args: dict, **kwargs) -> str:
                     from orchestrator.main_suite_health import detect_broken_main_suite
                     _th.Thread(target=detect_broken_main_suite, args=(dict(p),),
                                daemon=True).start()
+                    # Sibling check, same cadence/thread pattern: does a FRESH
+                    # clone install+collect from requirements.txt alone? The
+                    # pre-baked agent image masks missing declarations from
+                    # the per-commit test gate; this is the exhaustive
+                    # slow-path (deduped chore `fresh_install:{id}`).
+                    from orchestrator.fresh_env_check import detect_broken_fresh_install
+                    _th.Thread(target=detect_broken_fresh_install, args=(dict(p),),
+                               daemon=True).start()
             except Exception:
                 log.exception(f"architect-scheduler failed for product {p.get('id')}")
 
