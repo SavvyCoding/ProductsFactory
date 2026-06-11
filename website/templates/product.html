@@ -175,10 +175,10 @@
   {% for f in features %}{% set _ = status_counts.update({f.status: status_counts.get(f.status, 0) + 1}) %}{% endfor %}
   {% set type_counts = {'feature': 0, 'bug': 0, 'chore': 0} %}
   {% for f in features %}{% set _ = type_counts.update({f.feature_type: type_counts.get(f.feature_type, 0) + 1}) %}{% endfor %}
-  {# Rejected stories are out-of-scope — exclude from the total so
-     ship_pct ("X% of N") reflects what's actually planned to ship.
-     The status_counts breakdown above still shows the Rejected bucket. #}
-  {% set total_features = features | rejectattr('status', 'equalto', 'Rejected') | list | length %}
+  {# Rejected/Reverted stories are out-of-scope — exclude from the total
+     so ship_pct ("X% of N") reflects what's actually planned to ship.
+     The status_counts breakdown above still shows both buckets. #}
+  {% set total_features = features | rejectattr('status', 'in', ['Rejected', 'Reverted']) | list | length %}
   {% set pushed = status_counts.get('Pushed', 0) %}
   {% set blocked = status_counts.get('Blocked', 0) %}
   {% set in_flight = status_counts.get('Implementing', 0) + status_counts.get('Reviewing', 0) + status_counts.get('Reviewed', 0) %}
