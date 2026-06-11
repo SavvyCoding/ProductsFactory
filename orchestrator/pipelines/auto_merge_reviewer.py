@@ -164,23 +164,8 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
             # the old draft state). Only retry the merge once draft has flipped.
             if resp.status_code == 405 and "draft" in resp.text.lower():
                 log.info(f"[auto-merge] PR #{pr_number} is draft — marking ready and polling")
-                httpx.patch(
-                    f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}",
-                    json={"draft": False}, headers=gh_headers, timeout=10,
-                )
-                import time as _t
-                draft_cleared = False
-                for attempt in range(15):  # up to ~30s total
-                    _t.sleep(2)
-                    poll = httpx.get(
-                        f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}",
-                        headers=gh_headers, timeout=10,
-                    )
-                    if poll.status_code == 200 and poll.json().get("draft") is False:
-                        draft_cleared = True
-                        log.info(f"[auto-merge] PR #{pr_number} draft cleared after {(attempt + 1) * 2}s")
-                        break
-                if draft_cleared:
+                from orchestrator.auto_merge import mark_ready_and_poll
+                if mark_ready_and_poll(repo_slug, pr_number, gh_headers):
                     resp = _attempt_merge()
                 else:
                     # Polling timed out — GitHub still reports draft. Skip this
