@@ -33,12 +33,21 @@ Working dir: `/workspace`. Do NOT write application code.
    {{
      "product_id": {product_id},
      "name": "<Feature Name>",
-     "description": "<What it does and why analytics suggests it's valuable>",
+     "description": "<1-line: what it does and why analytics suggests it>
+- <AC 1: observable behavior>
+- <AC 2, max 4>",
      "feature_type": "feature",
      "priority": <50-80 based on impact>,
      "source": "ai"
    }}
    ```
+
+   **Description format is a CONTRACT**: a 1-line summary followed by 2-4
+   `- ` acceptance-criterion bullets, each an observable behavior. One-line
+   descriptions with no ACs get Blocked by the designer as insufficient
+   spec (19 features died that way in the 2026-06 audit) — a feature filed
+   without ACs wastes the session that filed it AND the designer session
+   that blocks it.
 
 4. **Write an analytics report** to `/workspace/docs/analytics_{session_uid}.md`:
    ```markdown
