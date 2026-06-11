@@ -8,12 +8,18 @@ A **Story** = ≤4 acceptance criteria, ≤6 files, fits one session. Multiple S
 
 ## Early-exit clauses (call `task_done` immediately if any apply)
 
-Don't burn a session on work that can't ship. Exit `success` with a one-line summary in these cases:
+Don't burn a session on work that can't ship. **In every early-exit case except an empty assignment you MUST first append a session_result.json line for each assigned feature** — exiting without one leaves the feature claimed-but-unaddressed in `Implementing`, the false-success detector charges it a fix_attempt, and after 5 silent loops it gets auto-Blocked with a misleading reason (this exact loop produced a third of all Blocked features in the 2026-06 audit). The line IS the early exit; the summary text is commentary.
 
-- **Empty assignment**: the list under `## Assigned features` is empty.
-- **Insufficient spec**: the assigned feature's name/description is a placeholder (`'query'`, `'test'`, `'x'`, single-letter, or empty) and there's no `docs/story_<id>.md`. The designer will catch this on a future cycle — don't invent a spec.
-- **Pre-existing pass**: reproduce-first (Step 0 of `AGENT_WORKFLOW.md`) shows every AC's Verify recipe already passes on HEAD before you've edited anything. Append a `## Reproduce-first baseline` note to `session_summary.md` and exit with status `pre_existing_pass`.
-- **Read-only conflict**: a file the spec tells you to edit is RO-mounted (PM-curated, e.g. `ARCHITECTURE.md`, `CLAUDE.md`, `quality_gates.json`, `check_deletion_safety.py`). Exit `blocked` with a one-line reason naming the file; the PM has to re-route through the architect persona.
+- **Empty assignment**: the list under `## Assigned features` is empty. Exit cleanly (the only case with nothing to write).
+- **Insufficient spec**: the assigned feature's name/description is a placeholder (`'query'`, `'test'`, `'x'`, single-letter, or empty) and there's no `docs/story_<id>.md`. Don't invent a spec. Write:
+  `echo '{"id": <id>, "status": "Blocked", "blocked_reason": "insufficient-spec: <what is missing>"}' >> /workspace/session_result.json`
+  then exit `success`.
+- **Pre-existing pass**: reproduce-first (Step 0 of `AGENT_WORKFLOW.md`) shows every AC's Verify recipe already passes on HEAD before you've edited anything. Append a `## Reproduce-first baseline` note with the captured outputs to `session_summary.md`, write:
+  `echo '{"id": <id>, "status": "Implemented"}' >> /workspace/session_result.json`
+  then exit `success`. (The post-coder verify gate re-runs the recipes independently and the reviewer sees your baseline note — the feature flows to review instead of looping.)
+- **Read-only conflict**: a file the spec tells you to edit is RO-mounted (PM-curated, e.g. `ARCHITECTURE.md`, `CLAUDE.md`, `quality_gates.json`, `check_deletion_safety.py`). Write:
+  `echo '{"id": <id>, "status": "Blocked", "blocked_reason": "spec requires editing RO-mounted <file> — re-route through the architect persona"}' >> /workspace/session_result.json`
+  then exit `blocked` with a one-line reason naming the file.
 
 ## Don't repeat known incidents
 
@@ -22,6 +28,7 @@ Specific failure modes the post-coder gates catch AFTER the fact. Avoid inline:
 - **Don't delete or rewrite a shared autouse fixture without checking siblings.** Canonical 2026-06-04 incident on feature #1307 (Auth and DB skeleton): coder removed `setup_test_env` from `tests/test_auth.py`; `tests/test_admin_api.py` + `tests/test_attachments.py` + `tests/test_auth.py` all imported it and hit fixture errors on 4 unrelated test files. Guard 17 catches some of these but not all — when you touch a fixture, grep its name across `tests/` first.
 - **Don't add a dep to `import X` without adding it to `requirements.txt` / `package.json`.** Guard 18 (deps coherence) refuses these. Canonical 2026-06-04: feature #1256 added `botocore` to `src/s3.py` without declaring it; rework bounced. The agent image masks missing deps because they're pre-baked — a fresh `pip install -r requirements.txt && pytest` doesn't.
 - **Don't define schema in two places.** If `migrations/` has the canonical baseline, `init_db()` / hand-rolled `CREATE TABLE` blocks are wrong. Canonical 2026-06-04 MyJira: `init_db()` had `users.hashed_password`; migration `001_baseline_*` had `users.password_hash`; auth code wrote `hashed_password`. Test env worked; prod-style alembic-upgrade-head broke auth silently.
+- **Intentionally-public state-changing routes need a `# PUBLIC_ROUTE:` annotation.** Guard 6 bounces any `POST/PUT/PATCH/DELETE` route without an auth check. For routes that are public BY DESIGN — `/login`, `/register`, OAuth callbacks, signed-webhook receivers, health probes — put `# PUBLIC_ROUTE: <one-line why>` (or `// PUBLIC_ROUTE:` in JS/TS) on the line above the route decorator. ONE route per annotation; never a file-level blanket. Without it the gate and the reviewer will both flag "missing auth" every round on a route that is supposed to be open (canonical: testingcalc #1451 registration endpoint, blocked after repeated bounces). Do NOT annotate routes that genuinely should require auth — the reviewer checks the rationale.
 
 ---
 
