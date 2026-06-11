@@ -204,10 +204,17 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
         template_name = "brownfield"
     elif product.get("analysis_status") == "running":
         template_name = "analysis_run"
-    elif product.get("type") == "brownfield":
-        template_name = "brownfield"
     else:
-        template_name = "greenfield"
+        # 2026-06-11: greenfield.md retired entirely. The persona="coder"
+        # branch above already routed all production coder sessions to
+        # brownfield; this legacy persona=None fall-through (scripts /
+        # evals / local Ollama runs) was the one remaining path that could
+        # serve the drifted zombie template — missing {hard_rules}, the
+        # HARD STOP block, rework-branch logic, and every 2026-05/06 coder
+        # fix, with a rework header docker_runner no longer emits. One
+        # accidental re-route away from mass regression; now structurally
+        # impossible. greenfield.md on disk is a pointer stub.
+        template_name = "brownfield"
 
     # Per-product prompt overrides (Symphony-style WORKFLOW.md pattern):
     # if a product wants its own prompt for any persona, it can drop a file at
