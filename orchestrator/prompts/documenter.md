@@ -12,7 +12,7 @@ Working dir: `/workspace`.
 
 ## Mission
 
-1. **Read current state:** `/workspace/README.md`, `/workspace/ARCHITECTURE.md`, `/workspace/CLAUDE.md`, `/workspace/CHANGELOG.md` (each only if it exists), and source files to understand what's actually built.
+1. **Read current state:** `/workspace/README.md`, `/workspace/ARCHITECTURE.md`, `/workspace/CLAUDE.md`, `/workspace/docs/CHANGELOG.md` (each only if it exists), and source files to understand what's actually built.
 
 2. **Get recently completed features** for changelog context:
    ```
@@ -28,7 +28,7 @@ Working dir: `/workspace`.
 
    Reflect what's ACTUALLY built (not planned). Keep under 200 lines. Standard Markdown only.
 
-4. **Update or create `/workspace/CHANGELOG.md`** in Keep-a-Changelog format. Add a new entry for any Pushed features not yet in the changelog. Use today's date. Increment patch version (or minor if significant features added).
+4. **Update or create `/workspace/docs/CHANGELOG.md`** in Keep-a-Changelog format. (MUST live under `docs/` — your commit allowlist is `README.md` + `docs/**`; a root-level `CHANGELOG.md` is silently stripped from the commit and your work is discarded.) Add a new entry for any Pushed features not yet in the changelog. Use today's date. Increment patch version (or minor if significant features added). If a legacy root `CHANGELOG.md` exists, leave it alone and maintain the `docs/` one.
    ```markdown
    # Changelog
 
@@ -43,7 +43,7 @@ Working dir: `/workspace`.
    - <what changed>
    ```
 
-5. **Update `ARCHITECTURE.md`** if its current section is stale (doesn't reflect new modules, endpoints, or data models).
+5. **If `ARCHITECTURE.md` is stale** (doesn't reflect new modules, endpoints, or data models): do NOT edit it — it is RO-mounted for every persona except the architect; your write fails with EROFS. Instead append a one-paragraph note to `/workspace/product_memory.md` under `### [<date>] documenter — ARCHITECTURE.md staleness` naming exactly which rows/sections are out of date; the architect applies it on its next cadence.
 
 6. **Update product config** to record last doc time (GET config first, merge, then PATCH):
    ```

@@ -85,20 +85,42 @@ def _validate_reviewer_outcome_consistency(entry: dict, pm_client, log_prefix: s
         return ("apply", "")
 
     comments.sort(key=lambda c: (c.get("created_at") or ""))
-    reviewer_comments = [
-        c for c in comments
-        if (c.get("author") or "").lower() == "reviewer"
-    ]
-    if not reviewer_comments:
+    if not any((c.get("author") or "").lower() == "reviewer" for c in comments):
         return ("apply", "")
 
-    latest_body = (reviewer_comments[-1].get("body") or "")
-    head = latest_body[:200]
-    head_upper = head.upper()
-    body_upper = latest_body.upper()
+    # Evaluate the TRAILING RUN of reviewer comments (every reviewer comment
+    # after the last non-reviewer comment) — not just the single latest one.
+    # The reviewer prompt explicitly instructs one comment per failing
+    # section plus a separate "✅ prior X addressed" acknowledgement, so a
+    # legitimate changes_requested round routinely ends with a ✅-opening
+    # comment. Judging only the latest comment mis-read that round as a
+    # mismatch, rejected the entry, and burned a full re-review session —
+    # the 2026-06-11 forensic audit traced 5 of the 7 divergent_review_
+    # feedback auto-Blocks to exactly this loop. Combined-sentiment rule:
+    #   changes_requested is consistent if ANY comment in the run has ❌;
+    #   approved is consistent if NO comment in the run has ❌ and at least
+    #   one opens positively.
+    tail_run: list[dict] = []
+    for c in comments:
+        if (c.get("author") or "").lower() == "reviewer":
+            tail_run.append(c)
+        else:
+            tail_run = []
+    if not tail_run:
+        return ("apply", "")
 
-    has_pos_head = ("✅" in head) or ("LGTM" in head_upper) or ("APPROVED" in head_upper)
-    has_neg_body = ("❌" in latest_body) or ("CHANGES_REQUESTED" in body_upper) or ("REJECT" in body_upper)
+    bodies = [(c.get("body") or "") for c in tail_run]
+    head = bodies[0][:200]
+
+    def _pos_head(b: str) -> bool:
+        h = b[:200]
+        return ("✅" in h) or ("LGTM" in h.upper()) or ("APPROVED" in h.upper())
+
+    has_pos_head = any(_pos_head(b) for b in bodies)
+    has_neg_body = any(
+        ("❌" in b) or ("CHANGES_REQUESTED" in b.upper()) or ("REJECT" in b.upper())
+        for b in bodies
+    )
 
     mismatch = False
     kind = ""

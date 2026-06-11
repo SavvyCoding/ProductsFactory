@@ -1158,3 +1158,28 @@ class TestDetectUnreachableEmittedUrls:
         assert len(out[0].occurrences) == 2
 
 
+
+
+# ── registry membership (2026-06-11 promotion) ──────────────────────────────
+
+
+class TestDetectorRegistryMembership:
+    def test_promoted_trio_on_chore_path(self):
+        # Promoted after the clean two-audit soak; a refactor must not
+        # silently demote them back to comment-only (the testingcalc
+        # re-review showed comments get read but never repaired).
+        from orchestrator import drift_detectors as dd
+        assert dd.detect_tracked_build_artifacts in dd._CHORE_DETECTORS
+        assert dd.detect_undeclared_backend_deps in dd._CHORE_DETECTORS
+        assert dd.detect_unreachable_emitted_urls in dd._CHORE_DETECTORS
+        # Moved, not copied — no double-reporting.
+        assert dd.detect_tracked_build_artifacts not in dd._DETECTORS
+        assert dd.detect_undeclared_backend_deps not in dd._DETECTORS
+        assert dd.detect_unreachable_emitted_urls not in dd._DETECTORS
+
+    def test_soaking_detectors_stay_on_comment_path(self):
+        from orchestrator import drift_detectors as dd
+        assert dd.detect_sandbox_path_literals in dd._DETECTORS
+        assert dd.detect_stub_confessions in dd._DETECTORS
+        assert dd.detect_secret_sentinel in dd._DETECTORS
+        assert dd.detect_secret_sentinel not in dd._CHORE_DETECTORS

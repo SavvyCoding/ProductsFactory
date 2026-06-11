@@ -9,8 +9,9 @@ Tech stack: {tech_stack}
 Working dir: `/workspace` (all files written here).
 
 > **Vocabulary:** items below are **Stories** (≤4 ACs, ≤6 files, fits one
-> coder session); the DB/API call them `features`. Many Stories = one
-> **Feature** (a sprint, ships as one PR).
+> coder session); the DB/API call them `features`. Many Stories group under
+> one **Phase** (a UI/planning bucket) — but **each Story ships as its own
+> session PR direct to `main`**; there is no batch merge.
 > **Tools:** **Bash** + `curl` for PM API calls — WebFetch can't reach `pm-api:8080`.
 > **Ignore** `/workspace/AGENT_WORKFLOW.md` — that's for the Coder.
 
@@ -330,6 +331,13 @@ correctly, design it normally — don't recursively split.
    For each new endpoint: method, path, request shape, response shape (status
    code AND body shape verbatim), error responses (status code + body).
    For each new exported function: signature with arg types and return type.
+   **Auth stance is REQUIRED for every state-changing endpoint** (POST/PUT/
+   PATCH/DELETE): either name the auth dependency it uses, or mark it
+   `PUBLIC_ROUTE` with a one-line rationale (login, register, OAuth
+   callback, signed-webhook receiver, health probe). The coder turns that
+   into a `# PUBLIC_ROUTE: <why>` annotation that the post-coder Guard 6
+   honours — without it, intentionally-public endpoints bounce on
+   "missing auth" every round.
 
    ## Algorithm Specs (REQUIRED when any AC involves non-trivial math/parsing)
    For each algorithmic AC, include:
@@ -347,6 +355,16 @@ correctly, design it normally — don't recursively split.
 
    ## Edge Cases & Error Handling
    - Input edge cases (empty, oversized, malformed, missing auth).
+   - **Numeric/compute extremes (REQUIRED for any AC that computes):**
+     overflow (`exp(1000)`, `10^308*10`), infinity/NaN reaching the
+     serializer, inputs that explode cost (huge exponents, unbounded
+     `precision`/`iterations` parameters — cap them in the request
+     schema). At least ONE AC's Verify recipe must exercise an extreme
+     and assert the mapped error (e.g. 422 with a stable code), not a
+     500. Canonical miss (testingcalc 2026-06-11): every happy-path and
+     domain-error case shipped clean while the entire overflow/inf
+     class returned 500 — and one endpoint CACHED the inf before
+     serialization failed, turning the expression into a stored 500.
    - Concurrency cases if applicable.
    - Each error response from the API section must appear here with
      the trigger condition.
@@ -425,9 +443,20 @@ correctly, design it normally — don't recursively split.
    - Blocked-insufficient: `{"id": <id>, "status": "Blocked", "blocked_reason": "Insufficient spec — <detail>"}`
 
    `status` must be exactly `"Designed"`, `"Rejected"`, or `"Blocked"`.
-   Only use `Blocked` when the spec is genuinely unworkable (vague to the
-   point you can't even split it); use `Rejected` for the standard SPLIT
-   path. One JSON object per line. Never wrap in `{"features": [...]}`.
+   One JSON object per line. Never wrap in `{"features": [...]}`.
+
+   **Escape-hatch precedence — when a spec is unclear, this is the order:**
+   1. **`[NEEDS CLARIFICATION: ...]` in the doc** (step 1) — THE DEFAULT.
+      Keeps the story live, costs no fix_attempts, and asks the PM a
+      specific answerable question. If you can formulate ANY clarifying
+      question, use this path.
+   2. **`Rejected`** — for SPLIT replacements and already-satisfied chores.
+   3. **`Blocked`** — LAST RESORT, only when the story is so vague no
+      clarifying question can even be formed (name/description is a
+      placeholder like 'test'/'x'/'qqqq'). A Block is terminal until a
+      human intervenes; 19 stories sat dead in the Blocked queue in the
+      2026-06 audit, most of which a [NEEDS CLARIFICATION] question would
+      have kept moving.
 
 4. **Exit 0.** Do NOT run any `git` commands — the orchestrator owns git.
    Do NOT write application code, tests, or fixtures.

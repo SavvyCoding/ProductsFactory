@@ -53,11 +53,18 @@ POST {pm_api_url}/api/features
 {{
   "product_id": {product_id},
   "name": "<short name, max 8 words>",
-  "description": "<one sentence: what it does and why valuable>",
+  "description": "<1-line summary of what it does and why valuable>\n- <AC 1: one observable behavior>\n- <AC 2>\n- <AC 3 if needed, max 4>",
   "source": "ai",
   "priority": 50
 }}
 ```
+**Description format is a CONTRACT**: a 1-line summary followed by 2-4
+`- ` acceptance-criterion bullets, each an observable behavior (an HTTP
+response, a returned value, a visible UI state). One-sentence descriptions
+with no ACs get Blocked by the designer as insufficient spec — 19 features
+died that way in the 2026-06 audit; a feature you file without ACs is
+compute wasted twice.
+
 Post all 5 before moving on.
 
 ---

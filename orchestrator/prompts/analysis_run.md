@@ -39,10 +39,8 @@ For each meaningful existing capability, POST to `{pm_api_url}/api/features` wit
 {{"product_id": {product_id}, "name": "...", "status": "Pushed", "source": "ai"}}
 ```
 
-### 5. Commit and push
-- Commit `ARCHITECTURE.md` + `product_config.json` to `main`
-- Message: `chore: Analysis Run — ARCHITECTURE.md + product_config.json [ProductFactory]`
-- Push to `main` (this scaffolding pass runs before any sprint exists, so `main` is correct).
+### 5. Leave files in the working tree — do NOT run git
+The orchestrator commits and pushes `ARCHITECTURE.md` + `product_config.json` to `main` after you exit. Never run `git add`/`commit`/`push` yourself — agent-side git is rejected by the harness and contradicts the factory-wide git-ownership contract.
 
 ### 6. Mark analysis complete
 PATCH `{pm_api_url}/api/products/{product_id}` → `analysis_status="done"`, `status="ready"`.
