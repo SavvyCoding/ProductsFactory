@@ -1409,15 +1409,13 @@ _DETECTORS = (
     detect_shell_artifact_files,
     detect_design_doc_mismatch,
     detect_placeholder_template_content,
-    # 2026-06-09 five-product-audit batch — all five are REPORT-ONLY
-    # (comment path) for the soak period; promotion to _CHORE_DETECTORS
-    # or post-coder bounce guards only after false-positive review across
-    # ≥2 products (Guard-17-tuning protocol).
+    # 2026-06-09 five-product-audit batch, comment path. The medium-severity
+    # detectors stay here (file-scoped feedback the next coder session acts
+    # on via {reviewer_feedback}); secret_sentinel is high-severity but
+    # deployed only 2026-06-10 — it finishes its report-only soak before
+    # promotion (Guard-17-tuning protocol).
     detect_sandbox_path_literals,
-    detect_tracked_build_artifacts,
     detect_stub_confessions,
-    detect_undeclared_backend_deps,
-    detect_unreachable_emitted_urls,
     detect_secret_sentinel,
 )
 
@@ -1430,6 +1428,15 @@ _CHORE_DETECTORS = (
     detect_god_file,
     detect_public_route_blanket_with_auth,
     detect_mixed_error_envelopes,
+    # Promoted from the comment path 2026-06-11 after a clean two-audit
+    # soak (zero false positives across all five products, host and
+    # in-container runs). Rationale: the testingcalc re-review showed
+    # comment-path findings get READ but never REPAIRED — every known
+    # defect sat untouched for 36h while new features shipped around it.
+    # Chores give findings an owner.
+    detect_tracked_build_artifacts,
+    detect_undeclared_backend_deps,
+    detect_unreachable_emitted_urls,
 )
 
 
