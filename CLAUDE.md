@@ -138,7 +138,6 @@ Active detectors:
 - `false_success` — coder session claimed `task_done` but staged no commits / left features unaddressed
 - `dirty_pr_close` — PR with merge conflicts, idle, ≥1h old → close + reset features
 - `auto_plan` — active phase dead, ≥N un-phased Approved features → kick off LLM phase planner
-- `merge_stall_alert` — phase all-Reviewed but PRs not merging for ≥1h → operator alert
 - `overlap_pr` — multiple open PRs cover the same feature IDs → close the older
 - `detect_repeated_review_feedback` — **convergent cascade**: same comment signature across N consecutive cycles → Block the feature with `blocked_reason`
 - `detect_divergent_review_feedback` (Phase 6) — **divergent cascade**: reviewer flags a *different* issue each cycle while ignoring earlier ones. The 25-comment cumulative-feedback context (`_fetch_recent_review_comments` + `_format_reviewer_feedback`, limit raised 6→25 on 2026-05-07) is injected into the rework coder prompt via `{reviewer_feedback}` so the running checklist is explicit.

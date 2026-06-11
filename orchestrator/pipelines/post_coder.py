@@ -6,10 +6,10 @@ workspace. This pipeline takes care of every subsequent git step:
   1. Detect agent-handled vs not-handled features (verifies claimed PRs
      have real ``[feature-N]`` commit tags on GitHub before trusting them)
   2. Detect uncommitted changes / unpushed commits in the workspace
-  3. Resolve target branch in three modes:
-       - sprint-PR mode  → reuse the already-provisioned sprint branch + PR
-       - rework mode     → all features point at one open PR; force-push to it
-       - per-feature mode → cut ``coder/<session_uid>`` (legacy fallback)
+  3. Resolve target branch (1-PR model, migration 043):
+       - rework mode  → all features point at one open PR; force-push to it
+       - session mode → cut a fresh ``coder/<session_uid>`` branch off the
+         default branch tip and open a session PR direct to main
   4. add + commit (with ``[feature-N]`` tags) + push (force-with-lease in rework)
   5. Append Reviewing entries to session_result.json (with PM-API fallback PATCH
      if the file write fails — keeps a real GitHub PR from being stranded)
@@ -2872,23 +2872,22 @@ def _post_coder_verify_check(
 def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                               assigned_features: list[dict]) -> list[int]:
     """
-    Deterministic git fallback after the coder LLM exits cleanly.
-    The coder ONLY writes code; this function pushes to the sprint branch:
+    Deterministic git ceremony after the coder LLM exits cleanly.
+    The coder ONLY writes code; this function ships it (1-PR model,
+    migration 043 — every coder session opens its own session PR):
       1. Detect if there are any changes in the workspace
-      2. Check out the sprint branch (provisioned at sprint activation)
-      3. git add + commit + push
+      2. Rework mode: assigned features share an open session PR →
+         force-push fresh commits to its branch (preserves the reviewer's
+         comment thread). Otherwise cut a fresh ``coder/<session_uid>``
+         branch off the default branch tip.
+      3. Run the lint/test/verify gates, then git add + commit + push
+         and open the session PR (``coder/<uid>`` → main)
       4. PATCH each assigned feature to Reviewing + pr_number on the PM API
          directly (no session_result.json roundtrip; see step 5 comment for
          why the file-based handoff was removed on 2026-05-06).
 
     Returns the list of feature IDs successfully PATCHed to Reviewing — used
     by the caller to set the session record's `features_pushed` counter.
-
-    Sprint-PR mode is the only supported flow: PR creation happens once at
-    sprint activation (`orchestrator.sprint_pr.provision_sprint_pr`); coder
-    sessions just stack commits onto the same branch. If the active sprint
-    has no provisioned branch + PR, the pipeline marks the assigned features
-    Blocked with a clear reason — never opens a fresh PR.
     """
     pushed_ids: list[int] = []
     pname = product.get("name", "?")
