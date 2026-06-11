@@ -43,10 +43,6 @@ REST API (used by poller — no auth on poller-only routes):
   POST /api/features/reset_stuck       — reset Implementing→Approved if >45min (poller)
   POST /api/labels                     — create label
   GET  /api/products/{id}/labels       — list labels for product
-  POST /api/sprints                    — create sprint
-  GET  /api/products/{id}/sprints      — list sprints
-  GET  /api/products/{id}/sprints/active — active sprint
-  PATCH /api/sprints/{id}              — update sprint
   GET  /api/system-config              — system config for poller (no auth)
   POST /api/recommend/features         — LLM-generated feature suggestions
   GET  /api/alerts/unread              — unread alerts for nav badge
@@ -284,10 +280,16 @@ async def _llm_call(prompt: str, db: AsyncSession, max_tokens: int = 3000) -> st
         )
     import anthropic
     client = anthropic.Anthropic(api_key=api_key)
-    msg = client.messages.create(
-        model=_RECOMMENDATION_MODEL,
-        max_tokens=max_tokens,
-        messages=[{"role": "user", "content": prompt}],
+    # The sync SDK call blocks the event loop (an LLM call can run tens of
+    # seconds — every other request on the worker stalls). Run it in the
+    # default executor, like the subprocess fallback above already does.
+    msg = await asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: client.messages.create(
+            model=_RECOMMENDATION_MODEL,
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        ),
     )
     return msg.content[0].text.strip()
 _CONTAINER_WORKSPACE = Path("/workspace")
@@ -821,8 +823,8 @@ async def product_detail(
         "alert_count": alert_count,
         "current_pm": current_pm,
         "active_tab": tab,
-        "max_features_default": _cfg(await _get_system_config(db), "max_features_per_run"),
-        "max_fix_attempts": _cfg(await _get_system_config(db), "max_fix_attempts"),
+        "max_features_default": _cfg(_sys_cfg, "max_features_per_run"),
+        "max_fix_attempts": _cfg(_sys_cfg, "max_fix_attempts"),
         "phases": phases,
         "sprints": sprints,
         "active_sprint": active_sprint,
@@ -3057,41 +3059,62 @@ async def _build_phase_report(phase: Phase, db: AsyncSession) -> dict:
     # that depend on it (via the typed feature_links graph or the depends_on
     # FK) and live in a LATER phase — those will be blocked downstream. This is
     # the "future features X, Y will be blocked" warning the gate decision needs.
+    # Batched (was one links query + one depends_on query per unresolved
+    # feature + one row fetch per downstream id — ~140 queries on a
+    # 20-feature phase with 5 downstream each; now 3 total).
     blockers: list[dict] = []
-    for u in unresolved:
-        links = (await db.execute(
+    if unresolved:
+        u_ids = [u.id for u in unresolved]
+        # Link semantics: (type=blocks, s, t) → t is downstream of s;
+        # (type=is_blocked_by, s, t) → s is downstream of t. Same mapping
+        # as the old per-feature WHERE, applied over the batch.
+        all_links = (await db.execute(
             select(FeatureLink).where(
-                ((FeatureLink.source_id == u.id) & (FeatureLink.link_type == "blocks"))
-                | ((FeatureLink.target_id == u.id) & (FeatureLink.link_type == "is_blocked_by"))
+                ((FeatureLink.source_id.in_(u_ids)) & (FeatureLink.link_type == "blocks"))
+                | ((FeatureLink.target_id.in_(u_ids)) & (FeatureLink.link_type == "is_blocked_by"))
             )
         )).scalars().all()
-        downstream_ids = {
-            (lk.target_id if lk.source_id == u.id else lk.source_id) for lk in links
-        }
+        downstream_by_u: dict[int, set[int]] = {uid: set() for uid in u_ids}
+        for lk in all_links:
+            if lk.link_type == "blocks" and lk.source_id in downstream_by_u:
+                downstream_by_u[lk.source_id].add(lk.target_id)
+            elif lk.link_type == "is_blocked_by" and lk.target_id in downstream_by_u:
+                downstream_by_u[lk.target_id].add(lk.source_id)
         # depends_on FK: any feature pointing at U is downstream of it.
-        dep_rows = (await db.execute(
-            select(Feature.id).where(Feature.depends_on == u.id)
-        )).scalars().all()
-        downstream_ids.update(dep_rows)
+        dep_pairs = (await db.execute(
+            select(Feature.id, Feature.depends_on).where(Feature.depends_on.in_(u_ids))
+        )).all()
+        for vid, uid in dep_pairs:
+            if uid in downstream_by_u:
+                downstream_by_u[uid].add(vid)
 
-        downstream_blocked = []
-        for vid in downstream_ids:
-            v = (await db.execute(select(Feature).where(Feature.id == vid))).scalar_one_or_none()
-            if not v or v.phase_id is None:
-                continue
-            v_meta = phase_meta.get(v.phase_id)
-            # Only warn about features in a strictly LATER phase.
-            if v_meta and v_meta["order"] > phase.order:
-                downstream_blocked.append({
-                    "feature_id": v.id, "name": v.name,
-                    "phase": v_meta["name"], "phase_order": v_meta["order"],
-                })
-        blockers.append({
-            "feature_id": u.id, "name": u.name, "status": u.status,
-            "reason": u.blocked_reason or u.review_notes or "",
-            "fix_attempts": u.fix_attempts,
-            "downstream_blocked": sorted(downstream_blocked, key=lambda d: d["phase_order"]),
-        })
+        all_downstream_ids = set().union(*downstream_by_u.values()) if downstream_by_u else set()
+        v_by_id: dict[int, Feature] = {}
+        if all_downstream_ids:
+            v_rows = (await db.execute(
+                select(Feature).where(Feature.id.in_(all_downstream_ids))
+            )).scalars().all()
+            v_by_id = {v.id: v for v in v_rows}
+
+        for u in unresolved:
+            downstream_blocked = []
+            for vid in downstream_by_u.get(u.id, ()):
+                v = v_by_id.get(vid)
+                if not v or v.phase_id is None:
+                    continue
+                v_meta = phase_meta.get(v.phase_id)
+                # Only warn about features in a strictly LATER phase.
+                if v_meta and v_meta["order"] > phase.order:
+                    downstream_blocked.append({
+                        "feature_id": v.id, "name": v.name,
+                        "phase": v_meta["name"], "phase_order": v_meta["order"],
+                    })
+            blockers.append({
+                "feature_id": u.id, "name": u.name, "status": u.status,
+                "reason": u.blocked_reason or u.review_notes or "",
+                "fix_attempts": u.fix_attempts,
+                "downstream_blocked": sorted(downstream_blocked, key=lambda d: d["phase_order"]),
+            })
 
     # Quality signal already on record.
     supervisor_rows = (await db.execute(

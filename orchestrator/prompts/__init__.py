@@ -213,7 +213,7 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
         # HARD STOP block, rework-branch logic, and every 2026-05/06 coder
         # fix, with a rework header docker_runner no longer emits. One
         # accidental re-route away from mass regression; now structurally
-        # impossible. greenfield.md on disk is a pointer stub.
+        # impossible. greenfield.md was deleted outright (dead-code sweep).
         template_name = "brownfield"
 
     # Per-product prompt overrides (Symphony-style WORKFLOW.md pattern):
