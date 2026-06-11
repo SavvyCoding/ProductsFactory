@@ -11,7 +11,7 @@ import orchestrator.docker_runner as dr
 def _patch_comments(monkeypatch, body="fix the import"):
     monkeypatch.setattr(
         dr, "_fetch_recent_review_comments",
-        lambda fid, limit=25: [{"created_at": "2026-06-08T00:00:00",
+        lambda fid, limit=25, cumulative=False: [{"created_at": "2026-06-08T00:00:00",
                                 "author": "lint-guard", "body": body}],
     )
 
@@ -47,7 +47,40 @@ class TestReviewerFeedbackFraming:
 
     def test_no_comments_returns_empty(self, monkeypatch):
         monkeypatch.setattr(dr, "_fetch_recent_review_comments",
-                            lambda fid, limit=25: [])
+                            lambda fid, limit=25, cumulative=False: [])
         feats = [{"id": 1, "name": "x", "review_outcome": "changes_requested",
                   "fix_attempts": 1, "branch_name": "coder/abc"}]
         assert dr._format_reviewer_feedback(feats) == ""
+
+
+class TestFeedbackWindowCaseSplit:
+    """2026-06-11: no-branch reworks get the CUMULATIVE comment history
+    (nothing carries the prior decisions on a clean reimplement); branch-
+    persisted reworks keep the latest-bounce-only window."""
+
+    def _capture(self, monkeypatch):
+        calls = {}
+        def fake(fid, limit=25, cumulative=False):
+            calls["cumulative"] = cumulative
+            return [{"created_at": "2026-06-11T00:00:00",
+                     "author": "reviewer", "body": "fix X"}]
+        monkeypatch.setattr(dr, "_fetch_recent_review_comments", fake)
+        return calls
+
+    def test_no_branch_requests_cumulative_history(self, monkeypatch):
+        calls = self._capture(monkeypatch)
+        feats = [{"id": 1, "name": "x", "review_outcome": "changes_requested",
+                  "fix_attempts": 2, "branch_name": None, "pr_number": None}]
+        out = dr._format_reviewer_feedback(feats)
+        assert calls["cumulative"] is True
+        assert "FULL feedback history" in out
+        assert "10-minute window" not in out
+
+    def test_branch_persisted_requests_latest_only(self, monkeypatch):
+        calls = self._capture(monkeypatch)
+        feats = [{"id": 1, "name": "x", "review_outcome": "changes_requested",
+                  "fix_attempts": 1, "branch_name": "coder/abc123"}]
+        out = dr._format_reviewer_feedback(feats)
+        assert calls["cumulative"] is False
+        assert "10-minute window" in out
+        assert "FULL feedback history" not in out
