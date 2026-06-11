@@ -640,14 +640,14 @@ async def dashboard(
     config = await _get_system_config(db)
 
     # Feature counts per product for progress bars
-    # Rejected features are out-of-scope work (PM said no / sizing-gate
-    # parent superseded by children) — excluded from total so the
-    # "X/total shipped" ratio reflects what's actually planned to ship,
-    # matching the product.html summary-tab convention.
+    # Rejected/Reverted features are out-of-scope work (PM said no /
+    # sizing-gate parent superseded / merged-then-backed-out) — excluded
+    # from total so the "X/total shipped" ratio reflects what's actually
+    # planned to ship, matching the product.html progress conventions.
     _ACTIVE_STATUSES = {"Approved", "Designing", "Designed", "Implementing", "Reviewing", "Reviewed"}
     counts_result = await db.execute(
         select(Feature.product_id, Feature.status, func.count().label("cnt"))
-        .where(Feature.status != "Rejected")
+        .where(Feature.status.notin_(["Rejected", "Reverted"]))
         .group_by(Feature.product_id, Feature.status)
     )
     feature_counts: dict[int, dict] = {}
