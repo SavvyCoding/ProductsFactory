@@ -33,18 +33,9 @@ PROMPT_INVARIANTS: dict[str, list[str]] = {
     # Coder personas: behavioral guarantees that must survive any prompt
     # rewrite. Each phrase locks in a specific directive — losing one
     # changes session behaviour.
-    "greenfield": [
-        "session_result.json",        # how the poller learns what was attempted
-        "Implemented",                # the success status
-        "Blocked",                    # the failure status
-        "Reviewing",                  # must remind model NOT to write this
-        "task_done",                  # must call before turn budget runs out
-        "sed -i",                     # must remind model NOT to use sed/awk -i
-        "git",                        # the no-git prohibition must mention git
-        "gh ",                        # ditto for gh
-        "self-verification",          # the pre-exit checklist (saves rework)
-        "session_summary.md",         # blocked-reason fallback path
-    ],
+    # ("greenfield" entry removed 2026-06-11: the template is retired to a
+    # pointer stub; ALL coder routing — including the legacy persona=None
+    # type-based fall-through — lands on brownfield.md.)
     "brownfield": [
         "session_result.json",
         "Implemented",

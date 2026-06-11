@@ -595,11 +595,30 @@ def _write_sprint_features_md(working_dir: str, features: list[dict], sprint_nam
         log.warning(f"Could not write features.md to {working_dir}: {e}")
 
 
-def _fetch_recent_review_comments(feature_id: int, limit: int = 25) -> list[dict]:
+def _fetch_recent_review_comments(
+    feature_id: int, limit: int = 25, cumulative: bool = False,
+) -> list[dict]:
     """
     Pull the comments relevant to the CURRENT rework cycle. Returns
     oldest-first within the slice so the prompt-renderer can stack them
     in chronological order under the feature.
+
+    Two modes (case-split added 2026-06-11):
+
+    ``cumulative=False`` (branch-persisted reworks) — only the LATEST
+    bounce's feedback (10-minute window). The prior code is in the
+    coder's tree and carries the prior decisions; the latest signal is
+    the truth source.
+
+    ``cumulative=True`` (pre-push-gate reworks, NO branch) — the full
+    allowed-author comment history up to ``limit``. The 2026-06-08 audit
+    found 47/50 reworks were pre-push bounces where the coder
+    REIMPLEMENTS from a clean tree: with latest-only feedback, every
+    reviewer/gate item from earlier rounds silently regresses on
+    reimplementation, the next round flags it again (or flags something
+    new), and the divergence detector blocks the feature. When there is
+    no prior code to carry the decisions, the comment history IS the
+    checklist.
 
     Filter (2026-06-01): only the LATEST bounce's feedback drives the
     rework — not the accumulated history. The bounce can come from the
@@ -686,6 +705,10 @@ def _fetch_recent_review_comments(feature_id: int, limit: int = 25) -> list[dict
                         if (c.get("author") or "").lower() in _ALLOWED_AUTHORS]
             if not relevant:
                 return []
+            if cumulative:
+                # Pre-push-gate rework (no branch): full history IS the
+                # checklist — see docstring case-split.
+                return relevant[-limit:]
             # Last-bounce filter (2026-06-01): keep only comments within
             # a 10-minute window backward from the most recent comment's
             # timestamp. See docstring for the rationale.
@@ -837,6 +860,28 @@ def _format_reviewer_feedback(features: list[dict]) -> str:
             "shows only mainline history). **Reimplement the feature cleanly "
             "and make sure every item below is addressed** before you finish."
         )
+    if has_prior_branch:
+        _window_para = (
+            "Only the LATEST bounce's feedback is included below (the "
+            "10-minute window around the most recent comment). Earlier "
+            "bounces' feedback was either already addressed in the code "
+            "you now see, or the latest bounce decided to re-raise it — "
+            "either way, the items below are what's still outstanding."
+        )
+    else:
+        # Case-split (2026-06-11): no branch = nothing carries the prior
+        # decisions, so the FULL comment history is the rework checklist.
+        # Latest-only feedback on clean-reimplement reworks made earlier
+        # reviewer items silently regress each round — the divergent-
+        # feedback loop in its purest form.
+        _window_para = (
+            "The FULL feedback history is included below — because you are "
+            "reimplementing from a clean tree, every item ever flagged on "
+            "these features is still your responsibility (there is no prior "
+            "code carrying the earlier fixes). Treat the whole list as a "
+            "checklist; items the latest bounce didn't mention can STILL "
+            "fail review if you regress them."
+        )
     sections: list[str] = [
         "## Latest feedback to address",
         "",
@@ -846,16 +891,13 @@ def _format_reviewer_feedback(features: list[dict]) -> str:
         "",
         _workspace_para,
         "",
-        "Only the LATEST bounce's feedback is included below (the "
-        "10-minute window around the most recent comment). Earlier "
-        "bounces' feedback was either already addressed in the code "
-        "you now see, or the latest bounce decided to re-raise it — "
-        "either way, the items below are what's still outstanding.",
+        _window_para,
         "",
     ]
     any_comments = False
     for f in rework_features:
-        comments = _fetch_recent_review_comments(int(f["id"]))
+        comments = _fetch_recent_review_comments(
+            int(f["id"]), cumulative=not has_prior_branch)
         if not comments:
             continue
         any_comments = True

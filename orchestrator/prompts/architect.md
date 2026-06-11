@@ -195,6 +195,14 @@ For each finding in each non-RESOLVED review doc:
 # RESOLVED <YYYY-MM-DD>: <original finding, one line> — addressed (<what changed>).
 ```
 
+⚠️ **RESOLVED requires CODE evidence — documenting a defect does not resolve it.** A finding about the CODE (a schema divergence, a dead endpoint, a security hole) may be stamped RESOLVED only when the *code* changed: quote the file:line of the fix (or the commit) in the stub. If all you did — or all anyone did — is describe the defect in ARCHITECTURE.md/MODULES/DEPRECATED, the finding is NOT resolved; use this stub instead and leave the doc non-RESOLVED:
+
+```
+# DOCUMENTED <YYYY-MM-DD> (not fixed): <finding> — recorded in <where>; code unchanged.
+```
+
+(Canonical overclaim, testingcalc 2026-06-11: a review doc stamped the init_db-vs-alembic schema divergence "RESOLVED" when only ARCHITECTURE.md gained a row describing it — the conflicting DDL was byte-identical, and the new history API then 500'd on every init_db-bootstrapped DB. A later session trusted the RESOLVED stub and skipped re-checking.)
+
 Do NOT delete the file (deletion is forbidden — see Hard rules; the allowlist refuses non-doc deletions and would discard your whole commit). Overwriting to a RESOLVED stub keeps the never-delete rule intact while stopping the stale doc from contradicting the live MODULES table.
 
 Why this matters: the reconciler used to file chores from your review docs, routing them through coder→reviewer. That path failed structurally because the coder can't write ARCHITECTURE.md. The chore-controller wiring was retired 2026-05-30 — you ARE the actuator now. Findings that sit in a non-RESOLVED review doc and never get applied are the find-to-action gap the system explicitly does not have a chore-controller backup for.

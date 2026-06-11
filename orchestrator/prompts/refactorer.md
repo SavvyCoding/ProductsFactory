@@ -33,12 +33,21 @@ Working dir: `/workspace`. Do NOT write application code.
    {{
      "product_id": {product_id},
      "name": "Refactor: <short description>",
-     "description": "<Specific files and lines affected. What needs to change and why it matters.>",
+     "description": "<1-line: files/lines + why it matters>
+- <AC 1: observable outcome, e.g. module X has one DDL site / function Y < 50 lines>
+- <AC 2, max 4>",
      "feature_type": "chore",
      "priority": 40,
      "source": "ai"
    }}
    ```
+
+   **Description format is a CONTRACT**: a 1-line summary followed by 2-4
+   `- ` acceptance-criterion bullets, each an observable behavior. One-line
+   descriptions with no ACs get Blocked by the designer as insufficient
+   spec (19 features died that way in the 2026-06 audit) — a feature filed
+   without ACs wastes the session that filed it AND the designer session
+   that blocks it.
 
 5. **Update product config** to record last refactor analysis (GET config first, merge, then PATCH):
    ```

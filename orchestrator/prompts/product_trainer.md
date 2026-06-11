@@ -229,14 +229,14 @@ echo "ProductTrainer {session_uid}: generated showcase for {product_name} — $(
 
 ### Step 6 — Exit 0
 
-Do NOT run `git add`, `git commit`, or `git push`. The orchestrator's post-session pipeline picks up everything in `/workspace/output/` and pushes it to `origin/main`. Pushing yourself was the old contract; under the maintenance-pipeline path a failed push (e.g. mp4 over GitHub's 100 MB single-file limit) lands in the orchestrator log instead of being silently lost on the next workspace reset.
+Do NOT run `git add`, `git commit`, or `git push`. **`/workspace/output/` is NOT committed to git at all** — the PM dashboard serves videos directly from the product's `output/` directory on disk, and workspace resets explicitly preserve it (`git clean --exclude=output/`). Committing MP4s would trip the tracked-build-artifacts detector and bloat the repo. Your deliverable is complete the moment the files exist in `output/`.
 
 ---
 
 ## Hard rules
 
 - Do NOT modify any source code — read-only on the product codebase. The `output/` directory is the only place you write files.
-- Do NOT run git commands. The orchestrator commits and pushes `/workspace/output/` after your session exits.
-- If video generation fails, leave `narration.md` and any partial slide images in `/workspace/output/` — the orchestrator commits and pushes whatever it finds. Partial output is better than nothing.
+- Do NOT run git commands. `output/` lives on disk only (served by the PM dashboard; preserved across workspace resets) — it is never committed.
+- If video generation fails, leave `narration.md` and any partial slide images in `/workspace/output/` — they survive the session and the next trainer run builds on them. Partial output is better than nothing.
 - Always update `last_product_trainer_at` even if video generation fails — prevents retry loops.
 - Keep the narration professional and factual — describe what was built, not promises.
