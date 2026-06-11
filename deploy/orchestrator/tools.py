@@ -284,7 +284,7 @@ def _discover_registered_products(products: list, **kwargs) -> int:
     return n
 
 
-def _scaffold_greenfield_pending(products: list, **kwargs) -> int:
+def _scaffold_greenfield_pending(products: list, sys_cfg: dict | None = None, **kwargs) -> int:
     """
     For every product in `greenfield_pending`, invoke the host-side
     scaffold helper that creates the GitHub repo, generates the deploy
@@ -310,12 +310,14 @@ def _scaffold_greenfield_pending(products: list, **kwargs) -> int:
         return 0
 
     # system_config supplies github_org / GitHub App credentials.
-    try:
-        with _pm_client() as client:
-            sys_cfg = client.get("/api/system-config").json()
-    except Exception:
-        log.exception("[scaffold] could not fetch system-config")
-        return 0
+    # Normally passed in by run_cycle's per-cycle fetch; self-fetch fallback.
+    if sys_cfg is None:
+        try:
+            with _pm_client() as client:
+                sys_cfg = client.get("/api/system-config").json()
+        except Exception:
+            log.exception("[scaffold] could not fetch system-config")
+            return 0
 
     scaffolded = 0
     for product in pending:
@@ -442,6 +444,22 @@ def run_cycle(args: dict, **kwargs) -> str:
         # don't have active sessions; the launch_lock prevents double-spawn
         # for a given product. No global guard needed.
 
+        # 4b. Single per-cycle system-config fetch. The helpers below
+        # (greenfield scaffold, auto-merge sweep, supervisor detectors,
+        # architect scheduler) each used to fetch /api/system-config
+        # themselves — with N ready products that was ~2N+2 identical GETs
+        # per 60s cycle. Operators can still hot-rotate config: one cycle
+        # of latency, same as before. Empty dict on failure → each helper
+        # falls back to its own fetch (or its env default), preserving the
+        # old failure semantics.
+        try:
+            with _pm_client() as client:
+                _sc_raw = client.get("/api/system-config").json()
+            cycle_sys_cfg: dict = _sc_raw if isinstance(_sc_raw, dict) else {}
+        except Exception:
+            log.exception("per-cycle system-config fetch failed (helpers fall back)")
+            cycle_sys_cfg = {}
+
         # 5. Per-product preflight
         products_raw = json.loads(get_products({}, **kwargs))
         products_data = products_raw.get("data") if isinstance(products_raw, dict) else products_raw
@@ -450,7 +468,7 @@ def run_cycle(args: dict, **kwargs) -> str:
         # 5a. Scaffold greenfield_pending products (creates GitHub repo, deploy
         # key, initial files, flips status → registered).
         try:
-            n = _scaffold_greenfield_pending(products, **kwargs)
+            n = _scaffold_greenfield_pending(products, sys_cfg=cycle_sys_cfg or None, **kwargs)
             if n:
                 products_raw = json.loads(get_products({}, **kwargs))
                 products_data = products_raw.get("data") if isinstance(products_raw, dict) else products_raw
@@ -478,9 +496,12 @@ def run_cycle(args: dict, **kwargs) -> str:
 
         for p in ready:
             try:
-                reconcile_prs({"product_id": p["id"]}, **kwargs)
+                # Pass the in-hand product row (same ProductOut schema as
+                # GET /api/products/{id}) so reconcile_prs skips its
+                # per-product re-fetch.
+                reconcile_prs({"product_id": p["id"], "product": p}, **kwargs)
             except Exception:
-                pass
+                log.exception(f"reconcile_prs failed for product {p.get('id')} (non-fatal)")
 
         # Phase 1 of PollerRevamp (INVARIANTS.md VII.1): per-cycle auto-merge
         # sweep. Walks every ready product and squash-merges any feature that
@@ -490,12 +511,28 @@ def run_cycle(args: dict, **kwargs) -> str:
         # incomplete work. Best-effort — never raises into run_cycle.
         try:
             from orchestrator.auto_merge import sweep_all  # type: ignore
-            with _pm_client() as client:
-                _sc_for_merge = client.get("/api/system-config").json()
+            _sc_for_merge = cycle_sys_cfg
+            if not _sc_for_merge:
+                with _pm_client() as client:
+                    _sc_for_merge = client.get("/api/system-config").json()
             if isinstance(_sc_for_merge, dict):
                 sweep_all(ready, _sc_for_merge)
         except Exception:
             log.exception("auto-merge sweep failed (non-fatal)")
+
+        # Per-cycle per-product feature snapshot, fetched ONCE after the
+        # reconcile pass (so just-merged PRs are reflected) and shared by the
+        # supervisor / phase-gate / architect detectors below — each used to
+        # re-fetch the same list itself (3 GETs/product/cycle → 1).
+        features_by_pid: dict = {}
+        for p in ready:
+            try:
+                with _pm_client() as client:
+                    _fr = client.get(f"/api/products/{p['id']}/features")
+                _fl = _fr.json() if _fr.is_success else None
+                features_by_pid[p["id"]] = _fl if isinstance(_fl, list) else None
+            except Exception:
+                features_by_pid[p["id"]] = None  # helpers fall back to self-fetch
 
         # Phase-1 supervisor detectors that operate per-product on data the
         # PM API already serves cheaply: orphan-Approved features and rapid
@@ -503,7 +540,9 @@ def run_cycle(args: dict, **kwargs) -> str:
         # prevent action spam). Best-effort — never raises.
         for p in ready:
             try:
-                _run_supervisor_per_product_detectors(p)
+                _run_supervisor_per_product_detectors(
+                    p, sys_cfg=cycle_sys_cfg or None,
+                    features=features_by_pid.get(p["id"]))
             except Exception:
                 log.exception(f"supervisor per-product detectors failed for product {p.get('id')}")
 
@@ -514,7 +553,7 @@ def run_cycle(args: dict, **kwargs) -> str:
         # reads gate_state to freeze later phases until a human approves.
         for p in ready:
             try:
-                _run_phase_gate_detector(p)
+                _run_phase_gate_detector(p, features=features_by_pid.get(p["id"]))
             except Exception:
                 log.exception(f"phase-gate detector failed for product {p.get('id')}")
 
@@ -525,7 +564,8 @@ def run_cycle(args: dict, **kwargs) -> str:
         # the trigger logic.
         for p in ready:
             try:
-                _check_architect_due(p)
+                _check_architect_due(p, sys_cfg=cycle_sys_cfg or None,
+                                     features=features_by_pid.get(p["id"]))
                 # On the architect cadence, also run the deterministic main-suite
                 # health check (run_persona_now is set to "architect" by the line
                 # above, or by a PM click). Out-of-band in a daemon thread — it
@@ -909,11 +949,15 @@ def reconcile_prs(args: dict, **kwargs) -> str:
         # single per-product entry point that sequences reconcile_merged_prs
         # then reconcile_in_flight_prs with isolated try/except per pass.
         from orchestrator.reconcile import reconcile_product  # type: ignore
-        with _pm_client() as client:
-            product_resp = client.get(f"/api/products/{product_id}")
-        if not product_resp.is_success:
-            return _err(f"product {product_id} not found")
-        product = product_resp.json()
+        # run_cycle passes the already-fetched product row (same ProductOut
+        # schema as GET /api/products/{id}); only re-fetch when absent.
+        product = args.get("product")
+        if not isinstance(product, dict) or not product.get("id"):
+            with _pm_client() as client:
+                product_resp = client.get(f"/api/products/{product_id}")
+            if not product_resp.is_success:
+                return _err(f"product {product_id} not found")
+            product = product_resp.json()
         reconcile_product(product)
         # Phase-1 supervisor detectors that operate on open PRs.
         # Cheap to run after the reconcile pass since we re-hit GitHub once
@@ -932,9 +976,16 @@ def reconcile_prs(args: dict, **kwargs) -> str:
         return _err(f"reconcile_prs failed: {e}")
 
 
-def _run_supervisor_per_product_detectors(product: dict) -> None:
+def _run_supervisor_per_product_detectors(
+    product: dict,
+    sys_cfg: dict | None = None,
+    features: list | None = None,
+) -> None:
     """Per-cycle supervisor detectors that operate on product-level state
     fetched from the PM API: orphan-Approved + rapid status flap.
+
+    ``sys_cfg``/``features`` are normally supplied by run_cycle's per-cycle
+    fetch; self-fetch fallback keeps standalone calls working.
     """
     import httpx as _httpx
     from orchestrator.supervisor import detect_orphan_approved, detect_rapid_flap  # type: ignore
@@ -943,13 +994,14 @@ def _run_supervisor_per_product_detectors(product: dict) -> None:
     if not pid:
         return
 
-    # Pull features once (full payload — orphan detector needs updated_at)
-    try:
-        with _pm_client() as client:
-            feat_resp = client.get(f"/api/products/{pid}/features")
-            features = feat_resp.json() if feat_resp.is_success else []
-    except Exception:
-        features = []
+    # Features (full payload — orphan detector needs updated_at)
+    if features is None:
+        try:
+            with _pm_client() as client:
+                feat_resp = client.get(f"/api/products/{pid}/features")
+                features = feat_resp.json() if feat_resp.is_success else []
+        except Exception:
+            features = []
     if isinstance(features, list):
         try:
             detect_orphan_approved(product_id=pid, features=features)
@@ -960,9 +1012,11 @@ def _run_supervisor_per_product_detectors(product: dict) -> None:
     # — endpoint accepts overrides via query string but we fall back to
     # the supervisor defaults to keep wiring simple).
     try:
-        with _pm_client() as client:
-            sc_resp = client.get("/api/system-config")
-            sc = sc_resp.json() if sc_resp.is_success else {}
+        sc = sys_cfg
+        if sc is None:
+            with _pm_client() as client:
+                sc_resp = client.get("/api/system-config")
+                sc = sc_resp.json() if sc_resp.is_success else {}
         win = sc.get("supervisor_rapid_flap_window_hours") or 1
         thr = sc.get("supervisor_rapid_flap_min_transitions") or 5
         # Oscillation threshold: flag only when a single status is re-entered
@@ -992,7 +1046,7 @@ _GATE_ACTIVE_STATUSES = frozenset({
 })
 
 
-def _run_phase_gate_detector(product: dict) -> None:
+def _run_phase_gate_detector(product: dict, features: list | None = None) -> None:
     """Human-in-loop phase gate sweep (migration 045). Opt-in per product via
     ``config.human_gate_phases``. Keeps each phase's gate_state in sync with
     feature reality so the persona decision tree (orchestrator/cycle/persona.py)
@@ -1019,8 +1073,9 @@ def _run_phase_gate_detector(product: dict) -> None:
         with _pm_client() as client:
             ph_resp = client.get(f"/api/products/{pid}/phases")
             phases = ph_resp.json() if ph_resp.is_success else []
-            feat_resp = client.get(f"/api/products/{pid}/features")
-            features = feat_resp.json() if feat_resp.is_success else []
+            if features is None:
+                feat_resp = client.get(f"/api/products/{pid}/features")
+                features = feat_resp.json() if feat_resp.is_success else []
     except Exception:
         log.exception(f"phase-gate detector fetch failed for product {pid}")
         return
@@ -1084,7 +1139,11 @@ _DEFAULT_ARCHITECT_PUSHED_THRESHOLD = 3
 _ARCHITECT_FALLBACK_SECONDS = 7 * 24 * 3600
 
 
-def _check_architect_due(product: dict) -> None:
+def _check_architect_due(
+    product: dict,
+    sys_cfg: dict | None = None,
+    features: list | None = None,
+) -> None:
     """Per-cycle: launch the architect persona when ARCHITECTURE.md drift
     is likely. Two triggers, either is sufficient:
 
@@ -1124,9 +1183,11 @@ def _check_architect_due(product: dict) -> None:
     last_pushed_count = cfg.get("features_pushed_at_last_architect") or 0
 
     try:
-        with _pm_client() as client:
-            sc_resp = client.get("/api/system-config")
-            sc = sc_resp.json() if sc_resp.is_success else {}
+        sc = sys_cfg
+        if sc is None:
+            with _pm_client() as client:
+                sc_resp = client.get("/api/system-config")
+                sc = sc_resp.json() if sc_resp.is_success else {}
         if isinstance(sc, dict):
             override = sc.get("architect_pending_threshold")
             if isinstance(override, int) and override > 0:
@@ -1134,15 +1195,14 @@ def _check_architect_due(product: dict) -> None:
     except Exception:
         pass  # use default
 
-    # Count Pushed features. Cheap GET of just status to avoid serialising
-    # full feature payloads -- but the existing /api/products/{id}/features
-    # endpoint doesn't support field projection, so we fetch and filter.
-    # If the per-product feature count grows huge this is worth revisiting.
+    # Count Pushed features. Normally supplied by run_cycle's per-cycle
+    # snapshot; self-fetch fallback for standalone calls.
     pushed_count = 0
     try:
-        with _pm_client() as client:
-            f_resp = client.get(f"/api/products/{pid}/features")
-            features = f_resp.json() if f_resp.is_success else []
+        if features is None:
+            with _pm_client() as client:
+                f_resp = client.get(f"/api/products/{pid}/features")
+                features = f_resp.json() if f_resp.is_success else []
         if isinstance(features, list):
             pushed_count = sum(1 for f in features if f.get("status") == "Pushed")
     except Exception:
