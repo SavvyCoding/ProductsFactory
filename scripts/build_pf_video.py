@@ -159,8 +159,8 @@ SLIDES = [
       <div style="position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--blue),var(--cyan))"></div>
       <div style="width:42px;height:42px;border-radius:10px;background:rgba(59,130,246,0.15);display:flex;align-items:center;justify-content:center;font-size:22px;margin-top:4px">🖥</div>
       <div style="font-size:15px;font-weight:700">Orchestrator</div>
-      <code style="font-size:11px">orchestrator/poller.py</code>
-      <div style="color:var(--text2);font-size:13px;line-height:1.6">Windows poller running on the host. Acquires distributed lock, selects products round-robin, launches Docker containers, live-polls session results, manages the full agent lifecycle.</div>
+      <code style="font-size:11px">deploy/orchestrator/orchestrate.py</code>
+      <div style="color:var(--text2);font-size:13px;line-height:1.6">Containerized cycle loop (pf-orchestrator). Acquires distributed lock, selects products round-robin, launches Docker containers, runs the post-session pipelines, manages the full agent lifecycle.</div>
     </div>
     <div class="card" style="display:flex;flex-direction:column;gap:12px;position:relative;overflow:hidden">
       <div style="position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--violet),var(--pink))"></div>

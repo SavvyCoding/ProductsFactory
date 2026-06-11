@@ -2,7 +2,6 @@
 GitHub API client — used by the poller for PR management.
 
 Handles:
-  - count_open_prs()            PR count gate (pause if ≥3 open)
   - reconcile_merged_prs()      sync merged/closed PRs → DB feature status
   - reconcile_in_flight_prs()   check every in-flight feature's PR against GitHub
 """
@@ -27,20 +26,31 @@ log = logging.getLogger("poller.github")
 MAX_FIX_ATTEMPTS = int(os.environ.get("MAX_FIX_ATTEMPTS", "5"))
 
 
+# (timestamp, value) — see _resolve_max_fix_attempts. TTL < the 60s cycle
+# interval, so "read fresh each cycle" hot-reload semantics are preserved
+# while per-feature loop calls within one reconcile pass hit the cache.
+_max_fix_cache: tuple[float, int] | None = None
+
+
 def _resolve_max_fix_attempts() -> int:
     """Read max_fix_attempts from system_config; fall back to env constant.
 
-    Cheap one-shot HTTP call against the PM API (already a per-cycle
-    dependency for everything in this module). Never fails the caller —
-    on any error we return the env-default constant so the reconcile
-    sweep keeps working.
+    Cached for 55s: this is called once per candidate feature inside the
+    reconcile loops, which used to mean one HTTP round-trip per feature
+    per cycle. Never fails the caller — on any error we return the
+    env-default constant so the reconcile sweep keeps working.
     """
+    global _max_fix_cache
+    now = time.time()
+    if _max_fix_cache is not None and now - _max_fix_cache[0] < 55:
+        return _max_fix_cache[1]
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
             resp = client.get("/api/system-config")
             if resp.status_code == 200:
                 val = (resp.json() or {}).get("max_fix_attempts")
                 if isinstance(val, int) and val > 0:
+                    _max_fix_cache = (now, val)
                     return val
     except Exception:
         pass
@@ -96,25 +106,6 @@ def _github_headers() -> dict:
     if tok:
         headers["Authorization"] = f"Bearer {tok}"
     return headers
-
-
-def count_open_prs(product: dict) -> int:
-    """Returns number of open PRs for this product's repo."""
-    slug = _parse_repo_slug(product.get("github_repo", ""))
-    if not slug:
-        return 0
-    try:
-        resp = _gh_get(
-            f"https://api.github.com/repos/{slug}/pulls",
-            params={"state": "open", "per_page": 10},
-            headers=_github_headers(),
-        )
-        if resp is not None and resp.status_code == 200:
-            data = resp.json()
-            return len(data) if isinstance(data, list) else 0
-    except Exception as e:
-        log.warning(f"count_open_prs failed: {e}")
-    return 0
 
 
 def reconcile_merged_prs(product: dict):
@@ -265,34 +256,6 @@ def reconcile_in_flight_prs(product: dict):
                 if pr_n:
                     candidates.append((f, int(pr_n)))
 
-            # Migration sweep runs BEFORE the in-flight PR reconciliation
-            # because products with no in-flight PRs (everything Approved or
-            # Blocked, no Reviewing/Implementing) would otherwise short-
-            # circuit out via the candidates-empty early return below.
-            stranded = [
-                f["id"] for f in features_data
-                if f.get("status") == "Blocked" and f.get("sprint_id") is not None
-            ]
-            if stranded:
-                try:
-                    resp = client.post(
-                        f"/api/products/{product['id']}/sprints/blocked/route",
-                        json={
-                            "feature_ids": stranded[:20],
-                            "reason": "Migrated from legacy Blocked state",
-                        },
-                    )
-                    # Only log when a real transition happened. The route
-                    # endpoint short-circuits idempotent re-routes (already in
-                    # the Blocked sprint), so a stranded list of N can yield
-                    # 0 actual moves — no need to flood the orchestrator log
-                    # with "routed 3 stranded Blocked features" every cycle.
-                    moved = (resp.json() or {}).get("moved", 0) if resp.status_code == 200 else 0
-                    if moved:
-                        log.info(f"[in-flight] migration sweep: routed {moved} stranded Blocked feature(s)")
-                except Exception as re:
-                    log.warning(f"[in-flight] migration sweep failed: {re}")
-
             if not candidates:
                 return
 
@@ -338,24 +301,6 @@ def reconcile_in_flight_prs(product: dict):
                                 f"{new_attempts} attempts. Needs human review."
                             ),
                         })
-                        # Route to the per-product Blocked sprint so the PM
-                        # dashboard surfaces it for triage instead of
-                        # leaving it stranded on its original delivery
-                        # sprint (where it would otherwise contribute to
-                        # all_features_done=false and stall DoD).
-                        try:
-                            client.post(
-                                f"/api/products/{product['id']}/sprints/blocked/route",
-                                json={
-                                    "feature_ids": [fid],
-                                    "reason": (
-                                        f"Auto-escalated after {new_attempts} closed-PR attempts "
-                                        f"(last PR #{pr_n})"
-                                    ),
-                                },
-                            )
-                        except Exception as re:
-                            log.warning(f"[in-flight] route to Blocked sprint failed for #{fid}: {re}")
                         log.warning(
                             f"[in-flight] Feature #{fid} → Blocked sprint "
                             f"(fix_attempts={new_attempts} ≥ {MAX_FIX_ATTEMPTS})"

@@ -1351,16 +1351,9 @@ def detect_auto_plan(
     return True
 
 
-# ── Detector D: merge-stall alert (sprint-aware variant — retired) ──────────
-# The sprint-aware merge-stall detector was retired in migration 043
-# (phases→features flat model). Under the new model there are no sprints to
-# stall — each feature ships as its own session PR. A per-feature merge-stall
-# equivalent could be reintroduced later (alert if a feature has been
-# Reviewed-approved with PR open for > N minutes).
-
-def detect_merge_stall(*args, **kwargs) -> bool:
-    """No-op stub retained for callsite compatibility. Returns False."""
-    return False
+# ── Detector D: merge-stall alert — retired in migration 043 (phases→features
+# flat model; no sprints to stall). A per-feature equivalent could be
+# reintroduced later (alert if Reviewed-approved with PR open > N minutes).
 
 
 # ── Detector E: overlap-PR detector ──────────────────────────────────────────
@@ -1873,8 +1866,3 @@ def _fix_app_token(product: dict) -> dict | None:
     return None
 
 
-# _check_sprint_pr_mode / _fix_sprint_pr_mode and
-# _check_sprint_provisioned / _fix_sprint_provisioned were retired with
-# the 1-PR model (2026-05-15) and migration 043 (2026-05-26). Sprints no
-# longer exist; the orchestrator force-sets the equivalent in-memory flag
-# at every launch, so auto-healing the DB column was a no-op.

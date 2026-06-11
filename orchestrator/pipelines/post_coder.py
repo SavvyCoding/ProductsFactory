@@ -6,10 +6,10 @@ workspace. This pipeline takes care of every subsequent git step:
   1. Detect agent-handled vs not-handled features (verifies claimed PRs
      have real ``[feature-N]`` commit tags on GitHub before trusting them)
   2. Detect uncommitted changes / unpushed commits in the workspace
-  3. Resolve target branch in three modes:
-       - sprint-PR mode  → reuse the already-provisioned sprint branch + PR
-       - rework mode     → all features point at one open PR; force-push to it
-       - per-feature mode → cut ``coder/<session_uid>`` (legacy fallback)
+  3. Resolve target branch (1-PR model, migration 043):
+       - rework mode  → all features point at one open PR; force-push to it
+       - session mode → cut a fresh ``coder/<session_uid>`` branch off the
+         default branch tip and open a session PR direct to main
   4. add + commit (with ``[feature-N]`` tags) + push (force-with-lease in rework)
   5. Append Reviewing entries to session_result.json (with PM-API fallback PATCH
      if the file write fails — keeps a real GitHub PR from being stranded)
@@ -341,30 +341,38 @@ def _post_coder_lint_check(
     pipeline uses (cwd=working_dir, capture_output, text). Reusing it
     keeps the timeout discipline + cwd consistent.
     """
+    # Single `git show HEAD --name-status` for the whole lint check. The
+    # guards below used to issue five separate `git show HEAD --name-only
+    # --diff-filter=...` subprocesses (AM here, an MD probe, Guard 17's MD +
+    # AMD, Guard 20's name-status) — all derivable from this one parse.
+    # Status letters: A/M/D plus Rxxx/Cxxx for renames/copies; the
+    # --diff-filter=AM/MD/AMD outputs exclude R/C, so the derived sets below
+    # filter on exact letters to match byte-for-byte.
     try:
-        files_r = _run(["git", "show", "HEAD", "--name-only", "--pretty=",
-                        "--diff-filter=AM"], timeout=20)
-        if files_r.returncode != 0:
+        ns_top_r = _run(["git", "show", "HEAD", "--name-status", "--pretty="],
+                        timeout=20)
+        if ns_top_r.returncode != 0:
             return []
+        _ns_entries: list[tuple[str, str]] = []
+        for _raw in (ns_top_r.stdout or "").splitlines():
+            _parts = _raw.split("\t")
+            if len(_parts) < 2:
+                continue
+            _ns_entries.append((_parts[0][:1], _parts[-1].strip()))
         files = [
-            f.strip() for f in (files_r.stdout or "").splitlines()
-            if f.strip()
-            and not f.endswith("session_result.json")
-            and not f.endswith("session_summary.md")
-            and not f.startswith(".sprint-79")  # scaffold marker
+            p for st, p in _ns_entries
+            if st in ("A", "M")
+            and p
+            and not p.endswith("session_result.json")
+            and not p.endswith("session_summary.md")
+            and not p.startswith(".sprint-79")  # scaffold marker
         ]
     except Exception:
         return []
 
     # Guard 17 (AST-diff deletion safety) also needs to run on deletion-only
-    # commits, where `files` (AM-only) is empty but a `D` entry exists. Probe
-    # for any MD file up front; if both are empty, nothing to check.
-    try:
-        _has_md_r = _run(["git", "show", "HEAD", "--name-only", "--pretty=",
-                          "--diff-filter=MD"], timeout=20)
-        _has_md = bool(_has_md_r.returncode == 0 and (_has_md_r.stdout or "").strip())
-    except Exception:
-        _has_md = False
+    # commits, where `files` (AM-only) is empty but a `D` entry exists.
+    _has_md = any(st in ("M", "D") for st, _p in _ns_entries)
     if not files and not _has_md:
         return []
 
@@ -566,12 +574,23 @@ def _post_coder_lint_check(
     import hashlib as _hashlib
     import re as _re
 
+    # Content cache: Guards 5-11/13/18 each iterate the same changed-file
+    # list — without this, a 15-file commit meant ~90 redundant disk reads
+    # per lint pass. Safe because the commit is already made; the working
+    # tree is static for the duration of the check.
+    _read_cache: dict[str, str] = {}
+
     def _read(rel_path: str) -> str:
+        cached = _read_cache.get(rel_path)
+        if cached is not None:
+            return cached
         try:
             from pathlib import Path as _P
-            return (_P(working_dir) / rel_path).read_text(encoding="utf-8", errors="replace")
+            content = (_P(working_dir) / rel_path).read_text(encoding="utf-8", errors="replace")
         except Exception:
-            return ""
+            content = ""
+        _read_cache[rel_path] = content
+        return content
 
     # --- Guard 5: hardcoded secret fallback in token/crypto calls ---
     # Calculator's SRC/main.py + StockAnalysis's tokenGenerator.js both shipped
@@ -867,6 +886,12 @@ def _post_coder_lint_check(
     ]
     _SCRATCH_DIRS = ("Temp/", "temp/", "temp_storage/")
     _SOURCE_EXTENSIONS = (".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".rb")
+    # 13e suffix pattern — compiled once here, not per-file in the loop below.
+    _SIBLING_SUFFIX_RE = _re.compile(
+        r"^(.*?test_[A-Za-z0-9_]+)"
+        r"_(qa|manager|class|cases|extra|additional|more|new|v2)"
+        r"(\.[A-Za-z]+)$"
+    )
     debris_hits = []
     qa_pair_hits = []
     from pathlib import Path as _PP
@@ -946,12 +971,7 @@ def _post_coder_lint_check(
         # — same `DatabaseManager` class tested in both, no review caught it.
         # The blocklist is a closed set of suffixes; legitimate per-method
         # splits (`_async`, `_sync`, `_unit`, `_integration`, `_e2e`) pass
-        # through unchanged.
-        _SIBLING_SUFFIX_RE = _re.compile(
-            r"^(.*?test_[A-Za-z0-9_]+)"
-            r"_(qa|manager|class|cases|extra|additional|more|new|v2)"
-            r"(\.[A-Za-z]+)$"
-        )
+        # through unchanged. (Pattern compiled once above the loop.)
         m = _SIBLING_SUFFIX_RE.match(fname)
         if m:
             base = m.group(1) + m.group(3)
@@ -1367,27 +1387,14 @@ def _post_coder_lint_check(
     # Whole-word grep has false positives on common names (`name`, `run`,
     # `get`) inside docstrings/strings/local vars; the error message names
     # the symbol + caller paths so the coder can verify in seconds.
-    try:
-        md_r = _run(["git", "show", "HEAD", "--name-only", "--pretty=",
-                     "--diff-filter=MD"], timeout=20)
-        md_files = (
-            {f.strip() for f in (md_r.stdout or "").splitlines()
-             if f.strip().endswith(".py")}
-            if md_r.returncode == 0 else set()
-        )
-    except Exception:
-        md_files = set()
+    # Derived from the single top-of-check `git show --name-status` parse
+    # (was two more `git show --diff-filter=MD/AMD` subprocesses).
+    md_files = {p for st, p in _ns_entries
+                if st in ("M", "D") and p.endswith(".py")}
 
     if md_files:
-        try:
-            all_r = _run(["git", "show", "HEAD", "--name-only", "--pretty=",
-                          "--diff-filter=AMD"], timeout=20)
-            all_changed = (
-                {f.strip() for f in (all_r.stdout or "").splitlines() if f.strip()}
-                if all_r.returncode == 0 else set(md_files)
-            )
-        except Exception:
-            all_changed = set(md_files)
+        all_changed = {p for st, p in _ns_entries
+                       if st in ("A", "M", "D") and p} or set(md_files)
 
         def _top_level_names(src: str) -> set[str]:
             try:
@@ -1433,18 +1440,30 @@ def _post_coder_lint_check(
                 removed_symbols.append((path, name))
 
         if removed_symbols:
+            # Single batched word-grep for ALL removed symbols (was one
+            # `git grep` subprocess per symbol — 0.5-2s on deletion-heavy
+            # commits). `-o` prints `path:match`, from which the per-symbol
+            # file sets are rebuilt; `-w` keeps the same whole-word
+            # semantics as the old per-symbol `-w` calls. Symbol names are
+            # Python identifiers, so the joined alternation is regex-safe.
+            _sym_names = sorted({n for _p, n in removed_symbols})
+            hits_by_name: dict[str, set[str]] = {n: set() for n in _sym_names}
+            try:
+                g = _run(["git", "grep", "-o", "-w", "-E",
+                          "(" + "|".join(_sym_names) + ")", "--", "*.py"],
+                         timeout=30)
+                if g.returncode == 0:
+                    for _raw in (g.stdout or "").splitlines():
+                        _hit_path, _, _hit_sym = _raw.partition(":")
+                        _hit_sym = _hit_sym.strip()
+                        if _hit_sym in hits_by_name and _hit_path.strip():
+                            hits_by_name[_hit_sym].add(_hit_path.strip())
+            except Exception:
+                hits_by_name = {}  # grep failure → no dangling claims (soft fail)
             dangling: list[str] = []
             for path, name in removed_symbols:
-                try:
-                    g = _run(["git", "grep", "-l", "-w", name, "--", "*.py"],
-                             timeout=15)
-                except Exception:
-                    continue
-                if g.returncode != 0:
-                    continue
-                hits = [h.strip() for h in (g.stdout or "").splitlines()
-                        if h.strip()]
-                surviving = [h for h in hits if h not in all_changed]
+                surviving = [h for h in sorted(hits_by_name.get(name, ()))
+                             if h not in all_changed]
                 if surviving:
                     sample = ", ".join(surviving[:3])
                     more = " ..." if len(surviving) > 3 else ""
@@ -1551,11 +1570,12 @@ def _post_coder_lint_check(
             for f in files:
                 if not f.endswith(".py"):
                     continue
+                src = _read(f)  # shared content cache (Guards 5-11 read these too)
+                if not src:
+                    continue
                 try:
-                    src = (_wd_path / f).read_text(
-                        encoding="utf-8", errors="replace")
                     tree = _ast.parse(src)
-                except (OSError, SyntaxError, ValueError):
+                except (SyntaxError, ValueError):
                     continue
                 for node in _ast.walk(tree):
                     top = None
@@ -1790,9 +1810,9 @@ def _post_coder_lint_check(
     #     passes — that's the sanctioned removal queue (e.g. the deprecated
     #     source-grep antipattern tests the architect queues for deletion).
     try:
-        ns_r = _run(["git", "show", "HEAD", "--name-status", "--pretty="],
-                    timeout=20)
-        if ns_r.returncode == 0:
+        # Reuses the single top-of-check name-status parse (_ns_entries);
+        # an empty parse no-ops the guard, same as the old returncode check.
+        if _ns_entries:
             def _is_test_file(path: str) -> bool:
                 pl = path.replace("\\", "/").lower()
                 name = pl.rsplit("/", 1)[-1]
@@ -1811,11 +1831,7 @@ def _post_coder_lint_check(
 
             deleted_tests: list[str] = []
             added_tests = 0
-            for raw in (ns_r.stdout or "").splitlines():
-                parts = raw.split("\t")
-                if len(parts) < 2:
-                    continue
-                st, path = parts[0][:1], parts[-1].strip()
+            for st, path in _ns_entries:
                 if not _is_test_file(path):
                     continue
                 if st == "D":
@@ -2856,23 +2872,22 @@ def _post_coder_verify_check(
 def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                               assigned_features: list[dict]) -> list[int]:
     """
-    Deterministic git fallback after the coder LLM exits cleanly.
-    The coder ONLY writes code; this function pushes to the sprint branch:
+    Deterministic git ceremony after the coder LLM exits cleanly.
+    The coder ONLY writes code; this function ships it (1-PR model,
+    migration 043 — every coder session opens its own session PR):
       1. Detect if there are any changes in the workspace
-      2. Check out the sprint branch (provisioned at sprint activation)
-      3. git add + commit + push
+      2. Rework mode: assigned features share an open session PR →
+         force-push fresh commits to its branch (preserves the reviewer's
+         comment thread). Otherwise cut a fresh ``coder/<session_uid>``
+         branch off the default branch tip.
+      3. Run the lint/test/verify gates, then git add + commit + push
+         and open the session PR (``coder/<uid>`` → main)
       4. PATCH each assigned feature to Reviewing + pr_number on the PM API
          directly (no session_result.json roundtrip; see step 5 comment for
          why the file-based handoff was removed on 2026-05-06).
 
     Returns the list of feature IDs successfully PATCHed to Reviewing — used
     by the caller to set the session record's `features_pushed` counter.
-
-    Sprint-PR mode is the only supported flow: PR creation happens once at
-    sprint activation (`orchestrator.sprint_pr.provision_sprint_pr`); coder
-    sessions just stack commits onto the same branch. If the active sprint
-    has no provisioned branch + PR, the pipeline marks the assigned features
-    Blocked with a clear reason — never opens a fresh PR.
     """
     pushed_ids: list[int] = []
     pname = product.get("name", "?")
