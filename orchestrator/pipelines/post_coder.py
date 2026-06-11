@@ -376,6 +376,32 @@ def _post_coder_lint_check(
     if not files and not _has_md:
         return []
 
+    # Single `-U0` content diff for the whole lint check: ADDED lines per
+    # file. Guard 4 (placeholder markers) and Guard 21 (CORS misconfig)
+    # judge only what THIS commit wrote — scanning whole-file content
+    # bounced bystander commits on pre-existing lines (canonical:
+    # testingcalc #1418, four features bounced on a legacy `# placeholder`
+    # none of them wrote).
+    _added_by_file: dict[str, list[str]] = {}
+    try:
+        _u0_r = _run(["git", "show", "HEAD", "-U0", "--pretty="], timeout=30)
+        if _u0_r.returncode == 0:
+            _cur_file = None
+            for _raw in (_u0_r.stdout or "").splitlines():
+                if _raw.startswith("+++ b/"):
+                    _cur_file = _raw[6:].strip()
+                    continue
+                if _raw.startswith("+++"):
+                    _cur_file = None
+                    continue
+                if not _raw.startswith("+") or _raw.startswith("+++"):
+                    continue
+                if _cur_file is None:
+                    continue
+                _added_by_file.setdefault(_cur_file, []).append(_raw[1:])
+    except Exception:
+        _added_by_file = {}
+
     violations: list[str] = []
 
     # --- Guard 1: raw error.message in HTTP responses ---
@@ -528,27 +554,17 @@ def _post_coder_lint_check(
                 'placeholder="', "placeholder='",
                 "placeholder={",
             )
-            diff_r = _run(["git", "show", "HEAD", "-U0", "--pretty="],
-                          timeout=30)
+            # Reuses the single top-of-check -U0 parse (_added_by_file).
             bad_files = set()
-            if diff_r.returncode == 0:
-                cur_file = None
-                for raw in (diff_r.stdout or "").splitlines():
-                    if raw.startswith("+++ b/"):
-                        cur_file = raw[6:].strip()
-                        continue
-                    if raw.startswith("+++"):
-                        cur_file = None
-                        continue
-                    if not raw.startswith("+") or raw.startswith("+++"):
-                        continue
-                    if cur_file is None or cur_file not in impl_files:
-                        continue
-                    line = raw[1:]
+            for cur_file, added in _added_by_file.items():
+                if cur_file not in impl_files:
+                    continue
+                for line in added:
                     if any(a in line for a in _ATTR_SKIPS):
                         continue
                     if _MARKER_RE.search(line) or _STUB_RE.search(line):
                         bad_files.add(cur_file)
+                        break
             if bad_files:
                 files_sample = sorted(bad_files)
                 sample = ", ".join(files_sample[:3])
@@ -623,6 +639,78 @@ def _post_coder_lint_check(
             f"{', '.join(secret_hits[:3])}{'...' if len(secret_hits) > 3 else ''}. "
             f"Replace with: if not os.environ.get('X'): return 503 — never "
             f"substitute a literal as the secret."
+        )
+
+    # --- Guard 5b: literal fallback inside secret-getter functions (AST) ---
+    # DogTinder 2026-06-11 evasion of Guard 5's regex: instead of the two-arg
+    # os.environ.get("KEY", "literal") form, the coder wrote
+    #     key = os.environ.get("ENCRYPTION_KEY")
+    #     if key is None:
+    #         return b'a' * 32
+    # — a hardcoded key by another shape. AST rule: a function whose name
+    # mentions key/secret/token/passw that BOTH reads the environment AND
+    # returns a non-empty str/bytes literal (incl. constant expressions like
+    # b'a' * 32) is a secret fallback. Requiring the env read keeps FPs out:
+    # get_token_type() returning "Bearer" never touches the environment.
+    # Python-only for v1 (same precedent as Guard 17).
+    _SECRET_FN_RE = _re.compile(r"key|secret|token|passw", _re.I)
+
+    def _is_const_strbytes(node) -> bool:
+        if isinstance(node, _ast.Constant) and isinstance(node.value, (str, bytes)):
+            return len(node.value) >= 3
+        if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Mult):
+            # b'a' * 32 — repeated short literal is still a constant key
+            def _sb(n):
+                return isinstance(n, _ast.Constant) and isinstance(n.value, (str, bytes))
+            def _i(n):
+                return isinstance(n, _ast.Constant) and isinstance(n.value, int)
+            return (_sb(node.left) and _i(node.right)) or (_sb(node.right) and _i(node.left))
+        if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Add):
+            return _is_const_strbytes(node.left) and _is_const_strbytes(node.right)
+        return False
+
+    def _reads_environ(fn_node) -> bool:
+        for sub in _ast.walk(fn_node):
+            if isinstance(sub, _ast.Attribute) and sub.attr == "environ":
+                return True
+            if isinstance(sub, _ast.Call):
+                callee = sub.func
+                if isinstance(callee, _ast.Attribute) and callee.attr == "getenv":
+                    return True
+                if isinstance(callee, _ast.Name) and callee.id == "getenv":
+                    return True
+        return False
+
+    secret_fn_hits = []
+    for f in src_files:
+        if not f.endswith(".py") or f.startswith(("tests/", "TestCases/")):
+            continue
+        content = _read(f)
+        if not content:
+            continue
+        try:
+            tree5b = _ast.parse(content)
+        except (SyntaxError, ValueError):
+            continue
+        for node in _ast.walk(tree5b):
+            if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                continue
+            if not _SECRET_FN_RE.search(node.name):
+                continue
+            if not _reads_environ(node):
+                continue
+            for sub in _ast.walk(node):
+                if isinstance(sub, _ast.Return) and sub.value is not None \
+                        and _is_const_strbytes(sub.value):
+                    secret_fn_hits.append(f"{f}::{node.name}")
+                    break
+    if secret_fn_hits:
+        violations.append(
+            f"secret-getter function returns a literal fallback: "
+            f"{', '.join(secret_fn_hits[:3])}{'...' if len(secret_fn_hits) > 3 else ''}. "
+            f"A function that reads an env var for key/secret/token material "
+            f"must FAIL CLOSED when the var is missing (raise / return an "
+            f"error response) — never substitute a literal default key."
         )
 
     # --- Guard 6: state-changing API route without auth check ---
@@ -940,6 +1028,21 @@ def _post_coder_lint_check(
                 continue
             debris_hits.append(f"{f} (in scratch dir — template forbids commits here)")
             continue
+        # 13f: test file at repo ROOT when a tests/ dir exists — agents'
+        # scratch test scripts left behind from debugging (canonical:
+        # DogTinder 2026-06-11, five zero-assertion test_*.py at root).
+        # Hard-bounce-only, NOT auto-rm: the file may contain content the
+        # agent meant to move into tests/.
+        if "/" not in f and fname.startswith("test_") and fname.endswith(".py"):
+            try:
+                if (_PP(working_dir) / "tests").is_dir():
+                    first = next((ln for ln in _read(f).splitlines() if ln.strip()), "")
+                    if "AGENT_DEBRIS_EXEMPT" not in first:
+                        debris_hits.append(
+                            f"{f} (test file at repo root — move it into tests/)")
+                        continue
+            except Exception:
+                pass
         # 13c: empty source file — but allow empty __init__.py (standard
         # Python package marker idiom). Surfaced by 2026-05-26 SmokeTest
         # smoke test: greenfield Python product was bounced for
@@ -1874,6 +1977,103 @@ def _post_coder_lint_check(
                     )
     except Exception:
         log.debug("Guard 20 test-deletion raised", exc_info=True)
+
+    # --- Guard 21: CORS wildcard origin + credentials (added lines) ---
+    # DogTinder 2026-06-11: `allow_origins=["*"]` together with
+    # `allow_credentials=True` — the combination nullifies CORS for
+    # authenticated requests (any site can make credentialed calls).
+    # Judged on the commit's ADDED lines only (per-file), so pre-existing
+    # misconfigs in a touched file don't bounce bystanders — the architect
+    # owns legacy debt.
+    try:
+        _CORS_CRED_RE = _re.compile(
+            r"allow_credentials\s*[:=]\s*True|credentials\s*:\s*true", _re.I)
+        _CORS_WILD_RE = _re.compile(
+            r"""allow_origins\s*[:=]\s*\[?\s*["']\*["']|origin[s]?\s*:\s*["']\*["']""",
+            _re.I)
+        _cors_hits = []
+        for _cf, _added in _added_by_file.items():
+            if not _cf.endswith((".py", ".js", ".jsx", ".ts", ".tsx")):
+                continue
+            _blob = "\n".join(_added)
+            if _CORS_CRED_RE.search(_blob) and _CORS_WILD_RE.search(_blob):
+                _cors_hits.append(_cf)
+        if _cors_hits:
+            violations.append(
+                f"CORS misconfiguration — wildcard origins WITH credentials: "
+                f"{', '.join(sorted(_cors_hits)[:3])}"
+                f"{'...' if len(_cors_hits) > 3 else ''}. "
+                f"`allow_origins=['*']` + `allow_credentials=True` lets any "
+                f"website make authenticated requests. Either pin the origin "
+                f"list (env-configurable) or drop allow_credentials."
+            )
+    except Exception:
+        log.debug("Guard 21 CORS raised", exc_info=True)
+
+    # --- Guard 22: zero-assertion test files (newly ADDED) ---
+    # DogTinder 2026-06-11: five test_*.py committed with literally zero
+    # assertions (one was a bare `print("Simple test")`) — debugging
+    # scaffolds that pollute discovery and inflate the suite count without
+    # testing anything. Scoped to files ADDED by this commit so legacy
+    # suites don't bounce bystanders. Python: AST — any Assert node,
+    # pytest.raises/fail, or self.assert* call counts. JS/TS: regex for
+    # expect( / assert. First-line AGENT_DEBRIS_EXEMPT honoured (same
+    # contract as Guard 13).
+    try:
+        def _is_testish(path: str) -> bool:
+            name = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+            return (
+                name.startswith("test_")
+                or name.endswith(("_test.py", ".test.ts", ".test.tsx",
+                                  ".test.js", ".test.jsx", ".spec.ts",
+                                  ".spec.js", ".spec.tsx"))
+            )
+
+        _hollow: list[str] = []
+        for st, p in _ns_entries:
+            if st != "A" or not _is_testish(p):
+                continue
+            content22 = _read(p)
+            if not content22.strip():
+                continue  # empty files are Guard 13c's call
+            first22 = next((ln for ln in content22.splitlines() if ln.strip()), "")
+            if "AGENT_DEBRIS_EXEMPT" in first22:
+                continue
+            if p.endswith(".py"):
+                try:
+                    tree22 = _ast.parse(content22)
+                except (SyntaxError, ValueError):
+                    continue
+                has_assert = False
+                for n22 in _ast.walk(tree22):
+                    if isinstance(n22, _ast.Assert):
+                        has_assert = True
+                        break
+                    if isinstance(n22, _ast.Call):
+                        fn22 = n22.func
+                        # pytest.raises / pytest.fail / self.assertEqual etc.
+                        if isinstance(fn22, _ast.Attribute) and (
+                                fn22.attr.startswith("assert")
+                                or fn22.attr in ("raises", "fail")):
+                            has_assert = True
+                            break
+                if not has_assert:
+                    _hollow.append(p)
+            else:
+                if not _re.search(r"\b(expect|assert)\s*\(", content22):
+                    _hollow.append(p)
+        if _hollow:
+            violations.append(
+                f"test file(s) with ZERO assertions: "
+                f"{', '.join(sorted(_hollow)[:4])}"
+                f"{'...' if len(_hollow) > 4 else ''}. "
+                f"A test that asserts nothing passes vacuously and inflates "
+                f"the suite without testing anything. Add real assertions "
+                f"on behavior, or delete the file if it was a debugging "
+                f"scaffold."
+            )
+    except Exception:
+        log.debug("Guard 22 zero-assert raised", exc_info=True)
 
     return violations
 
@@ -3639,11 +3839,19 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             # not the comment-path _DETECTORS above) emit high-severity findings
             # that get filed as Approved chore features. The existing
             # coder→guard→reviewer pipeline is the actuator, so corrections run
-            # through the same verification as any feature. Default OFF — flip
-            # the flag per-environment to A/B on a product. Best-effort: failure
-            # here never bounces the feature.
-            if os.environ.get("RECONCILER_CHORES_ENABLED", "").strip().lower() \
-                    in ("1", "true", "yes", "on"):
+            # through the same verification as any feature. Default OFF.
+            # Per-product A/B via product.config["reconciler_chores"]
+            # (explicit True/False wins, settable from the product settings
+            # UI); the RECONCILER_CHORES_ENABLED env flag is the
+            # environment-wide fallback. Best-effort: failure here never
+            # bounces the feature.
+            _chores_cfg = (product.get("config") or {}).get("reconciler_chores")
+            _chores_on = (
+                _chores_cfg if isinstance(_chores_cfg, bool)
+                else os.environ.get("RECONCILER_CHORES_ENABLED", "").strip().lower()
+                in ("1", "true", "yes", "on")
+            )
+            if _chores_on:
                 _chore_findings = _drift.run_chore_detectors(working_dir, _all_features)
                 if _chore_findings:
                     _filed = _drift.file_corrective_chores(
