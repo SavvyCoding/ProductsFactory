@@ -81,6 +81,38 @@ try {
 } finally { clearTimeout(t); }
 ```
 
+### External OAuth / third-party HTTP API — mock fetch, never call the provider
+Tests and Verify recipes must NEVER hit a live IdP or external API (Google OAuth, Mapbox, Stripe, FCM). Stub `fetch` with a recorded response shape:
+```typescript
+import { vi, test, expect } from "vitest";
+
+test("google oauth callback exchanges code and creates user", async () => {
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+    if (String(url).includes("oauth2.googleapis.com/token"))
+      return new Response(JSON.stringify({ access_token: "fake-at", token_type: "Bearer" }));
+    if (String(url).includes("googleapis.com/v1/userinfo"))
+      return new Response(JSON.stringify({ sub: "g-1", email: "user@example.com" }));
+    throw new Error(`unexpected outbound call: ${url}`);  // doubles as a no-live-calls guard
+  });
+  const res = await app.request("/api/auth/google/callback?code=fake");
+  expect(res.status).toBe(200);
+  fetchSpy.mockRestore();
+});
+```
+The AC asserts YOUR callback/parsing/fallback logic, never the provider's. A missing API key must fail closed (503/throw) — never a literal fallback (lint Guard 5 refuses those).
+
+### Outbound webhook — capture with a double, assert the payload
+```typescript
+const sent: unknown[] = [];
+vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+  sent.push(JSON.parse(String(init?.body)));
+  return new Response(null, { status: 204 });
+});
+await app.request("/api/v1/documents/9/decline", { method: "POST", headers: auth });
+expect(sent[0]).toMatchObject({ event: "document.declined" });
+```
+Delivery retries/signing are YOUR code under test; the receiving endpoint is always a double.
+
 ## CONFIG GATES
 
 Quality bars that the post-coder lint guard verifies. Authoritative source: `quality_gates.json` (installed alongside this file).

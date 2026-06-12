@@ -1556,20 +1556,54 @@ def detect_rapid_flap(
     if feature_ids and not dry_run:
         # Phases→features flat model: PATCH each flapping feature's status
         # to Blocked directly. No more blocked-sprint holdpen.
+        #
+        # blocked_reason carries the per-feature reason (transition count /
+        # window / threshold) PLUS the dominant bounce-author signature from
+        # the feature's recent comments — the generic "rapid status flap loop
+        # detected" string left 29 features undiagnosable (2026-06-12 audit:
+        # most flaps mask an env_broken oscillation, but the reason never
+        # said so).
         try:
             with httpx.Client(base_url=PM_API_URL, timeout=15) as client:
-                for fid in feature_ids:
+                for fid, reason in zip(feature_ids, reasons):
+                    sig = _bounce_author_signature(client, fid)
                     client.patch(
                         f"/api/features/{fid}",
                         json={
                             "status": "Blocked",
-                            "blocked_reason": "Auto-routed: rapid status flap loop detected by supervisor",
+                            "blocked_reason": (
+                                f"Auto-blocked by supervisor.rapid_flap: {reason}"
+                                + (f" Recent bounce authors: {sig}." if sig else "")
+                            ),
                             "changed_by": "supervisor",
                         },
                     )
         except Exception:
             log.exception(f"rapid_flap: status=Blocked PATCH failed for product {product_id}")
     return routed
+
+
+def _bounce_author_signature(client, feature_id: int, limit: int = 25) -> str:
+    """Histogram of non-pm comment authors on a feature's recent comments,
+    e.g. "3x post-coder:test-env, 1x lint-guard". This is the diagnosis the
+    flap reason was missing: the AUTHORS of the bounces name the failing
+    gate, which names the class (env vs spec vs code). Best-effort — any
+    failure returns "" and the flap Block proceeds with the count-only
+    reason."""
+    try:
+        r = client.get(f"/api/features/{feature_id}/comments",
+                       params={"limit": limit})
+        if not (200 <= r.status_code < 300):
+            return ""
+        from collections import Counter
+        authors = Counter(
+            c.get("author") for c in (r.json() or [])
+            if isinstance(c, dict) and c.get("author")
+            and c.get("author") not in ("pm",)
+        )
+        return ", ".join(f"{n}x {a}" for a, n in authors.most_common(3))
+    except Exception:
+        return ""
 
 
 # ── Detector: unproductive-coder auto-heal ───────────────────────────────────

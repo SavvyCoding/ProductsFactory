@@ -93,6 +93,19 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     n 18 && \
     n 20
 
+# ── Layer 5b: meta-infrastructure static linters (wave-5) ────────────────────
+# Dockerfile / CI-workflow / hook-config stories verify STATICALLY — the
+# sandbox has no docker daemon and no Actions runner, so executing those
+# artifacts is impossible by design. These two linters give the designer's
+# meta-infra contract (designer.md) concrete Verify recipes. Pinned versions;
+# also listed in orchestrator/capabilities.py AGENT_IMAGE_TOOLS — keep both
+# in sync when upgrading.
+RUN curl -sSfL https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz \
+        | tar xz -C /usr/local/bin actionlint && \
+    curl -sSfL -o /usr/local/bin/hadolint \
+        https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64 && \
+    chmod a+rx /usr/local/bin/actionlint /usr/local/bin/hadolint
+
 # ── Layer 6: Claude Code CLI ──────────────────────────────────────────────────
 # Pin to a specific version so agent behaviour is reproducible across builds.
 # To upgrade: update the version tag here and rebuild with deploy/docker/build.sh.
