@@ -2346,6 +2346,30 @@ def _container_test_run(working_dir: str, service_env: dict[str, str] | None = N
     return _run
 
 
+def _detect_missing_tool(output: str) -> str | None:
+    """Extract the CLI name from a missing-tool-shaped test failure
+    (wave-5). Matches the same output shapes _ENV_BROKEN_PATTERNS already
+    classifies (command-not-found, `'ruff' not on PATH` probe assertions) —
+    this function only names the tool so the caller can route on the
+    capability manifest: obtainable tool missing → env_broken (transient,
+    retry); non-obtainable tool → terminal Block-for-redesign (the sandbox
+    will NEVER provide it; iterating the coder against it produced the
+    Docker-probe grind, DogTinder #1518/19/20). Pure function."""
+    if not output:
+        return None
+    import re as _re2
+    m = _re2.search(r"(?:sh|bash):\s+([\w.\-]+):\s+command not found", output)
+    if not m:
+        m = _re2.search(r"^([\w.\-]+): command not found", output, _re2.M)
+    if not m:
+        m = _re2.search(
+            r"AssertionError:\s*['\"]?([\w.\-]+)['\"]?[^\n]*?(?:on PATH|in PATH|not installed|not available)",
+            output)
+    if not m:
+        m = _re2.search(r"FileNotFoundError:.*No such file or directory: '([\w.\-]+)'", output)
+    return m.group(1) if m else None
+
+
 def _detect_missing_service(output: str) -> str | None:
     """Catalog-scoped missing-service detection (Phase C of service
     provisioning). Returns a SERVICE_CATALOG name when the test output
@@ -4210,6 +4234,63 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                 except Exception:
                     pass
                 return pushed_ids
+
+        # tool_missing triage (wave-5): the env_broken patterns already MATCH
+        # command-not-found / not-on-PATH failures (cycle DL, 2026-06-01),
+        # but env_broken semantics are "transient — operator fixes, retry",
+        # which loops forever on a tool the sandbox will NEVER provide.
+        # Route on the capability manifest: an obtainable tool reported
+        # missing stays env_broken (image hiccup / npm ci not run); a
+        # non-obtainable tool is terminal — Block for redesign with the
+        # precise fix, no fix_attempts bump. Canonical grind this ends:
+        # DogTinder #1518/19/20 (docker CLI — deliberately absent per the
+        # security model) and the MyJira Ruff probes that cap-Blocked
+        # against a pre-2026-06-01 image.
+        if env_broken:
+            _missing_tool = _detect_missing_tool(test_result.get("output") or "")
+            if _missing_tool:
+                from orchestrator.capabilities import is_obtainable_tool
+                if not is_obtainable_tool(_missing_tool):
+                    _tool_reason = (
+                        f"Tests require the '{_missing_tool}' CLI, which is not in "
+                        f"the agent image and will not be added (see "
+                        f"orchestrator/capabilities.py). This is not coder-fixable. "
+                        f"Redesign the story: meta-infrastructure artifacts "
+                        f"(Dockerfile, CI workflows, hook configs) verify "
+                        f"STATICALLY (hadolint / actionlint / config validation), "
+                        f"never by executing the tool. Do not re-approve as-is."
+                    )
+                    log.warning(
+                        f"[post-coder] {pname}: non-obtainable tool "
+                        f"'{_missing_tool}' required by tests — Blocking "
+                        f"{len(assigned_features)} feature(s) for redesign"
+                    )
+                    try:
+                        with httpx.Client(base_url=PM_API_URL, timeout=15) as _tm_client:
+                            for feat in assigned_features:
+                                _tm_client.patch(f"/api/features/{feat['id']}", json={
+                                    "status": "Blocked",
+                                    "blocked_reason": _tool_reason,
+                                })
+                                _tm_client.post(
+                                    f"/api/features/{feat['id']}/comments",
+                                    json={"author": "post-coder:tool-missing",
+                                          "body": "🚫 " + _tool_reason},
+                                )
+                    except Exception:
+                        log.exception(f"[post-coder] {pname}: tool-missing Block PATCH failed")
+                    try:
+                        from orchestrator.alerts import send_alert
+                        send_alert(
+                            "warning",
+                            f"{pname}: feature(s) Blocked — tests need the "
+                            f"'{_missing_tool}' CLI which the agent image does not "
+                            f"provide (session {session_uid}). Story needs a "
+                            f"static-verification redesign.",
+                        )
+                    except Exception:
+                        pass
+                    return pushed_ids
 
         # Cycle GK (2026-06-04): cap consecutive env_broken bounces per
         # feature. The env_broken path was added so true infra failures

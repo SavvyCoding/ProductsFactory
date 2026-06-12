@@ -455,12 +455,33 @@ correctly, design it normally — don't recursively split.
          - **Everything else** — use the in-memory fake: `fakeredis` for
            Redis, `sqlite`/`aiosqlite` for SQL, `moto` for S3, `respx`/
            `responses` for HTTP APIs. Fakes are the DEFAULT; a live
-           service is the exception that needs the infra story.
+           service is the exception that needs the infra story. For
+           OAuth IdPs, outbound webhooks, and third-party HTTP APIs
+           (maps/payments/push), copy the canonical mocks verbatim from
+           ARCHITECTURE.md REFERENCE PATTERNS ("External OAuth provider",
+           "Outbound webhook", "Third-party HTTP API") — the AC asserts
+           YOUR parsing/fallback logic, never the provider's behaviour.
          NEVER write an AC whose only implementation path is installing,
          vendoring, or compiling the service itself — the coder's sandbox
          cannot run services, and the canonical failure (DogTinder #1582,
          2026-06-11) ended with an agent committing the entire Redis
          source tree to a dating app.
+   - [ ] **Meta-infrastructure stories verify STATICALLY, never by
+         execution.** Stories whose artifact is a Dockerfile, a GitHub
+         Actions workflow, a docker-compose file, or a pre-commit config
+         can NEVER run their artifact in the sandbox: there is no `docker`
+         CLI (deliberate — security model), no Actions runner, and hook
+         repos may not be fetchable. Verify recipes for these stories use
+         the static linters the agent image provides:
+         - Dockerfile / compose → `hadolint Dockerfile` (exit 0)
+         - GitHub Actions YAML → `actionlint .github/workflows/<f>.yml` (exit 0)
+         - pre-commit config → `pre-commit validate-config` (exit 0)
+         - any YAML → `python3 -c "import yaml, sys; yaml.safe_load(open(sys.argv[1]))" <f>`
+         Do NOT write `docker build` / `docker run` / `pre-commit run`
+         (downloads hook envs) / "the workflow passes on GitHub" ACs —
+         each is unverifiable here and grinds the feature to a Block
+         (canonical: DogTinder #1518/19/20 Docker-probe chain; MyJira
+         #1335-1337 CI-pipeline cluster, all cap-Blocked).
    - [ ] Every AC maps to at least one named test (the Test: line)
    - [ ] **No AC is satisfiable by an import, an isinstance check, or a
          tool `--version` probe** — every AC asserts a runtime observable

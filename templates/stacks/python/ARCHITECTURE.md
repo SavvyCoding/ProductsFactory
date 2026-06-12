@@ -128,6 +128,51 @@ def _isolated_db(tmp_path, monkeypatch):
 ```
 Without this, a test calling a repository function directly (or one of two tests sharing the default DB path) leaks state into the next test — invisible in isolation, broken in the full suite. The post-coder test-check runs the FULL suite, so cross-test leakage poisons every feature's gate.
 
+### External OAuth provider — mock the IdP, never call it
+Tests and Verify recipes must NEVER hit a live identity provider (Google/Apple/GitHub OAuth). Mock the token + userinfo endpoints with `respx`:
+```python
+import respx, httpx
+
+@respx.mock
+def test_google_oauth_callback(client):
+    respx.post("https://oauth2.googleapis.com/token").respond(
+        json={"access_token": "fake-at", "id_token": "fake-idt", "token_type": "Bearer"})
+    respx.get("https://openidconnect.googleapis.com/v1/userinfo").respond(
+        json={"sub": "g-12345", "email": "user@example.com", "email_verified": True})
+    r = client.get("/api/auth/google/callback?code=fake-code&state=teststate")
+    assert r.status_code == 200
+    assert r.json()["user"]["email"] == "user@example.com"
+```
+The AC asserts YOUR callback logic (token exchange called, user row created, session issued) — never the provider's behaviour.
+
+### Outbound webhook — capture with a test double, assert the payload
+```python
+import respx, httpx
+
+@respx.mock
+def test_webhook_fired_on_decline(client, auth_headers):
+    route = respx.post("https://hooks.example.com/endpoint").respond(204)
+    client.post("/api/v1/documents/9/decline", headers=auth_headers)
+    assert route.called
+    body = httpx.Request("POST", "x://x", content=route.calls[0].request.content)
+    import json; payload = json.loads(route.calls[0].request.content)
+    assert payload["event"] == "document.declined"
+```
+Delivery retries/signing are YOUR code under test; the receiving endpoint is always a double.
+
+### Third-party HTTP API (maps, payments, push) — recorded-response mock
+```python
+import respx
+
+@respx.mock
+def test_geocode_address():
+    respx.get(url__startswith="https://api.mapbox.com/geocoding/").respond(
+        json={"features": [{"center": [-122.42, 37.78]}]})   # recorded real shape
+    from src.lib.geo import geocode
+    assert geocode("123 Main St") == (37.78, -122.42)
+```
+Keep one canned response per API in `tests/fixtures/` (recorded once from real docs/responses). The AC asserts your parsing/fallback logic. A missing API key must fail closed (503/raise) — never a literal fallback (lint Guard 5/5b refuses those).
+
 ## CONFIG GATES
 
 Quality bars that the post-coder lint guard verifies. Authoritative source: `quality_gates.json` (installed alongside this file).
