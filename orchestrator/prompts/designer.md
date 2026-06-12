@@ -436,6 +436,30 @@ correctly, design it normally — don't recursively split.
          - For ACs that genuinely require an external service that
            can't be booted in-process, write `Verify: see unit test`
            and lean on the named test.
+   - [ ] **No AC or test depends on a live external service that isn't
+         declared.** The agent/test containers provide language toolchains
+         and client CLIs — but NO running services. What IS available:
+         - **Declared services** — check the product's
+           `product_config`-declared `services` list. If the service your
+           story needs is declared, its connection URL arrives as an env
+           var (`REDIS_URL`, `DATABASE_URL`) — use that env var in tests
+           and recipes, never a hardcoded `localhost:<port>`.
+         - **The provisionable catalog** — `redis`, `postgres`. If your
+           story genuinely needs one of these live (not fakeable) and it
+           is NOT yet declared: FILE A DEPENDENCY STORY first via
+           `POST /api/features` with `feature_type="infra"`, name it
+           `Provision <service> service`, priority 5 — then set your
+           story's `depends_on` to it. The orchestrator implements infra
+           stories itself once the PM approves; no coder session runs.
+         - **Everything else** — use the in-memory fake: `fakeredis` for
+           Redis, `sqlite`/`aiosqlite` for SQL, `moto` for S3, `respx`/
+           `responses` for HTTP APIs. Fakes are the DEFAULT; a live
+           service is the exception that needs the infra story.
+         NEVER write an AC whose only implementation path is installing,
+         vendoring, or compiling the service itself — the coder's sandbox
+         cannot run services, and the canonical failure (DogTinder #1582,
+         2026-06-11) ended with an agent committing the entire Redis
+         source tree to a dating app.
    - [ ] Every AC maps to at least one named test (the Test: line)
    - [ ] **No AC is satisfiable by an import, an isinstance check, or a
          tool `--version` probe** — every AC asserts a runtime observable

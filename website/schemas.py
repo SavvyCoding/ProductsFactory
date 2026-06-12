@@ -180,8 +180,8 @@ class FeatureCreate(BaseModel):
     @field_validator("feature_type")
     @classmethod
     def feature_type_valid(cls, v: str) -> str:
-        if v not in ("feature", "bug", "chore"):
-            raise ValueError("feature_type must be 'feature', 'bug', or 'chore'")
+        if v not in ("feature", "bug", "chore", "infra"):
+            raise ValueError("feature_type must be 'feature', 'bug', 'chore', or 'infra'")
         return v
 
 

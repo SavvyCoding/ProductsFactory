@@ -19,7 +19,9 @@ PRODUCT_STATUSES   = ('registered', 'discovering', 'discovered', 'ready', 'pause
                       'greenfield_pending')
 PRODUCT_TYPES      = ('greenfield', 'brownfield')
 ANALYSIS_STATUSES  = ('pending', 'running', 'done')
-FEATURE_TYPES      = ('feature', 'bug', 'chore')
+# 'infra' (migration 046): dependency stories executed deterministically by
+# the orchestrator (service provisioning) — never by a coder/designer session.
+FEATURE_TYPES      = ('feature', 'bug', 'chore', 'infra')
 FEATURE_STATUSES   = ('Pending', 'Approved',
                       'Designing', 'Designed',
                       'Implementing', 'Implemented',
