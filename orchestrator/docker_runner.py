@@ -400,6 +400,124 @@ def _annotate_session_summary_outcome(
         log.warning(f"Could not annotate session_summary.md outcome: {e}")
 
 
+_ESCALATION_ADDENDUM = """
+
+## ⚠️ ESCALATED SESSION — DIAGNOSE FIRST (fix_attempts at/near cap)
+
+One or more of your assigned features has bounced repeatedly. Another blind
+code attempt is the WORST possible move. Before editing ANY file:
+
+1. Read EVERY comment on the feature — the bounce history is your evidence.
+2. Reproduce the failing gate yourself (run the exact test / Verify command
+   from the latest bounce comment and observe the real output).
+3. Post your root-cause diagnosis as a feature comment via
+   POST {pm_api_url}/api/features/<id>/comments. The body's FIRST LINE must be:
+
+       ESCALATION-DIAGNOSIS: <verdict> — <one-line root cause>
+
+   where <verdict> is exactly one of:
+   - fixable        → you understand the cause and will fix it THIS session.
+   - spec_defect    → the design doc / AC is wrong or self-contradictory
+                      (QUOTE the contradiction). The orchestrator routes the
+                      feature back to the designer. Do NOT code around a
+                      broken spec.
+   - env_impossible → the AC needs something this sandbox cannot provide
+                      (NAME it: service / tool / network). The orchestrator
+                      Blocks the feature with your diagnosis. Do NOT vendor,
+                      compile, or install your way around it.
+4. Only write code if your verdict is `fixable`.
+
+A correct `spec_defect` or `env_impossible` diagnosis IS a successful
+session outcome — it ends a loop that five blind retries cannot.
+"""
+
+
+def _route_escalation_diagnosis(product: dict, assigned_features: list[dict]) -> None:
+    """Post-session router for escalated-session verdicts (wave-5).
+
+    Scans each assigned feature's recent comments for the
+    ``ESCALATION-DIAGNOSIS: <verdict>`` marker the escalation addendum
+    contracts the agent to post, then routes:
+
+      - spec_defect    → status=Approved + design_doc_path cleared
+                         (changed_by=supervisor) — the designer redoes the
+                         doc; the pre-session stale-doc invalidation deletes
+                         the superseded file.
+      - env_impossible → status=Blocked with the diagnosis as
+                         blocked_reason (changed_by=supervisor).
+      - fixable / no marker → no-op (normal pipeline outcome stands).
+
+    Runs AFTER _finalize_session so the routing verdict wins over the
+    post-coder bounce status. Best-effort; never raises.
+    """
+    import re as _re_esc
+    marker = _re_esc.compile(
+        r"ESCALATION-DIAGNOSIS:\s*(spec_defect|env_impossible|fixable)", _re_esc.I)
+    pname = product.get("name", "?")
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=15) as client:
+            for feat in assigned_features or []:
+                fid = feat.get("id")
+                if not isinstance(fid, int):
+                    continue
+                try:
+                    r = client.get(f"/api/features/{fid}/comments", params={"limit": 10})
+                    comments = r.json() if 200 <= r.status_code < 300 else []
+                except Exception:
+                    continue
+                verdict, excerpt = None, ""
+                for c in sorted(comments or [],
+                                key=lambda c: c.get("created_at") or "", reverse=True):
+                    m = marker.search(c.get("body") or "")
+                    if m:
+                        verdict = m.group(1).lower()
+                        excerpt = (c.get("body") or "").strip()[:400]
+                        break
+                if verdict == "spec_defect":
+                    client.patch(f"/api/features/{fid}", json={
+                        "status": "Approved", "changed_by": "supervisor",
+                        "design_doc_path": None, "design_doc": None,
+                    })
+                    log.info(f"[escalation] {pname}: #{fid} diagnosed spec_defect — routed to designer (doc cleared)")
+                elif verdict == "env_impossible":
+                    client.patch(f"/api/features/{fid}", json={
+                        "status": "Blocked", "changed_by": "supervisor",
+                        "blocked_reason": f"Escalated-session diagnosis: {excerpt}",
+                    })
+                    log.info(f"[escalation] {pname}: #{fid} diagnosed env_impossible — Blocked with diagnosis")
+    except Exception:
+        log.exception(f"[escalation] {pname}: diagnosis routing failed (non-fatal)")
+
+
+def _invalidate_stale_design_docs(working_dir: str, assigned_features: list[dict]) -> int:
+    """Delete worktree docs/story_<id>.md for designer-assigned features.
+
+    A designer assignment means the feature's DB design_doc_path is empty —
+    any doc file still on disk is by definition superseded (PM cleared the
+    pointer for a redesign, or a half-finished session left one behind).
+    Tolerates both the zero-padded and un-padded doc filenames (same pair
+    the verify-check probes). Returns the number deleted. Best-effort.
+    """
+    deleted = 0
+    for feat in assigned_features or []:
+        fid = feat.get("id")
+        if not isinstance(fid, int):
+            continue
+        for candidate in (f"story_{fid:03d}.md", f"story_{fid}.md"):
+            try:
+                p = Path(working_dir) / "docs" / candidate
+                if p.is_file():
+                    p.unlink()
+                    deleted += 1
+                    log.info(
+                        f"[stale-doc] deleted superseded {candidate} pre-design "
+                        f"(feature #{fid} has no design_doc_path — DB pointer wins)"
+                    )
+            except Exception as e:
+                log.warning(f"[stale-doc] could not delete docs/{candidate}: {e}")
+    return deleted
+
+
 def _fetch_assigned_features(product_id: int, persona: str | None, max_count: int = MAX_FEATURES_PER_SPRINT) -> tuple[list[dict], str | None, dict | None]:
     """
     Pre-fetch features the agent should work on this session.
@@ -1995,6 +2113,38 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # Agent receives an explicit task list — no self-discovery inside the container.
     assigned_features, active_sprint_name, _ = _fetch_assigned_features(product["id"], persona, effective_max_features)
     _claim_features(assigned_features, persona)
+    # Stale-doc invalidation (wave-5): a feature in the DESIGNER pool has an
+    # empty design_doc_path by definition (first design OR a PM-requested
+    # redesign). If the worktree still holds docs/story_<id>.md from a
+    # superseded design, the designer's idempotency rule (designer.md step 0
+    # — the Mytracking-#1276 anti-churn guard) keeps the stale doc verbatim:
+    # DogTinder #1582's redesign shipped hardcoded localhost three times
+    # because of exactly this DB-pointer/file disagreement. Delete the stale
+    # file pre-session; post-doc commits the regenerated one over it. No
+    # push needed: if the session dies, the next workspace reset restores
+    # the file and the next designer pass deletes it again — converges.
+    if persona == "designer":
+        _invalidate_stale_design_docs(working_dir, assigned_features)
+    # Diagnose-first escalation (wave-5): when an assigned feature is at or
+    # past ESCALATION_FIX_ATTEMPTS_THRESHOLD (default 4 — one before the
+    # cap-Block at 5), this session runs in escalated mode: optional
+    # stronger model (ESCALATION_MODEL / ESCALATION_CLAUDE_MODEL env) and a
+    # mandatory root-cause-diagnosis contract appended to the prompt. The
+    # 22-feature "fix_attempts=5, needs human triage" wall (2026-06-12
+    # audit) is mostly features that needed a DIAGNOSIS — spec defect or
+    # env-impossible — not a fifth blind code attempt.
+    escalation_threshold = int(os.environ.get("ESCALATION_FIX_ATTEMPTS_THRESHOLD", "4"))
+    escalated = (
+        persona == "coder"
+        and any((f.get("fix_attempts") or 0) >= escalation_threshold
+                for f in assigned_features)
+    )
+    if escalated:
+        log.info(
+            f"[escalation] {product.get('name', '?')}: coder session escalated — "
+            f"feature(s) {[f['id'] for f in assigned_features if (f.get('fix_attempts') or 0) >= escalation_threshold]} "
+            f"at fix_attempts >= {escalation_threshold}; diagnose-first contract active"
+        )
     product["_assigned_features"] = assigned_features
     product["_assigned_features_md"] = _format_assigned_features(assigned_features, persona)
     # Pull recent reviewer/auditor comments for any feature in a rework cycle
@@ -2109,6 +2259,20 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     prompt = build_prompt(product, session_uid, persona=persona, max_features=effective_max_features, backend=effective_backend)
 
+    # Escalated sessions (wave-5): append the diagnose-first contract and
+    # apply the optional model override. Ollama override here (the backend
+    # branch below builds OLLAMA_MODEL from effective_persona_model); the
+    # Claude override is applied where claude_model is resolved.
+    if escalated:
+        prompt += _ESCALATION_ADDENDUM.replace(
+            "{pm_api_url}",
+            str(os.environ.get("PM_API_URL_CONTAINER", os.environ.get("PM_API_URL", ""))),
+        )
+        _esc_model = os.environ.get("ESCALATION_MODEL", "").strip()
+        if _esc_model and effective_backend == "ollama":
+            log.info(f"[escalation] model override (ollama): {effective_persona_model} -> {_esc_model}")
+            effective_persona_model = _esc_model
+
     # Guard: check DB for an already-running session for this product.
     # Cross-check with docker ps — if the container is gone, auto-close the stale DB record.
     product_id = product["id"]
@@ -2201,6 +2365,11 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         # the host's live Claude Code process. Returns the mount args + cleanup
         # tmpdir + resolved per-persona model.
         claude_mount, _tmp_claude_dir, claude_model = _stage_claude_credentials(sys_cfg, persona)
+        # Escalated sessions (wave-5): optional stronger Claude model.
+        if escalated and os.environ.get("ESCALATION_CLAUDE_MODEL", "").strip():
+            _esc_claude = os.environ["ESCALATION_CLAUDE_MODEL"].strip()
+            log.info(f"[escalation] model override (claude): {claude_model} -> {_esc_claude}")
+            claude_model = _esc_claude
 
         # --dangerously-skip-permissions works now that container runs as non-root.
         # --output-format stream-json + --verbose turns claude -p into a streaming
@@ -2340,7 +2509,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # test/verify containers (inside _finalize_session) connect to the same
     # per-session service containers.
     try:
-        return _finalize_session(
+        _finalize_result = _finalize_session(
             product=product,
             persona=persona,
             session_uid=session_uid,
@@ -2349,6 +2518,11 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             exit_code=exit_code,
             session_meta=session_meta,
         )
+        # Escalated sessions (wave-5): route any ESCALATION-DIAGNOSIS verdict
+        # AFTER finalize so the diagnosis wins over the post-coder bounce.
+        if escalated:
+            _route_escalation_diagnosis(product, assigned_features)
+        return _finalize_result
     finally:
         try:
             from orchestrator import services as _services
