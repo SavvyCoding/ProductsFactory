@@ -3940,6 +3940,11 @@ async def api_flapping_features(
             # Terminal features are DONE, not stuck — never flag them (a feature
             # that progressed to Pushed must not be Block-able; #1421).
             Feature.status.notin_(["Pushed", "Rejected", "Reverted", "Deferred", "Blocked"]),
+            # Operator/PM-driven transitions are surgery, not flapping —
+            # counting them Blocked DogTinder #1582 mid-redesign (2026-06-12)
+            # after a string of deliberate pm resets. Agent-loop oscillation
+            # is what the detector exists for; pm moves are exempt.
+            FeatureChangelog.changed_by != "pm",
         )
         .group_by(FeatureChangelog.feature_id, FeatureChangelog.new_value)
         .subquery()
