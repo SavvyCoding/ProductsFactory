@@ -2254,7 +2254,7 @@ def _all_failing_tests(output: str) -> list[str]:
     return found[:25]   # cap to keep the comment / prompt bounded
 
 
-def _agent_container_base(working_dir: str):
+def _agent_container_base(working_dir: str, service_env: dict[str, str] | None = None):
     """Shared `docker run` prefix + stack-install command for executing a shell
     script INSIDE the agent image (full toolchain: node/npm/npx, python/pip, go;
     plus the per-product download cache + workspace mount + sandbox hardening).
@@ -2314,6 +2314,9 @@ def _agent_container_base(working_dir: str):
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
         # CI=true → vitest/jest/most runners run once and exit (no watch hang).
         "-e", "CI=true",
+        # Sidecar service URLs (REDIS_URL etc.) — same per-session service
+        # containers the agent run used; teardown happens after finalize.
+        *[a for k, v in (service_env or {}).items() for a in ("-e", f"{k}={v}")],
         *cache_args,                       # persistent per-product download cache
         "-v", f"{host_path(working_dir)}:/workspace",
         "-w", "/workspace",
@@ -2322,13 +2325,13 @@ def _agent_container_base(working_dir: str):
     return prefix, install
 
 
-def _container_test_run(working_dir: str):
+def _container_test_run(working_dir: str, service_env: dict[str, str] | None = None):
     """Return a `_run`-compatible callable that runs the stack's TEST command in
     the agent-image container (toolchain present), with a clean install
     prepended. Deterministic (no LLM) — verdict is the container exit code +
     stdout, classified by `_post_coder_test_check` unchanged. Fixed the
     orchestrator-has-no-npm bug behind the MyCalc1 #1370 cascade."""
-    prefix, install = _agent_container_base(working_dir)
+    prefix, install = _agent_container_base(working_dir, service_env=service_env)
 
     def _run(cmd, **kw):
         timeout = kw.pop("timeout", 300)
@@ -2341,6 +2344,33 @@ def _container_test_run(working_dir: str):
         return _sp.run(prefix + [full], capture_output=True, text=True, timeout=timeout + 120)
 
     return _run
+
+
+def _detect_missing_service(output: str) -> str | None:
+    """Catalog-scoped missing-service detection (Phase C of service
+    provisioning). Returns a SERVICE_CATALOG name when the test output
+    shows a connection failure against that service's default port AND
+    names the service — e.g. DogTinder #1582's
+    `Could not connect to Redis at 127.0.0.1:6379: Connection refused`.
+
+    Deliberately tight: a generic ECONNREFUSED on an arbitrary port stays
+    a regular test failure (the app-under-test not starting IS the
+    coder's bug); only failures attributable to a known provisionable
+    service trigger the triage. Pure function — unit-tested directly.
+    """
+    if not output:
+        return None
+    low = output.lower()
+    if "connection refused" not in low and "could not connect" not in low:
+        return None
+    try:
+        from orchestrator.services import SERVICE_CATALOG
+    except Exception:
+        return None
+    for svc, entry in SERVICE_CATALOG.items():
+        if svc in low and f":{entry['port']}" in output:
+            return svc
+    return None
 
 
 def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
@@ -2842,7 +2872,8 @@ def _is_server_required(cmd: str) -> bool:
     return False
 
 
-def _run_verify(cmd: str, cwd: str, timeout: int) -> dict:
+def _run_verify(cmd: str, cwd: str, timeout: int,
+                service_env: dict[str, str] | None = None) -> dict:
     """Run a single Verify command in bash. Returns a dict with:
       exit_code: int (124 on timeout, subprocess returncode otherwise)
       stdout:    str
@@ -2871,7 +2902,7 @@ def _run_verify(cmd: str, cwd: str, timeout: int) -> dict:
         # band-aid too. Install is silenced (node_modules is usually already
         # present from the test-check earlier in the same pipeline); the recipe
         # runs LAST so the container's exit code + stdout are the recipe's.
-        prefix, install = _agent_container_base(cwd)
+        prefix, install = _agent_container_base(cwd, service_env=service_env)
         script = ((f"{install} >/dev/null 2>&1; " if install else "")
                   + f"timeout {timeout}s bash -c {_shlex.quote(cmd)}")
         r = _sp.run(prefix + [script], capture_output=True, text=True,
@@ -2988,6 +3019,7 @@ def _post_coder_verify_check(
     product_name: str,
     assigned_features: list[dict],
     timeout_per_command: int = 30,
+    service_env: dict[str, str] | None = None,
 ) -> dict:
     """Empirical AC-recipe gate. Reads each assigned feature's
     docs/story_<id>.md, parses Verify+Expected pairs, runs each command,
@@ -3043,7 +3075,8 @@ def _post_coder_verify_check(
         )
         for ac_num, cmd, expected in triples:
             total += 1
-            r = _run_verify(cmd, cwd=working_dir, timeout=timeout_per_command)
+            r = _run_verify(cmd, cwd=working_dir, timeout=timeout_per_command,
+                            service_env=service_env)
             if r["skipped"]:
                 skipped.append({
                     "feature_id": fid, "ac": ac_num,
@@ -4098,12 +4131,86 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     # symlink needed — the container mounts the workspace at /workspace
     # natively. Deterministic (exit-code based); _post_coder_test_check's
     # detection + classification are unchanged.
-    test_result = _post_coder_test_check(working_dir, _container_test_run(working_dir), pname)
+    # Sidecar service env (REDIS_URL etc.): the per-session service
+    # containers provisioned at launch are still up (teardown happens after
+    # finalize); the gate containers connect to the same names.
+    from orchestrator import services as _pf_services
+    _service_env = _pf_services.session_service_env(product, session_uid)
+    test_result = _post_coder_test_check(
+        working_dir, _container_test_run(working_dir, service_env=_service_env), pname)
     if test_result.get("framework") != "none" and not test_result.get("passed"):
         env_broken = test_result.get("env_broken", False)
         first_failure = test_result.get("first_failure", "")
         collection_errors = test_result.get("collection_errors", 0)
         output_excerpt = (test_result.get("output") or "")[:1500]
+
+        # service_missing triage (Phase C of service provisioning): a
+        # connection-refused failure against a CATALOG service's default
+        # port is never coder-fixable — iterating the coder against it
+        # produced the DogTinder #1582 vendoring spiral (3 sessions, then
+        # the entire Redis source tree in a 982k-line PR).
+        #   - service DECLARED for the product but unreachable → the
+        #     orchestrator's provisioning hiccuped: env_broken semantics
+        #     (no fix_attempts bump, operator alert, retry next session).
+        #   - service NOT declared → env-impossible spec: Block the
+        #     features with the precise fix (designer files an infra
+        #     story, or redesigns with the in-memory fake). No
+        #     fix_attempts bump — this was never the coder's fault.
+        _missing_svc = _detect_missing_service(test_result.get("output") or "")
+        if _missing_svc and not test_result.get("pre_existing_only"):
+            from orchestrator import services as _svc_mod
+            if _missing_svc in _svc_mod.declared_services(product):
+                log.warning(
+                    f"[post-coder] {pname}: declared service '{_missing_svc}' "
+                    f"unreachable in test container — treating as env_broken "
+                    f"(provisioning hiccup, not the coder's bug)"
+                )
+                env_broken = True
+            else:
+                _svc_reason = (
+                    f"Tests require a live {_missing_svc} service that is not "
+                    f"declared for this product (connection refused on the "
+                    f"{_missing_svc} default port). This is not coder-fixable: "
+                    f"either the designer files a `Provision {_missing_svc} "
+                    f"service` story (feature_type=infra; the orchestrator "
+                    f"implements it after PM approval), or the story is "
+                    f"redesigned to use the in-memory fake (fakeredis / sqlite "
+                    f"/ moto / respx). Do not re-approve as-is."
+                )
+                log.warning(
+                    f"[post-coder] {pname}: undeclared service "
+                    f"'{_missing_svc}' required by tests — Blocking "
+                    f"{len(assigned_features)} feature(s) for redesign "
+                    f"(no fix_attempts bump)"
+                )
+                try:
+                    with httpx.Client(base_url=PM_API_URL, timeout=15) as _sm_client:
+                        for feat in assigned_features:
+                            _sm_client.patch(f"/api/features/{feat['id']}", json={
+                                "status": "Blocked",
+                                "blocked_reason": _svc_reason,
+                            })
+                            _sm_client.post(
+                                f"/api/features/{feat['id']}/comments",
+                                json={"author": "post-coder:service-missing",
+                                      "body": "🚫 " + _svc_reason +
+                                              f"\n\nFirst failure: `{first_failure[:200]}`"},
+                            )
+                except Exception:
+                    log.exception(f"[post-coder] {pname}: service-missing Block PATCH failed")
+                try:
+                    from orchestrator.alerts import send_alert
+                    send_alert(
+                        "warning",
+                        f"{pname}: feature(s) Blocked — tests need a live "
+                        f"'{_missing_svc}' service that isn't declared (session "
+                        f"{session_uid}). Designer should file an infra story "
+                        f"or redesign with the in-memory fake.",
+                    )
+                except Exception:
+                    pass
+                return pushed_ids
+
         # Cycle GK (2026-06-04): cap consecutive env_broken bounces per
         # feature. The env_broken path was added so true infra failures
         # (jest missing, pip-install errors, `<tool> not on PATH`
@@ -4344,6 +4451,7 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
         working_dir=working_dir,
         product_name=pname,
         assigned_features=assigned_features,
+        service_env=_service_env,
     )
     if verify_result["checked"] and verify_result["skipped"]:
         log.info(
