@@ -42,6 +42,7 @@ so wandering just wastes your whole session — design the assignment.)
 
 {prev_session_summary}
 {product_memory}
+{declared_services}
 ---
 
 ## ⚠️ Authorized writes — these five paths only
