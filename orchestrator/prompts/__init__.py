@@ -268,6 +268,34 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
             except Exception:
                 pass
 
+    # Declared sidecar services (service provisioning, 2026-06-12): the
+    # fakes-first rule in designer.md tells agents to "check the declared
+    # services list" — but that list lives in product.config (DB), invisible
+    # from inside the workspace. Render it into the prompt explicitly, with
+    # the env var carrying each connection URL. Root cause: DogTinder #1582
+    # redesign still hardcoded localhost:6379 because the designer had no
+    # way to know redis was declared or that REDIS_URL exists.
+    _svc_block = ""
+    try:
+        from orchestrator.services import SERVICE_CATALOG
+        _declared = [s for s in ((product.get("config") or {}).get("services") or [])
+                     if s in SERVICE_CATALOG]
+        if _declared:
+            _svc_lines = "\n".join(
+                f"- **{s}** — a live per-session instance is provisioned for every "
+                f"agent/test/verify container; connect ONLY via the "
+                f"`{SERVICE_CATALOG[s]['env_var']}` environment variable. NEVER "
+                f"hardcode `localhost:{SERVICE_CATALOG[s]['port']}` or any host:port — "
+                f"the service is NOT on localhost."
+                for s in _declared
+            )
+            _svc_block = (
+                "## Declared live services (USE THESE — do not fake, do not vendor)\n\n"
+                f"{_svc_lines}\n\n---\n"
+            )
+    except Exception:
+        _svc_block = ""
+
     replacements = {
         "{product_id}": str(product["id"]),
         "{product_name}": str(product.get("name", product["working_dir"])),
@@ -308,6 +336,7 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
         "{product_memory}": _memory_content,
         "{reviewer_patterns}": _read_reviewer_patterns(_working_dir),
         "{hard_rules}": _HARD_RULES,
+        "{declared_services}": _svc_block,
     }
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)

@@ -150,6 +150,15 @@ Active detectors:
 
 `_MAINTENANCE_PERSONAS` in `orchestrator/docker_runner.py` is the canonical set of scheduled personas (gated per-cycle in `orchestrator/cycle/persona.py`): `documenter`, `analytics`, `recommender`, `devops`, `refactorer`, `product_trainer`, and `architect` (Phase 8 — quantitative drift detection: counts documented vs registered endpoints, detects parallel-module drift, verifies `CONFIG GATES` values match `quality_gates.json`, files chore features with `priority=25` + labels `["architecture","drift"]`; capped at 3 features per session).
 
+### Sidecar services & infra stories (2026-06-12)
+
+Products whose tests need a LIVE service (redis, postgres) declare it in `product.config.services`; the orchestrator provisions one container per (session, service) — `pf-svc-{session_uid}-{name}` on `productfactory-net` — at launch, injects connection env vars (`REDIS_URL`, `DATABASE_URL`) into the agent AND post-coder gate containers, and tears down after session finalize. A per-cycle reaper removes orphans. **Agents never start services** (no docker socket by design); `orchestrator/services.py::SERVICE_CATALOG` is the allowlist — agent text can *name* a service, never supply an image. Canonical incident: DogTinder #1582 (coder vendored the entire Redis source tree because its sandbox offered no other path to a live-Redis AC).
+
+Three moving parts:
+- **`feature_type='infra'` stories** (migration 046): the designer files `Provision <service> service` via the API when a story needs an undeclared catalog service, and points the real story's `depends_on` at it. After PM approval, `deploy/orchestrator/tools.py::_execute_infra_stories` implements it deterministically (catalog lookup → smoke-provision → write `product.config.services` → mark Pushed with merge_notes) — no coder/designer session ever runs one; both selection points (`cycle/persona._decide_action`, `docker_runner._fetch_assigned_features`) exclude `infra`.
+- **Fakes-first designer rule** (designer.md): in-memory fakes (fakeredis/sqlite/moto/respx) are the default; a live service is the exception that needs the infra story.
+- **`service_missing` triage** (post_coder.py `_detect_missing_service`): a test failure that is connection-refused against a catalog service's default port is never coder-fixable. Declared service → env_broken semantics (provisioning hiccup; no fix_attempts bump). Undeclared → features Blocked with the precise fix (file infra story or use the fake) — no bump, no coder rework loop.
+
 ### Greenfield Scaffolding
 
 When `setup_product.py` discovers a new product directory with fewer than `BROWNFIELD_FILE_THRESHOLD` (default: 10) source files, it is classified as **greenfield**. `greenfield_scaffold.py` then:

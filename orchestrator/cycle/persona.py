@@ -53,6 +53,13 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
         features = features_resp.json() if features_resp.is_success else []
         sys_cfg = syscfg_resp.json() if syscfg_resp.is_success else {}
 
+        # Infra stories (feature_type='infra') are system-executed by the
+        # cycle loop (tools._execute_infra_stories) — never coder/designer/
+        # planner work. Strip them from the decision pool entirely. The
+        # sibling filter lives in docker_runner._fetch_assigned_features
+        # (same two-enforcement-points discipline as the phase gate).
+        features = [f for f in features if f.get("feature_type") != "infra"]
+
         non_terminal = [f for f in features if f.get("status") not in _TERMINAL]
 
         # Human-in-loop phase gate (migration 045). Opt-in per product via

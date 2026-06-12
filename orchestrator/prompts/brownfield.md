@@ -55,6 +55,7 @@ The reviewer reviews the Session PR. Approving it squash-merges your session's w
 {reviewer_patterns}
 {reviewer_feedback}
 {related_existing_code}
+{declared_services}
 ## Per-story workflow (one at a time — finish #N before starting #N+1)
 
 0. **Reproduce-first — run every `Verify:` recipe from `docs/story_<ID>.md` BEFORE editing.** For each AC, execute the `Verify:` bash command exactly as written and capture the actual output. Compare each to the design doc's `Expected:` line. This is your **failure baseline** — what the AC looks like when unsatisfied. Two reasons this matters:
