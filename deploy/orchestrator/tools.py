@@ -368,6 +368,7 @@ def run_cycle(args: dict, **kwargs) -> str:
         # docker containers and closes the DB records. No mtime parsing, no
         # RunningFor string matching, no GitHub API calls. Single source of
         # truth: the `sessions` table.
+        active_sessions: list = []
         try:
             with _pm_client() as client:
                 wd_resp = client.get("/api/sessions/watchdog/targets")
@@ -434,6 +435,19 @@ def run_cycle(args: dict, **kwargs) -> str:
                     client.post(f"/api/sessions/{t['id']}/kill", json={"reason": reason})
         except Exception:
             log.exception("[watchdog] failed")
+
+        # Sidecar-service reaper (orchestrator/services.py): remove pf-svc-*
+        # containers whose session is no longer active (running OR wrapping —
+        # wrapping sessions still run gate containers against their
+        # services). The session watchdog above deliberately ignores
+        # pf-svc-* (they have no session row).
+        try:
+            from orchestrator.services import reap_orphan_services
+            _active_uids = {s.get("session_uid") for s in active_sessions
+                            if s.get("session_uid")}
+            reap_orphan_services(_active_uids)
+        except Exception:
+            log.exception("[services] orphan reaper failed (non-fatal)")
 
         reset_stuck_features({}, **kwargs)
 
@@ -545,6 +559,25 @@ def run_cycle(args: dict, **kwargs) -> str:
                     features=features_by_pid.get(p["id"]))
             except Exception:
                 log.exception(f"supervisor per-product detectors failed for product {p.get('id')}")
+
+        # Infra-story executor (service provisioning, Phase B): Approved
+        # feature_type='infra' stories are implemented HERE, deterministically
+        # — never dispatched to coder/designer sessions (both selection
+        # points also exclude them). Runs before the phase-gate detector so
+        # a just-Pushed infra story settles into this cycle's gate math.
+        for p in ready:
+            try:
+                n_infra = _execute_infra_stories(p, features=features_by_pid.get(p["id"]))
+                if n_infra:
+                    # Refresh this product's feature snapshot for the
+                    # detectors below — statuses just changed.
+                    with _pm_client() as client:
+                        _fr = client.get(f"/api/products/{p['id']}/features")
+                    _fl = _fr.json() if _fr.is_success else None
+                    if isinstance(_fl, list):
+                        features_by_pid[p["id"]] = _fl
+            except Exception:
+                log.exception(f"infra-story executor failed for product {p.get('id')}")
 
         # Human-in-loop phase gate (migration 045). Opt-in per product via
         # config.human_gate_phases; no-op otherwise. Settles completed phases
@@ -1133,6 +1166,118 @@ def _run_phase_gate_detector(product: dict, features: list | None = None) -> Non
                     log.info(f"phase-gate: phase {ph['id']} settled → awaiting_review + alert")
             except Exception:
                 log.exception(f"phase-gate report/alert failed for phase {ph['id']}")
+
+
+def _execute_infra_stories(product: dict, features: list | None = None) -> int:
+    """Deterministic executor for Approved ``feature_type='infra'`` stories
+    (service provisioning, Phase B). No LLM, no coder session:
+
+      1. Parse the service name out of the story text against
+         orchestrator/services.py's SERVICE_CATALOG allowlist (agent-
+         authored text can NAME a service, never supply an image).
+      2. Merge it into product.config.services (DB JSONB — orchestrator/PM
+         territory; the RO-mounted product_config.json file is untouched).
+      3. Provision once + readiness-probe + teardown (smoke test).
+      4. PATCH the story to Pushed with merge_notes, so it flows through
+         phases/release-notes like any shipped feature.
+
+    A story naming no catalog service is Blocked with a clear reason
+    (decisive — no silent every-cycle retry loop). Failure to provision
+    leaves the story Approved (retried next cycle) + one operator alert.
+    Returns the number executed. Best-effort; never raises into run_cycle.
+    """
+    from orchestrator.services import (
+        SERVICE_CATALOG, ensure_session_services, teardown_session_services,
+    )
+    pid = product.get("id")
+    if not pid:
+        return 0
+    if features is None:
+        try:
+            with _pm_client() as client:
+                fr = client.get(f"/api/products/{pid}/features")
+            features = fr.json() if fr.is_success else []
+        except Exception:
+            return 0
+    if not isinstance(features, list):
+        return 0
+    infra = [f for f in features
+             if f.get("feature_type") == "infra" and f.get("status") == "Approved"]
+    executed = 0
+    for f in infra:
+        fid = f.get("id")
+        text = f"{f.get('name', '')} {f.get('description', '')}".lower()
+        svc = next((s for s in SERVICE_CATALOG if s in text), None)
+        if svc is None:
+            try:
+                with _pm_client() as client:
+                    client.patch(f"/api/features/{fid}", json={
+                        "status": "Blocked",
+                        "blocked_reason": (
+                            "infra story names no catalog service. Provisionable "
+                            f"services: {', '.join(sorted(SERVICE_CATALOG))}. "
+                            "Rename the story to include one, or implement the "
+                            "dependency another way (in-memory fake)."
+                        ),
+                    })
+                log.warning(f"[infra] feature #{fid}: no catalog service in story text — Blocked")
+            except Exception:
+                log.exception(f"[infra] could not Block unrecognized infra story #{fid}")
+            continue
+
+        # Smoke-test provisioning BEFORE declaring, so a broken image/daemon
+        # doesn't leave the product declaring a service that can't start.
+        smoke_uid = f"infra{fid}"
+        try:
+            env = ensure_session_services(
+                {"config": {"services": [svc]}, "name": product.get("name", "?")},
+                smoke_uid,
+            )
+        finally:
+            teardown_session_services(smoke_uid)
+        if not env:
+            log.warning(f"[infra] feature #{fid}: {svc} failed smoke provisioning — leaving Approved (retry next cycle)")
+            try:
+                with _pm_client() as client:
+                    client.post("/api/alerts", json={
+                        "product_id": pid, "level": "warning",
+                        "message": (
+                            f"Infra story #{fid}: provisioning smoke-test for "
+                            f"'{svc}' failed (image pull or readiness). Will "
+                            f"retry each cycle; check the orchestrator's docker "
+                            f"daemon / network."
+                        ),
+                    })
+            except Exception:
+                pass
+            continue
+
+        try:
+            # Fresh read right before the config write to shrink the
+            # read-modify-write window (other actors touch config.last_*_at).
+            with _pm_client() as client:
+                pr = client.get(f"/api/products/{pid}")
+                cfg = dict((pr.json() or {}).get("config") or {}) if pr.is_success \
+                    else dict(product.get("config") or {})
+                svcs = list(cfg.get("services") or [])
+                if svc not in svcs:
+                    svcs.append(svc)
+                cfg["services"] = svcs
+                client.patch(f"/api/products/{pid}", json={"config": cfg})
+                client.patch(f"/api/features/{fid}", json={
+                    "status": "Pushed",
+                    "merge_notes": (
+                        f"{SERVICE_CATALOG[svc]['image']} provisioned per-session by the "
+                        f"orchestrator; {SERVICE_CATALOG[svc]['env_var']} injected into "
+                        f"agent/test/verify containers. Executed deterministically "
+                        f"(no coder session)."
+                    ),
+                })
+            executed += 1
+            log.info(f"[infra] {product.get('name', '?')}: feature #{fid} → Pushed ({svc} declared + smoke-tested)")
+        except Exception:
+            log.exception(f"[infra] declare/PATCH failed for feature #{fid}")
+    return executed
 
 
 _DEFAULT_ARCHITECT_PUSHED_THRESHOLD = 3

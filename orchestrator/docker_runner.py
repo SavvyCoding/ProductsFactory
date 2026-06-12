@@ -424,6 +424,14 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
             all_features = resp.json()
             all_features = all_features if isinstance(all_features, list) else []
 
+            # Infra stories are system-executed by the cycle loop
+            # (tools._execute_infra_stories), never session work. This
+            # selector runs independently of cycle/persona._decide_action,
+            # so it MUST apply the same exclusion (two-enforcement-points
+            # discipline, same as the phase gate).
+            all_features = [f for f in all_features
+                            if f.get("feature_type") != "infra"]
+
             if persona == "coder":
                 # Match the API's /next-for-persona?persona=coder rules so the
                 # orchestrator's persona dispatch and the agent's actually-
@@ -2225,6 +2233,15 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             prelude + f'exec {quoted}',
         ]
 
+    # Sidecar services (orchestrator/services.py): provision declared
+    # services (product.config.services) for this session and inject their
+    # connection env vars. The containers outlive the agent run — the
+    # post-coder gate containers connect to the same names — and are torn
+    # down after _finalize_session below.
+    from orchestrator import services as _services
+    _svc_env_map = _services.ensure_session_services(product, session_uid)
+    _svc_env = [a for k, v in _svc_env_map.items() for a in ("-e", f"{k}={v}")]
+
     cmd = [
         "docker", "run", "--rm",
         "--name", f"pf-{product['id']}-{session_uid}",
@@ -2258,6 +2275,7 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         *gh_env,                                   # empty unless mount failed — legacy fallback
         *persona_env,                              # AGENT_PERSONA for prompt selection
         *ollama_env,                               # Ollama model config (ollama backend only)
+        *_svc_env,                                 # sidecar service URLs (REDIS_URL etc.)
         "-e", f"PM_API_URL={PM_API_URL_CONTAINER}",
         "-e", f"SESSION_UID={session_uid}",
         AGENT_IMAGE,
@@ -2318,15 +2336,25 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 pass
 
     # ── Post-exit reconciliation (runs regardless of exit code) ─────────────────
-    return _finalize_session(
-        product=product,
-        persona=persona,
-        session_uid=session_uid,
-        working_dir=working_dir,
-        session_id=session_id,
-        exit_code=exit_code,
-        session_meta=session_meta,
-    )
+    # Service teardown happens AFTER finalize: the post-coder pipeline's
+    # test/verify containers (inside _finalize_session) connect to the same
+    # per-session service containers.
+    try:
+        return _finalize_session(
+            product=product,
+            persona=persona,
+            session_uid=session_uid,
+            working_dir=working_dir,
+            session_id=session_id,
+            exit_code=exit_code,
+            session_meta=session_meta,
+        )
+    finally:
+        try:
+            from orchestrator import services as _services
+            _services.teardown_session_services(session_uid)
+        except Exception:
+            log.exception("service teardown failed (reaper will collect)")
 
 
 def _post_log_lines(product_id: int, lines: list[str]) -> None:
