@@ -302,12 +302,22 @@ class TestBlockedReprocessor:
     def _product(self, **cfg):
         return {"id": 7, "name": "P", "config": cfg}
 
-    def test_disabled_by_default(self):
+    def test_enabled_by_default(self):
+        # Default ON for all products (2026-06-13): no env, no config.
         fake = _ReprocFake()
-        feats = [_blocked(1, "Auto-blocked by supervisor.rapid_flap: ...")]
+        feats = [_blocked(1, "Auto-blocked by supervisor.divergent_review_feedback: ...")]
         with patch.dict(os.environ, {}, clear=False), \
              patch.object(orch_tools, "_pm_client", return_value=fake):
             os.environ.pop("BLOCKED_REPROCESSOR_ENABLED", None)
+            n = orch_tools._reprocess_blocked_features(self._product(), feats)
+        assert n == 1
+
+    def test_env_kill_switch_disables(self):
+        # BLOCKED_REPROCESSOR_ENABLED set to a falsy value disables everywhere.
+        fake = _ReprocFake()
+        feats = [_blocked(1, "supervisor.divergent_review_feedback")]
+        with patch.dict(os.environ, {"BLOCKED_REPROCESSOR_ENABLED": "0"}), \
+             patch.object(orch_tools, "_pm_client", return_value=fake):
             n = orch_tools._reprocess_blocked_features(self._product(), feats)
         assert n == 0
         assert fake.patches == []
