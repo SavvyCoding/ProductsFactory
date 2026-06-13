@@ -92,6 +92,30 @@ If ANY of these is true → **SPLIT before designing**:
   - Any single AC's algorithm is >20 lines AND there are >2 such ACs
   - You cannot honestly answer "yes" to #5
 
+**🔴 SHARED-ENTRYPOINT COHESION — this OVERRIDES the split criteria above.**
+Do NOT split a story when the resulting children would each **create or be
+the primary editor of the SAME new entrypoint / config / framework file**.
+Foundational framework setup is ONE cohesive unit even when it exceeds the
+soft caps — ship it as a single feature. A cohesive-but-slightly-large
+story beats many-but-colliding stories: split children that all touch the
+same new file dispatch in parallel as separate coder sessions and separate
+PRs, and they **collide** (one merges, the rest become conflicts / cap-block
+each other). Canonical 2026-06-13 IndianFoodTruck cascade: the NextAuth
+foundation (install + `pages/api/auth/[...nextauth].ts` catch-all route +
+`_app.tsx` SessionProvider + CredentialsProvider + verifyAuth helper) was
+split into ~9 overlapping features (#1541/#1611/#1612/#1613/#1614/#1616/
+#1621/#1623/#1624) that all had to create the same `[...nextauth].ts` and
+`_app.tsx` — 4 cap-blocked, 5 rejected, zero shipped, because each slice
+fought the others over the same two files.
+
+Files that are shared cohesive entrypoints (keep their setup whole): the
+app factory / `_app.tsx` / `main.py` / `app.py`, a framework catch-all
+route (`[...nextauth].ts`), a single DB-init / schema module, a shared
+middleware-registration file, a root router. If your split would make two
+children both `Create`/own one of these, KEEP THE STORY WHOLE instead.
+(You may still split work that merely *imports from* a shared module — the
+collision is about co-creating/co-owning the same file, not referencing it.)
+
 **Runtime-tool stories — split aggressively.** When ANY AC requires an
 external runtime executable to be invoked by the test (`chromium` /
 `playwright` browser, `pre-commit run`, `locust` subprocess,
