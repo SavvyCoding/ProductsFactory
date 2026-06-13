@@ -1794,10 +1794,16 @@ async def api_update_feature(
     _BLOCKED_DATA_CLEANUP_CALLERS = frozenset({
         "drift-scanner:auto-heal",
     })
+    # Automated re-engage callers allowed to un-Block a feature (set status to
+    # Approved/Designed/Implementing) like a PM. The blocked-reprocessor
+    # (wave-8) gives each Blocked feature ONE bounded auto-retry — it's a
+    # deliberate, audited automation (one-shot dedup + per-cycle cap + env/
+    # spec skip), so it gets the same re-engage authority as a PM.
+    _BLOCKED_REENGAGE_CALLERS = frozenset({"pm", "blocked-reprocessor"})
     _is_blocked_data_cleanup = _peek_changed_by in _BLOCKED_DATA_CLEANUP_CALLERS
     if (
         feature.status == "Blocked"
-        and _peek_changed_by != "pm"
+        and _peek_changed_by not in _BLOCKED_REENGAGE_CALLERS
         and not _is_blocked_data_cleanup
     ):
         raise HTTPException(
@@ -1846,6 +1852,9 @@ async def api_update_feature(
         "rollback",
         "kill_recovery",
         "supervisor",
+        "blocked-reprocessor",  # wave-8: re-engages Blocked features to
+                                # Approved/Implementing (a rank downgrade from
+                                # Blocked) for the bounded one-shot auto-retry.
         "post-doc:rollback",
         "post-coder:fallback",
         "post-coder:lint-guard",  # added 2026-05-07: post-coder auto-rejects

@@ -1189,7 +1189,16 @@ def _run_phase_gate_detector(product: dict, features: list | None = None) -> Non
                 log.exception(f"phase-gate report/alert failed for phase {ph['id']}")
 
 
-_REPROCESS_MARKER_AUTHOR = "blocked-reprocessor"
+# Dedupe-marker author. Bumped to -v2 (2026-06-13): the first deploy used
+# changed_by="supervisor", which the website Blocked-re-engage gate rejects
+# (only pm / blocked-reprocessor may re-engage) — so the unblock PATCHes
+# silently 422'd while the marker comment was still posted, falsely spending
+# the one-shot without unblocking anything. The new author voids those stale
+# v1 markers so falsely-spent features get a real retry.
+_REPROCESS_MARKER_AUTHOR = "blocked-reprocessor-v2"
+# changed_by for the unblock PATCH — must be in the website's
+# _BLOCKED_REENGAGE_CALLERS + _RANK_GUARD_BYPASS allowlists.
+_REPROCESS_CHANGED_BY = "blocked-reprocessor"
 # Bounce-author substrings that mean a CODE-quality grind (the coder can
 # plausibly fix it with a diagnose-first escalation). Env/service/tool/spec
 # blocks are deliberately excluded — re-running the coder won't help; those
@@ -1295,24 +1304,41 @@ def _reprocess_blocked_features(product: dict, features: list | None = None,
                     continue  # coder re-run won't help — owned by other paths
 
                 if is_divergent:
-                    patch = {"status": "Approved", "changed_by": "supervisor",
+                    # → Approved: the handler zeroes fix_attempts on this
+                    # transition, which is exactly what a divergent retry
+                    # wants (clean slate for the cumulative checklist).
+                    patch = {"status": "Approved", "changed_by": _REPROCESS_CHANGED_BY,
                              "design_doc_path": None, "design_doc": None,
                              "fix_attempts": 0}
                     note = ("Auto-retry (blocked-reprocessor): divergent_review "
                             "class — cumulative-feedback checklist converges this "
                             "(cf. #1490). Doc cleared for clean redesign. One-shot.")
                 elif is_flap_or_cap and is_code_quality:
-                    patch = {"status": "Approved", "changed_by": "supervisor",
+                    # → Implementing + changes_requested (NOT Approved): the
+                    # handler zeroes fix_attempts on →Approved, which would
+                    # defeat the escalation signal. Implementing preserves
+                    # fix_attempts, and changes_requested makes it coder-
+                    # eligible as a rework, so the next session escalates.
+                    patch = {"status": "Implementing", "changed_by": _REPROCESS_CHANGED_BY,
+                             "review_outcome": "changes_requested",
                              "fix_attempts": esc_threshold}
                     note = (f"Auto-retry (blocked-reprocessor): code-quality "
-                            f"flap/cap — unblocked with fix_attempts={esc_threshold} "
-                            f"so the next coder session runs the diagnose-first "
-                            f"escalation instead of another blind attempt. One-shot.")
+                            f"flap/cap — re-engaged to Implementing with "
+                            f"fix_attempts={esc_threshold} so the next coder "
+                            f"session runs the diagnose-first escalation instead "
+                            f"of another blind attempt. One-shot.")
                 else:
                     continue  # unclassified — leave for human triage
 
                 try:
-                    client.patch(f"/api/features/{fid}", json=patch)
+                    pr = client.patch(f"/api/features/{fid}", json=patch)
+                    # Only spend the one-shot if the unblock actually landed —
+                    # a rejected re-engage must NOT post the dedup marker (the
+                    # v1 bug: 422'd unblocks still marked the feature spent).
+                    if not (200 <= pr.status_code < 300):
+                        log.warning(f"[reprocessor] {pname}: #{fid} unblock PATCH "
+                                    f"returned {pr.status_code} — not marking; will retry")
+                        continue
                     client.post(f"/api/features/{fid}/comments",
                                 json={"author": _REPROCESS_MARKER_AUTHOR, "body": note})
                     reprocessed += 1
