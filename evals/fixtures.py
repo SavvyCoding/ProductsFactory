@@ -62,6 +62,12 @@ PROMPT_INVARIANTS: dict[str, list[str]] = {
         "session_summary.md",          # progress logging path
         "product_memory.md",           # cross-session findings path
         "git",                         # the no-git prohibition must mention git
+        # Shared-entrypoint cohesion: the sizing gate must NOT split a
+        # foundation whose children co-create the same new file (the 2026-
+        # 06-13 IndianFoodTruck NextAuth cascade). Losing this re-opens the
+        # colliding-PR failure class.
+        "COHESION",
+        "[...nextauth].ts",
     ],
 
     # Reviewer behavioral guarantees. Each phrase locks in a specific

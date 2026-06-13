@@ -1663,6 +1663,97 @@ def detect_schema_dual_source(
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Detector: overlapping features — siblings racing to co-create the same file
+# ────────────────────────────────────────────────────────────────────────────
+# Two or more IN-FLIGHT features whose design docs both declare the same
+# NEW source file (one not yet on origin/main) are racing to create it:
+# they dispatch as separate coder sessions / separate PRs, and whichever
+# lands first turns the others into merge conflicts / cap-blocks. This is
+# parallel-module drift at the PLANNING layer — the per-coder context
+# builder can't see it (the coder for one feature doesn't know the sibling
+# exists), and detect_overlapping_prs only catches it at PR time, after the
+# compute is spent. Comment-path safety net behind the designer's
+# shared-entrypoint cohesion rule (designer.md sizing gate); the primary
+# fix is not splitting file-sharing foundations in the first place.
+# Canonical 2026-06-13 IndianFoodTruck: ~9 NextAuth features all declared
+# `src/pages/api/auth/[...nextauth].ts` and `_app.tsx`; 4 cap-blocked, 5
+# rejected, zero shipped.
+_DOC_SOURCE_PATH_RE = re.compile(
+    r"(?:src|pages|app|lib)/[\w./\[\]\-]+\.(?:ts|tsx|js|jsx|py|go|rb)",
+)
+_OVERLAP_ACTIVE_STATUSES = frozenset({
+    "Designed", "Implementing", "Reviewing", "Reviewed",
+})
+
+
+def detect_overlapping_features(
+    working_dir: str | Path, features: list[dict]
+) -> list[Finding]:
+    """Active features whose design docs declare the same not-yet-on-main file."""
+    wd = Path(working_dir)
+    if not wd.is_dir():
+        return []
+    on_main = _ls_tree_origin_main(wd)  # tracked paths on main, or None on failure
+
+    file_to_fids: dict[str, set[int]] = {}
+    for f in features or []:
+        if f.get("status") not in _OVERLAP_ACTIVE_STATUSES:
+            continue
+        fid = f.get("id")
+        doc_rel = f.get("design_doc_path")
+        if not isinstance(fid, int) or not doc_rel:
+            continue
+        try:
+            doc = (wd / doc_rel).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for m in _DOC_SOURCE_PATH_RE.finditer(doc):
+            path = m.group(0)
+            # Files co-CREATED collide; files merely imported don't. Skip
+            # paths already on main — referencing a shipped module is normal
+            # reuse, not a create-race. (ls-tree failure → on_main is None →
+            # keep all paths; the 2+-feature requirement still bounds FP.)
+            if on_main is not None and path in on_main:
+                continue
+            file_to_fids.setdefault(path, set()).add(fid)
+
+    pid = _product_id_from_features(features)
+    findings: list[Finding] = []
+    for path, fids in sorted(file_to_fids.items()):
+        if len(fids) < 2:
+            continue
+        ids = sorted(fids)
+        anchor = ids[0]
+        findings.append(Finding(
+            category="overlapping_features",
+            severity="high",
+            target_type="code",
+            target_id=path,
+            feature_id=anchor,
+            detail=(
+                f"{len(ids)} in-flight features {ids} all declare creating the "
+                f"same not-yet-shipped file `{path}`. They dispatch as separate "
+                "coder sessions / PRs and will collide — whichever merges first "
+                "turns the others into conflicts or cap-blocks (the planning-"
+                "layer parallel-module-drift pattern; canonical IndianFoodTruck "
+                "NextAuth cascade)."
+            ),
+            fix_hint=(
+                f"Consolidate {ids} into ONE feature that owns `{path}` (reject "
+                "the overlapping siblings, fold their ACs in), or re-scope so "
+                "only one creates the file and the others import from it. "
+                "Foundation setup sharing a new entrypoint must ship as a "
+                "single cohesive feature — see the designer sizing gate's "
+                "shared-entrypoint cohesion rule."
+            ),
+            occurrences=[f"{path}: features {ids}"],
+            product_id=pid,
+            dedupe_key=f"overlapping_features:{path}",
+        ))
+    return findings
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Orchestration
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -1685,6 +1776,12 @@ _DETECTORS = (
     # two-audit soak, per the Guard-17-tuning protocol that secret_sentinel
     # followed.
     detect_timing_unsafe_compare,
+    # Wave-7 (2026-06-13): planning-layer collision detector — in-flight
+    # features racing to co-create the same not-yet-shipped file. Comment-
+    # path safety net behind the designer's shared-entrypoint cohesion rule
+    # (the primary, prevention fix). Soaks here; consolidation is a judgment
+    # call, never auto-mutated, so it stays comment-only.
+    detect_overlapping_features,
 )
 
 # Objective code-drift detectors whose high-severity findings are routed to

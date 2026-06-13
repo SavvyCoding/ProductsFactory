@@ -20,6 +20,7 @@ from orchestrator.drift_detectors import (  # noqa: E402
     detect_design_doc_mismatch,
     detect_duplicate_ddl,
     detect_insecure_cors,
+    detect_overlapping_features,
     detect_placeholder_template_content,
     detect_sandbox_path_literals,
     detect_schema_dual_source,
@@ -1341,3 +1342,76 @@ class TestDetectSchemaDualSource:
         _write(tmp_path / "src" / "db.py",
                "    conn.execute('CREATE TABLE widgets (id int)')\n")
         assert detect_schema_dual_source(tmp_path, [_feature(1)]) == []
+
+
+# ── detect_overlapping_features (wave-7) ────────────────────────────────────
+
+
+class TestDetectOverlappingFeatures:
+    def _doc(self, tmp_path, fid, *paths):
+        body = f"# Story {fid}\n" + "".join(
+            f"AC{i} — new module `{p}` exporting things.\n"
+            for i, p in enumerate(paths, 1))
+        _write(tmp_path / "docs" / f"story_{fid}.md", body)
+        return _feature(fid, status="Designed", design_doc_path=f"docs/story_{fid}.md")
+
+    def test_two_features_same_new_file_flagged(self, tmp_path):
+        # Canonical IndianFoodTruck NextAuth shape: two in-flight features
+        # both declare creating the same catch-all route.
+        route = "src/pages/api/auth/[...nextauth].ts"
+        f1 = self._doc(tmp_path, 1613, route)
+        f2 = self._doc(tmp_path, 1623, route)
+        out = detect_overlapping_features(tmp_path, [f1, f2])
+        assert len(out) == 1
+        assert out[0].category == "overlapping_features"
+        assert out[0].severity == "high"
+        assert out[0].target_id == route
+        assert "1613" in out[0].detail and "1623" in out[0].detail
+        assert out[0].feature_id == 1613  # anchored to the lowest id
+
+    def test_single_feature_not_flagged(self, tmp_path):
+        f1 = self._doc(tmp_path, 1, "src/lib/auth/index.ts")
+        assert detect_overlapping_features(tmp_path, [f1]) == []
+
+    def test_terminal_feature_excluded(self, tmp_path):
+        # A shipped feature + one in-flight declaring the same file is NOT a
+        # live race — the shipped one already owns it.
+        route = "src/pages/api/auth/[...nextauth].ts"
+        shipped = self._doc(tmp_path, 100, route)
+        shipped["status"] = "Pushed"
+        active = self._doc(tmp_path, 200, route)
+        assert detect_overlapping_features(tmp_path, [shipped, active]) == []
+
+    def test_file_already_on_main_not_flagged(self, tmp_path, monkeypatch):
+        # Two features both reference an EXISTING shared module — that's
+        # import/reuse, not a create-race. on_main filtering drops it.
+        shared = "src/lib/db.ts"
+        import orchestrator.drift_detectors as dd
+        monkeypatch.setattr(dd, "_ls_tree_origin_main", lambda wd: {shared})
+        f1 = self._doc(tmp_path, 1, shared)
+        f2 = self._doc(tmp_path, 2, shared)
+        assert detect_overlapping_features(tmp_path, [f1, f2]) == []
+
+    def test_distinct_files_not_flagged(self, tmp_path):
+        f1 = self._doc(tmp_path, 1, "src/api/menu.ts")
+        f2 = self._doc(tmp_path, 2, "src/api/orders.ts")
+        assert detect_overlapping_features(tmp_path, [f1, f2]) == []
+
+    def test_no_design_doc_skipped(self, tmp_path):
+        # Approved-but-undesigned features have no doc → nothing to collide.
+        f1 = _feature(1, status="Approved")
+        f2 = _feature(2, status="Approved")
+        assert detect_overlapping_features(tmp_path, [f1, f2]) == []
+
+    def test_three_way_collision_lists_all(self, tmp_path):
+        app = "src/pages/_app.tsx"
+        feats = [self._doc(tmp_path, i, app) for i in (1613, 1616, 1624)]
+        out = detect_overlapping_features(tmp_path, feats)
+        assert len(out) == 1
+        for fid in (1613, 1616, 1624):
+            assert str(fid) in out[0].detail
+
+    def test_registry_membership(self):
+        from orchestrator import drift_detectors as dd
+        assert dd.detect_overlapping_features in dd._DETECTORS
+        assert dd.detect_overlapping_features not in dd._CHORE_DETECTORS
