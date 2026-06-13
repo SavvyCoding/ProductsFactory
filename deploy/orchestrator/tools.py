@@ -1210,10 +1210,11 @@ def _reprocess_blocked_features(product: dict, features: list | None = None,
     are all PREVENTIVE and nothing re-processes the existing pool).
 
     Each feature is reprocessed AT MOST ONCE (a `blocked-reprocessor`
-    comment is the dedupe marker), so this can't loop. Gated OFF by default
-    (env BLOCKED_REPROCESSOR_ENABLED, or product.config.blocked_reprocessor)
-    — flip it on to drain. Routing by the wave-6-enriched blocked_reason +
-    bounce-author signature:
+    comment is the dedupe marker), so this can't loop. ON by default for all
+    products (2026-06-13): product.config.blocked_reprocessor explicit bool
+    wins (per-product opt-OUT); BLOCKED_REPROCESSOR_ENABLED is a global kill
+    switch (set to a falsy value to disable everywhere). Routing by the
+    wave-6-enriched blocked_reason + bounce-author signature:
 
       - divergent_review_feedback → unblock to Approved, clear the design
         doc, fix_attempts=0. The 25-comment cumulative checklist converges
@@ -1234,10 +1235,11 @@ def _reprocess_blocked_features(product: dict, features: list | None = None,
     cfg = product.get("config") or {}
     _flag = cfg.get("blocked_reprocessor")
     if isinstance(_flag, bool):
-        enabled = _flag
+        enabled = _flag                              # per-product opt-out wins
     else:
-        enabled = os.environ.get("BLOCKED_REPROCESSOR_ENABLED", "").strip().lower() \
-            in ("1", "true", "yes", "on")
+        enabled = os.environ.get(                    # default ON; env kill switch
+            "BLOCKED_REPROCESSOR_ENABLED", "").strip().lower() \
+            not in ("0", "false", "no", "off")
     if not enabled:
         return 0
     pid = product.get("id")
