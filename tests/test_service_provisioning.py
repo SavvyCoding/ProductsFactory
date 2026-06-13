@@ -259,3 +259,136 @@ class TestInfraExcludedFromSelector:
             feats, _, _ = docker_runner._fetch_assigned_features(7, "coder")
         ids = [f["id"] for f in feats]
         assert 2 in ids and 1 not in ids
+
+
+# ── blocked-feature re-processor (wave-8) ───────────────────────────────────
+
+
+class _ReprocFake:
+    def __init__(self, comments_by_fid=None):
+        self.comments_by_fid = comments_by_fid or {}
+        self.patches = []
+        self.posts = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+    def get(self, path, **kw):
+        r = MagicMock(is_success=True, status_code=200)
+        if "/comments" in path:
+            fid = int(path.split("/")[3])
+            r.json.return_value = self.comments_by_fid.get(fid, [])
+        else:
+            r.json.return_value = {}
+        return r
+
+    def patch(self, path, json=None, **kw):
+        self.patches.append((path, json))
+        return MagicMock(is_success=True, status_code=200)
+
+    def post(self, path, json=None, **kw):
+        self.posts.append((path, json))
+        return MagicMock(is_success=True, status_code=200)
+
+
+def _blocked(fid, reason):
+    return {"id": fid, "status": "Blocked", "blocked_reason": reason}
+
+
+class TestBlockedReprocessor:
+    def _product(self, **cfg):
+        return {"id": 7, "name": "P", "config": cfg}
+
+    def test_enabled_by_default(self):
+        # Default ON for all products (2026-06-13): no env, no config.
+        fake = _ReprocFake()
+        feats = [_blocked(1, "Auto-blocked by supervisor.divergent_review_feedback: ...")]
+        with patch.dict(os.environ, {}, clear=False), \
+             patch.object(orch_tools, "_pm_client", return_value=fake):
+            os.environ.pop("BLOCKED_REPROCESSOR_ENABLED", None)
+            n = orch_tools._reprocess_blocked_features(self._product(), feats)
+        assert n == 1
+
+    def test_env_kill_switch_disables(self):
+        # BLOCKED_REPROCESSOR_ENABLED set to a falsy value disables everywhere.
+        fake = _ReprocFake()
+        feats = [_blocked(1, "supervisor.divergent_review_feedback")]
+        with patch.dict(os.environ, {"BLOCKED_REPROCESSOR_ENABLED": "0"}), \
+             patch.object(orch_tools, "_pm_client", return_value=fake):
+            n = orch_tools._reprocess_blocked_features(self._product(), feats)
+        assert n == 0
+        assert fake.patches == []
+
+    def test_divergent_unblocked_clean(self):
+        fake = _ReprocFake()
+        feats = [_blocked(1, "Auto-blocked by supervisor.divergent_review_feedback: ...")]
+        with patch.object(orch_tools, "_pm_client", return_value=fake):
+            n = orch_tools._reprocess_blocked_features(
+                self._product(blocked_reprocessor=True), feats)
+        assert n == 1
+        _, body = fake.patches[0]
+        assert body["status"] == "Approved"
+        assert body["design_doc_path"] is None
+        assert body["fix_attempts"] == 0
+
+    def test_code_quality_flap_sets_escalation_threshold(self):
+        fake = _ReprocFake(comments_by_fid={
+            1: [{"author": "lint-guard", "body": "x"},
+                {"author": "post-coder:test-check", "body": "y"}]})
+        feats = [_blocked(1, "Auto-blocked by supervisor.rapid_flap: cycled 10 times. "
+                             "Recent bounce authors: 1x lint-guard, 1x post-coder:test-check.")]
+        with patch.object(orch_tools, "_pm_client", return_value=fake):
+            n = orch_tools._reprocess_blocked_features(
+                self._product(blocked_reprocessor=True), feats)
+        assert n == 1
+        _, body = fake.patches[0]
+        assert body["status"] == "Approved"
+        assert body["fix_attempts"] == 4  # escalation threshold → diagnose-first next run
+        assert "design_doc_path" not in body  # doc kept for code-quality retry
+
+    def test_env_block_skipped(self):
+        fake = _ReprocFake()
+        feats = [_blocked(1, "Tests require a live redis service that is not declared "
+                             "(service-missing). Not coder-fixable.")]
+        with patch.object(orch_tools, "_pm_client", return_value=fake):
+            n = orch_tools._reprocess_blocked_features(
+                self._product(blocked_reprocessor=True), feats)
+        assert n == 0
+        assert fake.patches == []
+
+    def test_dedup_one_shot(self):
+        fake = _ReprocFake(comments_by_fid={
+            1: [{"author": "blocked-reprocessor", "body": "already retried"}]})
+        feats = [_blocked(1, "Auto-blocked by supervisor.divergent_review_feedback: ...")]
+        with patch.object(orch_tools, "_pm_client", return_value=fake):
+            n = orch_tools._reprocess_blocked_features(
+                self._product(blocked_reprocessor=True), feats)
+        assert n == 0
+
+    def test_per_cycle_cap(self):
+        fake = _ReprocFake()
+        feats = [_blocked(i, "supervisor.divergent_review_feedback") for i in range(1, 6)]
+        with patch.object(orch_tools, "_pm_client", return_value=fake):
+            n = orch_tools._reprocess_blocked_features(
+                self._product(blocked_reprocessor=True), feats, max_per_cycle=2)
+        assert n == 2
+
+    def test_env_flag_enables(self):
+        fake = _ReprocFake()
+        feats = [_blocked(1, "supervisor.divergent_review_feedback")]
+        with patch.dict(os.environ, {"BLOCKED_REPROCESSOR_ENABLED": "1"}), \
+             patch.object(orch_tools, "_pm_client", return_value=fake):
+            n = orch_tools._reprocess_blocked_features(self._product(), feats)
+        assert n == 1
+
+    def test_config_false_overrides_env_on(self):
+        fake = _ReprocFake()
+        feats = [_blocked(1, "supervisor.divergent_review_feedback")]
+        with patch.dict(os.environ, {"BLOCKED_REPROCESSOR_ENABLED": "1"}), \
+             patch.object(orch_tools, "_pm_client", return_value=fake):
+            n = orch_tools._reprocess_blocked_features(
+                self._product(blocked_reprocessor=False), feats)
+        assert n == 0  # explicit per-product opt-out wins
