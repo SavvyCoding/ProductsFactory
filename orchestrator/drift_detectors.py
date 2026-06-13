@@ -388,6 +388,15 @@ _DDL_EXCLUDE_DIRS = frozenset({
     ".git", ".venv", "venv", "env", "__pycache__", "node_modules",
     "Temp", "Results", "dist", "build", ".pytest_cache", ".mypy_cache",
     "tests", "test", "migrations",
+    # Framework build-output dirs — minified/vendored artifacts, never
+    # hand-written source. Scanning them is noise (2026-06-13 soak:
+    # timing_unsafe_compare false-fired on IndianFoodTruck
+    # `.next/static/chunks/polyfills.js`). Pruning the build root drops
+    # everything under it. Shared by every source-scanning detector below.
+    # (Bare `static`/`vendor` are intentionally NOT excluded — they can hold
+    # hand-written code; only the build-tool output roots are.)
+    ".next", ".nuxt", ".svelte-kit", "out", "coverage", ".turbo",
+    ".cache", ".parcel-cache",
 })
 _DDL_EXCLUDE_PATH_SUBSTR = ("alembic/versions", "db/migrations")
 

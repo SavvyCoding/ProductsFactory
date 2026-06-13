@@ -1284,6 +1284,12 @@ class TestDetectTimingUnsafeCompare:
                "    return hmac.compare_digest(expected, provided_token)\n")
         assert detect_timing_unsafe_compare(tmp_path, [_feature(1)]) == []
 
+    def test_build_output_dirs_excluded(self, tmp_path):
+        # 2026-06-13 soak FP: minified Next.js artifact under .next/.
+        _write(tmp_path / ".next" / "static" / "chunks" / "polyfills.js",
+               "if(token==e){}\n")
+        assert detect_timing_unsafe_compare(tmp_path, [_feature(1)]) == []
+
 
 # ── detect_schema_dual_source (wave-6) ──────────────────────────────────────
 
