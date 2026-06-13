@@ -569,6 +569,23 @@ def run_cycle(args: dict, **kwargs) -> str:
         # — never dispatched to coder/designer sessions (both selection
         # points also exclude them). Runs before the phase-gate detector so
         # a just-Pushed infra story settles into this cycle's gate math.
+        # Blocked-feature re-processor (wave-8): give Blocked features whose
+        # blocker class now has a remedy ONE automatic retry (drains the
+        # accumulated pool). Gated OFF by default. Runs before the infra
+        # executor + detectors so a just-unblocked feature settles into this
+        # cycle's dispatch.
+        for p in ready:
+            try:
+                n_re = _reprocess_blocked_features(p, features=features_by_pid.get(p["id"]))
+                if n_re:
+                    with _pm_client() as client:
+                        _fr = client.get(f"/api/products/{p['id']}/features")
+                    _fl = _fr.json() if _fr.is_success else None
+                    if isinstance(_fl, list):
+                        features_by_pid[p["id"]] = _fl
+            except Exception:
+                log.exception(f"blocked-reprocessor failed for product {p.get('id')}")
+
         for p in ready:
             try:
                 n_infra = _execute_infra_stories(p, features=features_by_pid.get(p["id"]))
@@ -1170,6 +1187,139 @@ def _run_phase_gate_detector(product: dict, features: list | None = None) -> Non
                     log.info(f"phase-gate: phase {ph['id']} settled → awaiting_review + alert")
             except Exception:
                 log.exception(f"phase-gate report/alert failed for phase {ph['id']}")
+
+
+_REPROCESS_MARKER_AUTHOR = "blocked-reprocessor"
+# Bounce-author substrings that mean a CODE-quality grind (the coder can
+# plausibly fix it with a diagnose-first escalation). Env/service/tool/spec
+# blocks are deliberately excluded — re-running the coder won't help; those
+# need a designer redesign or the service/tool-missing paths, which already
+# own them.
+_CODE_QUALITY_AUTHORS = ("lint-guard", "post-coder:test-check",
+                         "post-coder:verify-check", "reviewer")
+_ENV_SPEC_AUTHORS = ("service-missing", "tool-missing", "test-env",
+                     "env_broken", "service_missing", "tool_missing")
+
+
+def _reprocess_blocked_features(product: dict, features: list | None = None,
+                                max_per_cycle: int = 2) -> int:
+    """Wave-8: give a Blocked feature ONE automatic retry through the
+    machinery that can now handle its blocker class — draining the
+    accumulated pool instead of letting it grow (2026-06-13 audit: 75
+    Blocked, class distribution unchanged across waves because the fixes
+    are all PREVENTIVE and nothing re-processes the existing pool).
+
+    Each feature is reprocessed AT MOST ONCE (a `blocked-reprocessor`
+    comment is the dedupe marker), so this can't loop. Gated OFF by default
+    (env BLOCKED_REPROCESSOR_ENABLED, or product.config.blocked_reprocessor)
+    — flip it on to drain. Routing by the wave-6-enriched blocked_reason +
+    bounce-author signature:
+
+      - divergent_review_feedback → unblock to Approved, clear the design
+        doc, fix_attempts=0. The 25-comment cumulative checklist converges
+        this class (proven: DogTinder #1490 shipped this way).
+      - rapid_flap / fix_attempts cap whose bounce authors are CODE-quality
+        (lint/test/verify/reviewer, not env/spec) → unblock to Approved,
+        keep the doc, set fix_attempts = the escalation threshold so the
+        NEXT coder session runs the diagnose-first escalation (wave-5)
+        instead of another blind attempt. This is also the fix for the
+        flap-preempts-escalation gap: rapid_flap blocks on transition count
+        at fix_attempts=3, before the escalation trigger (>=4) fires — the
+        reprocessor sets the trigger condition explicitly.
+      - env/service/tool/spec blocks → SKIP (a coder re-run won't help; the
+        service/tool-missing + spec_defect paths own those).
+
+    Returns the number reprocessed. Best-effort; never raises into the cycle.
+    """
+    cfg = product.get("config") or {}
+    _flag = cfg.get("blocked_reprocessor")
+    if isinstance(_flag, bool):
+        enabled = _flag
+    else:
+        enabled = os.environ.get("BLOCKED_REPROCESSOR_ENABLED", "").strip().lower() \
+            in ("1", "true", "yes", "on")
+    if not enabled:
+        return 0
+    pid = product.get("id")
+    if not pid:
+        return 0
+    if features is None:
+        try:
+            with _pm_client() as client:
+                fr = client.get(f"/api/products/{pid}/features")
+            features = fr.json() if fr.is_success else []
+        except Exception:
+            return 0
+    if not isinstance(features, list):
+        return 0
+    blocked = [f for f in features if f.get("status") == "Blocked"]
+    if not blocked:
+        return 0
+
+    esc_threshold = int(os.environ.get("ESCALATION_FIX_ATTEMPTS_THRESHOLD", "4"))
+    reprocessed = 0
+    pname = product.get("name", "?")
+    try:
+        with _pm_client() as client:
+            for f in blocked:
+                if reprocessed >= max_per_cycle:
+                    break
+                fid = f.get("id")
+                if not isinstance(fid, int):
+                    continue
+                reason = (f.get("blocked_reason") or "").lower()
+
+                # Dedupe: one auto-retry per feature, ever.
+                try:
+                    cr = client.get(f"/api/features/{fid}/comments", params={"limit": 50})
+                    comments = cr.json() if cr.is_success else []
+                except Exception:
+                    comments = []
+                if any(isinstance(c, dict) and c.get("author") == _REPROCESS_MARKER_AUTHOR
+                       for c in comments):
+                    continue
+
+                # Classify by blocked_reason + bounce authors.
+                authors_blob = " ".join(
+                    (c.get("author") or "") for c in comments if isinstance(c, dict))
+                is_env_spec = any(a in reason or a in authors_blob for a in _ENV_SPEC_AUTHORS)
+                is_divergent = "divergent" in reason
+                is_flap_or_cap = ("rapid_flap" in reason or "flap loop" in reason
+                                  or "fix_attempts" in reason or "max_fix_attempts" in reason)
+                is_code_quality = any(a in reason or a in authors_blob
+                                      for a in _CODE_QUALITY_AUTHORS)
+
+                if is_env_spec and not is_divergent:
+                    continue  # coder re-run won't help — owned by other paths
+
+                if is_divergent:
+                    patch = {"status": "Approved", "changed_by": "supervisor",
+                             "design_doc_path": None, "design_doc": None,
+                             "fix_attempts": 0}
+                    note = ("Auto-retry (blocked-reprocessor): divergent_review "
+                            "class — cumulative-feedback checklist converges this "
+                            "(cf. #1490). Doc cleared for clean redesign. One-shot.")
+                elif is_flap_or_cap and is_code_quality:
+                    patch = {"status": "Approved", "changed_by": "supervisor",
+                             "fix_attempts": esc_threshold}
+                    note = (f"Auto-retry (blocked-reprocessor): code-quality "
+                            f"flap/cap — unblocked with fix_attempts={esc_threshold} "
+                            f"so the next coder session runs the diagnose-first "
+                            f"escalation instead of another blind attempt. One-shot.")
+                else:
+                    continue  # unclassified — leave for human triage
+
+                try:
+                    client.patch(f"/api/features/{fid}", json=patch)
+                    client.post(f"/api/features/{fid}/comments",
+                                json={"author": _REPROCESS_MARKER_AUTHOR, "body": note})
+                    reprocessed += 1
+                    log.info(f"[reprocessor] {pname}: #{fid} auto-retried ({note[:60]}...)")
+                except Exception:
+                    log.exception(f"[reprocessor] {pname}: retry PATCH failed for #{fid}")
+    except Exception:
+        log.exception(f"[reprocessor] {pname}: failed (non-fatal)")
+    return reprocessed
 
 
 def _execute_infra_stories(product: dict, features: list | None = None) -> int:
