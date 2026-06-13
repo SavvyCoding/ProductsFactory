@@ -128,6 +128,24 @@ def _isolated_db(tmp_path, monkeypatch):
 ```
 Without this, a test calling a repository function directly (or one of two tests sharing the default DB path) leaks state into the next test — invisible in isolation, broken in the full suite. The post-coder test-check runs the FULL suite, so cross-test leakage poisons every feature's gate.
 
+### Redis cache testing — fakeredis, never a live server
+If the product uses Redis (caching, rate limiting), tests must use **fakeredis** (in-memory), NOT a live Redis. A live-Redis dependency means tests pass only where a server happens to be up and fail on a plain checkout — the fakes-first rule exists to keep tests self-contained. `fakeredis` is pre-installed. Patch `redis.asyncio.from_url` (and the sync `redis.from_url` if used) in the autouse fixture so every `Redis.from_url(REDIS_URL)` in `src/` transparently gets an in-memory server:
+```python
+import pytest
+import fakeredis.aioredis
+
+@pytest.fixture(autouse=True)
+def _fake_redis(monkeypatch):
+    """Every redis.asyncio.Redis.from_url(...) in src/ → in-memory fake."""
+    server = fakeredis.FakeServer()
+    def _from_url(*a, **kw):
+        return fakeredis.aioredis.FakeRedis(server=server, decode_responses=kw.get("decode_responses", False))
+    monkeypatch.setattr("redis.asyncio.Redis.from_url", _from_url)
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")  # value unused; from_url is patched
+    yield
+```
+Test the cache-MISS / Redis-down path explicitly (point one test's `from_url` at a closed port or raise from the patch) — graceful degradation is a behaviour, not an accident. Do NOT write tests that `import redis; redis.Redis.from_url(os.environ["REDIS_URL"])` against a real server.
+
 ### External OAuth provider — mock the IdP, never call it
 Tests and Verify recipes must NEVER hit a live identity provider (Google/Apple/GitHub OAuth). Mock the token + userinfo endpoints with `respx`:
 ```python
