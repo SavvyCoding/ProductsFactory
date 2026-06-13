@@ -345,7 +345,10 @@ class TestBlockedReprocessor:
                 self._product(blocked_reprocessor=True), feats)
         assert n == 1
         _, body = fake.patches[0]
-        assert body["status"] == "Approved"
+        # Implementing (NOT Approved — →Approved would zero fix_attempts and
+        # defeat escalation) + changes_requested makes it coder-eligible.
+        assert body["status"] == "Implementing"
+        assert body["review_outcome"] == "changes_requested"
         assert body["fix_attempts"] == 4  # escalation threshold → diagnose-first next run
         assert "design_doc_path" not in body  # doc kept for code-quality retry
 
@@ -361,7 +364,7 @@ class TestBlockedReprocessor:
 
     def test_dedup_one_shot(self):
         fake = _ReprocFake(comments_by_fid={
-            1: [{"author": "blocked-reprocessor", "body": "already retried"}]})
+            1: [{"author": "blocked-reprocessor-v2", "body": "already retried"}]})
         feats = [_blocked(1, "Auto-blocked by supervisor.divergent_review_feedback: ...")]
         with patch.object(orch_tools, "_pm_client", return_value=fake):
             n = orch_tools._reprocess_blocked_features(
@@ -392,3 +395,18 @@ class TestBlockedReprocessor:
             n = orch_tools._reprocess_blocked_features(
                 self._product(blocked_reprocessor=False), feats)
         assert n == 0  # explicit per-product opt-out wins
+
+    def test_failed_unblock_does_not_spend_one_shot(self):
+        # The v1 bug: a 422'd unblock still posted the dedup marker, falsely
+        # spending the retry. A non-2xx PATCH must NOT mark or count.
+        class _RejectFake(_ReprocFake):
+            def patch(self, path, json=None, **kw):
+                self.patches.append((path, json))
+                return MagicMock(is_success=False, status_code=422)
+        fake = _RejectFake()
+        feats = [_blocked(1, "supervisor.divergent_review_feedback")]
+        with patch.object(orch_tools, "_pm_client", return_value=fake):
+            n = orch_tools._reprocess_blocked_features(
+                self._product(blocked_reprocessor=True), feats)
+        assert n == 0
+        assert fake.posts == []  # no dedup marker posted
