@@ -163,7 +163,12 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
     elif persona == "qa_tester":
         template_name = "reviewer"
     elif persona == "security_auditor":
-        template_name = "reviewer"
+        # Wave-6 (2026-06-13): revived as a STANDING, read-only, product-wide
+        # security audit that files findings as `bug` features — distinct
+        # from the per-PR security review that was merged into `reviewer`
+        # on 2026-05-06 (that merge is unchanged). PM-triggered on-demand
+        # only; never auto-scheduled.
+        template_name = "security_auditor"
     elif persona == "documenter":
         template_name = "documenter"
     elif persona == "refactorer":

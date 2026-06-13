@@ -3891,23 +3891,29 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
                 )
                 _drift.post_findings(_drift_findings, _drift_client, pname)
 
-            # Reconciler-as-controller (opt-in via RECONCILER_CHORES_ENABLED).
-            # Objective code-drift detectors (separate _CHORE_DETECTORS registry,
-            # not the comment-path _DETECTORS above) emit high-severity findings
-            # that get filed as Approved chore features. The existing
-            # coder→guard→reviewer pipeline is the actuator, so corrections run
-            # through the same verification as any feature. Default OFF.
-            # Per-product A/B via product.config["reconciler_chores"]
-            # (explicit True/False wins, settable from the product settings
-            # UI); the RECONCILER_CHORES_ENABLED env flag is the
-            # environment-wide fallback. Best-effort: failure here never
-            # bounces the feature.
+            # Reconciler-as-controller. Objective code-drift detectors
+            # (separate _CHORE_DETECTORS registry, not the comment-path
+            # _DETECTORS above) emit high-severity findings filed as Approved
+            # chore features. The existing coder→guard→reviewer pipeline is
+            # the actuator, so corrections run through the same verification
+            # as any feature. file_corrective_chores caps at 3/product/cycle
+            # and dedupes open chores, so steady-state filing is bounded.
+            #
+            # Default ON for ALL products (2026-06-13) — the DogTinder
+            # re-review confirmed comment-path findings get read but never
+            # repaired; chores give every finding an owner. Resolution:
+            #   1. product.config["reconciler_chores"] explicit bool wins
+            #      (per-product opt-OUT: set False to disable for a product).
+            #   2. else RECONCILER_CHORES_ENABLED env var as a global kill
+            #      switch — ON unless explicitly set to a falsy value.
+            # Best-effort: failure here never bounces the feature.
             _chores_cfg = (product.get("config") or {}).get("reconciler_chores")
-            _chores_on = (
-                _chores_cfg if isinstance(_chores_cfg, bool)
-                else os.environ.get("RECONCILER_CHORES_ENABLED", "").strip().lower()
-                in ("1", "true", "yes", "on")
-            )
+            if isinstance(_chores_cfg, bool):
+                _chores_on = _chores_cfg
+            else:
+                _chores_on = os.environ.get(
+                    "RECONCILER_CHORES_ENABLED", "").strip().lower() \
+                    not in ("0", "false", "no", "off")
             if _chores_on:
                 _chore_findings = _drift.run_chore_detectors(working_dir, _all_features)
                 if _chore_findings:

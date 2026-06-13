@@ -388,6 +388,15 @@ _DDL_EXCLUDE_DIRS = frozenset({
     ".git", ".venv", "venv", "env", "__pycache__", "node_modules",
     "Temp", "Results", "dist", "build", ".pytest_cache", ".mypy_cache",
     "tests", "test", "migrations",
+    # Framework build-output dirs — minified/vendored artifacts, never
+    # hand-written source. Scanning them is noise (2026-06-13 soak:
+    # timing_unsafe_compare false-fired on IndianFoodTruck
+    # `.next/static/chunks/polyfills.js`). Pruning the build root drops
+    # everything under it. Shared by every source-scanning detector below.
+    # (Bare `static`/`vendor` are intentionally NOT excluded — they can hold
+    # hand-written code; only the build-tool output roots are.)
+    ".next", ".nuxt", ".svelte-kit", "out", "coverage", ".turbo",
+    ".cache", ".parcel-cache",
 })
 _DDL_EXCLUDE_PATH_SUBSTR = ("alembic/versions", "db/migrations")
 
@@ -1401,6 +1410,259 @@ def detect_secret_sentinel(
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Detector: insecure CORS — wildcard origin together with credentials
+# ────────────────────────────────────────────────────────────────────────────
+# `allow_origins=["*"]` (or `origin: '*'`) combined with
+# `allow_credentials=True` nullifies CORS for authenticated requests: any
+# website can make credentialed calls and read the response. The per-commit
+# lint Guard 21 catches NEW occurrences (added lines), but legacy misconfigs
+# predate it — this whole-file scan catches the existing debt (canonical:
+# DogTinder main.py, flagged in two human reviews, never fixed because no
+# loop turned the finding into a chore). High-severity → corrective-chore
+# sink. Near-zero FP: requires BOTH markers in the same file.
+_CORS_WILDCARD_RE = re.compile(
+    r"""allow_origins\s*[:=]\s*\[?\s*["']\*["']|origins?\s*:\s*["']\*["']""",
+    re.IGNORECASE,
+)
+_CORS_CREDENTIALS_RE = re.compile(
+    r"allow_credentials\s*[:=]\s*True|credentials\s*:\s*true", re.IGNORECASE,
+)
+_CORS_SOURCE_EXTS = (".py", ".js", ".jsx", ".ts", ".tsx")
+
+
+def detect_insecure_cors(
+    working_dir: str | Path, features: list[dict]
+) -> list[Finding]:
+    """Source files configuring CORS with a wildcard origin AND credentials."""
+    wd = Path(working_dir)
+    if not wd.is_dir():
+        return []
+    findings: list[Finding] = []
+    pid = _product_id_from_features(features)
+    anchor = _pick_target_feature(features) or 0
+    for root, dirs, files in os.walk(wd):
+        dirs[:] = [d for d in dirs if d not in _DDL_EXCLUDE_DIRS]
+        rel_root = os.path.relpath(root, wd).replace("\\", "/")
+        if any(sub in rel_root for sub in _DDL_EXCLUDE_PATH_SUBSTR):
+            continue
+        for fn in files:
+            if not fn.endswith(_CORS_SOURCE_EXTS):
+                continue
+            fpath = Path(root) / fn
+            try:
+                text = fpath.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            if _CORS_WILDCARD_RE.search(text) and _CORS_CREDENTIALS_RE.search(text):
+                rel = os.path.relpath(fpath, wd).replace("\\", "/")
+                findings.append(Finding(
+                    category="insecure_cors",
+                    severity="high",
+                    target_type="file",
+                    target_id=rel,
+                    feature_id=anchor,
+                    detail=(
+                        f"`{rel}` configures CORS with a wildcard origin "
+                        "(`allow_origins=['*']`) AND `allow_credentials=True`. "
+                        "This combination disables CORS protection for "
+                        "authenticated requests — any website can make "
+                        "credentialed calls on behalf of a logged-in user and "
+                        "read the response (cross-site token/data theft)."
+                    ),
+                    fix_hint=(
+                        "Pin the allowed origins to an explicit, "
+                        "env-configurable list (e.g. read CORS_ORIGINS), or "
+                        "drop allow_credentials if a wildcard origin is "
+                        "genuinely required. Never combine the two."
+                    ),
+                    occurrences=[rel],
+                    product_id=pid,
+                ))
+    return findings
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Detector: timing-unsafe comparison of secret material (comment-path soak)
+# ────────────────────────────────────────────────────────────────────────────
+# `==` / `!=` on password/token/hash/secret/signature values leaks
+# information through comparison timing — a constant-time compare
+# (hmac.compare_digest / crypto.timingSafeEqual) is required. Canonical:
+# DogTinder auth/utils.py `return expected.hex() == dk_hex`. Higher FP
+# surface than the CORS/schema detectors (==-matching is broad), so this
+# soaks on the COMMENT path first per the Guard-17-tuning protocol; promote
+# to the chore sink after a clean two-audit soak.
+_SECRET_VAR_RE = re.compile(
+    r"\b\w*(password|passwd|secret|token|hmac|signature|digest|"
+    r"hashed?|pwhash|api[_-]?key)\w*\b",
+    re.IGNORECASE,
+)
+# A hash/MAC digest output being compared is the classic timing leak even
+# when the operands aren't named like secrets — DogTinder's canonical line
+# is `return expected.hex() == dk_hex` (operands `expected`/`dk_hex`, no
+# secret-ish name; the signal is the .hex() digest call).
+_DIGEST_CALL_RE = re.compile(r"\.(hexdigest|digest|hex)\s*\(\s*\)")
+_UNSAFE_CMP_RE = re.compile(r"[^=!<>]=\=[^=]|!\=[^=]")  # a == b / a != b, not >= <= == in chains
+
+
+def detect_timing_unsafe_compare(
+    working_dir: str | Path, features: list[dict]
+) -> list[Finding]:
+    """Direct == / != comparisons involving secret-looking identifiers."""
+    wd = Path(working_dir)
+    if not wd.is_dir():
+        return []
+    findings: list[Finding] = []
+    anchor = _pick_target_feature(features)
+    if anchor is None:
+        return []
+    for root, dirs, files in os.walk(wd):
+        dirs[:] = [d for d in dirs if d not in _DDL_EXCLUDE_DIRS]
+        rel_root = os.path.relpath(root, wd).replace("\\", "/")
+        if any(sub in rel_root for sub in _DDL_EXCLUDE_PATH_SUBSTR):
+            continue
+        for fn in files:
+            if not fn.endswith((".py", ".js", ".jsx", ".ts", ".tsx")):
+                continue
+            fpath = Path(root) / fn
+            try:
+                text = fpath.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            rel = os.path.relpath(fpath, wd).replace("\\", "/")
+            hits: list[str] = []
+            for i, line in enumerate(text.splitlines(), start=1):
+                stripped = line.strip()
+                if stripped.startswith(("#", "//", "*")):
+                    continue
+                if "==" not in line and "!=" not in line:
+                    continue
+                if not _UNSAFE_CMP_RE.search(line):
+                    continue
+                # Both operands must look like values (skip `x == None`,
+                # `len(x) == 0`, numeric/bool comparisons — those aren't
+                # secret-equality checks).
+                if re.search(r"==\s*(None|null|true|false|\d|len\()", line, re.IGNORECASE):
+                    continue
+                if not (_SECRET_VAR_RE.search(line) or _DIGEST_CALL_RE.search(line)):
+                    continue
+                hits.append(f"{rel}:{i}")
+            for loc in hits:
+                findings.append(Finding(
+                    category="timing_unsafe_compare",
+                    severity="medium",
+                    target_type="code",
+                    target_id=loc,
+                    feature_id=anchor,
+                    detail=(
+                        f"`{loc}` compares secret material (password / token / "
+                        "hash / signature) with `==` or `!=`. String/bytes "
+                        "equality short-circuits on the first differing byte, "
+                        "leaking the value through timing."
+                    ),
+                    fix_hint=(
+                        "Use a constant-time compare: Python "
+                        "`hmac.compare_digest(a, b)`; JS/TS "
+                        "`crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b))`."
+                    ),
+                ))
+    return findings
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Detector: schema dual-source — tables created in code but not in migrations
+# ────────────────────────────────────────────────────────────────────────────
+# A product whose runtime init (e.g. init_db()) CREATE TABLEs a table that no
+# alembic/migration file creates has two schema sources of truth: a fresh
+# `alembic upgrade head` deploy is missing the table. Canonical: DogTinder
+# (init_db creates 7 tables, alembic covers 2) and MyJira (#1329/49/51
+# duplicate_ddl siblings). Complements duplicate_ddl (same-table N copies);
+# this catches code-vs-migration divergence. High-severity → chore sink.
+_OP_CREATE_TABLE_RE = re.compile(
+    r"""(?:op\.create_table|create_table)\s*\(\s*["']([A-Za-z_][A-Za-z0-9_]*)["']""",
+    re.IGNORECASE,
+)
+
+
+def detect_schema_dual_source(
+    working_dir: str | Path, features: list[dict]
+) -> list[Finding]:
+    """Tables CREATEd in application source but absent from migrations."""
+    wd = Path(working_dir)
+    if not wd.is_dir():
+        return []
+    # No migrations at all → not a dual-source problem (single source: code).
+    migration_files: list[Path] = []
+    for sub in ("alembic/versions", "db/migrations", "migrations"):
+        mdir = wd / sub
+        if mdir.is_dir():
+            migration_files.extend(mdir.rglob("*.py"))
+    if not migration_files:
+        return []
+
+    migration_tables: set[str] = set()
+    for mf in migration_files:
+        try:
+            mt = mf.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for m in _DDL_RE.finditer(mt):
+            migration_tables.add(m.group(1).lower())
+        for m in _OP_CREATE_TABLE_RE.finditer(mt):
+            migration_tables.add(m.group(1).lower())
+
+    # Tables created in non-migration application source.
+    source_tables: dict[str, str] = {}  # table → first "relpath:lineno"
+    for root, dirs, files in os.walk(wd):
+        dirs[:] = [d for d in dirs if d not in _DDL_EXCLUDE_DIRS]
+        rel_root = os.path.relpath(root, wd).replace("\\", "/")
+        if any(sub in rel_root for sub in _DDL_EXCLUDE_PATH_SUBSTR) \
+                or rel_root.split("/")[0] in ("migrations",):
+            continue
+        for fn in files:
+            if not fn.endswith(".py"):
+                continue
+            fpath = Path(root) / fn
+            try:
+                text = fpath.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            rel = os.path.relpath(fpath, wd).replace("\\", "/")
+            for i, line in enumerate(text.splitlines(), start=1):
+                hash_idx = line.find("#")
+                for m in _DDL_RE.finditer(line):
+                    if hash_idx != -1 and hash_idx < m.start():
+                        continue
+                    source_tables.setdefault(m.group(1).lower(), f"{rel}:{i}")
+
+    missing = sorted(t for t in source_tables if t not in migration_tables)
+    if not missing:
+        return []
+    pid = _product_id_from_features(features)
+    anchor = _pick_target_feature(features) or 0
+    return [Finding(
+        category="schema_dual_source",
+        severity="high",
+        target_type="code",
+        target_id="init_db_vs_migrations",
+        feature_id=anchor,
+        detail=(
+            f"{len(missing)} table(s) are CREATEd in application source but "
+            f"absent from the migrations: {', '.join(missing)}. The schema has "
+            "two sources of truth — a fresh `alembic upgrade head` deploy is "
+            "missing these tables, and the code/migration copies will drift."
+        ),
+        fix_hint=(
+            "Add an alembic migration that creates the missing table(s), then "
+            "make the runtime init rely on migrations having run (drop the "
+            "inline CREATE TABLE, or keep it only as an idempotent "
+            "CREATE TABLE IF NOT EXISTS that mirrors the migration exactly)."
+        ),
+        occurrences=[source_tables[t] for t in missing],
+        product_id=pid,
+    )]
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Orchestration
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -1417,6 +1679,12 @@ _DETECTORS = (
     detect_sandbox_path_literals,
     detect_stub_confessions,
     detect_secret_sentinel,
+    # Wave-6 security loop (2026-06-13): timing-unsafe secret comparison.
+    # On the comment path to soak (==-matching has a broader FP surface than
+    # the CORS/schema detectors); promote to the chore sink after a clean
+    # two-audit soak, per the Guard-17-tuning protocol that secret_sentinel
+    # followed.
+    detect_timing_unsafe_compare,
 )
 
 # Objective code-drift detectors whose high-severity findings are routed to
@@ -1437,6 +1705,14 @@ _CHORE_DETECTORS = (
     detect_tracked_build_artifacts,
     detect_undeclared_backend_deps,
     detect_unreachable_emitted_urls,
+    # Wave-6 security loop (2026-06-13): the two near-zero-FP security
+    # detectors go straight to the chore sink — the whole point (DogTinder
+    # re-review) is that comment-path security findings get READ but never
+    # REPAIRED. Both require a highly specific pattern, so FP risk is low
+    # enough to skip the comment-path soak. Still gated by
+    # RECONCILER_CHORES_ENABLED / product.config.reconciler_chores.
+    detect_insecure_cors,
+    detect_schema_dual_source,
 )
 
 

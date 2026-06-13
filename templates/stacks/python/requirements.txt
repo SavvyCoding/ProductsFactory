@@ -10,3 +10,8 @@
 
 pytest>=8.0,<10
 pytest-cov>=4.0
+# In-memory Redis for tests (fakes-first rule): cache / rate-limiter tests
+# must use fakeredis, never a live server — see the "Redis cache testing"
+# REFERENCE PATTERN in ARCHITECTURE.md. Pre-seeded so the pattern's import
+# doesn't trip Guard 18 on a fresh product.
+fakeredis>=2.21,<3

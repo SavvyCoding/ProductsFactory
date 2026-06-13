@@ -19,10 +19,13 @@ from orchestrator.drift_detectors import (  # noqa: E402
     Finding,
     detect_design_doc_mismatch,
     detect_duplicate_ddl,
+    detect_insecure_cors,
     detect_placeholder_template_content,
     detect_sandbox_path_literals,
+    detect_schema_dual_source,
     detect_shell_artifact_files,
     detect_stub_confessions,
+    detect_timing_unsafe_compare,
     detect_tracked_build_artifacts,
     detect_undeclared_backend_deps,
     detect_unreachable_emitted_urls,
@@ -1183,3 +1186,158 @@ class TestDetectorRegistryMembership:
         assert dd.detect_stub_confessions in dd._DETECTORS
         assert dd.detect_secret_sentinel in dd._DETECTORS
         assert dd.detect_secret_sentinel not in dd._CHORE_DETECTORS
+
+    def test_wave6_security_detector_routing(self):
+        # CORS + schema-drift are near-zero-FP → chore path (close the loop).
+        # Timing-compare has a broader FP surface → comment-path soak.
+        from orchestrator import drift_detectors as dd
+        assert dd.detect_insecure_cors in dd._CHORE_DETECTORS
+        assert dd.detect_schema_dual_source in dd._CHORE_DETECTORS
+        assert dd.detect_timing_unsafe_compare in dd._DETECTORS
+        assert dd.detect_timing_unsafe_compare not in dd._CHORE_DETECTORS
+
+
+# ── detect_insecure_cors (wave-6) ───────────────────────────────────────────
+
+
+class TestDetectInsecureCors:
+    def test_wildcard_plus_credentials_flagged(self, tmp_path):
+        # Canonical DogTinder main.py shape.
+        _write(tmp_path / "src" / "main.py", (
+            "app.add_middleware(\n"
+            "    CORSMiddleware,\n"
+            "    allow_origins=['*'],\n"
+            "    allow_credentials=True,\n"
+            ")\n"
+        ))
+        out = detect_insecure_cors(tmp_path, [_feature(1, product_id=31)])
+        assert len(out) == 1
+        assert out[0].category == "insecure_cors"
+        assert out[0].severity == "high"
+        assert out[0].target_id == "src/main.py"
+        assert out[0].product_id == 31
+
+    def test_pinned_origin_with_credentials_passes(self, tmp_path):
+        _write(tmp_path / "src" / "main.py", (
+            "app.add_middleware(CORSMiddleware,\n"
+            "    allow_origins=['https://app.example.com'],\n"
+            "    allow_credentials=True)\n"
+        ))
+        assert detect_insecure_cors(tmp_path, [_feature(1)]) == []
+
+    def test_wildcard_without_credentials_passes(self, tmp_path):
+        _write(tmp_path / "src" / "main.py",
+               "app.add_middleware(CORSMiddleware, allow_origins=['*'])\n")
+        assert detect_insecure_cors(tmp_path, [_feature(1)]) == []
+
+    def test_js_shape_flagged(self, tmp_path):
+        _write(tmp_path / "src" / "server.js", (
+            "app.use(cors({ origin: '*', credentials: true }));\n"
+        ))
+        assert len(detect_insecure_cors(tmp_path, [_feature(1)])) == 1
+
+    def test_migration_dirs_excluded(self, tmp_path):
+        _write(tmp_path / "alembic" / "versions" / "x.py",
+               "allow_origins=['*']\nallow_credentials=True\n")
+        assert detect_insecure_cors(tmp_path, [_feature(1)]) == []
+
+
+# ── detect_timing_unsafe_compare (wave-6) ───────────────────────────────────
+
+
+class TestDetectTimingUnsafeCompare:
+    def test_dogtinder_hash_compare_flagged(self, tmp_path):
+        # Canonical DogTinder auth/utils.py shape.
+        _write(tmp_path / "src" / "auth" / "utils.py", (
+            "def verify_password(password, password_hash):\n"
+            "    expected = pbkdf2(password)\n"
+            "    return expected.hex() == dk_hex\n"
+        ))
+        out = detect_timing_unsafe_compare(tmp_path, [_feature(1)])
+        assert len(out) == 1
+        assert out[0].category == "timing_unsafe_compare"
+        assert out[0].target_id.startswith("src/auth/utils.py:")
+        assert "compare_digest" in out[0].fix_hint
+
+    def test_token_equality_flagged(self, tmp_path):
+        _write(tmp_path / "src" / "api.py",
+               "    if provided_token == stored_token:\n        pass\n")
+        assert len(detect_timing_unsafe_compare(tmp_path, [_feature(1)])) == 1
+
+    def test_compare_to_none_ignored(self, tmp_path):
+        _write(tmp_path / "src" / "api.py", "    if token == None:\n        pass\n")
+        assert detect_timing_unsafe_compare(tmp_path, [_feature(1)]) == []
+
+    def test_len_and_numeric_compare_ignored(self, tmp_path):
+        _write(tmp_path / "src" / "api.py", (
+            "    if len(secret) == 0:\n        pass\n"
+            "    if token_count == 3:\n        pass\n"
+        ))
+        assert detect_timing_unsafe_compare(tmp_path, [_feature(1)]) == []
+
+    def test_non_secret_equality_ignored(self, tmp_path):
+        _write(tmp_path / "src" / "api.py", "    if name == other_name:\n        pass\n")
+        assert detect_timing_unsafe_compare(tmp_path, [_feature(1)]) == []
+
+    def test_constant_time_compare_not_flagged(self, tmp_path):
+        _write(tmp_path / "src" / "auth.py",
+               "    return hmac.compare_digest(expected, provided_token)\n")
+        assert detect_timing_unsafe_compare(tmp_path, [_feature(1)]) == []
+
+    def test_build_output_dirs_excluded(self, tmp_path):
+        # 2026-06-13 soak FP: minified Next.js artifact under .next/.
+        _write(tmp_path / ".next" / "static" / "chunks" / "polyfills.js",
+               "if(token==e){}\n")
+        assert detect_timing_unsafe_compare(tmp_path, [_feature(1)]) == []
+
+
+# ── detect_schema_dual_source (wave-6) ──────────────────────────────────────
+
+
+class TestDetectSchemaDualSource:
+    def _migration(self, tmp_path, *tables):
+        body = "from alembic import op\ndef upgrade():\n"
+        for t in tables:
+            body += f"    op.create_table('{t}')\n"
+        _write(tmp_path / "alembic" / "versions" / "001_init.py", body)
+
+    def test_table_in_code_not_in_migration_flagged(self, tmp_path):
+        # Canonical DogTinder: init_db creates more tables than alembic covers.
+        self._migration(tmp_path, "users", "dog_profiles")
+        _write(tmp_path / "src" / "db.py", (
+            "async def init_db():\n"
+            "    await conn.execute('CREATE TABLE IF NOT EXISTS users (...)')\n"
+            "    await conn.execute('CREATE TABLE IF NOT EXISTS dog_profiles (...)')\n"
+            "    await conn.execute('CREATE TABLE IF NOT EXISTS device_tokens (...)')\n"
+            "    await conn.execute('CREATE TABLE IF NOT EXISTS user_blocks (...)')\n"
+        ))
+        out = detect_schema_dual_source(tmp_path, [_feature(1, product_id=31)])
+        assert len(out) == 1
+        assert out[0].category == "schema_dual_source"
+        assert out[0].severity == "high"
+        assert "device_tokens" in out[0].detail
+        assert "user_blocks" in out[0].detail
+        assert "users" not in out[0].detail.split(":")[-1]  # covered tables excluded
+
+    def test_all_tables_in_migrations_passes(self, tmp_path):
+        self._migration(tmp_path, "users", "dog_profiles")
+        _write(tmp_path / "src" / "db.py", (
+            "async def init_db():\n"
+            "    await conn.execute('CREATE TABLE IF NOT EXISTS users (...)')\n"
+            "    await conn.execute('CREATE TABLE IF NOT EXISTS dog_profiles (...)')\n"
+        ))
+        assert detect_schema_dual_source(tmp_path, [_feature(1)]) == []
+
+    def test_no_migrations_skips(self, tmp_path):
+        # Single source of truth (code only) — not a dual-source problem.
+        _write(tmp_path / "src" / "db.py",
+               "    conn.execute('CREATE TABLE users (...)')\n")
+        assert detect_schema_dual_source(tmp_path, [_feature(1)]) == []
+
+    def test_raw_create_table_in_migration_counts(self, tmp_path):
+        # A migration using raw SQL (not op.create_table) still covers the table.
+        _write(tmp_path / "alembic" / "versions" / "001.py",
+               "def upgrade():\n    op.execute('CREATE TABLE widgets (id int)')\n")
+        _write(tmp_path / "src" / "db.py",
+               "    conn.execute('CREATE TABLE widgets (id int)')\n")
+        assert detect_schema_dual_source(tmp_path, [_feature(1)]) == []

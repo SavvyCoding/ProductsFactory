@@ -173,7 +173,11 @@ _ONDEMAND_PERSONAS = ("documenter", "analytics", "refactorer", "devops", "recomm
                       # (read-only on source); PM triggers on demand via
                       # run_persona_now="architect", or the cycle/persona gate
                       # fires it automatically every ~50 features pushed.
-                      "architect")
+                      "architect",
+                      # Wave-6 (2026-06-13): read-only product-wide security
+                      # audit that files findings as bug features. PM-triggered
+                      # only — opt-in by design, never auto-scheduled.
+                      "security_auditor")
 _FEATURE_KEEP = {"id", "product_id", "phase_id", "parent_id", "name", "status",
                  "feature_type", "design_doc_path", "pr_number", "pr_url",
                  "fix_attempts", "merge_notes"}
