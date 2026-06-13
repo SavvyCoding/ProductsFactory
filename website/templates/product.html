@@ -1260,13 +1260,13 @@
         <div class="form-group">
           <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
             <input type="checkbox" name="reconciler_chores" value="on" style="width:auto"
-                   {% if (product.config or {}).get('reconciler_chores') %}checked{% endif %}>
+                   {% if (product.config or {}).get('reconciler_chores', True) %}checked{% endif %}>
             Auto-file corrective chores from drift findings
           </label>
-          <p class="field-hint">When on, high-severity findings from the per-commit drift scanner
-            (e.g. duplicate schema definitions) are filed automatically as Approved chore features
-            for the coder to fix. When off, this product inherits the orchestrator's
-            RECONCILER_CHORES_ENABLED environment default (off unless set). Findings are still
+          <p class="field-hint">ON by default for all products. High-severity findings from the
+            drift scanner (duplicate schema, god-files, insecure CORS, schema/migration drift, etc.)
+            are filed automatically as Approved chore features for the coder to fix (capped at 3 per
+            cycle, deduped against open chores). Uncheck to opt this product OUT. Findings are still
             posted as feature comments either way.</p>
         </div>
         <button type="submit">Save workflow</button>
