@@ -1388,7 +1388,10 @@ async def run_trainer(
 # On-demand maintenance personas. These used to be scheduled in a post-sprint
 # cadence (_post_sprint_persona_due), but the dispatcher never wired them up;
 # they're now PM-triggered from the product page, like product_trainer.
-ONDEMAND_PERSONAS = ("documenter", "analytics", "refactorer", "devops", "recommender")
+ONDEMAND_PERSONAS = ("documenter", "analytics", "refactorer", "devops", "recommender",
+                     # Wave-6: read-only product-wide security audit; files
+                     # findings as bug features. PM-triggered (this button) only.
+                     "security_auditor")
 
 
 @app.post("/product/{product_id}/run-persona")
