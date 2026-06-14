@@ -419,9 +419,21 @@ code attempt is exactly what failed 4+ times; your job is to DIAGNOSE.
        ESCALATION-DIAGNOSIS: <verdict> — <one-line root cause>
 
    where <verdict> is exactly one of:
-   - fixable        → the cause is clear and a focused code change fixes it.
-                      A FOLLOW-UP coder session will apply the fix using your
-                      diagnosis — describe the fix precisely (files, lines).
+   - fixable        → ONE clear root cause; a single focused code change fixes
+                      it. Use this ONLY when the SAME failure persists across
+                      bounce rounds. A FOLLOW-UP coder session applies the fix
+                      using your diagnosis — describe it precisely (files, lines).
+   - too_big        → the feature is sound but too LARGE to land in one coder
+                      session. The tell: the bounce history shows a DIFFERENT
+                      failing test / AC each round (one round it's auth, the
+                      next it's the DB write, the next a missing helper) — that
+                      divergent surface means the coder can never hold the whole
+                      thing in one session, not that any single bug is hard. The
+                      orchestrator routes it back to the designer to split into
+                      VERTICAL SLICES (a minimal bootable thread first, then
+                      dependent slices that extend it). When in doubt between
+                      `fixable` and `too_big`, count the DISTINCT failures in the
+                      history: ≥3 different ones → `too_big`.
    - spec_defect    → the design doc / AC is wrong or self-contradictory
                       (QUOTE the contradiction). The orchestrator routes the
                       feature back to the designer.
@@ -472,6 +484,12 @@ def _route_escalation_diagnosis(product: dict, assigned_features: list[dict]) ->
                          (changed_by=supervisor) — the designer redoes the
                          doc; the pre-session stale-doc invalidation deletes
                          the superseded file.
+      - too_big        → status=Approved + design_doc_path cleared (same
+                         designer re-entry as spec_defect) PLUS a directive
+                         comment telling the next designer to split the feature
+                         into VERTICAL SLICES. The verdict means the feature is
+                         sound but oversized — re-scoping, not a code fix, is
+                         the cure (wave-10).
       - env_impossible → status=Blocked with the diagnosis as
                          blocked_reason (changed_by=supervisor).
       - fixable / no marker → no-op (normal pipeline outcome stands).
@@ -481,7 +499,7 @@ def _route_escalation_diagnosis(product: dict, assigned_features: list[dict]) ->
     """
     import re as _re_esc
     marker = _re_esc.compile(
-        r"ESCALATION-DIAGNOSIS:\s*(spec_defect|env_impossible|fixable)", _re_esc.I)
+        r"ESCALATION-DIAGNOSIS:\s*(spec_defect|too_big|env_impossible|fixable)", _re_esc.I)
     pname = product.get("name", "?")
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=15) as client:
@@ -510,6 +528,39 @@ def _route_escalation_diagnosis(product: dict, assigned_features: list[dict]) ->
                         "design_doc_path": None, "design_doc": None,
                     })
                     log.info(f"[escalation] {pname}: #{fid} diagnosed spec_defect — routed to designer (doc cleared)")
+                elif verdict == "too_big":
+                    # Wave-10: the feature is sound but oversized. Route back to
+                    # the designer (clear the doc, like spec_defect) AND leave a
+                    # directive the next designer reads at session start — the
+                    # vertical-slice cohesion rule (designer.md) then carves a
+                    # minimal bootable slice + dependent extensions, and the
+                    # keystone depends_on gate sequences them so they don't
+                    # collide. This is the structural cure for the #1621 class:
+                    # re-scope, not another fix attempt.
+                    try:
+                        client.post(f"/api/features/{fid}/comments", json={
+                            "author": "escalation-router",
+                            "body": (
+                                "🔪 **Diagnosed `too_big`** — re-scope as VERTICAL SLICES "
+                                "(do NOT design this whole). Per the SHARED-ENTRYPOINT "
+                                "COHESION rule in designer.md:\n"
+                                "1. **Slice 1** = the thinnest bootable end-to-end thread that "
+                                "*creates* the shared entrypoint file(s) minimally + ONE passing "
+                                "behavioral test. Keep it ≤4 ACs.\n"
+                                "2. **Slice 2+** = `depends_on` the previous slice; each EXTENDS "
+                                "the shared file rather than re-creating it. The orchestrator "
+                                "now enforces `depends_on` at dispatch, so the slices build in "
+                                "order and cannot collide.\n\n"
+                                "Diagnosis: " + excerpt
+                            ),
+                        })
+                    except Exception:
+                        pass
+                    client.patch(f"/api/features/{fid}", json={
+                        "status": "Approved", "changed_by": "supervisor",
+                        "design_doc_path": None, "design_doc": None,
+                    })
+                    log.info(f"[escalation] {pname}: #{fid} diagnosed too_big — routed to designer for vertical slicing")
                 elif verdict == "env_impossible":
                     client.patch(f"/api/features/{fid}", json={
                         "status": "Blocked", "changed_by": "supervisor",
@@ -572,6 +623,12 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
             resp.raise_for_status()
             all_features = resp.json()
             all_features = all_features if isinstance(all_features, list) else []
+
+            # Keystone dependency gate (wave-10): resolve depends_on against
+            # the RAW list (incl. infra stories) BEFORE the infra exclusion
+            # below, so a story that depends_on an infra/predecessor feature
+            # still finds it. See orchestrator/cycle/dependencies.py.
+            raw_features = list(all_features)
 
             # Infra stories are system-executed by the cycle loop
             # (tools._execute_infra_stories), never session work. This
@@ -643,6 +700,25 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                              f"feature(s) for persona={persona}")
             except Exception:
                 log.exception("[assign] phase-gate/order fetch failed; proceeding ungated")
+
+            # Keystone dependency gate (wave-10): hold any feature whose
+            # depends_on hasn't shipped (status != Pushed). Resolved against
+            # raw_features so a predecessor/infra dep excluded from the persona
+            # pool is still found. Mirrors cycle/persona._decide_action (the
+            # two-enforcement-points discipline). Makes vertical slices
+            # SEQUENCE instead of racing onto the same shared entrypoint file.
+            try:
+                from orchestrator.cycle.dependencies import dependency_blocked_feature_ids
+                dep_blocked = dependency_blocked_feature_ids(raw_features)
+                if dep_blocked:
+                    before = len(features)
+                    features = [f for f in features if f.get("id") not in dep_blocked]
+                    if before != len(features):
+                        log.info(f"[assign] dependency-gate held "
+                                 f"{before - len(features)} feature(s) whose "
+                                 f"depends_on isn't Pushed yet (persona={persona})")
+            except Exception:
+                log.exception("[assign] dependency-gate failed; proceeding ungated")
 
         # Sort: stuck-rework features (Implementing+changes_requested AND
         # fix_attempts >= REWORK_CAP_PROXIMITY) go LAST so the coder picks
