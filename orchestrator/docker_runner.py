@@ -402,34 +402,63 @@ def _annotate_session_summary_outcome(
 
 _ESCALATION_ADDENDUM = """
 
-## ⚠️ ESCALATED SESSION — DIAGNOSE FIRST (fix_attempts at/near cap)
+## ⚠️ ESCALATED DIAGNOSE-ONLY SESSION — write_file is BLOCKED
 
-One or more of your assigned features has bounced repeatedly. Another blind
-code attempt is the WORST possible move. Before editing ANY file:
+One or more of your assigned features has bounced to the fix_attempts cap.
+This session is READ-ONLY: `write_file` and git-mutating commands are
+disabled at the tool layer — you literally cannot write code. Another blind
+code attempt is exactly what failed 4+ times; your job is to DIAGNOSE.
 
 1. Read EVERY comment on the feature — the bounce history is your evidence.
-2. Reproduce the failing gate yourself (run the exact test / Verify command
-   from the latest bounce comment and observe the real output).
+2. Reproduce the failing gate (run the exact test / Verify command from the
+   latest bounce comment; reading and running are allowed, only WRITES are
+   blocked).
 3. Post your root-cause diagnosis as a feature comment via
    POST {pm_api_url}/api/features/<id>/comments. The body's FIRST LINE must be:
 
        ESCALATION-DIAGNOSIS: <verdict> — <one-line root cause>
 
    where <verdict> is exactly one of:
-   - fixable        → you understand the cause and will fix it THIS session.
+   - fixable        → the cause is clear and a focused code change fixes it.
+                      A FOLLOW-UP coder session will apply the fix using your
+                      diagnosis — describe the fix precisely (files, lines).
    - spec_defect    → the design doc / AC is wrong or self-contradictory
                       (QUOTE the contradiction). The orchestrator routes the
-                      feature back to the designer. Do NOT code around a
-                      broken spec.
+                      feature back to the designer.
    - env_impossible → the AC needs something this sandbox cannot provide
                       (NAME it: service / tool / network). The orchestrator
-                      Blocks the feature with your diagnosis. Do NOT vendor,
-                      compile, or install your way around it.
-4. Only write code if your verdict is `fixable`.
+                      Blocks the feature with your diagnosis.
+4. Then call task_done. Do NOT attempt to write code — it will be rejected.
 
-A correct `spec_defect` or `env_impossible` diagnosis IS a successful
-session outcome — it ends a loop that five blind retries cannot.
+A correct verdict IS the successful outcome — it ends a loop that more blind
+retries cannot, and a `fixable` diagnosis hands the next coder the answer.
 """
+
+
+def _has_escalation_diagnosis(assigned_features: list[dict]) -> bool:
+    """True if any assigned feature already carries an ESCALATION-DIAGNOSIS
+    comment — the once-only gate (wave-9). A feature at the cap gets ONE
+    read-only diagnostician session; once a verdict exists, the next session
+    is a normal coder that applies the fix with the diagnosis in context
+    (via {reviewer_feedback}). Without this gate the feature would diagnose
+    forever. Best-effort: a lookup failure → False (re-diagnose, harmless)."""
+    import re as _re_d
+    marker = _re_d.compile(r"ESCALATION-DIAGNOSIS:", _re_d.I)
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            for feat in assigned_features or []:
+                fid = feat.get("id")
+                if not isinstance(fid, int):
+                    continue
+                r = client.get(f"/api/features/{fid}/comments", params={"limit": 25})
+                if not (200 <= r.status_code < 300):
+                    continue
+                for c in (r.json() or []):
+                    if isinstance(c, dict) and marker.search(c.get("body") or ""):
+                        return True
+    except Exception:
+        return False
+    return False
 
 
 def _route_escalation_diagnosis(product: dict, assigned_features: list[dict]) -> None:
@@ -461,7 +490,9 @@ def _route_escalation_diagnosis(product: dict, assigned_features: list[dict]) ->
                 if not isinstance(fid, int):
                     continue
                 try:
-                    r = client.get(f"/api/features/{fid}/comments", params={"limit": 10})
+                    # limit=25: a feature at the cap has a long bounce history;
+                    # a small window could miss the just-posted verdict.
+                    r = client.get(f"/api/features/{fid}/comments", params={"limit": 25})
                     comments = r.json() if 200 <= r.status_code < 300 else []
                 except Exception:
                     continue
@@ -1774,7 +1805,16 @@ def _finalize_session(
         # Symphony "agent owns git, fallback handles laggards" model: agents
         # were fake-claiming Reviewing in sprint-PR mode, leaving reviewers
         # to crawl over empty PRs. See commit 6b0473b for the symptom history.
-        if exit_code == 0 and persona == "coder":
+        if exit_code == 0 and persona == "coder" and product.get("_escalated_session"):
+            # Escalated read-only diagnostician (wave-9): wrote no code by
+            # design. Skip the post-coder commit/push/auto-heal pipeline
+            # entirely — the diagnosis router (run after _finalize_session)
+            # is the only post-processing. Avoids a false "unproductive
+            # coder → pause" auto-heal on a session that legitimately
+            # produced only a comment.
+            log.info(f"[escalation] {product.get('name','?')}: skipping post-coder "
+                     f"pipeline for read-only diagnostician session {session_uid}")
+        elif exit_code == 0 and persona == "coder":
             try:
                 post_coder_pushed = _run_post_coder_pipeline(
                     product, session_uid, working_dir,
@@ -2134,17 +2174,31 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # audit) is mostly features that needed a DIAGNOSIS — spec defect or
     # env-impossible — not a fifth blind code attempt.
     escalation_threshold = int(os.environ.get("ESCALATION_FIX_ATTEMPTS_THRESHOLD", "4"))
-    escalated = (
+    _at_cap = (
         persona == "coder"
         and any((f.get("fix_attempts") or 0) >= escalation_threshold
                 for f in assigned_features)
     )
+    # Run the read-only diagnostician ONCE — only if a verdict doesn't already
+    # exist. After a verdict, the next coder session is a NORMAL (writeable)
+    # one that applies the fix with the diagnosis in {reviewer_feedback}.
+    escalated = _at_cap and not _has_escalation_diagnosis(assigned_features)
     if escalated:
         log.info(
-            f"[escalation] {product.get('name', '?')}: coder session escalated — "
+            f"[escalation] {product.get('name', '?')}: read-only diagnostician session — "
             f"feature(s) {[f['id'] for f in assigned_features if (f.get('fix_attempts') or 0) >= escalation_threshold]} "
-            f"at fix_attempts >= {escalation_threshold}; diagnose-first contract active"
+            f"at fix_attempts >= {escalation_threshold}; write_file blocked, diagnose-only"
         )
+    elif _at_cap:
+        log.info(
+            f"[escalation] {product.get('name', '?')}: post-diagnosis coder session — "
+            f"feature(s) at cap already have a diagnosis; applying the fix"
+        )
+    # Threaded to _finalize_session (read via the product dict): an escalated
+    # read-only session writes no code, so it must SKIP the post-coder
+    # commit/push/auto-heal pipeline (which would false-fire "coder pushed
+    # nothing → pause"). Only the diagnosis router runs after it.
+    product["_escalated_session"] = escalated
     product["_assigned_features"] = assigned_features
     product["_assigned_features_md"] = _format_assigned_features(assigned_features, persona)
     # Pull recent reviewer/auditor comments for any feature in a rework cycle
@@ -2333,6 +2387,12 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     gh_env: list[str] = []  # legacy name retained — now always empty (token comes via file)
 
     persona_env = ["-e", f"AGENT_PERSONA={persona}"] if persona else []
+    # Wave-9: tell the in-container agent this is a read-only diagnose-first
+    # session so ollama_agent blocks write_file / git-mutating bash. Enforced
+    # at the tool layer because a prompt-only "diagnose first" is ignored by
+    # the qwen3-coder model (proven on #1591/#1621/#1542).
+    if escalated:
+        persona_env += ["-e", "AGENT_ESCALATED=1"]
 
     # Select the agent command based on backend
     _tmp_claude_dir: str | None = None

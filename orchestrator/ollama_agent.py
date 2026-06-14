@@ -75,6 +75,13 @@ OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "")  # required for Ollama Clo
 DESIGNER_MODEL = os.environ.get("DESIGNER_MODEL", "gemma3:27b")
 CODER_MODEL    = os.environ.get("CODER_MODEL",    "qwen3-coder:30b")
 AGENT_PERSONA  = os.environ.get("AGENT_PERSONA",  "coder")
+# Escalated diagnose-first session (wave-9): a coder session for a feature at
+# the fix_attempts cap runs READ-ONLY — it must produce an ESCALATION-DIAGNOSIS
+# verdict, not another blind code attempt. Enforced at the tool layer (like the
+# read-only personas) because the qwen3-coder model ignores a prompt-only
+# "diagnose first" instruction and just codes (proven on #1591/#1621/#1542).
+AGENT_ESCALATED = os.environ.get("AGENT_ESCALATED", "").strip().lower() in (
+    "1", "true", "yes", "on")
 PM_API_URL     = os.environ.get("PM_API_URL",     "http://pm-api:8080")
 SESSION_UID    = os.environ.get("SESSION_UID",    "local")
 MAX_TURNS        = int(os.environ.get("MAX_TURNS",         "80"))
@@ -392,6 +399,9 @@ def dispatch_tool(name: str, args: dict) -> tuple[str, bool]:
     # tee >>, redirect to file). Read-only bash (ls, cat, grep, pytest,
     # gh pr view, gh pr review) still works.
     _READONLY_PERSONAS = {"reviewer", "security_auditor"}
+    # Escalated coder sessions are read-only too — same tool-layer enforcement,
+    # so the diagnose-first contract can't be ignored (wave-9).
+    _is_readonly = AGENT_PERSONA in _READONLY_PERSONAS or AGENT_ESCALATED
     _MUTATING_BASH_PATTERNS = (
         "git commit", "git add", "git push", "git rebase", "git merge",
         "git reset", "git checkout -b", "git tag",
@@ -400,7 +410,7 @@ def dispatch_tool(name: str, args: dict) -> tuple[str, bool]:
 
     if name == "bash":
         cmd = args.get("command", "")
-        if AGENT_PERSONA in _READONLY_PERSONAS:
+        if _is_readonly:
             cmd_lc = cmd.lower()
             for pat in _MUTATING_BASH_PATTERNS:
                 if pat in cmd_lc:
@@ -422,9 +432,9 @@ def dispatch_tool(name: str, args: dict) -> tuple[str, bool]:
             # filter blocks the very write the reviewer needs to perform.
             if (" > " in cmd or " >> " in cmd) and "/workspace/" in cmd:
                 if "session_result.json" not in cmd:
-                    _log(f"REFUSING file-redirect bash for {AGENT_PERSONA} persona: {cmd[:120]!r}")
+                    _log(f"REFUSING file-redirect bash (read-only): {cmd[:120]!r}")
                     return (
-                        f"REJECTED: persona={AGENT_PERSONA} is read-only — can't redirect "
+                        f"REJECTED: this session is read-only — can't redirect "
                         f"output into files under /workspace/ (except session_result.json). "
                         f"Read and decide."
                     ), False
@@ -432,7 +442,20 @@ def dispatch_tool(name: str, args: dict) -> tuple[str, bool]:
     elif name == "read_file":
         return _redact_secrets(tool_read_file(args.get("path", ""), args.get("max_lines", 500))), False
     elif name == "write_file":
-        if AGENT_PERSONA in _READONLY_PERSONAS:
+        if AGENT_ESCALATED and AGENT_PERSONA not in _READONLY_PERSONAS:
+            _log("REFUSING write_file for ESCALATED diagnose-first session")
+            return (
+                "REJECTED: this is an ESCALATED diagnose-first session — write_file "
+                "is blocked. The feature has bounced to the cap; another blind code "
+                "attempt is the wrong move. Your ONLY job: read the bounce history "
+                "and failing gate, then post your verdict as a feature comment whose "
+                "FIRST LINE is `ESCALATION-DIAGNOSIS: <fixable|spec_defect|"
+                "env_impossible> — <root cause>`, then call task_done. A follow-up "
+                "coder session will fix it using your diagnosis if fixable.\n"
+                f"POST {PM_API_URL}/api/features/<id>/comments  "
+                'body={{"author":"coder","body":"ESCALATION-DIAGNOSIS: ..."}}'
+            ), False
+        if _is_readonly:
             _log(f"REFUSING write_file for {AGENT_PERSONA} persona")
             # Earlier guidance pointed at `gh pr review --request-changes` and
             # vague "PATCH the feature" — but `gh` isn't on PATH and the
