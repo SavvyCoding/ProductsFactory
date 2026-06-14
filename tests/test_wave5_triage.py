@@ -114,8 +114,23 @@ class _FakeClient:
 class TestEscalation:
     def test_addendum_carries_the_contract(self):
         for token in ("ESCALATION-DIAGNOSIS:", "spec_defect", "env_impossible",
-                      "fixable", "DIAGNOSE FIRST"):
+                      "fixable", "write_file is BLOCKED"):  # wave-9: read-only framing
             assert token in docker_runner._ESCALATION_ADDENDUM, token
+
+    def test_has_escalation_diagnosis_detects_verdict(self):
+        # Wave-9 once-only gate: a feature with a verdict → True (next session
+        # is a normal coder, not another diagnostician).
+        fake = _FakeClient({7: [
+            {"body": "ESCALATION-DIAGNOSIS: fixable — off-by-one"},
+            {"body": "regular bounce"},
+        ]})
+        with patch("orchestrator.docker_runner.httpx.Client", return_value=fake):
+            assert docker_runner._has_escalation_diagnosis([{"id": 7}]) is True
+
+    def test_has_escalation_diagnosis_false_when_none(self):
+        fake = _FakeClient({7: [{"body": "lint-guard: bounced"}]})
+        with patch("orchestrator.docker_runner.httpx.Client", return_value=fake):
+            assert docker_runner._has_escalation_diagnosis([{"id": 7}]) is False
 
     def test_spec_defect_routes_to_designer(self):
         fake = _FakeClient({7: [
@@ -162,6 +177,38 @@ class TestEscalation:
         with patch("orchestrator.docker_runner.httpx.Client", return_value=fake):
             docker_runner._route_escalation_diagnosis({"name": "P"}, [{"id": 11}])
         assert fake.patches[0][1]["status"] == "Blocked"
+
+
+class TestEscalatedReadOnlyEnforcement:
+    """Wave-9: an escalated coder session is read-only at the TOOL layer —
+    the missing enforcement that let the prompt-only diagnose-first contract
+    be ignored (proven on #1591/#1621/#1542)."""
+
+    def test_write_file_blocked_when_escalated(self, monkeypatch):
+        from orchestrator import ollama_agent as oa
+        monkeypatch.setattr(oa, "AGENT_ESCALATED", True)
+        monkeypatch.setattr(oa, "AGENT_PERSONA", "coder")
+        out, done = oa.dispatch_tool("write_file", {"path": "src/x.py", "content": "y"})
+        assert "REJECTED" in out and "ESCALATED" in out
+        assert "ESCALATION-DIAGNOSIS" in out  # steers to the verdict
+        assert done is False
+
+    def test_write_file_allowed_when_not_escalated(self, monkeypatch, tmp_path):
+        from orchestrator import ollama_agent as oa
+        monkeypatch.setattr(oa, "AGENT_ESCALATED", False)
+        monkeypatch.setattr(oa, "AGENT_PERSONA", "coder")
+        # Not escalated + coder persona → write_file is NOT blocked by the guard
+        # (it reaches tool_write_file). We only assert it's not a guard rejection.
+        out, _ = oa.dispatch_tool("write_file",
+                                  {"path": str(tmp_path / "x.txt"), "content": "hi"})
+        assert "is read-only" not in out and "ESCALATED" not in out
+
+    def test_mutating_bash_blocked_when_escalated(self, monkeypatch):
+        from orchestrator import ollama_agent as oa
+        monkeypatch.setattr(oa, "AGENT_ESCALATED", True)
+        monkeypatch.setattr(oa, "AGENT_PERSONA", "coder")
+        out, done = oa.dispatch_tool("bash", {"command": "git commit -m wip"})
+        assert "REJECTED" in out and done is False
 
 
 # ── flap detector: enriched reason + author signature ────────────────────────
