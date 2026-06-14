@@ -110,11 +110,17 @@ class _FakeClient:
         self.patches.append((path, json))
         return MagicMock(status_code=200)
 
+    def post(self, path, json=None, **kw):
+        self.posts = getattr(self, "posts", [])
+        self.posts.append((path, json))
+        return MagicMock(status_code=201)
+
 
 class TestEscalation:
     def test_addendum_carries_the_contract(self):
         for token in ("ESCALATION-DIAGNOSIS:", "spec_defect", "env_impossible",
-                      "fixable", "write_file is BLOCKED"):  # wave-9: read-only framing
+                      "fixable", "too_big",  # wave-10: oversized → vertical slice
+                      "write_file is BLOCKED"):  # wave-9: read-only framing
             assert token in docker_runner._ESCALATION_ADDENDUM, token
 
     def test_has_escalation_diagnosis_detects_verdict(self):
@@ -144,6 +150,29 @@ class TestEscalation:
         assert body["status"] == "Approved"
         assert body["design_doc_path"] is None
         assert body["changed_by"] == "supervisor"
+
+    def test_too_big_routes_to_designer_with_vertical_slice_directive(self):
+        # Wave-10: too_big → back to designer (Approved, doc cleared, like
+        # spec_defect) PLUS a directive comment telling the next designer to
+        # split vertically.
+        fake = _FakeClient({12: [
+            {"body": "ESCALATION-DIAGNOSIS: too_big — 3 different gates failed "
+                     "across rounds (auth, DB write, missing helper)",
+             "created_at": "2026-06-13T01:00:00"},
+        ]})
+        with patch("orchestrator.docker_runner.httpx.Client", return_value=fake):
+            docker_runner._route_escalation_diagnosis({"name": "P"}, [{"id": 12}])
+        path, body = fake.patches[0]
+        assert path == "/api/features/12"
+        assert body["status"] == "Approved"
+        assert body["design_doc_path"] is None
+        assert body["changed_by"] == "supervisor"
+        # the vertical-slice directive comment was posted
+        assert getattr(fake, "posts", [])
+        ppath, pbody = fake.posts[0]
+        assert ppath == "/api/features/12/comments"
+        assert pbody["author"] == "escalation-router"
+        assert "VERTICAL" in pbody["body"] and "depends_on" in pbody["body"]
 
     def test_env_impossible_blocks_with_diagnosis(self):
         fake = _FakeClient({8: [
