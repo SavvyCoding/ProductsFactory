@@ -29,4 +29,7 @@ Every Bash call must complete the sentence: "I expect to see X because Y; I'll r
 **I. Don't deploy / push / merge / open PR from inside the session.**
 The orchestrator owns all git, PR, and deploy ceremony. Your job ends at `task_done`. Running `git push` / `gh pr create` yourself produces orphan commits that get wiped on the next workspace reset.
 
+**J. Don't make a check pass by weakening the check.** (The meta-rule — most gate bounces are a special case of this.)
+Every gate is a PROXY for working software, never the target: a test, an auth guard, a bar in `quality_gates.json`, an AC `Verify:` recipe, a `PUBLIC_ROUTE:` annotation. The moment you find yourself editing the *check* rather than the *code under test* to go green — softening an assertion, adding `.skip`/`xit`, deleting a failing test, lowering a coverage/lint bar, annotating a route public to silence the auth guard, or returning a hardcoded constant the test happens to assert — STOP. That is the single failure mode every gate in this system exists to catch, and the lint-guard/reviewer catch it every time, costing you a full rework round. Two honest options only: change the real code until the check passes for the right reason, or mark the feature `Blocked` with the specific reason. An honest `Blocked` routes the work correctly; a gamed green is the only true failure. (The persona-specific sections below list concrete instances — they're all this one rule.)
+
 ---
