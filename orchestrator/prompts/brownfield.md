@@ -58,6 +58,22 @@ The reviewer reviews the Session PR. Approving it squash-merges your session's w
 {declared_services}
 ## Per-story workflow (one at a time — finish #N before starting #N+1)
 
+**Stack translation — this workflow's commands are written Python-first; on a Node/TS or Go product (`{tech_stack}`), substitute the equivalent. Every rule below still applies; only the command changes.** Read your stack's real test command from `/workspace/CLAUDE.md` first — it wins over this table.
+
+| Concept (Python form used below) | Node / TypeScript | Go |
+|---|---|---|
+| Full suite — `pytest -q` | `npm test` (or `npx jest`) | `go test ./...` |
+| Scoped — `pytest tests/test_x.py -q` | `npx jest path/to/x.test.ts` (or `--testPathPattern`) | `go test ./pkg/...` |
+| Ad-hoc verify — `python -c "..."` | `npx tsx -e "..."` (the verify recipes already use this) | `go run ./cmd/probe` |
+| Deps manifest — `requirements.txt` / `requirements-dev.txt` | `package.json` `dependencies` / `devDependencies` | `go.mod` |
+| Add a dep — edit `requirements.txt` | `npm install <pkg>` (writes `package.json` + lockfile) | `go get <mod>` |
+| Skip markers (banned) — `@pytest.mark.skip`, `pytest.skip()` | `it.skip` / `describe.skip` / `xit` / `xdescribe` / `test.todo` / `test.only` | `t.Skip(...)` |
+| Hollow assert (banned) — `assert True` | `expect(true).toBe(true)`, `expect(fn).toBeDefined()` | `if false {...}` |
+| Shared fixture — `conftest.py` autouse | jest `setupFilesAfterEnv` / top-level `beforeEach` | `TestMain` / shared setup helper |
+| Debris siblings — `test_x_qa.py` next to `test_x.py` | duplicate `*.test.ts` / `*.spec.ts` scratch files, `debug_*.ts` | `*_scratch_test.go` |
+
+So when Step 3's red→green loop says "`pytest`", a Next.js coder runs `npm test`; when Step 4 says "`python -c`", run `npx tsx -e`; when the deps checks say "`requirements.txt`", check `package.json`. The deps-name confusions in Step 3 (PyYAML→`yaml`, etc.) are Python-only — Node import names already match their `package.json` keys.
+
 0. **Reproduce-first — run every `Verify:` recipe from `docs/story_<ID>.md` BEFORE editing.** For each AC, execute the `Verify:` bash command exactly as written and capture the actual output. Compare each to the design doc's `Expected:` line. This is your **failure baseline** — what the AC looks like when unsatisfied. Two reasons this matters:
 
    1. **It anchors you to the AC contract.** The Verify recipes are the testable, executable definition of "done." Reading them after editing tempts you to interpret them as suggestions; running them first makes them ground truth. If a recipe is ambiguous or impossible to satisfy (e.g. it greps a file that doesn't exist yet), say so in `session_summary.md` and proceed conservatively — do NOT silently edit the design doc to change the recipe. **The design doc is mounted read-only for this session; attempts to modify it will fail with EROFS at the syscall level.**

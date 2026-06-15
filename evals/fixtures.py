@@ -53,6 +53,12 @@ PROMPT_INVARIANTS: dict[str, list[str]] = {
         "wired end-to-end and fails closed",  # R2: dead-at-runtime / swallow-and-proceed
         "request-controlled identifiers",  # R3: SQL injection via dynamic column names
         "never deleting/`.skip`-ing the test",  # R5: delete-the-failing-test shortcut
+        # R4: Node/TS parity — the Python-first workflow must carry a stack
+        # translation so non-Python products (e.g. Next.js IndianFoodTruck)
+        # get the jest/npm/npx-tsx equivalents instead of pytest-only guidance.
+        "Stack translation",
+        "npm test",
+        "npx tsx",
     ],
 
     # Designer must produce a design doc in docs/ so the coder can pick it up,
