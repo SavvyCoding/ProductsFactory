@@ -53,6 +53,19 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
         features = features_resp.json() if features_resp.is_success else []
         sys_cfg = syscfg_resp.json() if syscfg_resp.is_success else {}
 
+        # Keystone dependency gate (wave-10): resolve depends_on against the
+        # RAW list — including infra stories — BEFORE they're stripped below,
+        # so a story that depends_on an infra/predecessor feature still finds
+        # it. dependency_blocked_feature_ids returns ids whose depends_on
+        # hasn't shipped (status != Pushed); those are frozen from the
+        # coder/designer pools so vertical slices sequence instead of racing.
+        dep_blocked_ids: set = set()
+        try:
+            from orchestrator.cycle.dependencies import dependency_blocked_feature_ids
+            dep_blocked_ids = dependency_blocked_feature_ids(features)
+        except Exception:
+            log.exception("dependency-gate read failed; proceeding ungated")
+
         # Infra stories (feature_type='infra') are system-executed by the
         # cycle loop (tools._execute_infra_stories) — never coder/designer/
         # planner work. Strip them from the decision pool entirely. The
@@ -82,6 +95,14 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
                 gated_out_ids = gated_out_feature_ids(features, phases, prod_cfg)
         except Exception:
             log.exception("phase-gate read failed; proceeding ungated")
+
+        # Frozen = phase-gated OR dependency-blocked. Both freeze a feature out
+        # of the coder/designer pools; the union is what the pool filters below
+        # consult so the two reasons stay in one place.
+        frozen_ids: set = set(gated_out_ids) | set(dep_blocked_ids)
+        if dep_blocked_ids:
+            log.info(f"[dependency-gate] product {product_id}: "
+                     f"{len(dep_blocked_ids)} feature(s) held — depends_on not yet Pushed")
 
         # 0. Phase planner — plan whenever any Approved feature is unphased.
         # Restores pre-fe54264 semantics: phase planning runs eagerly, not
@@ -133,7 +154,7 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
                            if f.get("status") == "Implementing"
                            and f.get("review_outcome") == "changes_requested"
                            and (f.get("fix_attempts") or 0) < _REWORK_CAP_PROXIMITY
-                           and f.get("id") not in gated_out_ids]
+                           and f.get("id") not in frozen_ids]
         if rework_codeable:
             return {"action": "launch_session", "persona": "coder",
                     "product_id": product_id,
@@ -175,7 +196,7 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
         # in when the coder is gated or has no work.
         approved_no_design = [f for f in non_terminal
                               if f.get("status") == "Approved" and not f.get("design_doc_path")
-                              and f.get("id") not in gated_out_ids]
+                              and f.get("id") not in frozen_ids]
         first_pass_codeable = [f for f in non_terminal
                                if (f.get("status") == "Designed"
                                    or (f.get("status") == "Approved"
@@ -187,7 +208,7 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
                                    or (f.get("status") == "Implementing"
                                        and f.get("review_outcome") == "changes_requested"
                                        and (f.get("fix_attempts") or 0) >= _REWORK_CAP_PROXIMITY))
-                               and f.get("id") not in gated_out_ids]
+                               and f.get("id") not in frozen_ids]
 
         # Cycle IU (2026-06-02): open-PR serialization gate. Only one
         # coder session PR open per product at a time. If any feature for

@@ -93,28 +93,57 @@ If ANY of these is true → **SPLIT before designing**:
   - You cannot honestly answer "yes" to #5
 
 **🔴 SHARED-ENTRYPOINT COHESION — this OVERRIDES the split criteria above.**
-Do NOT split a story when the resulting children would each **create or be
-the primary editor of the SAME new entrypoint / config / framework file**.
-Foundational framework setup is ONE cohesive unit even when it exceeds the
-soft caps — ship it as a single feature. A cohesive-but-slightly-large
-story beats many-but-colliding stories: split children that all touch the
-same new file dispatch in parallel as separate coder sessions and separate
-PRs, and they **collide** (one merges, the rest become conflicts / cap-block
-each other). Canonical 2026-06-13 IndianFoodTruck cascade: the NextAuth
-foundation (install + `pages/api/auth/[...nextauth].ts` catch-all route +
-`_app.tsx` SessionProvider + CredentialsProvider + verifyAuth helper) was
-split into ~9 overlapping features (#1541/#1611/#1612/#1613/#1614/#1616/
-#1621/#1623/#1624) that all had to create the same `[...nextauth].ts` and
-`_app.tsx` — 4 cap-blocked, 5 rejected, zero shipped, because each slice
-fought the others over the same two files.
+When the children of a split would each **create or be the primary editor of
+the SAME new entrypoint / config / framework file**, you must NOT split them
+**horizontally** (by component, dispatched in parallel) — they would collide
+(one merges, the rest become conflicts / cap-block each other). Canonical
+2026-06-13 IndianFoodTruck cascade: the NextAuth foundation (install +
+`pages/api/auth/[...nextauth].ts` catch-all route + `_app.tsx` SessionProvider
++ CredentialsProvider + verifyAuth helper) was split into ~9 overlapping
+features (#1541/#1611/#1612/#1613/#1614/#1616/#1621/#1623/#1624) that all had
+to create the same `[...nextauth].ts` and `_app.tsx` — 4 cap-blocked, 5
+rejected, zero shipped.
 
-Files that are shared cohesive entrypoints (keep their setup whole): the
-app factory / `_app.tsx` / `main.py` / `app.py`, a framework catch-all
-route (`[...nextauth].ts`), a single DB-init / schema module, a shared
-middleware-registration file, a root router. If your split would make two
-children both `Create`/own one of these, KEEP THE STORY WHOLE instead.
-(You may still split work that merely *imports from* a shared module — the
-collision is about co-creating/co-owning the same file, not referencing it.)
+Files that are shared cohesive entrypoints: the app factory / `_app.tsx` /
+`main.py` / `app.py`, a framework catch-all route (`[...nextauth].ts`), a
+single DB-init / schema module, a shared middleware-registration file, a root
+router. (Work that merely *imports from* such a module is NOT a collision —
+this rule is about co-creating/co-owning the same file.)
+
+You have **two** ways to handle a coupled foundation. Pick by size:
+
+**(a) Small enough to land whole (≤4 ACs honestly):** ship it as ONE feature.
+A cohesive small story beats many colliding ones.
+
+**(b) Too big to land whole (the #1621 case — keeping it whole just trades
+collision for a feature no coder session can finish): split it VERTICALLY,
+not horizontally.** A vertical slice is a thin end-to-end thread that is
+independently shippable AND testable. Crucially the slices are **sequenced
+with `depends_on`**, so only one coder touches the shared file at a time —
+the orchestrator now ENFORCES `depends_on` at dispatch (a slice is not coded
+until the slice it depends on is Pushed), so vertical slices physically cannot
+collide. The walking-skeleton method:
+
+  - **Slice 1 — minimal bootable thread.** *Creates* the shared entrypoint
+    file(s) with the thinnest working path, plus ONE passing behavioral test.
+    For NextAuth: "POST credentials for a single hardcoded user returns a
+    valid session" — this creates `[...nextauth].ts` + `_app.tsx` minimally
+    and proves the wiring. ≤4 ACs.
+  - **Slice 2 — thicken it.** `depends_on` = slice 1. *Extends* the shared
+    file. For NextAuth: "credentials are checked against the real user table
+    with bcrypt." It edits the file slice 1 created; no collision because
+    slice 1 has already shipped.
+  - **Slice 3+ — one capability each,** `depends_on` the previous slice.
+    For NextAuth: "`verifyAuth(req)` helper guards a protected route." Often
+    these only *import* the foundation and could even run in parallel, but
+    chaining `depends_on` keeps the build order unambiguous.
+
+So the NextAuth foundation becomes 3 sequenced slices, each ≤4 ACs and each
+landable, instead of one 8-AC feature that cap-blocks (#1621) OR nine parallel
+features that collide. Set `depends_on` on each child to the previous slice
+(see §SPLIT for the field). Vertical slicing is the DEFAULT for any coupled
+foundation that fails the sizing gate — keep-it-whole (a) is only for
+foundations that genuinely fit in one session.
 
 **Runtime-tool stories — split aggressively.** When ANY AC requires an
 external runtime executable to be invoked by the test (`chromium` /
@@ -169,6 +198,14 @@ No per-phase cap. Create as many children as the story honestly needs
 recursive splits aren't supported in one session, so size each child
 correctly when you create it.
 
+**For a VERTICAL slice of a coupled foundation (the cohesion rule's option
+(b)), chain the children with `depends_on`:** child 2's `depends_on` = child
+1's id, child 3's = child 2's id, and so on. The orchestrator enforces this
+at dispatch — child 2 is not coded until child 1 is Pushed — so the slices
+build the shared entrypoint file in order and never collide. (For a plain
+horizontal split of INDEPENDENT stories, leave `depends_on` unset.) The POST
+body field is `"depends_on": <predecessor-child-id>`.
+
 ```bash
 PARENT_ID={feature_id}
 
@@ -192,7 +229,21 @@ CHILD1=$(curl -sS -X POST $PM_API_URL/api/features \
     \"parent_id\": $PARENT_ID,
     \"phase_id\": $PARENT_PHASE_ID
   }" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
-# … repeat for CHILD2, CHILD3, ... as needed
+# … repeat for CHILD2, CHILD3, ... as needed.
+#
+# For a VERTICAL slice (cohesion option (b)), add "depends_on" pointing at the
+# previous child so the orchestrator sequences them and they don't collide on
+# the shared entrypoint file:
+# CHILD2=$(curl -sS -X POST $PM_API_URL/api/features \
+#   -H 'Content-Type: application/json' \
+#   -d "{
+#     \"product_id\": {product_id},
+#     \"name\": \"NextAuth — real user-table credential check (bcrypt)\",
+#     \"description\": \"Extend the catch-all route created in slice 1 so CredentialsProvider authorizes against the users table with bcrypt.compare. <ACs...>\",
+#     \"priority\": 50, \"source\": \"ai\", \"status\": \"Approved\",
+#     \"parent_id\": $PARENT_ID, \"phase_id\": $PARENT_PHASE_ID,
+#     \"depends_on\": $CHILD1
+#   }" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
 
 # 2. Post a "replaced by" comment on the parent so the corrections trail
 #    on the feature page reads naturally to anyone scanning history.

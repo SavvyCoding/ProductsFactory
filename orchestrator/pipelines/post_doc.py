@@ -301,6 +301,16 @@ def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
         )
         return
 
+    # Over-coupling advisory (wave-10 Layer 1.2) — SOAK mode: posts a
+    # sizing-advisor comment on oversized design docs recommending a vertical
+    # split, but never bounces. Runs after the hard guards pass so it only
+    # annotates a doc that's actually about to ship. Best-effort; a failure
+    # here must not block the commit.
+    try:
+        _post_doc_oversize_advisory(working_dir, _run, assigned_features, product)
+    except Exception:
+        log.exception(f"[post-{persona}] {pname}: sizing-advisor failed (non-fatal)")
+
     feat_summary = ", ".join(f"#{f['id']}" for f in assigned_features)
     # product_planner merged into designer 2026-05-06 — both produce per-
     # feature design docs, single verb is fine.
@@ -517,6 +527,112 @@ def _bounce_doc_features_for_lint(
                     )
     except Exception as e:
         log.warning(f"[post-{persona}] {pname}: lint-guard PM client error: {e}")
+
+
+_AC_DEF_RE = __import__("re").compile(r"^\s*#{0,3}\s*AC\d{1,2}[.:]", __import__("re").M)
+
+
+def _post_doc_oversize_advisory(
+    working_dir: str,
+    _run,
+    assigned_features: list[dict],
+    product: dict,
+) -> int:
+    """SOAK-mode over-coupling detector (wave-10, Layer 1.2).
+
+    Reads each staged ``docs/story_*.md`` and counts its acceptance criteria
+    (``AC1.``/``AC2.`` definition lines) and ``### Files to create`` bullets.
+    A doc that exceeds the sizing caps (>4 ACs or >6 created files) is a
+    foundation the designer kept whole under the cohesion rule but that a
+    single coder session likely can't land (the #1621 class). We post a
+    ``sizing-advisor`` comment recommending a VERTICAL split — but do NOT
+    bounce the feature.
+
+    Comment-path soak first, per the Guard-17-tuning protocol: a design-doc
+    AC count is a softer signal than a committed-code violation, so it earns
+    its bounce rights only after a clean audit window. Returns the number of
+    advisories posted (for logging / future promotion). Best-effort.
+    """
+    import re as _re
+    from pathlib import Path as _PPath
+
+    try:
+        diff_r = _run(["git", "diff", "--cached", "--name-only"], timeout=15)
+    except Exception:
+        return 0
+    if diff_r.returncode != 0:
+        return 0
+    staged_docs = [
+        ln.strip() for ln in (diff_r.stdout or "").splitlines()
+        if ln.strip().startswith("docs/story_") and ln.strip().endswith(".md")
+    ]
+    if not staged_docs:
+        return 0
+
+    pname = product.get("name", "?")
+    wd = _PPath(working_dir)
+    _files_hdr = _re.compile(r"^\s*#{2,4}\s*Files to create", _re.I | _re.M)
+    _bullet = _re.compile(r"^\s*[-*]\s+\S")
+    _next_hdr = _re.compile(r"^\s*#{2,4}\s")
+    posted = 0
+
+    with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+        for doc_path in staged_docs:
+            try:
+                content = (wd / doc_path).read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            ac_count = len(_AC_DEF_RE.findall(content))
+            # Count bullets under the first "Files to create" header until the
+            # next markdown header.
+            file_count = 0
+            m = _files_hdr.search(content)
+            if m:
+                tail = content[m.end():].splitlines()
+                for ln in tail:
+                    if _next_hdr.match(ln):
+                        break
+                    if _bullet.match(ln):
+                        file_count += 1
+            if ac_count <= 4 and file_count <= 6:
+                continue
+
+            # Map doc → feature id (docs/story_<id>.md, padded or not).
+            try:
+                stem = doc_path.rsplit("/", 1)[-1]
+                num = stem.split("_", 1)[1].split(".", 1)[0]
+                fid = int(num.lstrip("0") or "0")
+            except Exception:
+                fid = next((f.get("id") for f in assigned_features
+                            if isinstance(f.get("id"), int)), None)
+            if not isinstance(fid, int):
+                continue
+
+            body = (
+                f"📐 **sizing-advisor (advisory — not a bounce):** this design "
+                f"declares **{ac_count} ACs** and **{file_count} files to create** "
+                f"(soft caps: ≤4 ACs, ≤6 files). A foundation this size tends to "
+                f"cap-block in one coder session (the #1621 class).\n\n"
+                f"If this is a coupled foundation kept whole under the "
+                f"SHARED-ENTRYPOINT COHESION rule, prefer a **VERTICAL split**: "
+                f"slice 1 = the thinnest bootable thread that creates the shared "
+                f"entrypoint file(s) + one passing test; slice 2+ `depends_on` the "
+                f"previous slice and extend it. The orchestrator enforces "
+                f"`depends_on` at dispatch, so the slices sequence and cannot "
+                f"collide. See designer.md → SHARED-ENTRYPOINT COHESION option (b)."
+            )
+            try:
+                client.post(f"/api/features/{fid}/comments",
+                            json={"author": "sizing-advisor", "body": body})
+                posted += 1
+            except Exception as e:
+                log.warning(f"[post-doc] {pname}: sizing-advisor comment for "
+                            f"#{fid} failed: {e}")
+
+    if posted:
+        log.info(f"[post-doc] {pname}: sizing-advisor posted {posted} "
+                 f"over-coupling advisory(ies) (soak — no bounce)")
+    return posted
 
 
 def _post_doc_clarification_check(
