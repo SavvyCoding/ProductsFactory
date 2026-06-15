@@ -59,6 +59,11 @@ PROMPT_INVARIANTS: dict[str, list[str]] = {
         "Stack translation",
         "npm test",
         "npx tsx",
+        # Meta-rule J (2026-06-15): generalizes the gate-gaming instances
+        # (hollow/deleted/skipped tests, stubs, PUBLIC_ROUTE abuse, gate
+        # lowering) into one principle. Lives in _hard_rules.md, so it must
+        # appear in every persona's built prompt.
+        "weakening the check",
     ],
 
     # Designer must produce a design doc in docs/ so the coder can pick it up,
@@ -112,6 +117,7 @@ PROMPT_INVARIANTS: dict[str, list[str]] = {
         "MANDATORY",
         "review_notes",
         "Review incomplete",
+        "Your stance:",               # disposition line (2026-06-15 persona-character pass)
     ],
 
     # Planner: under the flat phases→features model (migration 043, 2026-05-26)
@@ -126,6 +132,7 @@ PROMPT_INVARIANTS: dict[str, list[str]] = {
         "/api/features",              # story POST endpoint
         "Pending",                    # stories must be created in Pending state
         "ONE new Feature",            # the one-feature-per-session rule
+        "Your stance:",               # disposition line (2026-06-15 persona-character pass)
     ],
 
     # Recommender — generates Pending feature suggestions. Must check
@@ -148,6 +155,7 @@ PROMPT_INVARIANTS: dict[str, list[str]] = {
         "priority",                   # priority is set
         "last_refactorer_at",         # config update
         "Do NOT write application code",
+        "Your stance:",               # disposition line (2026-06-15 persona-character pass)
     ],
 
     # DevOps — mirrors refactorer but for infra. Same shape: chore
@@ -195,7 +203,11 @@ PROMPT_INVARIANTS: dict[str, list[str]] = {
     # a special product fixture with analysis_status="running".)
 
     # Security auditor must not modify code — it only files bugs.
-    "security_auditor": ["bug", "security"],
+    "security_auditor": ["bug", "security", "Your stance:"],
+
+    # Architect — disposition line locks in the structural-fix-by-default
+    # character added in the 2026-06-15 persona-character pass.
+    "architect": ["Your stance:", "drift"],
 
     # QA tester operates on the coder's open PR — it must push tests to that branch.
     "qa_tester": ["test"],
