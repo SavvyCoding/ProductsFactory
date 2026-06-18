@@ -231,17 +231,19 @@ class TestPostDocRehome:
         {"id": 1633, "status": "Designed", "parent_id": 1540, "depends_on": 1632},
     ]
 
-    def test_soak_mode_applies_nothing(self, monkeypatch):
+    def test_disabled_applies_nothing(self, monkeypatch):
+        # ON by default → an explicit falsy value disables (dry-run only).
         from orchestrator.pipelines import post_doc
-        monkeypatch.delenv("DEPENDENCY_REHOME_ENABLED", raising=False)
+        monkeypatch.setenv("DEPENDENCY_REHOME_ENABLED", "off")
         c = self._mock_client(self._FEATS)
         n = post_doc._post_doc_rehome_replaced_dependents({"id": 32}, "designer", "P", c)
         assert n == 0
-        c.patch.assert_not_called()      # soak: detect + log, never mutate
+        c.patch.assert_not_called()      # dry-run: detect + log, never mutate
 
-    def test_enabled_rehomes_to_live_child(self, monkeypatch):
+    def test_on_by_default_rehomes_to_live_child(self, monkeypatch):
+        # Unset env → enabled by default; re-homes #1633 off Rejected #1632 → #1635.
         from orchestrator.pipelines import post_doc
-        monkeypatch.setenv("DEPENDENCY_REHOME_ENABLED", "1")
+        monkeypatch.delenv("DEPENDENCY_REHOME_ENABLED", raising=False)
         c = self._mock_client(self._FEATS)
         n = post_doc._post_doc_rehome_replaced_dependents({"id": 32}, "designer", "P", c)
         assert n == 1
