@@ -608,6 +608,8 @@
                 {{ f.name }}
                 {% if f.source == 'ai' %}<span class="ai-badge" title="AI-suggested">🤖</span>{% endif %}
               </div>
+              {% if f.parent_id %}<div style="font-size:10px;color:var(--text-muted);margin-top:1px">↳ child of #{{ f.parent_id }}</div>{% endif %}
+              {% if f.id in dep_waiting %}<div style="font-size:10px;color:#92400e;background:#fef3c7;border:1px solid #fcd34d;display:inline-block;padding:0 6px;border-radius:8px;margin-top:2px" title="Held by the dependency gate — won't start until #{{ dep_waiting[f.id].id }} ({{ dep_waiting[f.id].name }}) reaches Pushed">↳ waiting on #{{ dep_waiting[f.id].id }} · {{ dep_waiting[f.id].status }}</div>{% endif %}
               {% if f.blocked_reason and f.status == 'Blocked' %}<div class="fbt-blocked">⚠ {{ f.blocked_reason[:140] }}{% if f.blocked_reason|length > 140 %}…{% endif %}</div>{% endif %}
             </td>
             <td>
@@ -856,6 +858,7 @@
           {% if f.parent_id %}<span style="font-size:10px;color:var(--text-muted);margin-left:6px" title="Split child of #{{ f.parent_id }}">↳ child of #{{ f.parent_id }}</span>{% endif %}
         </div>
         <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;margin-left:6px">
+          {% if f.id in dep_waiting %}<span style="font-size:9px;color:#92400e;background:#fef3c7;border:1px solid #fcd34d;padding:0 5px;border-radius:7px;white-space:nowrap" title="Held by the dependency gate — won't start until #{{ dep_waiting[f.id].id }} ({{ dep_waiting[f.id].name }}) reaches Pushed">↳ waiting on #{{ dep_waiting[f.id].id }} · {{ dep_waiting[f.id].status }}</span>{% endif %}
           <span class="badge badge-status-{{ f.status | lower }}" style="font-size:10px">{{ f.status }}</span>
           {% if f.pr_url %}<a href="{{ f.pr_url }}" target="_blank" style="font-size:11px;color:var(--blue);text-decoration:none" title="View PR">#{{ f.pr_number or f.pr_url.split('/')[-1] }}</a>{% endif %}
         </div>
