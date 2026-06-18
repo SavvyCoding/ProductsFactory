@@ -372,8 +372,72 @@ def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
             _mark_assigned_features_designed(
                 working_dir, assigned_features, persona, pname, client,
             )
+            # SOURCE-side dangling-dependency repair: a designer sizing-split may
+            # have just Rejected a parent "as Replaced" and created live children.
+            # The split re-homes the children (parent_id) but NOT external
+            # dependents' depends_on, stranding them on a dead foundation forever
+            # (canonical IndianFoodTruck #1633 → Rejected #1632). Re-home them onto
+            # the live replacement now, at the source. Flag-gated (off by default)
+            # for the Guard-17 soak protocol; logs intended repairs until enabled.
+            _post_doc_rehome_replaced_dependents(product, persona, pname, client)
     except Exception as e:
         log.warning(f"[post-{persona}] {pname}: PM client error during designed PATCH: {e}")
+
+
+def _post_doc_rehome_replaced_dependents(product: dict, persona: str, pname: str, client) -> int:
+    """Re-home features whose ``depends_on`` points at a Rejected/Reverted
+    target onto its live replacement child — the SOURCE-side cure for the
+    re-decomposition stranding class (the per-cycle catch-net is the safety net).
+
+    Reuses ``orchestrator.cycle.dependencies.dangling_dependency_repairs`` (single
+    source of truth). **Flag-gated**: applies nothing unless
+    ``DEPENDENCY_REHOME_ENABLED`` is truthy — until then it logs the repairs it
+    *would* make (Guard-17 soak protocol). Best-effort; never raises into the
+    pipeline. Returns the number of re-homes applied.
+    """
+    from orchestrator.cycle.dependencies import dangling_dependency_repairs
+    pid = product.get("id")
+    enabled = os.environ.get("DEPENDENCY_REHOME_ENABLED", "").lower() in ("1", "true", "yes", "on")
+    try:
+        feats = client.get(f"/api/products/{pid}/features").json()
+    except Exception as e:
+        log.warning(f"[post-{persona}] {pname}: rehome fetch failed: {e}")
+        return 0
+    if not isinstance(feats, list):
+        return 0
+    repairs = dangling_dependency_repairs(feats)
+    if not repairs:
+        return 0
+    if not enabled:
+        for r in repairs:
+            log.info(f"[post-{persona}] {pname}: [rehome-soak] would repair #{r['feature_id']}: {r['reason']}")
+        return 0
+    applied = 0
+    for r in repairs:
+        fid, new_dep = r["feature_id"], r["new_dep"]
+        try:
+            if new_dep is not None:
+                client.patch(f"/api/features/{fid}", json={
+                    "depends_on": new_dep, "changed_by": f"post-{persona}:rehome",
+                })
+                client.post(f"/api/features/{fid}/comments", json={
+                    "author": f"post-{persona}:rehome",
+                    "body": (f"🔧 Dependency repair — {r['reason']}. The prior target was "
+                             f"Rejected as 'Replaced'; re-homed to its live replacement so "
+                             f"the dispatch gate releases this once the replacement ships."),
+                })
+                applied += 1
+            else:
+                # No live replacement child — can't safely auto re-home; flag the PM.
+                client.post("/api/alerts", json={
+                    "level": "warning",
+                    "message": f"Dangling dependency — feature #{fid}: {r['reason']}",
+                })
+        except Exception as e:
+            log.warning(f"[post-{persona}] {pname}: rehome for #{fid} failed: {e}")
+    if applied:
+        log.info(f"[post-{persona}] {pname}: re-homed {applied} dangling dependency(ies)")
+    return applied
 
 
 def _mark_assigned_features_designed(
