@@ -7,7 +7,10 @@ import os
 
 os.environ.setdefault("PM_API_URL", "http://pm-api:8080")
 
-from orchestrator.cycle.dependencies import dependency_blocked_feature_ids  # noqa: E402
+from orchestrator.cycle.dependencies import (  # noqa: E402
+    dependency_blocked_feature_ids,
+    dangling_dependency_repairs,
+)
 
 
 # ── keystone: depends_on dispatch gate ───────────────────────────────────────
@@ -152,3 +155,59 @@ class TestOversizeAdvisory:
         assert n == 1
         # only a comment POST, no status mutation
         assert all(p[0].endswith("/comments") for p in posts)
+
+
+# ── dangling-dependency repair sweep ─────────────────────────────────────────
+
+
+class TestDanglingDependencyRepair:
+    def test_no_dead_deps_yields_no_repairs(self):
+        feats = [
+            {"id": 1, "status": "Pushed", "depends_on": None, "parent_id": None},
+            {"id": 2, "status": "Approved", "depends_on": 1, "parent_id": None},
+        ]
+        assert dangling_dependency_repairs(feats) == []
+
+    def test_rehomes_to_live_replacement_child(self):
+        # The IndianFoodTruck #1633 case: dep #1632 was Rejected and re-split
+        # into live children #1634/#1635; re-home to the highest-id live child.
+        feats = [
+            {"id": 1632, "status": "Rejected", "depends_on": None, "parent_id": 1540},
+            {"id": 1634, "status": "Blocked",  "depends_on": None, "parent_id": 1632},
+            {"id": 1635, "status": "Designed", "depends_on": 1634, "parent_id": 1632},
+            {"id": 1633, "status": "Designed", "depends_on": 1632, "parent_id": 1540},
+        ]
+        repairs = dangling_dependency_repairs(feats)
+        assert len(repairs) == 1
+        r = repairs[0]
+        assert r["feature_id"] == 1633
+        assert r["old_dep"] == 1632
+        assert r["new_dep"] == 1635          # highest-id live child of the dead #1632
+
+    def test_reverted_target_also_repaired(self):
+        feats = [
+            {"id": 10, "status": "Reverted", "depends_on": None, "parent_id": None},
+            {"id": 11, "status": "Approved", "depends_on": 10, "parent_id": None},
+        ]
+        repairs = dangling_dependency_repairs(feats)
+        assert len(repairs) == 1
+        assert repairs[0]["new_dep"] is None  # no live child → flag for PM, don't clear
+
+    def test_skips_dead_children_when_picking_replacement(self):
+        # A dead target whose only children are ALSO dead → no auto re-home.
+        feats = [
+            {"id": 20, "status": "Rejected", "depends_on": None, "parent_id": None},
+            {"id": 21, "status": "Rejected", "depends_on": None, "parent_id": 20},
+            {"id": 22, "status": "Approved", "depends_on": 20, "parent_id": None},
+        ]
+        repairs = dangling_dependency_repairs(feats)
+        assert repairs[0]["new_dep"] is None
+
+    def test_live_dep_is_not_flagged(self):
+        # depends_on a Blocked (not dead) feature → gate holds it, but it is
+        # NOT a dangling-repair case (Blocked can still recover to Pushed).
+        feats = [
+            {"id": 30, "status": "Blocked",  "depends_on": None, "parent_id": None},
+            {"id": 31, "status": "Approved", "depends_on": 30, "parent_id": None},
+        ]
+        assert dangling_dependency_repairs(feats) == []

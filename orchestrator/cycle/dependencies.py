@@ -65,3 +65,72 @@ def dependency_blocked_feature_ids(features) -> set:
         if dep_feat.get("status") != "Pushed" and isinstance(fid, int):
             blocked.add(fid)
     return blocked
+
+
+# Terminally-dead statuses: a dependency in one of these will NEVER reach
+# ``Pushed``, so a dependent pointing at it is stalled forever (the gate above
+# keeps it Blocked by design). These are the targets the repair sweep re-homes.
+_DEAD_STATUSES = frozenset({"Rejected", "Reverted"})
+
+
+def dangling_dependency_repairs(features) -> list:
+    """Find features whose ``depends_on`` points at a terminally-dead
+    (``Rejected``/``Reverted``) target and compute a repair for each.
+
+    ``dependency_blocked_feature_ids`` deliberately keeps such a dependent
+    BLOCKED — you must not ship a slice onto a foundation that never landed.
+    But the dead target is almost always a designer sizing-split that was
+    ``Rejected`` as "Replaced by children #X, #Y" (the split re-homes the
+    children via ``parent_id`` but NOT the external dependents' ``depends_on``).
+    The dependent then sits invisibly stalled forever. This sweep surfaces it
+    and proposes the fix: re-home ``depends_on`` onto the live replacement.
+
+    The live replacement is a NON-dead child of the dead target
+    (``parent_id == dead_id``); we pick the HIGHEST-id such child — the last
+    slice in the split chain, which is the API/integration a dependent usually
+    consumes. If no live child exists, ``new_dep`` is ``None`` (can't auto-
+    re-home → flag for a human; clearing it would let the dependent ship
+    without its prerequisite, trading "stuck forever" for "fails on missing
+    prerequisite").
+
+    Pure function — returns the actions, applies NOTHING. Each action is::
+
+        {"feature_id": int, "old_dep": int, "new_dep": int | None, "reason": str}
+
+    Canonical: IndianFoodTruck #1633 (Order History Frontend) pointed at the
+    Rejected #1632 (Backend), which had been re-split into #1634/#1635 — the
+    sweep re-homes it to the live #1635 (GET /api/orders).
+    """
+    by_id = {f.get("id"): f for f in (features or [])
+             if isinstance(f.get("id"), int)}
+    # Index of live (non-dead) children per parent id.
+    live_children: dict = {}
+    for f in (features or []):
+        pid = f.get("parent_id")
+        if isinstance(pid, int) and f.get("status") not in _DEAD_STATUSES:
+            cid = f.get("id")
+            if isinstance(cid, int):
+                live_children.setdefault(pid, []).append(cid)
+
+    repairs: list = []
+    for f in (features or []):
+        fid = f.get("id")
+        dep = f.get("depends_on")
+        if not isinstance(dep, int) or dep == fid:
+            continue
+        dep_feat = by_id.get(dep)
+        if dep_feat is None or dep_feat.get("status") not in _DEAD_STATUSES:
+            continue
+        candidates = live_children.get(dep, [])
+        new_dep = max(candidates) if candidates else None
+        if new_dep is not None:
+            reason = (f"depends_on #{dep} is {dep_feat.get('status')} (dead); "
+                      f"re-home to live replacement #{new_dep} (child of #{dep})")
+        else:
+            reason = (f"depends_on #{dep} is {dep_feat.get('status')} (dead) with "
+                      f"no live replacement child — needs PM re-point")
+        repairs.append({
+            "feature_id": fid, "old_dep": dep,
+            "new_dep": new_dep, "reason": reason,
+        })
+    return repairs
