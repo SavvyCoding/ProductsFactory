@@ -29,6 +29,7 @@ _VALID_FEATURE_STATUSES = frozenset({
     "Reviewing", "Reviewed",
     "Testing", "Committed", "Pushed",
     "Blocked", "Rejected", "Reverted", "Deferred",
+    "Stuck",
 })
 
 
