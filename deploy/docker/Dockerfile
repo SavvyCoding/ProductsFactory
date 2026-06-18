@@ -73,6 +73,7 @@ RUN pyenv global 3.12.4 && \
         httpx requests \
         pydantic \
         ruff pre-commit black flake8 mypy playwright \
+        anthropic openai \
         Pillow moviepy edge-tts && \
     pyenv global 3.11.9 && \
     pip install --no-cache-dir --upgrade pip && \
@@ -82,6 +83,7 @@ RUN pyenv global 3.12.4 && \
         httpx requests \
         pydantic \
         ruff pre-commit black flake8 mypy playwright \
+        anthropic openai \
         Pillow moviepy edge-tts && \
     pyenv global 3.12.4
 

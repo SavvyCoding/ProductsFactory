@@ -27,7 +27,11 @@ FEATURE_STATUSES   = ('Pending', 'Approved',
                       'Implementing', 'Implemented',
                       'Reviewing', 'Reviewed',
                       'Testing', 'Committed', 'Pushed',
-                      'Blocked', 'Rejected', 'Reverted', 'Deferred')
+                      'Blocked', 'Rejected', 'Reverted', 'Deferred',
+                      # 'Stuck' (migration 047): terminal — both the base model
+                      # and the premium escalation pass failed. Reprocessor-
+                      # invisible, so it cannot loop. Needs human triage.
+                      'Stuck')
 ALERT_LEVELS       = ('info', 'warning', 'error', 'critical')
 
 
@@ -83,6 +87,10 @@ class Feature(Base):
     priority:       Mapped[int]            = mapped_column(Integer, nullable=False, default=50)
     depends_on:     Mapped[Optional[int]]  = mapped_column(Integer, ForeignKey("features.id", ondelete="SET NULL"), index=True)
     fix_attempts:   Mapped[int]            = mapped_column(Integer, nullable=False, default=0)
+    # migration 047 — set while a Blocked feature is in its ONE premium-model
+    # escalation pass. Drives docker_runner model routing (use the global
+    # escalation backend/model) and the re-block → 'Stuck' branch in post_coder.
+    escalation_active: Mapped[bool]        = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     source:         Mapped[str]            = mapped_column(Text, nullable=False, default="pm")
     feature_type:   Mapped[str]            = mapped_column(Text, nullable=False, default="feature")
     branch_name:    Mapped[Optional[str]]  = mapped_column(Text)
@@ -158,7 +166,10 @@ class Session(Base):
     tokens_output:       Mapped[Optional[int]]  = mapped_column(Integer)
     cost_usd:            Mapped[Optional[float]] = mapped_column(Numeric(10, 6))
     persona:             Mapped[Optional[str]]  = mapped_column(String(32))
-    backend:             Mapped[Optional[str]]  = mapped_column(String(16))  # "claude" | "ollama"
+    backend:             Mapped[Optional[str]]  = mapped_column(String(16))  # "claude" | "ollama" | "claude-api" | "openai"
+    # migration 047 — true when this session ran a feature's premium escalation
+    # pass; the daily-USD-cap query sums cost_usd over today's is_escalation rows.
+    is_escalation:       Mapped[bool]           = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     # FSM — canonical lifecycle state. Watchdog/reconciler/harvester drive
     # transitions. Never parse docker output or file mtimes; consult these.
@@ -232,6 +243,17 @@ class SystemConfig(Base):
     claude_model_map:        Mapped[Optional[dict]] = mapped_column(JSONB) # explicit per-persona override
     claude_credentials_dir:  Mapped[Optional[str]] = mapped_column(Text)   # default C:/Users/digvi/.claude
     ssh_keys_dir:            Mapped[Optional[str]] = mapped_column(Text)   # default: SSH_DIR env var
+
+    # ── Blocked-feature premium escalation (migration 047) ─────────────────────
+    # Global config for auto-retrying Blocked features on a stronger LLM.
+    # See docs/blocked_escalation_plan.md.
+    blocked_escalation_enabled:       Mapped[Optional[bool]]  = mapped_column(Boolean)  # master on/off
+    blocked_escalation_backend:       Mapped[Optional[str]]   = mapped_column(Text)     # 'claude-api' | 'openai'
+    blocked_escalation_model:         Mapped[Optional[str]]   = mapped_column(Text)     # e.g. 'claude-opus-4-8'
+    blocked_escalation_max_attempts:  Mapped[Optional[int]]   = mapped_column(Integer)  # premium-pass cap (default 3)
+    blocked_escalation_daily_usd_cap: Mapped[Optional[float]] = mapped_column(Numeric(10, 2))  # blank/0 ⇒ disabled
+    anthropic_api_key:                Mapped[Optional[str]]   = mapped_column(Text)     # Claude API key
+    openai_api_key:                   Mapped[Optional[str]]   = mapped_column(Text)     # OpenAI API key
 
     # ── Supervisor (Phase 1 — rule-based detectors) ──────────────────────────
     # Global kill switch + per-detector toggles. NULL means "use default".

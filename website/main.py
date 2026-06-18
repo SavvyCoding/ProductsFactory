@@ -430,6 +430,13 @@ async def _max_fix_attempts(db: AsyncSession) -> int:
     return val if (val and val > 0) else 5
 
 
+async def _blocked_escalation_max_attempts(db: AsyncSession) -> int:
+    """Premium-escalation pass cap (docs/blocked_escalation_plan.md), default 3."""
+    cfg = await _get_system_config(db)
+    val = getattr(cfg, "blocked_escalation_max_attempts", None) if cfg else None
+    return val if (val and val > 0) else 3
+
+
 async def _close_blocked_feature_pr(
     feature: Feature, github_repo: str, reason: str, db: AsyncSession
 ) -> None:
@@ -563,6 +570,15 @@ _CFG_DEFAULTS = {
     "claude_model_map":       {},
     "claude_credentials_dir": "C:/Users/digvi/.claude",
     "ssh_keys_dir":           "",
+    # Blocked-feature premium escalation (migration 047). OFF by default; the
+    # cap is blank ⇒ disabled until a number is set on the Settings UI.
+    "blocked_escalation_enabled":       False,
+    "blocked_escalation_backend":       "claude-api",
+    "blocked_escalation_model":         "claude-opus-4-8",
+    "blocked_escalation_max_attempts":  3,
+    "blocked_escalation_daily_usd_cap": 0,        # 0/blank ⇒ disabled (safety)
+    "anthropic_api_key":                "",
+    "openai_api_key":                   "",
     # Supervisor (Phase-1 detectors)
     "supervisor_dry_run_only":                   False,
     "supervisor_false_success_enabled":          True,
@@ -1320,6 +1336,14 @@ async def admin_save_poller_settings(
     config.claude_model                = _str("claude_model")
     config.claude_credentials_dir      = _str("claude_credentials_dir")
     config.ssh_keys_dir = _str("ssh_keys_dir")
+    # Blocked-feature premium escalation (migration 047).
+    config.blocked_escalation_enabled       = form.get("blocked_escalation_enabled") == "1"
+    config.blocked_escalation_backend       = _str("blocked_escalation_backend")
+    config.blocked_escalation_model         = _str("blocked_escalation_model")
+    config.blocked_escalation_max_attempts  = _int("blocked_escalation_max_attempts")
+    config.blocked_escalation_daily_usd_cap = _float("blocked_escalation_daily_usd_cap")
+    config.anthropic_api_key                = _str("anthropic_api_key")
+    config.openai_api_key                   = _str("openai_api_key")
     await db.flush()
     return RedirectResponse("/admin?saved=true", status_code=303)
 
@@ -1818,7 +1842,7 @@ async def api_update_feature(
     # (wave-8) gives each Blocked feature ONE bounded auto-retry — it's a
     # deliberate, audited automation (one-shot dedup + per-cycle cap + env/
     # spec skip), so it gets the same re-engage authority as a PM.
-    _BLOCKED_REENGAGE_CALLERS = frozenset({"pm", "blocked-reprocessor"})
+    _BLOCKED_REENGAGE_CALLERS = frozenset({"pm", "blocked-reprocessor", "escalation-reprocessor"})
     _is_blocked_data_cleanup = _peek_changed_by in _BLOCKED_DATA_CLEANUP_CALLERS
     if (
         feature.status == "Blocked"
@@ -2083,7 +2107,31 @@ async def api_update_feature(
         # fix_attempts; all three must route at the cap or the cap is
         # not actually a cap.
         max_fix = await _max_fix_attempts(db)
-        if new_attempts >= max_fix:
+        esc_cap = await _blocked_escalation_max_attempts(db)
+        if feature.escalation_active and new_attempts >= esc_cap:
+            # Premium-escalation pass exhausted → terminal 'Stuck' (migration 047):
+            # both the base model AND the stronger LLM failed. Distinct from
+            # 'Blocked' so the escalation reprocessor never re-escalates it — the
+            # loop guard. Raise a dashboard alert for human triage.
+            feature.status = "Stuck"
+            feature.escalation_active = False
+            feature.blocked_reason = (
+                f"Stuck: premium escalation exhausted (fix_attempts={new_attempts} "
+                f">= {esc_cap}) via {trigger}. Base AND premium models both failed "
+                f"— needs human intervention."
+            )
+            db.add(FeatureChangelog(
+                feature_id=feature_id, field="status",
+                old_value=str(new_status) if new_status else str(prev_status),
+                new_value="Stuck",
+                changed_by=f"{changed_by} (escalation exhausted)",
+            ))
+            db.add(Alert(
+                product_id=feature.product_id, level="warning",
+                message=(f"Feature #{feature_id} is Stuck — base and premium models "
+                         f"both exhausted; needs human intervention."),
+            ))
+        elif new_attempts >= max_fix:
             # Phases→features flat model (migration 043): no more Blocked
             # holdpen sprint — just set the feature status to Blocked. PMs
             # re-engage by PATCHing status back to Approved/Designed.
@@ -2137,7 +2185,7 @@ async def api_update_feature(
     # transitions (parent "Replaced by children #X #Y" pattern from
     # designer.md), and PM-Reject of an in-flight feature also lands
     # here. Same close path, same single chokepoint.
-    _TERMINAL_NON_PUSHED = frozenset({"Blocked", "Rejected", "Deferred", "Reverted"})
+    _TERMINAL_NON_PUSHED = frozenset({"Blocked", "Rejected", "Deferred", "Reverted", "Stuck"})
     if (
         feature.status in _TERMINAL_NON_PUSHED
         and prev_status not in _TERMINAL_NON_PUSHED
@@ -3071,7 +3119,7 @@ async def api_plan_phases(
 # whose every feature is settled is eligible to settle the gate. Blocked /
 # Reverted are settled-but-unresolved — they don't keep the phase open, they
 # become the SUBJECT of the report's blockers + dependency warnings.
-_SETTLED_STATUSES = frozenset({"Pushed", "Deferred", "Rejected", "Reverted", "Blocked"})
+_SETTLED_STATUSES = frozenset({"Pushed", "Deferred", "Rejected", "Reverted", "Blocked", "Stuck"})
 _UNRESOLVED_STATUSES = frozenset({"Blocked", "Reverted"})
 
 
@@ -3444,6 +3492,19 @@ async def api_session_events(session_id: int, db: AsyncSession = Depends(get_db)
          "created_at": r.created_at.isoformat() if r.created_at else None}
         for r in result.fetchall()
     ]
+
+
+@app.get("/api/sessions/escalation-spend-today")
+async def api_escalation_spend_today(db: AsyncSession = Depends(get_db)):
+    """Sum cost_usd over today's (UTC) premium-escalation sessions — the
+    orchestrator's daily-cap gate (docs/blocked_escalation_plan.md). Literal
+    route: must precede /api/sessions/{session_id}."""
+    row = (await db.execute(text(
+        "SELECT COALESCE(SUM(cost_usd), 0) AS spend FROM sessions "
+        "WHERE is_escalation = true "
+        "AND started_at >= date_trunc('day', now() AT TIME ZONE 'utc')"
+    ))).one()
+    return {"spend_usd": float(row.spend or 0)}
 
 
 @app.get("/api/sessions/active")
@@ -3969,7 +4030,7 @@ async def api_flapping_features(
             FeatureChangelog.changed_at >= cutoff,
             # Terminal features are DONE, not stuck — never flag them (a feature
             # that progressed to Pushed must not be Block-able; #1421).
-            Feature.status.notin_(["Pushed", "Rejected", "Reverted", "Deferred", "Blocked"]),
+            Feature.status.notin_(["Pushed", "Rejected", "Reverted", "Deferred", "Blocked", "Stuck"]),
             # Operator/PM-driven transitions are surgery, not flapping —
             # counting them Blocked DogTinder #1582 mid-redesign (2026-06-12)
             # after a string of deliberate pm resets. Agent-loop oscillation

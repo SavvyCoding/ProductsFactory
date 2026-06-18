@@ -348,6 +348,56 @@
         </div>
       </div>
 
+      <p class="admin-section-label admin-section-label--gap">Blocked-Feature Premium Escalation</p>
+      <p class="field-hint" style="margin-top:0;margin-bottom:10px">
+        When a Blocked feature has exhausted the base model, automatically retry it once on a
+        stronger LLM (Claude API / OpenAI) for up to N attempts. If that also fails it goes to
+        <strong>Stuck</strong> (no further auto-retry). Bounded by a daily USD cap.
+        <em>Cap blank/0 ⇒ disabled.</em>
+      </p>
+      <div class="admin-fields-grid" style="grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px">
+        <div class="form-group" style="margin:0">
+          <label>
+            <input type="checkbox" name="blocked_escalation_enabled" value="1"
+                   {% if config.blocked_escalation_enabled %}checked{% endif %}>
+            Enable premium escalation
+          </label>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label for="p-esc-cap">Daily USD cap</label>
+          <input type="number" id="p-esc-cap" name="blocked_escalation_daily_usd_cap" step="0.01" min="0"
+                 value="{{ config.blocked_escalation_daily_usd_cap or '' }}" placeholder="0 = disabled" class="field-narrow">
+          <p class="field-hint">Max premium spend per UTC day. 0/blank disables escalation.</p>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label for="p-esc-backend">Backend</label>
+          <select id="p-esc-backend" name="blocked_escalation_backend">
+            <option value="claude-api" {% if config.blocked_escalation_backend == 'claude-api' %}selected{% endif %}>claude-api</option>
+            <option value="openai" {% if config.blocked_escalation_backend == 'openai' %}selected{% endif %}>openai</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label for="p-esc-model">Model</label>
+          <input type="text" id="p-esc-model" name="blocked_escalation_model"
+                 value="{{ config.blocked_escalation_model or '' }}" placeholder="claude-opus-4-8" autocomplete="off">
+        </div>
+        <div class="form-group" style="margin:0">
+          <label for="p-esc-attempts">Premium attempts</label>
+          <input type="number" id="p-esc-attempts" name="blocked_escalation_max_attempts" min="1" max="10"
+                 value="{{ config.blocked_escalation_max_attempts or 3 }}" placeholder="3" class="field-narrow">
+        </div>
+        <div class="form-group" style="margin:0">
+          <label for="p-anthropic-key">Anthropic API key</label>
+          <input type="password" id="p-anthropic-key" name="anthropic_api_key"
+                 value="{{ config.anthropic_api_key or '' }}" placeholder="sk-ant-..." autocomplete="off">
+        </div>
+        <div class="form-group" style="margin:0">
+          <label for="p-openai-key">OpenAI API key</label>
+          <input type="password" id="p-openai-key" name="openai_api_key"
+                 value="{{ config.openai_api_key or '' }}" placeholder="sk-..." autocomplete="off">
+        </div>
+      </div>
+
       <div class="form-actions">
         <button type="submit">Save poller &amp; agent settings</button>
       </div>
