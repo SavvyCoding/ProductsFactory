@@ -820,6 +820,25 @@
   </div>
   {% endif %}
 
+  {% set stuck_features = features | selectattr('status', 'equalto', 'Stuck') | list %}
+  {% if stuck_features %}
+  <div class="card" style="margin-bottom:16px;border-left:4px solid #7c3aed;background:var(--surface)">
+    <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:6px;color:#7c3aed">🛑 Stuck — base AND premium model failed ({{ stuck_features | length }})</div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">Premium escalation exhausted — neither the base nor the stronger LLM could land these. They need a human: re-scope the spec, fix the environment, or Reject. PM re-engages by PATCHing status to Approved/Designed.</div>
+    {% for f in stuck_features %}
+    <div class="phase-card" data-feature-id="{{ f.id }}" style="margin-bottom:6px;padding:8px;border-radius:6px;background:var(--bg);border:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;cursor:pointer">
+      <div style="min-width:0;flex:1">
+        <div style="font-size:13px;font-weight:600;color:var(--text)">
+          <span class="feat-id-badge">#{{ f.id }}</span>{% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
+        </div>
+        {% if f.blocked_reason %}<div style="font-size:11px;color:var(--text-muted);margin-top:2px">{{ f.blocked_reason }}</div>{% endif %}
+      </div>
+      <span style="font-size:10px;background:#7c3aed;color:#fff;padding:1px 6px;border-radius:8px;margin-left:8px;flex-shrink:0">Stuck · fix {{ f.fix_attempts or 0 }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
   {% if phases %}
   <!-- Phase listing — each phase shows its features inline -->
   {% for phase in phases %}

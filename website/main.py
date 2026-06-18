@@ -1336,6 +1336,14 @@ async def admin_save_poller_settings(
     config.claude_model                = _str("claude_model")
     config.claude_credentials_dir      = _str("claude_credentials_dir")
     config.ssh_keys_dir = _str("ssh_keys_dir")
+    # Blocked-feature premium escalation (migration 047).
+    config.blocked_escalation_enabled       = form.get("blocked_escalation_enabled") == "1"
+    config.blocked_escalation_backend       = _str("blocked_escalation_backend")
+    config.blocked_escalation_model         = _str("blocked_escalation_model")
+    config.blocked_escalation_max_attempts  = _int("blocked_escalation_max_attempts")
+    config.blocked_escalation_daily_usd_cap = _float("blocked_escalation_daily_usd_cap")
+    config.anthropic_api_key                = _str("anthropic_api_key")
+    config.openai_api_key                   = _str("openai_api_key")
     await db.flush()
     return RedirectResponse("/admin?saved=true", status_code=303)
 
