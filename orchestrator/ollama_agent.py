@@ -88,6 +88,12 @@ MAX_TURNS        = int(os.environ.get("MAX_TURNS",         "80"))
 OLLAMA_TIMEOUT   = int(os.environ.get("OLLAMA_TIMEOUT",    "300"))  # seconds for model inference
 BASH_TIMEOUT     = int(os.environ.get("BASH_TIMEOUT",      "180"))  # seconds for shell commands
 RETRY_SLEEP      = int(os.environ.get("OLLAMA_RETRY_SLEEP", "2"))   # seconds between retries
+# Premium API backend for a feature's escalation pass (docs/blocked_escalation_plan.md).
+# When AGENT_API_BACKEND is 'claude-api'/'openai', the loop runs on a frontier model
+# via orchestrator.backends instead of Ollama — SAME tools + dispatcher + AgentLoop.
+AGENT_API_BACKEND = os.environ.get("AGENT_API_BACKEND", "").strip().lower()
+AGENT_API_MODEL   = os.environ.get("AGENT_API_MODEL", "").strip()
+AGENT_API_KEY     = os.environ.get("AGENT_API_KEY", "").strip()
 # Context window allocated per Ollama request. Was hardcoded at 32768, which
 # silently truncated the context for the large-window cloud models actually in
 # use (qwen3-coder:480b = 256K, deepseek-v4-pro = 1M, etc.) — once a session's
@@ -1033,11 +1039,17 @@ def run_agent(initial_prompt: str) -> int:
         f"run `bash('ls {WORKSPACE_DIR}')` first."
     )
 
-    backend = _OllamaBackend(
-        models=MODELS, chat_url=CHAT_URL,
-        timeout=OLLAMA_TIMEOUT, retry_sleep=RETRY_SLEEP,
-        api_key=OLLAMA_API_KEY,
-    )
+    if AGENT_API_BACKEND in ("claude-api", "openai"):
+        # Escalation pass: run the SAME loop on a frontier model.
+        from orchestrator.backends import build_api_backend
+        backend = build_api_backend(AGENT_API_BACKEND, AGENT_API_MODEL, AGENT_API_KEY, log=_log)
+        _log(f"Using PREMIUM backend: {AGENT_API_BACKEND} model={AGENT_API_MODEL}")
+    else:
+        backend = _OllamaBackend(
+            models=MODELS, chat_url=CHAT_URL,
+            timeout=OLLAMA_TIMEOUT, retry_sleep=RETRY_SLEEP,
+            api_key=OLLAMA_API_KEY,
+        )
     loop = AgentLoop(
         backend=backend,
         tool_specs=TOOLS,
@@ -1057,12 +1069,15 @@ def run_agent(initial_prompt: str) -> int:
         input_tokens=backend.total_input_tokens,
         output_tokens=backend.total_output_tokens,
         call_count=backend.call_count,
+        cost_usd=getattr(backend, "total_cost_usd", None),
     )
     return rc
 
 
-def _patch_session_metrics(input_tokens: int, output_tokens: int, call_count: int) -> None:
-    """End-of-run PATCH /api/sessions/{id} with accumulated Ollama token totals."""
+def _patch_session_metrics(input_tokens: int, output_tokens: int, call_count: int,
+                           cost_usd: float | None = None) -> None:
+    """End-of-run PATCH /api/sessions/{id} with accumulated token totals (+ USD
+    cost for premium API backends; the daily escalation cap sums cost_usd)."""
     if not PM_API_URL or SESSION_UID == "local":
         _log(f"[metrics] skipping PATCH: PM_API_URL or SESSION_UID unset "
              f"(turns={call_count}, in={input_tokens}, out={output_tokens})")
@@ -1081,9 +1096,12 @@ def _patch_session_metrics(input_tokens: int, output_tokens: int, call_count: in
             _log(f"[metrics] could not resolve session_id for uid={SESSION_UID}; "
                  f"in={input_tokens} out={output_tokens} turns={call_count}")
             return
+        _patch_body = {"tokens_input": input_tokens, "tokens_output": output_tokens}
+        if cost_usd is not None:
+            _patch_body["cost_usd"] = round(float(cost_usd), 6)
         httpx.patch(
             f"{PM_API_URL}/api/sessions/{session_id}",
-            json={"tokens_input": input_tokens, "tokens_output": output_tokens},
+            json=_patch_body,
             timeout=5,
         )
         _log(f"[metrics] session_id={session_id} tokens_in={input_tokens} "

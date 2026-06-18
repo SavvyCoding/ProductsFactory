@@ -230,7 +230,7 @@ def get_features(args: dict, **kwargs) -> str:
         parsed = json.loads(raw)
         data = parsed.get("data") if isinstance(parsed, dict) else parsed
         if isinstance(data, list):
-            _TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted"}
+            _TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted", "Stuck"}
             data = [f for f in data if f.get("status") not in _TERMINAL]
             if isinstance(parsed, dict):
                 parsed["data"] = data
@@ -574,6 +574,23 @@ def run_cycle(args: dict, **kwargs) -> str:
         # accumulated pool). Gated OFF by default. Runs before the infra
         # executor + detectors so a just-unblocked feature settles into this
         # cycle's dispatch.
+        # Premium-model escalation (docs/blocked_escalation_plan.md): runs BEFORE
+        # the base reprocessor so a Blocked feature is offered the stronger LLM
+        # first. OFF unless configured (cap 0/blank ⇒ disabled). Refreshes the
+        # snapshot so the base reprocessor sees escalated features as no-longer-
+        # Blocked and skips them.
+        for p in ready:
+            try:
+                n_esc = _escalate_blocked_features(p, features=features_by_pid.get(p["id"]))
+                if n_esc:
+                    with _pm_client() as client:
+                        _fr = client.get(f"/api/products/{p['id']}/features")
+                    _fl = _fr.json() if _fr.is_success else None
+                    if isinstance(_fl, list):
+                        features_by_pid[p["id"]] = _fl
+            except Exception:
+                log.exception(f"escalation-reprocessor failed for product {p.get('id')}")
+
         for p in ready:
             try:
                 n_re = _reprocess_blocked_features(p, features=features_by_pid.get(p["id"]))
@@ -1227,6 +1244,114 @@ _CODE_QUALITY_AUTHORS = ("lint-guard", "post-coder:test-check",
                          "post-coder:verify-check", "reviewer")
 _ENV_SPEC_AUTHORS = ("service-missing", "tool-missing", "test-env",
                      "env_broken", "service_missing", "tool_missing")
+
+
+_ESCALATION_MARKER_AUTHOR = "escalation-reprocessor"
+
+
+def _truthy_cfg(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _escalate_blocked_features(product: dict, features: list | None = None,
+                               max_per_cycle: int = 2) -> int:
+    """Premium-model escalation (docs/blocked_escalation_plan.md). Per cycle, give
+    each Blocked feature ONE retry on the globally-configured stronger LLM:
+    → Approved, escalation_active=true, fix_attempts=0, priority bumped to the top
+    band so the orchestrator works it FIRST. Bounded by a daily USD cap. A feature
+    that re-blocks after the premium pass goes to 'Stuck' (post_coder) and is never
+    re-escalated → no loop.
+
+    OFF unless configured: requires blocked_escalation_enabled + a backend/model +
+    a non-zero daily cap (blank/0 ⇒ disabled, a safety default). Returns the number
+    escalated. Best-effort; never raises into the cycle.
+    """
+    pid = product.get("id")
+    if not pid:
+        return 0
+    pname = product.get("name", "?")
+    try:
+        with _pm_client() as client:
+            try:
+                cfg = client.get("/api/system-config").json()
+            except Exception:
+                return 0
+            if not _truthy_cfg(cfg.get("blocked_escalation_enabled")):
+                return 0
+            backend = (cfg.get("blocked_escalation_backend") or "").strip()
+            model = (cfg.get("blocked_escalation_model") or "").strip()
+            if backend not in ("claude-api", "openai") or not model:
+                return 0
+            try:
+                cap = float(cfg.get("blocked_escalation_daily_usd_cap") or 0)
+            except (TypeError, ValueError):
+                cap = 0.0
+            if cap <= 0:
+                return 0  # blank/0 ⇒ disabled (safety: no unbounded spend)
+            # Daily-cost gate (sum of today's premium sessions' cost_usd).
+            try:
+                spend = float(client.get(
+                    "/api/sessions/escalation-spend-today").json().get("spend_usd", 0))
+            except Exception:
+                spend = 0.0
+            if spend >= cap:
+                log.info(f"[escalation] {pname}: budget exhausted "
+                         f"(${spend:.2f} >= cap ${cap:.2f}) — skipping")
+                return 0
+
+            if features is None:
+                try:
+                    fr = client.get(f"/api/products/{pid}/features")
+                    features = fr.json() if fr.is_success else []
+                except Exception:
+                    return 0
+            blocked = [f for f in (features or [])
+                       if isinstance(f, dict) and f.get("status") == "Blocked"]
+            max_attempts = cfg.get("blocked_escalation_max_attempts", 3)
+            escalated = 0
+            for f in blocked:
+                if escalated >= max_per_cycle:
+                    break
+                fid = f.get("id")
+                if not isinstance(fid, int):
+                    continue
+                reason = (f.get("blocked_reason") or "").lower()
+                # env/service/tool/spec blocks: a stronger model won't fix infra.
+                if any(a in reason for a in _ENV_SPEC_AUTHORS):
+                    continue
+                # Dedupe: one escalation per feature, ever (re-block → Stuck, so a
+                # Blocked feature has never been escalated — the marker is belt-and-
+                # suspenders against a stray return-to-Blocked).
+                try:
+                    cr = client.get(f"/api/features/{fid}/comments", params={"limit": 50})
+                    comments = cr.json() if cr.is_success else []
+                except Exception:
+                    comments = []
+                if any(isinstance(c, dict) and c.get("author") == _ESCALATION_MARKER_AUTHOR
+                       for c in comments):
+                    continue
+                try:
+                    client.patch(f"/api/features/{fid}", json={
+                        "status": "Approved", "changed_by": "escalation-reprocessor",
+                        "escalation_active": True, "fix_attempts": 0, "priority": 1,
+                    })
+                    client.post(f"/api/features/{fid}/comments", json={
+                        "author": _ESCALATION_MARKER_AUTHOR,
+                        "body": (f"🚀 **Premium escalation** — base model exhausted; retrying on "
+                                 f"`{backend}` / `{model}` (≤{max_attempts} attempts), prioritised. "
+                                 f"If it still fails → **Stuck** (no further auto-retry)."),
+                    })
+                    escalated += 1
+                    log.info(f"[escalation] {pname}: #{fid} → premium pass "
+                             f"({backend}/{model}), prioritised")
+                except Exception as e:
+                    log.warning(f"[escalation] {pname}: #{fid} escalate failed: {e}")
+            return escalated
+    except Exception:
+        log.exception(f"[escalation] {pname}: driver failed (non-fatal)")
+        return 0
 
 
 def _reprocess_blocked_features(product: dict, features: list | None = None,

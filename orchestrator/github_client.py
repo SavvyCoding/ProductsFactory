@@ -174,7 +174,7 @@ def reconcile_merged_prs(product: dict):
                 log.warning("reconcile_merged_prs: unexpected features response shape")
                 return
 
-            terminal = {"Pushed", "Rejected", "Reverted", "Deferred"}
+            terminal = {"Pushed", "Rejected", "Reverted", "Deferred", "Stuck"}
 
             for feature in features_data:
                 if feature.get("status") in terminal:

@@ -2270,6 +2270,24 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             f"[escalation] {product.get('name', '?')}: post-diagnosis coder session — "
             f"feature(s) at cap already have a diagnosis; applying the fix"
         )
+    # Premium-model escalation (docs/blocked_escalation_plan.md): distinct from
+    # the wave-5 diagnostician above. A feature the escalation reprocessor moved
+    # back to Approved carries escalation_active=true; this WRITEABLE coder
+    # session runs on the globally-configured frontier LLM (sets AGENT_API_*
+    # below + tags the session is_escalation for the daily-cost cap).
+    premium_escalation = (
+        persona == "coder"
+        and any(f.get("escalation_active") for f in assigned_features)
+    )
+    if premium_escalation:
+        log.info(
+            f"[escalation] {product.get('name', '?')}: PREMIUM session — feature(s) "
+            f"{[f['id'] for f in assigned_features if f.get('escalation_active')]} "
+            f"on {sys_cfg.get('blocked_escalation_backend')}/"
+            f"{sys_cfg.get('blocked_escalation_model')}"
+        )
+    product["_premium_escalation"] = premium_escalation
+
     # Threaded to _finalize_session (read via the product dict): an escalated
     # read-only session writes no code, so it must SKIP the post-coder
     # commit/push/auto-heal pipeline (which would false-fire "coder pushed
@@ -2487,6 +2505,25 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             "-e", f"MAX_TURNS={effective_max_turns}",
             "-e", f"BASH_TIMEOUT={effective_bash_timeout}",
         ]
+        # Premium escalation (docs/blocked_escalation_plan.md): route this session
+        # to the frontier API backend via the SAME ollama_agent.py entry, which
+        # builds the API backend when AGENT_API_BACKEND is set. Key chosen by
+        # backend. If anything is incomplete, fall through to the base model.
+        if premium_escalation:
+            _esc_backend = (sys_cfg.get("blocked_escalation_backend") or "").strip()
+            _esc_model = (sys_cfg.get("blocked_escalation_model") or "").strip()
+            _esc_key = ((sys_cfg.get("anthropic_api_key") if _esc_backend == "claude-api"
+                         else sys_cfg.get("openai_api_key")) or "")
+            if _esc_backend in ("claude-api", "openai") and _esc_model and _esc_key:
+                ollama_env += [
+                    "-e", f"AGENT_API_BACKEND={_esc_backend}",
+                    "-e", f"AGENT_API_MODEL={_esc_model}",
+                    "-e", f"AGENT_API_KEY={_esc_key}",
+                ]
+                log.info(f"[escalation] session routed to premium {_esc_backend}/{_esc_model}")
+            else:
+                log.warning("[escalation] premium requested but backend/model/key "
+                            "incomplete — running the base model for this session")
         # Context-window tuning passthrough: forward these from the orchestrator
         # env into the agent container when set, so num_ctx + AgentLoop windowing
         # can be tuned at runtime via .env without rebuilding the agent image.
@@ -2602,6 +2639,9 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 "persona":      persona,
                 "backend":      effective_backend,
                 "status":       "starting",
+                # Tag premium-escalation sessions so the daily-USD cap sums their
+                # cost_usd (docs/blocked_escalation_plan.md).
+                "is_escalation": bool(premium_escalation),
             })
             resp.raise_for_status()
             session_id = resp.json()["id"]
