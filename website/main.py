@@ -563,6 +563,15 @@ _CFG_DEFAULTS = {
     "claude_model_map":       {},
     "claude_credentials_dir": "C:/Users/digvi/.claude",
     "ssh_keys_dir":           "",
+    # Blocked-feature premium escalation (migration 047). OFF by default; the
+    # cap is blank ⇒ disabled until a number is set on the Settings UI.
+    "blocked_escalation_enabled":       False,
+    "blocked_escalation_backend":       "claude-api",
+    "blocked_escalation_model":         "claude-opus-4-8",
+    "blocked_escalation_max_attempts":  3,
+    "blocked_escalation_daily_usd_cap": 0,        # 0/blank ⇒ disabled (safety)
+    "anthropic_api_key":                "",
+    "openai_api_key":                   "",
     # Supervisor (Phase-1 detectors)
     "supervisor_dry_run_only":                   False,
     "supervisor_false_success_enabled":          True,
@@ -1818,7 +1827,7 @@ async def api_update_feature(
     # (wave-8) gives each Blocked feature ONE bounded auto-retry — it's a
     # deliberate, audited automation (one-shot dedup + per-cycle cap + env/
     # spec skip), so it gets the same re-engage authority as a PM.
-    _BLOCKED_REENGAGE_CALLERS = frozenset({"pm", "blocked-reprocessor"})
+    _BLOCKED_REENGAGE_CALLERS = frozenset({"pm", "blocked-reprocessor", "escalation-reprocessor"})
     _is_blocked_data_cleanup = _peek_changed_by in _BLOCKED_DATA_CLEANUP_CALLERS
     if (
         feature.status == "Blocked"
@@ -3444,6 +3453,19 @@ async def api_session_events(session_id: int, db: AsyncSession = Depends(get_db)
          "created_at": r.created_at.isoformat() if r.created_at else None}
         for r in result.fetchall()
     ]
+
+
+@app.get("/api/sessions/escalation-spend-today")
+async def api_escalation_spend_today(db: AsyncSession = Depends(get_db)):
+    """Sum cost_usd over today's (UTC) premium-escalation sessions — the
+    orchestrator's daily-cap gate (docs/blocked_escalation_plan.md). Literal
+    route: must precede /api/sessions/{session_id}."""
+    row = (await db.execute(text(
+        "SELECT COALESCE(SUM(cost_usd), 0) AS spend FROM sessions "
+        "WHERE is_escalation = true "
+        "AND started_at >= date_trunc('day', now() AT TIME ZONE 'utc')"
+    ))).one()
+    return {"spend_usd": float(row.spend or 0)}
 
 
 @app.get("/api/sessions/active")
