@@ -289,8 +289,9 @@ class SessionCreate(BaseModel):
     session_uid:  str
     container_id: Optional[str] = None   # set at launch time: pf-{id}-{uid}
     persona:      Optional[str] = None
-    backend:      Optional[str] = None   # "claude" | "ollama"
+    backend:      Optional[str] = None   # "claude" | "ollama" | "claude-api" | "openai"
     status:       Optional[str] = None   # FSM default handled server-side
+    is_escalation: Optional[bool] = None # premium escalation pass (migration 047)
 
 
 class SessionEnd(BaseModel):
@@ -306,6 +307,7 @@ class SessionEnd(BaseModel):
     persona:            Optional[str]      = None
     status:             Optional[str]      = None   # FSM transition on close
     kill_reason:        Optional[str]      = None
+    is_escalation:      Optional[bool]     = None   # premium escalation pass (migration 047)
 
 
 class SessionOut(BaseModel):
