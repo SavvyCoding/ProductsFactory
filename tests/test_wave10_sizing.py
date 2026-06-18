@@ -211,3 +211,40 @@ class TestDanglingDependencyRepair:
             {"id": 31, "status": "Approved", "depends_on": 30, "parent_id": None},
         ]
         assert dangling_dependency_repairs(feats) == []
+
+
+# ── source-side post_doc re-home step ────────────────────────────────────────
+
+
+class TestPostDocRehome:
+    def _mock_client(self, feats):
+        from unittest.mock import MagicMock
+        c = MagicMock()
+        c.get.return_value = MagicMock(json=lambda: feats)
+        c.patch.return_value = MagicMock(status_code=200)
+        c.post.return_value = MagicMock(status_code=201)
+        return c
+
+    _FEATS = [
+        {"id": 1632, "status": "Rejected", "parent_id": 1540, "depends_on": None},
+        {"id": 1635, "status": "Designed", "parent_id": 1632, "depends_on": None},
+        {"id": 1633, "status": "Designed", "parent_id": 1540, "depends_on": 1632},
+    ]
+
+    def test_soak_mode_applies_nothing(self, monkeypatch):
+        from orchestrator.pipelines import post_doc
+        monkeypatch.delenv("DEPENDENCY_REHOME_ENABLED", raising=False)
+        c = self._mock_client(self._FEATS)
+        n = post_doc._post_doc_rehome_replaced_dependents({"id": 32}, "designer", "P", c)
+        assert n == 0
+        c.patch.assert_not_called()      # soak: detect + log, never mutate
+
+    def test_enabled_rehomes_to_live_child(self, monkeypatch):
+        from orchestrator.pipelines import post_doc
+        monkeypatch.setenv("DEPENDENCY_REHOME_ENABLED", "1")
+        c = self._mock_client(self._FEATS)
+        n = post_doc._post_doc_rehome_replaced_dependents({"id": 32}, "designer", "P", c)
+        assert n == 1
+        call = c.patch.call_args
+        assert "/api/features/1633" in call.args[0]
+        assert call.kwargs["json"]["depends_on"] == 1635   # re-homed to live child

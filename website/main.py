@@ -1970,6 +1970,7 @@ async def api_update_feature(
     _CHANGELOG_FIELDS = frozenset({
         "status", "priority", "pr_number", "blocked_reason",
         "phase_id", "parent_id", "story_points", "due_date", "fix_attempts",
+        "depends_on",  # re-home audit trail (dangling-dependency repair)
     })
     changed_by = updates.pop("changed_by", "agent")
     for field in _CHANGELOG_FIELDS:
