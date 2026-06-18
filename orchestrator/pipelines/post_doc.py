@@ -377,8 +377,8 @@ def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
             # The split re-homes the children (parent_id) but NOT external
             # dependents' depends_on, stranding them on a dead foundation forever
             # (canonical IndianFoodTruck #1633 → Rejected #1632). Re-home them onto
-            # the live replacement now, at the source. Flag-gated (off by default)
-            # for the Guard-17 soak protocol; logs intended repairs until enabled.
+            # the live replacement now, at the source. ON by default; set
+            # DEPENDENCY_REHOME_ENABLED to a falsy value to disable (dry-run logs only).
             _post_doc_rehome_replaced_dependents(product, persona, pname, client)
     except Exception as e:
         log.warning(f"[post-{persona}] {pname}: PM client error during designed PATCH: {e}")
@@ -390,14 +390,16 @@ def _post_doc_rehome_replaced_dependents(product: dict, persona: str, pname: str
     re-decomposition stranding class (the per-cycle catch-net is the safety net).
 
     Reuses ``orchestrator.cycle.dependencies.dangling_dependency_repairs`` (single
-    source of truth). **Flag-gated**: applies nothing unless
-    ``DEPENDENCY_REHOME_ENABLED`` is truthy — until then it logs the repairs it
-    *would* make (Guard-17 soak protocol). Best-effort; never raises into the
-    pipeline. Returns the number of re-homes applied.
+    source of truth). **ON by default** for all products; set
+    ``DEPENDENCY_REHOME_ENABLED`` to a falsy value (``0``/``false``/``no``/``off``)
+    to disable — it then only logs the repairs it *would* make (dry-run). Mirrors
+    the ``BLOCKED_REPROCESSOR_ENABLED`` / ``RECONCILER_CHORES_ENABLED`` kill-switch
+    convention. Best-effort; never raises into the pipeline. Returns the number of
+    re-homes applied.
     """
     from orchestrator.cycle.dependencies import dangling_dependency_repairs
     pid = product.get("id")
-    enabled = os.environ.get("DEPENDENCY_REHOME_ENABLED", "").lower() in ("1", "true", "yes", "on")
+    enabled = os.environ.get("DEPENDENCY_REHOME_ENABLED", "on").strip().lower() not in ("0", "false", "no", "off", "")
     try:
         feats = client.get(f"/api/products/{pid}/features").json()
     except Exception as e:
