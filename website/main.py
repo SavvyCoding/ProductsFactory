@@ -556,7 +556,7 @@ _CFG_DEFAULTS = {
     "brownfield_file_threshold":   10,
     "auto_merge_enabled":            False,
     # Agent / Ollama
-    "agent_backend":    "claude",
+    "agent_backend":    "ollama",   # Claude-CLI base backend retired
     "ollama_host":      "http://host.docker.internal:11434",
     "ollama_api_key":   "",   # required for Ollama Cloud, ignored for local
     "designer_model":   "gemma3:27b",
@@ -1296,7 +1296,10 @@ async def admin_save_poller_settings(
     config.max_fix_attempts            = _int("max_fix_attempts")
     config.brownfield_file_threshold       = _int("brownfield_file_threshold")
     config.auto_merge_enabled              = form.get("auto_merge_enabled") == "1"
-    config.agent_backend               = _str("agent_backend")
+    # Base backend is always Ollama now (the Claude-CLI radio was retired —
+    # escalation uses the Claude/OpenAI API, not the CLI). Hardcoded so saving
+    # the form without the field can't fall back to the old 'claude' default.
+    config.agent_backend               = "ollama"
     config.ollama_host                 = _str("ollama_host")
     # ollama_api_key: leave-blank-to-keep semantics so accidentally saving
     # the form with the password field empty doesn't wipe an existing key.
