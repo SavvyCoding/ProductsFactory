@@ -208,6 +208,7 @@ class FeatureUpdate(BaseModel):
                                             # off a Rejected/Replaced target onto its live
                                             # replacement child) goes through the audited API
                                             # instead of a raw DB write.
+    escalation_active: Optional[bool] = None  # premium-escalation flag (migration 047)
     merge_notes:     Optional[str]  = None  # per-feature release-notes draft
     expected_version: Optional[int] = None  # optimistic lock — if provided, update is rejected on mismatch
     # Caller-supplied attribution: who/what is making this change. Read by
@@ -243,6 +244,7 @@ class FeatureOut(BaseModel):
     feature_type:    str = "feature"
     priority:        int
     depends_on:      Optional[int]
+    escalation_active: bool = False
     fix_attempts:    int
     source:          str
     branch_name:     Optional[str]
