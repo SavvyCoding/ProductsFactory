@@ -1,5 +1,5 @@
 // ── TABS ─────────────────────────────────────────────────────
-const ADMIN_TABS = ['system','notif','poller','pms'];
+const ADMIN_TABS = ['system','notif','poller','agent','pms'];
 
 function adminTab(name, btn) {
   ADMIN_TABS.forEach(t => {
@@ -11,6 +11,19 @@ function adminTab(name, btn) {
   localStorage.setItem('pf-admin-tab', name);
 }
 
+// Agent sub-tabs (Ollama / Anthropic / OpenAI / Escalation)
+const AGENT_SUBS = ['ollama','anthropic','openai','escalation'];
+function agentSub(name, btn) {
+  AGENT_SUBS.forEach(s => {
+    const el = document.getElementById('asub-' + s);
+    if (el) el.classList.add('hidden');
+  });
+  document.querySelectorAll('.agent-subtab-bar .tab-btn').forEach(b => b.classList.remove('active'));
+  const panel = document.getElementById('asub-' + name);
+  if (panel) panel.classList.remove('hidden');
+  btn.classList.add('active');
+}
+
 // ── PASSWORD TOGGLES ─────────────────────────────────────────
 function toggleField(id, btn) {
   const inp = document.getElementById(id);
@@ -18,12 +31,9 @@ function toggleField(id, btn) {
   btn.textContent = inp.type === 'password' ? 'Show' : 'Hide';
 }
 
-function switchProfile(p) {
-  document.getElementById('profile-ollama').style.display = p === 'ollama' ? '' : 'none';
-  document.getElementById('profile-claude').style.display = p === 'claude'  ? '' : 'none';
-  document.querySelectorAll('.profile-option').forEach(el => el.classList.remove('active'));
-  document.querySelector(`.profile-option input[value="${p}"]`).closest('.profile-option').classList.add('active');
-}
+// Retired: the agent backend radios no longer toggle field visibility (the
+// Agent tab uses sub-tabs now). Kept as a safe no-op for any stale callers.
+function switchProfile(_p) { /* no-op */ }
 
 function forceUnlockPoller() {
   fetch('/api/poller/force-unlock', {method:'POST'})

@@ -29,7 +29,11 @@
     </button>
     <button class="tab-btn" onclick="adminTab('poller',this)">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4M8 16h.01M16 16h.01"/></svg>
-      Poller &amp; Agent
+      Poller
+    </button>
+    <button class="tab-btn" onclick="adminTab('agent',this)">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a4 4 0 0 1 4 4v2a4 4 0 0 1-8 0V6a4 4 0 0 1 4-4z"/><path d="M4 22a8 8 0 0 1 16 0"/><circle cx="12" cy="8" r="1"/></svg>
+      Agent
     </button>
     <button class="tab-btn" onclick="adminTab('pms',this)">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
@@ -150,14 +154,14 @@
 </div>
 
 <!-- ── TAB: POLLER & AGENT ──────────────────────────────────── -->
+<form method="post" action="/admin/settings/poller">
 <div id="atab-poller" class="admin-tab-panel hidden">
   <div class="settings-card admin-card-wide">
     <div class="settings-card-title">
-      <span class="title-icon" style="background:var(--green-lt)">🤖</span>
-      Poller &amp; Agent Settings
+      <span class="title-icon" style="background:var(--green-lt)">⏱️</span>
+      Poller Settings
       <span class="settings-card-hint">Blank = use env var / built-in default</span>
     </div>
-    <form method="post" action="/admin/settings/poller">
 
       <p class="admin-section-label">Poller</p>
       <div class="admin-fields-grid">
@@ -232,31 +236,62 @@
 
       </div>
 
-      <p class="admin-section-label admin-section-label--gap">Agent Profile</p>
+      <div class="form-actions">
+        <button type="submit">Save settings</button>
+      </div>
+
+      <div class="admin-subsection">
+        <div class="settings-card-title">
+          <span class="title-icon">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+          </span>
+          Poller Lock
+        </div>
+        <p class="muted admin-subsection-desc">
+          If the poller process crashed without releasing its lock, use this to forcefully clear it before restarting.
+        </p>
+        <button type="button" class="pf-btn pf-btn--sm pf-btn--danger" onclick="forceUnlockPoller()">Force-clear poller lock</button>
+        <span id="unlock-msg" class="admin-subsection-msg"></span>
+      </div>
+    </div><!-- /poller settings-card -->
+  </div><!-- /atab-poller -->
+
+  <div id="atab-agent" class="admin-tab-panel hidden">
+    <div class="settings-card admin-card-wide">
+      <div class="settings-card-title">
+        <span class="title-icon" style="background:var(--green-lt)">🤖</span>
+        Agent Settings
+        <span class="settings-card-hint">Blank = use env var / built-in default</span>
+      </div>
+
+      <p class="admin-section-label">Base backend <span class="field-hint field-hint--inline">platform that runs normal (non-escalation) sessions</span></p>
       <div class="admin-fields-grid admin-fields-grid--bottom-gap">
         <div class="form-group form-group--full">
           <div class="profile-switcher">
             <label class="profile-option {% if config.agent_backend != 'claude' %}active{% endif %}">
-              <input type="radio" name="agent_backend" value="ollama"
-                     {% if config.agent_backend != 'claude' %}checked{% endif %}
-                     onchange="switchProfile('ollama')">
+              <input type="radio" name="agent_backend" value="ollama" {% if config.agent_backend != 'claude' %}checked{% endif %}>
               <span class="profile-icon">⚡</span>
-              <span class="profile-label">Local Ollama</span>
-              <span class="profile-desc">Fast local models, no API cost</span>
+              <span class="profile-label">Ollama</span>
+              <span class="profile-desc">Local / cloud Ollama models</span>
             </label>
             <label class="profile-option {% if config.agent_backend == 'claude' %}active{% endif %}">
-              <input type="radio" name="agent_backend" value="claude"
-                     {% if config.agent_backend == 'claude' %}checked{% endif %}
-                     onchange="switchProfile('claude')">
+              <input type="radio" name="agent_backend" value="claude" {% if config.agent_backend == 'claude' %}checked{% endif %}>
               <span class="profile-icon">✦</span>
-              <span class="profile-label">Claude API</span>
-              <span class="profile-desc">Sonnet via Anthropic API</span>
+              <span class="profile-label">Claude CLI</span>
+              <span class="profile-desc">Claude via OAuth CLI</span>
             </label>
           </div>
         </div>
       </div>
 
-      <div id="profile-ollama" class="admin-fields-grid {% if config.agent_backend == 'claude' %}hidden{% endif %}">
+      <div class="tab-bar agent-subtab-bar" style="margin-bottom:14px">
+        <button type="button" class="tab-btn active" onclick="agentSub('ollama',this)">⚡ Ollama</button>
+        <button type="button" class="tab-btn" onclick="agentSub('anthropic',this)">✦ Anthropic</button>
+        <button type="button" class="tab-btn" onclick="agentSub('openai',this)">◯ OpenAI</button>
+        <button type="button" class="tab-btn" onclick="agentSub('escalation',this)">🚀 Escalation</button>
+      </div>
+
+      <div id="asub-ollama" class="agent-subpanel admin-fields-grid">
         <div class="form-group">
           <label for="p-ollama-host">Ollama host</label>
           <input type="text" id="p-ollama-host" name="ollama_host"
@@ -288,9 +323,9 @@
         <div class="form-group form-group-wide">
           <label>Per-persona model overrides</label>
           <p class="field-hint" style="margin-top:0;margin-bottom:8px">
-            Optional. When set, the orchestrator uses these models for the named persona instead of the Designer/Coder chain above. Comma-separated; primary first. Leave blank to fall back to the chains above.
+            Optional. Override the model for a specific persona instead of the Designer/Coder chain above. (Coder and Designer aren't listed here — they have their own chain fields above.) Comma-separated; primary first. Leave blank to fall back to the chains above.
           </p>
-          {% set _override_personas = ['coder', 'reviewer', 'designer', 'planner', 'documenter', 'analytics', 'recommender', 'devops', 'refactorer', 'product_trainer'] %}
+          {% set _override_personas = ['reviewer', 'planner', 'documenter', 'analytics', 'recommender', 'devops', 'refactorer', 'product_trainer'] %}
           {% set _model_map = config.ollama_model_map or {} %}
           <div class="admin-fields-grid" style="grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px">
             {% for _p in _override_personas %}
@@ -323,7 +358,7 @@
         </div>
       </div>
 
-      <div id="profile-claude" class="admin-fields-grid {% if config.agent_backend != 'claude' %}hidden{% endif %}">
+      <div id="asub-anthropic" class="agent-subpanel admin-fields-grid hidden">
         <div class="form-group">
           <label for="p-claude-model">Claude model</label>
           <select id="p-claude-model" name="claude_model">
@@ -346,78 +381,70 @@
                  value="{{ config.max_turns }}" placeholder="80" min="5" class="field-narrow">
           <p class="field-hint">Hard cap on agentic turns per Claude session.</p>
         </div>
-      </div>
-
-      <p class="admin-section-label admin-section-label--gap">Blocked-Feature Premium Escalation</p>
-      <p class="field-hint" style="margin-top:0;margin-bottom:10px">
-        When a Blocked feature has exhausted the base model, automatically retry it once on a
-        stronger LLM (Claude API / OpenAI) for up to N attempts. If that also fails it goes to
-        <strong>Stuck</strong> (no further auto-retry). Bounded by a daily USD cap.
-        <em>Cap blank/0 ⇒ disabled.</em>
-      </p>
-      <div class="admin-fields-grid" style="grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px">
-        <div class="form-group" style="margin:0">
-          <label>
-            <input type="checkbox" name="blocked_escalation_enabled" value="1"
-                   {% if config.blocked_escalation_enabled %}checked{% endif %}>
-            Enable premium escalation
-          </label>
-        </div>
-        <div class="form-group" style="margin:0">
-          <label for="p-esc-cap">Daily USD cap</label>
-          <input type="number" id="p-esc-cap" name="blocked_escalation_daily_usd_cap" step="0.01" min="0"
-                 value="{{ config.blocked_escalation_daily_usd_cap or '' }}" placeholder="0 = disabled" class="field-narrow">
-          <p class="field-hint">Max premium spend per UTC day. 0/blank disables escalation.</p>
-        </div>
-        <div class="form-group" style="margin:0">
-          <label for="p-esc-backend">Backend</label>
-          <select id="p-esc-backend" name="blocked_escalation_backend">
-            <option value="claude-api" {% if config.blocked_escalation_backend == 'claude-api' %}selected{% endif %}>claude-api</option>
-            <option value="openai" {% if config.blocked_escalation_backend == 'openai' %}selected{% endif %}>openai</option>
-          </select>
-        </div>
-        <div class="form-group" style="margin:0">
-          <label for="p-esc-model">Model</label>
-          <input type="text" id="p-esc-model" name="blocked_escalation_model"
-                 value="{{ config.blocked_escalation_model or '' }}" placeholder="claude-opus-4-8" autocomplete="off">
-        </div>
-        <div class="form-group" style="margin:0">
-          <label for="p-esc-attempts">Premium attempts</label>
-          <input type="number" id="p-esc-attempts" name="blocked_escalation_max_attempts" min="1" max="10"
-                 value="{{ config.blocked_escalation_max_attempts or 3 }}" placeholder="3" class="field-narrow">
-        </div>
-        <div class="form-group" style="margin:0">
+        <div class="form-group">
           <label for="p-anthropic-key">Anthropic API key</label>
           <input type="password" id="p-anthropic-key" name="anthropic_api_key"
                  value="{{ config.anthropic_api_key or '' }}" placeholder="sk-ant-..." autocomplete="off">
+          <p class="field-hint">Used by Claude-API escalation sessions (and feature recommendations).</p>
         </div>
-        <div class="form-group" style="margin:0">
+      </div><!-- /asub-anthropic -->
+
+      <div id="asub-openai" class="agent-subpanel admin-fields-grid hidden">
+        <div class="form-group">
           <label for="p-openai-key">OpenAI API key</label>
           <input type="password" id="p-openai-key" name="openai_api_key"
                  value="{{ config.openai_api_key or '' }}" placeholder="sk-..." autocomplete="off">
+          <p class="field-hint">Used by OpenAI escalation sessions.</p>
         </div>
-      </div>
+      </div><!-- /asub-openai -->
+
+      <div id="asub-escalation" class="agent-subpanel hidden">
+        <p class="field-hint" style="margin-top:0;margin-bottom:10px">
+          When a Blocked feature has exhausted the base model, automatically retry it once on a
+          stronger LLM for up to N attempts. If that also fails it goes to <strong>Stuck</strong>
+          (no further auto-retry). Bounded by a daily USD cap. <em>Cap blank/0 ⇒ disabled.</em>
+          API keys are set in the Anthropic / OpenAI tabs.
+        </p>
+        <div class="admin-fields-grid" style="grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px">
+          <div class="form-group" style="margin:0">
+            <label>
+              <input type="checkbox" name="blocked_escalation_enabled" value="1"
+                     {% if config.blocked_escalation_enabled %}checked{% endif %}>
+              Enable premium escalation
+            </label>
+          </div>
+          <div class="form-group" style="margin:0">
+            <label for="p-esc-cap">Daily USD cap</label>
+            <input type="number" id="p-esc-cap" name="blocked_escalation_daily_usd_cap" step="0.01" min="0"
+                   value="{{ config.blocked_escalation_daily_usd_cap or '' }}" placeholder="0 = disabled" class="field-narrow">
+            <p class="field-hint">Max premium spend per UTC day. 0/blank disables escalation.</p>
+          </div>
+          <div class="form-group" style="margin:0">
+            <label for="p-esc-backend">Backend</label>
+            <select id="p-esc-backend" name="blocked_escalation_backend">
+              <option value="claude-api" {% if config.blocked_escalation_backend == 'claude-api' %}selected{% endif %}>claude-api</option>
+              <option value="openai" {% if config.blocked_escalation_backend == 'openai' %}selected{% endif %}>openai</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin:0">
+            <label for="p-esc-model">Model</label>
+            <input type="text" id="p-esc-model" name="blocked_escalation_model"
+                   value="{{ config.blocked_escalation_model or '' }}" placeholder="claude-opus-4-8" autocomplete="off">
+          </div>
+          <div class="form-group" style="margin:0">
+            <label for="p-esc-attempts">Premium attempts</label>
+            <input type="number" id="p-esc-attempts" name="blocked_escalation_max_attempts" min="1" max="10"
+                   value="{{ config.blocked_escalation_max_attempts or 3 }}" placeholder="3" class="field-narrow">
+          </div>
+        </div>
+      </div><!-- /asub-escalation -->
 
       <div class="form-actions">
-        <button type="submit">Save poller &amp; agent settings</button>
+        <button type="submit">Save settings</button>
       </div>
-    </form>
-
-    <div class="admin-subsection">
-      <div class="settings-card-title">
-        <span class="title-icon">
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
-        </span>
-        Poller Lock
-      </div>
-      <p class="muted admin-subsection-desc">
-        If the poller process crashed without releasing its lock, use this to forcefully clear it before restarting.
-      </p>
-      <button type="button" class="pf-btn pf-btn--sm pf-btn--danger" onclick="forceUnlockPoller()">Force-clear poller lock</button>
-      <span id="unlock-msg" class="admin-subsection-msg"></span>
-    </div>
-  </div>
-</div>
+    </div><!-- /agent settings-card -->
+  </div><!-- /atab-agent -->
+</form>
 
 
 <!-- ── TAB: PM ACCOUNTS ─────────────────────────────────────── -->
@@ -484,7 +511,7 @@
 </div>
 
 {% block scripts %}
-<script src="/static/js/admin.js"></script>
+<script src="/static/js/admin.js?v=2026-06-18-agent-tab"></script>
 <script>
 // Restore last tab or auto-open the saved one
 (function() {

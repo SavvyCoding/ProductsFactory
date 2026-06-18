@@ -1314,7 +1314,9 @@ async def admin_save_poller_settings(
     # → drop the override for that persona. Personas not in this list are
     # left untouched in the JSONB so manual DB edits or future additions
     # survive a save through the UI.
-    _personas_for_override = ("coder", "reviewer", "designer", "planner",
+    # coder/designer intentionally excluded — they have dedicated chain fields
+    # (coder_model / designer_model); the per-persona grid only overrides the rest.
+    _personas_for_override = ("reviewer", "planner",
                               "documenter", "analytics", "recommender",
                               "devops", "refactorer", "product_trainer")
     _new_map = dict(config.ollama_model_map or {})
