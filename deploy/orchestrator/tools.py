@@ -586,6 +586,25 @@ def run_cycle(args: dict, **kwargs) -> str:
             except Exception:
                 log.exception(f"blocked-reprocessor failed for product {p.get('id')}")
 
+        # Dangling-dependency catch-net: re-home any feature whose depends_on
+        # points at a Rejected/Reverted (dead) target onto the live replacement
+        # child. The post_doc pipeline fixes this at the SOURCE (designer split
+        # time); this per-cycle sweep cleans up what escapes — PM-side
+        # rejections, pre-existing tangles, edge cases. Shares the detection
+        # logic with the source path (one source of truth). ON by default
+        # (DEPENDENCY_REHOME_ENABLED falsy → dry-run logs only).
+        for p in ready:
+            try:
+                n_rh = _repair_dangling_dependencies(p, features=features_by_pid.get(p["id"]))
+                if n_rh:
+                    with _pm_client() as client:
+                        _fr = client.get(f"/api/products/{p['id']}/features")
+                    _fl = _fr.json() if _fr.is_success else None
+                    if isinstance(_fl, list):
+                        features_by_pid[p["id"]] = _fl
+            except Exception:
+                log.exception(f"dependency-rehome catch-net failed for product {p.get('id')}")
+
         for p in ready:
             try:
                 n_infra = _execute_infra_stories(p, features=features_by_pid.get(p["id"]))
@@ -1348,6 +1367,78 @@ def _reprocess_blocked_features(product: dict, features: list | None = None,
     except Exception:
         log.exception(f"[reprocessor] {pname}: failed (non-fatal)")
     return reprocessed
+
+
+def _repair_dangling_dependencies(product: dict, features: list | None = None) -> int:
+    """Catch-net for the re-decomposition stranding class: re-home any feature
+    whose ``depends_on`` points at a Rejected/Reverted (dead) target onto its
+    live replacement child, so the dispatch gate stops holding it forever.
+
+    The post_doc pipeline fixes this at the SOURCE (designer split time); this
+    per-cycle sweep is the safety net for what escapes — PM-side rejections,
+    pre-existing tangles, edge cases the source path can't see. Shares the
+    detection logic (``orchestrator.cycle.dependencies.dangling_dependency_repairs``)
+    with the source path — one source of truth, no drift.
+
+    ON by default for all products; ``DEPENDENCY_REHOME_ENABLED`` falsy
+    (``0``/``false``/``no``/``off``) disables (dry-run: detect + log, mutate
+    nothing). Best-effort; never raises into the cycle. Returns count applied.
+    """
+    enabled = os.environ.get("DEPENDENCY_REHOME_ENABLED", "on").strip().lower() \
+        not in ("0", "false", "no", "off", "")
+    pid = product.get("id")
+    if not pid:
+        return 0
+    try:
+        from orchestrator.cycle.dependencies import dangling_dependency_repairs
+    except Exception:
+        return 0
+    if features is None:
+        try:
+            with _pm_client() as client:
+                _r = client.get(f"/api/products/{pid}/features")
+            features = _r.json() if _r.is_success else None
+        except Exception:
+            return 0
+    if not isinstance(features, list):
+        return 0
+    repairs = dangling_dependency_repairs(features)
+    if not repairs:
+        return 0
+    if not enabled:
+        for r in repairs:
+            log.info(f"[rehome-dry-run] product {pid}: would repair "
+                     f"#{r['feature_id']}: {r['reason']}")
+        return 0
+    applied = 0
+    try:
+        with _pm_client() as client:
+            for r in repairs:
+                fid, new_dep = r["feature_id"], r["new_dep"]
+                try:
+                    if new_dep is not None:
+                        client.patch(f"/api/features/{fid}", json={
+                            "depends_on": new_dep, "changed_by": "reconciler:rehome"})
+                        client.post(f"/api/features/{fid}/comments", json={
+                            "author": "reconciler:rehome",
+                            "body": (f"🔧 Dependency repair (catch-net) — {r['reason']}. "
+                                     f"Re-homed off the Rejected target onto its live "
+                                     f"replacement so the dispatch gate releases this once "
+                                     f"the replacement ships."),
+                        })
+                        applied += 1
+                    else:
+                        client.post("/api/alerts", json={
+                            "level": "warning",
+                            "message": f"Dangling dependency — feature #{fid}: {r['reason']}"})
+                except Exception as e:
+                    log.warning(f"[rehome] product {pid}: repair for #{fid} failed: {e}")
+    except Exception:
+        log.exception(f"[rehome] product {pid}: catch-net sweep failed")
+        return applied
+    if applied:
+        log.info(f"[rehome] product {pid}: re-homed {applied} dangling dependency(ies)")
+    return applied
 
 
 def _execute_infra_stories(product: dict, features: list | None = None) -> int:
