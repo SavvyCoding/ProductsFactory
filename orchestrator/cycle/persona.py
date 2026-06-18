@@ -43,7 +43,7 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
     ``persona``, ``product_id``, ``reason``. Never raises — failures return
     ``{"action": "exit", "reason": "..."}``.
     """
-    _TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted"}
+    _TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted", "Stuck"}
     _IN_AGENT = {"Designing", "Implementing", "Reviewing"}
 
     try:

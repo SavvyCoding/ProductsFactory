@@ -430,6 +430,13 @@ async def _max_fix_attempts(db: AsyncSession) -> int:
     return val if (val and val > 0) else 5
 
 
+async def _blocked_escalation_max_attempts(db: AsyncSession) -> int:
+    """Premium-escalation pass cap (docs/blocked_escalation_plan.md), default 3."""
+    cfg = await _get_system_config(db)
+    val = getattr(cfg, "blocked_escalation_max_attempts", None) if cfg else None
+    return val if (val and val > 0) else 3
+
+
 async def _close_blocked_feature_pr(
     feature: Feature, github_repo: str, reason: str, db: AsyncSession
 ) -> None:
@@ -2092,7 +2099,31 @@ async def api_update_feature(
         # fix_attempts; all three must route at the cap or the cap is
         # not actually a cap.
         max_fix = await _max_fix_attempts(db)
-        if new_attempts >= max_fix:
+        esc_cap = await _blocked_escalation_max_attempts(db)
+        if feature.escalation_active and new_attempts >= esc_cap:
+            # Premium-escalation pass exhausted → terminal 'Stuck' (migration 047):
+            # both the base model AND the stronger LLM failed. Distinct from
+            # 'Blocked' so the escalation reprocessor never re-escalates it — the
+            # loop guard. Raise a dashboard alert for human triage.
+            feature.status = "Stuck"
+            feature.escalation_active = False
+            feature.blocked_reason = (
+                f"Stuck: premium escalation exhausted (fix_attempts={new_attempts} "
+                f">= {esc_cap}) via {trigger}. Base AND premium models both failed "
+                f"— needs human intervention."
+            )
+            db.add(FeatureChangelog(
+                feature_id=feature_id, field="status",
+                old_value=str(new_status) if new_status else str(prev_status),
+                new_value="Stuck",
+                changed_by=f"{changed_by} (escalation exhausted)",
+            ))
+            db.add(Alert(
+                product_id=feature.product_id, level="warning",
+                message=(f"Feature #{feature_id} is Stuck — base and premium models "
+                         f"both exhausted; needs human intervention."),
+            ))
+        elif new_attempts >= max_fix:
             # Phases→features flat model (migration 043): no more Blocked
             # holdpen sprint — just set the feature status to Blocked. PMs
             # re-engage by PATCHing status back to Approved/Designed.
@@ -2146,7 +2177,7 @@ async def api_update_feature(
     # transitions (parent "Replaced by children #X #Y" pattern from
     # designer.md), and PM-Reject of an in-flight feature also lands
     # here. Same close path, same single chokepoint.
-    _TERMINAL_NON_PUSHED = frozenset({"Blocked", "Rejected", "Deferred", "Reverted"})
+    _TERMINAL_NON_PUSHED = frozenset({"Blocked", "Rejected", "Deferred", "Reverted", "Stuck"})
     if (
         feature.status in _TERMINAL_NON_PUSHED
         and prev_status not in _TERMINAL_NON_PUSHED
@@ -3080,7 +3111,7 @@ async def api_plan_phases(
 # whose every feature is settled is eligible to settle the gate. Blocked /
 # Reverted are settled-but-unresolved — they don't keep the phase open, they
 # become the SUBJECT of the report's blockers + dependency warnings.
-_SETTLED_STATUSES = frozenset({"Pushed", "Deferred", "Rejected", "Reverted", "Blocked"})
+_SETTLED_STATUSES = frozenset({"Pushed", "Deferred", "Rejected", "Reverted", "Blocked", "Stuck"})
 _UNRESOLVED_STATUSES = frozenset({"Blocked", "Reverted"})
 
 
@@ -3991,7 +4022,7 @@ async def api_flapping_features(
             FeatureChangelog.changed_at >= cutoff,
             # Terminal features are DONE, not stuck — never flag them (a feature
             # that progressed to Pushed must not be Block-able; #1421).
-            Feature.status.notin_(["Pushed", "Rejected", "Reverted", "Deferred", "Blocked"]),
+            Feature.status.notin_(["Pushed", "Rejected", "Reverted", "Deferred", "Blocked", "Stuck"]),
             # Operator/PM-driven transitions are surgery, not flapping —
             # counting them Blocked DogTinder #1582 mid-redesign (2026-06-12)
             # after a string of deliberate pm resets. Agent-loop oscillation

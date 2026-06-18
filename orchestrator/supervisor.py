@@ -1253,7 +1253,7 @@ def detect_dirty_prs(
             continue
         # Find features tracking this PR
         affected = [f for f in features if f.get("pr_number") == pr_n
-                    and f.get("status") not in ("Pushed", "Rejected", "Reverted", "Deferred")]
+                    and f.get("status") not in ("Pushed", "Rejected", "Reverted", "Deferred", "Stuck")]
         reason = (
             f"PR #{pr_n} mergeable_state=dirty for {int(age//60)}min, "
             f"idle for {int(idle_for//60)}min. Closing and resetting "

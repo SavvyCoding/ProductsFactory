@@ -230,7 +230,7 @@ def get_features(args: dict, **kwargs) -> str:
         parsed = json.loads(raw)
         data = parsed.get("data") if isinstance(parsed, dict) else parsed
         if isinstance(data, list):
-            _TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted"}
+            _TERMINAL = {"Pushed", "Deferred", "Rejected", "Reverted", "Stuck"}
             data = [f for f in data if f.get("status") not in _TERMINAL]
             if isinstance(parsed, dict):
                 parsed["data"] = data
