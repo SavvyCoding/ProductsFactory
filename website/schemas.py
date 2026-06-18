@@ -203,6 +203,11 @@ class FeatureUpdate(BaseModel):
     session_uid:     Optional[str]  = None  # review authorship — stored in feature_reviews, not on feature
     phase_id:        Optional[int]  = None  # reassign to a different phase
     parent_id:       Optional[int]  = None  # sizing-gate split tree
+    depends_on:      Optional[int]  = None  # dispatch-gate predecessor; settable so the
+                                            # dangling-dependency repair (re-home a dependent
+                                            # off a Rejected/Replaced target onto its live
+                                            # replacement child) goes through the audited API
+                                            # instead of a raw DB write.
     merge_notes:     Optional[str]  = None  # per-feature release-notes draft
     expected_version: Optional[int] = None  # optimistic lock — if provided, update is rejected on mismatch
     # Caller-supplied attribution: who/what is making this change. Read by
