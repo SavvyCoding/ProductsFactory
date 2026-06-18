@@ -264,26 +264,6 @@
         <span class="settings-card-hint">Blank = use env var / built-in default</span>
       </div>
 
-      <p class="admin-section-label">Base backend <span class="field-hint field-hint--inline">platform that runs normal (non-escalation) sessions</span></p>
-      <div class="admin-fields-grid admin-fields-grid--bottom-gap">
-        <div class="form-group form-group--full">
-          <div class="profile-switcher">
-            <label class="profile-option {% if config.agent_backend != 'claude' %}active{% endif %}">
-              <input type="radio" name="agent_backend" value="ollama" {% if config.agent_backend != 'claude' %}checked{% endif %}>
-              <span class="profile-icon">⚡</span>
-              <span class="profile-label">Ollama</span>
-              <span class="profile-desc">Local / cloud Ollama models</span>
-            </label>
-            <label class="profile-option {% if config.agent_backend == 'claude' %}active{% endif %}">
-              <input type="radio" name="agent_backend" value="claude" {% if config.agent_backend == 'claude' %}checked{% endif %}>
-              <span class="profile-icon">✦</span>
-              <span class="profile-label">Claude CLI</span>
-              <span class="profile-desc">Claude via OAuth CLI</span>
-            </label>
-          </div>
-        </div>
-      </div>
-
       <div class="tab-bar agent-subtab-bar" style="margin-bottom:14px">
         <button type="button" class="tab-btn active" onclick="agentSub('ollama',this)">⚡ Ollama</button>
         <button type="button" class="tab-btn" onclick="agentSub('anthropic',this)">✦ Anthropic</button>
@@ -306,34 +286,31 @@
                  placeholder="{% if config.ollama_api_key %}set ({{ config.ollama_api_key|length }} chars, starts with {{ config.ollama_api_key[:8] }}…; leave blank to keep){% else %}required for Ollama Cloud; ignored for local{% endif %}">
           <p class="field-hint">Required for Ollama Cloud (<code>https://ollama.com</code>). Ignored when host is a local Ollama. Leave blank on save to keep the existing key — only non-empty submissions overwrite. After a save, the placeholder updates to reflect the new key's prefix (visible confirmation of rotation).</p>
         </div>
-        <div class="form-group">
-          <label for="p-designer">Designer model chain</label>
-          <input type="text" id="p-designer" name="designer_model"
-                 value="{{ config.designer_model or '' }}"
-                 placeholder="gemma3:27b, qwen3-coder:480b" autocomplete="off">
-          <p class="field-hint">Ollama model(s) for Designer / Reviewer / Planner. Comma-separated for fallback chain — primary first. The agent tries each model up to 5× before falling through to the next on transient errors (5xx, timeouts, network).</p>
-        </div>
-        <div class="form-group">
-          <label for="p-coder">Coder model chain</label>
-          <input type="text" id="p-coder" name="coder_model"
-                 value="{{ config.coder_model or '' }}"
-                 placeholder="gpt-oss:120b, qwen3-coder:480b, deepseek-v4-flash" autocomplete="off">
-          <p class="field-hint">Ollama model(s) for Coder persona. Comma-separated for fallback chain.</p>
-        </div>
         <div class="form-group form-group-wide">
-          <label>Per-persona model overrides</label>
+          <label>Per-persona models</label>
           <p class="field-hint" style="margin-top:0;margin-bottom:8px">
-            Optional. Override the model for a specific persona instead of the Designer/Coder chain above. (Coder and Designer aren't listed here — they have their own chain fields above.) Comma-separated; primary first. Leave blank to fall back to the chains above.
+            Ollama model (chain) for each persona. Comma-separated for a fallback chain — primary first; the agent tries each up to 5× before falling through on transient errors. <strong>Coder</strong> and <strong>Designer</strong> are the base chains; every other persona falls back to them when left blank.
           </p>
-          {% set _override_personas = ['reviewer', 'planner', 'documenter', 'analytics', 'recommender', 'devops', 'refactorer', 'product_trainer'] %}
           {% set _model_map = config.ollama_model_map or {} %}
-          <div class="admin-fields-grid" style="grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px">
-            {% for _p in _override_personas %}
+          <div class="admin-fields-grid" style="grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 16px">
+            <div class="form-group" style="margin:0">
+              <label for="p-coder" style="font-size:0.85em"><strong>coder</strong></label>
+              <input type="text" id="p-coder" name="coder_model"
+                     value="{{ config.coder_model or '' }}"
+                     placeholder="qwen3-coder:480b, deepseek-v4-flash" autocomplete="off">
+            </div>
+            <div class="form-group" style="margin:0">
+              <label for="p-designer" style="font-size:0.85em"><strong>designer</strong></label>
+              <input type="text" id="p-designer" name="designer_model"
+                     value="{{ config.designer_model or '' }}"
+                     placeholder="gemma3:27b, qwen3-coder:480b" autocomplete="off">
+            </div>
+            {% for _p in ['reviewer', 'planner', 'documenter', 'analytics', 'recommender', 'devops', 'refactorer', 'product_trainer'] %}
             <div class="form-group" style="margin:0">
               <label for="p-mc-{{ _p }}" style="font-size:0.85em">{{ _p }}</label>
               <input type="text" id="p-mc-{{ _p }}" name="ollama_chain_{{ _p }}"
                      value="{% if _model_map.get(_p) %}{{ _model_map[_p] | join(', ') }}{% endif %}"
-                     placeholder="(uses default chain)" autocomplete="off">
+                     placeholder="(falls back to coder/designer)" autocomplete="off">
             </div>
             {% endfor %}
           </div>
