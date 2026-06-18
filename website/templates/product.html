@@ -511,7 +511,7 @@
                  onchange="toggleSelect({{ f.id }}, this)"
                  onclick="event.stopPropagation()">
           <div>
-            <div class="phase-card-name">{{ f.name }}</div>
+            <div class="phase-card-name"><span class="feat-id-badge">#{{ f.id }}</span>{{ f.name }}</div>
             {% if f.description %}<div class="phase-card-desc">{{ f.description[:200] }}{% if f.description|length > 200 %}…{% endif %}</div>{% endif %}
             <div class="phase-card-meta">
               {% if f.feature_type == 'bug' %}<span class="type-badge type-bug">🐛 Bug</span>{% endif %}
@@ -810,7 +810,7 @@
     <div class="phase-card" data-feature-id="{{ f.id }}" style="margin-bottom:6px;padding:8px;border-radius:6px;background:var(--bg);border:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;cursor:pointer">
       <div style="min-width:0;flex:1">
         <div style="font-size:13px;font-weight:600;color:var(--text)">
-          {% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
+          <span class="feat-id-badge">#{{ f.id }}</span>{% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
         </div>
         {% if f.blocked_reason %}<div style="font-size:11px;color:var(--text-muted);margin-top:2px">{{ f.blocked_reason }}</div>{% endif %}
       </div>
@@ -854,7 +854,7 @@
       {% for f in phase_display %}
       <div class="phase-card sprint-feature-row" data-feature-id="{{ f.id }}" style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;border-radius:6px;background:var(--surface);border:1px solid var(--border);cursor:pointer;{% if f.status == 'Pushed' %}opacity:.8{% endif %}">
         <div style="font-size:12px;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">
-          {% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
+          <span class="feat-id-badge">#{{ f.id }}</span>{% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
           {% if f.parent_id %}<span style="font-size:10px;color:var(--text-muted);margin-left:6px" title="Split child of #{{ f.parent_id }}">↳ child of #{{ f.parent_id }}</span>{% endif %}
         </div>
         <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;margin-left:6px">
@@ -931,7 +931,7 @@
     {% for f in unphased %}
     <div class="phase-card" data-feature-id="{{ f.id }}" style="margin-bottom:4px;padding:6px 8px;border-radius:6px;background:var(--bg);border:1px solid var(--border);display:flex;justify-content:space-between;cursor:pointer">
       <div style="font-size:12px;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">
-        {% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
+        <span class="feat-id-badge">#{{ f.id }}</span>{% if f.feature_type == 'bug' %}🐛 {% elif f.feature_type == 'chore' %}🔧 {% endif %}{{ f.name }}
       </div>
       <span class="badge badge-status-{{ f.status | lower }}" style="font-size:10px;flex-shrink:0">{{ f.status }}</span>
     </div>
