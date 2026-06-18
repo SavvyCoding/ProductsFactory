@@ -30,6 +30,7 @@ pydantic-settings==2.6.0
 
 # LLM feature recommendations
 anthropic>=0.40.0
+openai>=1.40.0
 
 # Product video generation (post-coder step)
 Pillow>=10.0.0              # slide image creation
