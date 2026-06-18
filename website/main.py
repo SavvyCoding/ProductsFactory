@@ -811,11 +811,30 @@ async def product_detail(
     )
     labels = label_result.scalars().all()
 
+    # Dependency-gate visibility: surface which features are HELD because their
+    # depends_on hasn't shipped, so the dashboard distinguishes "waiting on a
+    # dependency" from "idle / nobody's working on it". Mirrors the orchestrator
+    # gate orchestrator/cycle/dependencies.py::dependency_blocked_feature_ids
+    # (held = depends_on set, target present, target not Pushed, not a self-ref).
+    # Kept in sync by hand: the web image ships only orchestrator/__init__.py,
+    # not orchestrator.cycle, so it can't be imported here.
+    _feat_by_id = {f.id: f for f in features}
+    dep_waiting = {}
+    for f in features:
+        dep = f.depends_on
+        if dep and dep != f.id and dep in _feat_by_id and _feat_by_id[dep].status != "Pushed":
+            dep_waiting[f.id] = {
+                "id": dep,
+                "status": _feat_by_id[dep].status,
+                "name": _feat_by_id[dep].name,
+            }
+
     tab = request.query_params.get("tab", "board")
     response = templates.TemplateResponse("product.html", {
         "request": request,
         "product": product,
         "features": features,
+        "dep_waiting": dep_waiting,
         "sessions": sessions,
         "open_prs": open_prs,
         "open_prs_list": open_prs_list,
