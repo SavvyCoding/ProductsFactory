@@ -592,6 +592,18 @@ class TestDetectDuplicateDDL:
         self._write(tmp_path / "migrations" / "0002.py", ddl)
         assert detect_duplicate_ddl(tmp_path, [_feature(1, product_id=24)]) == []
 
+    def test_vendored_deps_excluded(self, tmp_path):
+        # CREATE TABLE inside installed-dependency dirs (.pylib / site-packages)
+        # is third-party library source (e.g. sqlalchemy's DDL generation), NOT
+        # product code — must never be flagged. Canonical 2026-06-19: ~18
+        # bogus duplicate_ddl chores on HomeChoreService sourced from
+        # `.pylib/sqlalchemy`.
+        ddl = 'conn.execute("CREATE TABLE calculations (id INTEGER)")\n'
+        self._write(tmp_path / ".pylib" / "sqlalchemy" / "a.py", ddl)
+        self._write(tmp_path / ".pylib" / "sqlalchemy" / "b.py", ddl)
+        self._write(tmp_path / "site-packages" / "fastapi" / "c.py", ddl)
+        assert detect_duplicate_ddl(tmp_path, [_feature(1, product_id=24)]) == []
+
     def test_comments_ignored(self, tmp_path):
         body = (
             'conn.execute("CREATE TABLE calculations (id INTEGER)")\n'
