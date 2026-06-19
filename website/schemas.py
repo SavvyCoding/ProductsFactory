@@ -189,6 +189,8 @@ class FeatureUpdate(BaseModel):
     """Used by Claude agents to update feature status during implementation."""
     status:          Optional[str]  = None
     feature_type:    Optional[str]  = None
+    priority:        Optional[int]  = None  # settable so the escalation driver can
+                                            # bump a feature to the top dispatch band
     fix_attempts:    Optional[int]  = None
     branch_name:     Optional[str]  = None
     pr_url:          Optional[str]  = None
