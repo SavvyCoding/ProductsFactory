@@ -63,11 +63,22 @@ class _CostTracker:
         self.total_cost_usd = 0.0
         self.call_count = 0
 
-    def _record(self, in_tok: int, out_tok: int) -> None:
+    def _record(self, in_tok: int, out_tok: int,
+                cache_read: int = 0, cache_write: int = 0) -> None:
+        # Prompt-caching aware (Anthropic): a cache WRITE bills at 1.25x base
+        # input price, a cache READ at 0.10x. usage.input_tokens is only the
+        # uncached remainder, so without these terms a cached multi-turn session
+        # would be wildly UNDER-counted (and an uncached one is the $3.72/224K
+        # case that tripped the daily cap on its own — 2026-06-18).
         in_price, out_price = _price_for(self.model)
-        self.total_input_tokens += in_tok or 0
+        self.total_input_tokens += (in_tok or 0) + (cache_read or 0) + (cache_write or 0)
         self.total_output_tokens += out_tok or 0
-        self.total_cost_usd += ((in_tok or 0) * in_price + (out_tok or 0) * out_price) / 1_000_000.0
+        self.total_cost_usd += (
+            (in_tok or 0) * in_price
+            + (cache_write or 0) * in_price * 1.25
+            + (cache_read or 0) * in_price * 0.10
+            + (out_tok or 0) * out_price
+        ) / 1_000_000.0
         self.call_count += 1
 
 
@@ -151,6 +162,33 @@ def _messages_to_anthropic(messages: list[dict]) -> tuple[str, list[dict]]:
     return "\n\n".join(system_parts), amsgs
 
 
+def _with_cache_control(system: str, amsgs: list[dict]) -> tuple[list[dict] | None, list[dict]]:
+    """Add ephemeral prompt-cache breakpoints so a multi-turn tool loop re-reads
+    the stable prefix (system + prior turns) at 0.10x input price instead of
+    re-paying full price for the whole re-sent context every turn.
+
+    Anthropic automatically bills the longest already-cached matching prefix as a
+    cache READ regardless of where THIS request's breakpoints sit — breakpoints
+    only control what gets WRITTEN. So one breakpoint on the system block + one on
+    the current conversation tail is enough for incremental caching: each turn
+    writes the new tail, the next turn reads everything before it.
+
+    Returns (system_param, amsgs): system becomes a one-element list of cached
+    text blocks (or None when empty), and the last content block of the last
+    message is tagged. amsgs is rebuilt fresh each call by _messages_to_anthropic,
+    so tagging it here never leaks cache_control back into the loop's history.
+    """
+    system_param = None
+    if system:
+        system_param = [{"type": "text", "text": system,
+                         "cache_control": {"type": "ephemeral"}}]
+    if amsgs:
+        content = amsgs[-1].get("content")
+        if isinstance(content, list) and content and isinstance(content[-1], dict):
+            content[-1] = {**content[-1], "cache_control": {"type": "ephemeral"}}
+    return system_param, amsgs
+
+
 def _anthropic_response_to_openai(resp) -> dict:
     """Anthropic Message → {content, tool_calls(OpenAI-style), finish_reason}."""
     text_parts: list[str] = []
@@ -198,6 +236,7 @@ class ClaudeAPIBackend(_CostTracker):
 
     def __call__(self, messages: list[dict], tools: list[dict]) -> dict:
         system, amsgs = _messages_to_anthropic(messages)
+        system_param, amsgs = _with_cache_control(system, amsgs)
         atools = _tools_to_anthropic(tools)
         client = self._client_lazy()
         last_err = None
@@ -206,13 +245,17 @@ class ClaudeAPIBackend(_CostTracker):
                 resp = client.messages.create(
                     model=self.model,
                     max_tokens=self.max_tokens,
-                    system=system or None,
+                    system=system_param,
                     messages=amsgs,
                     tools=atools or None,
                 )
                 usage = getattr(resp, "usage", None)
-                self._record(getattr(usage, "input_tokens", 0) if usage else 0,
-                             getattr(usage, "output_tokens", 0) if usage else 0)
+                self._record(
+                    getattr(usage, "input_tokens", 0) if usage else 0,
+                    getattr(usage, "output_tokens", 0) if usage else 0,
+                    getattr(usage, "cache_read_input_tokens", 0) if usage else 0,
+                    getattr(usage, "cache_creation_input_tokens", 0) if usage else 0,
+                )
                 return _anthropic_response_to_openai(resp)
             except Exception as e:  # noqa: BLE001 — backend owns its retries
                 last_err = e
