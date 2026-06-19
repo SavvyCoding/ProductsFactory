@@ -2203,7 +2203,7 @@ def _baseline_pytest_failures(working_dir: str, test_ids: list[str],
             log.warning(f"[post-coder] baseline worktree add failed: "
                         f"{(add.stderr or '')[:200]}")
             return set()
-        rr = _sp.run(["pytest", "-q", "--no-header", "-s",
+        rr = _sp.run(["python", "-m", "pytest", "-q", "--no-header", "-s",
                       "-p", "no:cacheprovider", "--continue-on-collection-errors",
                       *test_ids],
                      cwd=wt, capture_output=True, text=True, timeout=timeout)
@@ -2447,8 +2447,22 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
         # for ~12 sessions with "zero tests collected" while pytest -s
         # actually collected 5 items and only failed coverage. Don't drop
         # `-s` here — the capture path is unsafe on Windows hosts.
-        collect_cmd = ["pytest", "--collect-only", "-q", "-s"]
-        run_cmd     = ["pytest", "-q", "--no-header", "-s"]
+        # Invoke pytest as a MODULE, never the bare `pytest` console-script.
+        # The agent image bakes pytest in the pyenv site, but a product whose
+        # requirements pin a different pytest version installs it into
+        # ~/.local (pip auto-falls-back to --user when the pyenv site isn't
+        # writable). That ~/.local pytest shadows the pyenv one on sys.path,
+        # but the pyenv bin/pytest *shim* still imports a symbol from its own
+        # version (`from _pytest.config import _console_main`) that the
+        # ~/.local _pytest doesn't have → ImportError, pytest never starts,
+        # and every test "fails". `python -m pytest` loads the package python
+        # actually resolves (the coherent ~/.local set, plugins included) and
+        # bypasses the version-mismatched shim entirely. Canonical
+        # HomeChoreService #1662 (2026-06-19): the gate looped on
+        # `cannot import name '_console_main'` until the diagnostician caught
+        # it as env_impossible.
+        collect_cmd = ["python", "-m", "pytest", "--collect-only", "-q", "-s"]
+        run_cmd     = ["python", "-m", "pytest", "-q", "--no-header", "-s"]
     elif (wd / "package.json").exists():
         try:
             import json as _json
@@ -2490,6 +2504,15 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
         r"can't load package: package",
         r"pytest: command not found",
         r"ModuleNotFoundError: No module named 'pytest'",
+        # pytest env split: a product-pinned pytest in ~/.local shadows the
+        # image's pyenv pytest, breaking the bin shim (`_console_main` import)
+        # or a plugin load. Infra, not a code bug — the coder can't fix a
+        # broken launcher. The `python -m pytest` switch above prevents this in
+        # the test-check; these still catch verify-recipe / plugin-conflict
+        # variants so they're env_broken (no fix_attempts bump, operator alert)
+        # instead of a 4-bounce loop. Canonical HomeChoreService #1662.
+        r"cannot import name '_?console_main' from '_pytest",
+        r"cannot import name '\w+' from 'pytest' \(/[^)]*\.local/",
         # pytest reports "unrecognized arguments: --cov..." when a plugin in
         # the product's pytest.ini addopts isn't installed in the env running
         # the post-coder check (pytest-cov, pytest-xdist, etc.). That's a
