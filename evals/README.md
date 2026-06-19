@@ -46,7 +46,7 @@ python -m evals.runner evals/results/latest.json
 python -m evals.runner evals/results/baseline.json
 
 # 2. Edit a persona prompt.
-vim orchestrator/prompts/coder.md
+vim orchestrator/prompts/brownfield.md
 
 # 3. Run again on the candidate prompt.
 python -m evals.runner evals/results/candidate.json
@@ -73,8 +73,9 @@ Selected by `EVAL_BACKEND` (default: `ollama` if `OLLAMA_HOST` is set, else `stu
 1. Create `evals/scenarios/<id>.json`. Required fields:
    - `id`: unique string, also the test name in pytest
    - `description`: one-line human summary
-   - `persona`: persona name (or `null` + `product_overrides.type` for the
-     greenfield/brownfield coder, which is type-routed)
+   - `persona`: persona name (or `null` for the coder, which is type-routed via
+     `product_overrides.type` — all coder routing now lands on `brownfield.md`;
+     the separate greenfield template was retired to a pointer stub 2026-06-11)
    - `product_overrides`: dict merged over `SAMPLE_PRODUCT`
    - `assigned_features`: list of feature dicts
    - `stub_response`: the response the StubBackend should replay (must
