@@ -1333,10 +1333,17 @@ def _escalate_blocked_features(product: dict, features: list | None = None,
                        for c in comments):
                     continue
                 try:
-                    client.patch(f"/api/features/{fid}", json={
+                    _r = client.patch(f"/api/features/{fid}", json={
                         "status": "Approved", "changed_by": "escalation-reprocessor",
                         "escalation_active": True, "fix_attempts": 0, "priority": 1,
                     })
+                    # Only mark/count on a CONFIRMED unblock. A rejected PATCH
+                    # (e.g. rank guard) must NOT leave the one-shot marker comment,
+                    # or the feature gets permanently deduped out of escalation.
+                    if not _r.is_success:
+                        log.warning(f"[escalation] {pname}: #{fid} unblock PATCH "
+                                    f"failed ({_r.status_code}): {(_r.text or '')[:200]}")
+                        continue
                     client.post(f"/api/features/{fid}/comments", json={
                         "author": _ESCALATION_MARKER_AUTHOR,
                         "body": (f"🚀 **Premium escalation** — base model exhausted; retrying on "
