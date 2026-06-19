@@ -836,10 +836,13 @@
         {% if phase.goal %}<div style="font-size:12px;color:var(--text-muted);margin-top:2px">{{ phase.goal }}</div>{% endif %}
       </div>
       <div style="text-align:right;flex-shrink:0;margin-left:12px">
-        <div style="font-size:12px;color:var(--text-muted)">{{ phase_pushed | length }}/{{ phase_feats | length }} shipped</div>
-        {% if phase_feats | length > 0 %}
+        {# Denominator is phase_display (excludes Rejected/Reverted) — the same
+           list rendered below — so "25/25 shipped" when all shippable features
+           are Pushed, not "25/33" inflated by out-of-scope rejected work. #}
+        <div style="font-size:12px;color:var(--text-muted)">{{ phase_pushed | length }}/{{ phase_display | length }} shipped</div>
+        {% if phase_display | length > 0 %}
         <div style="background:var(--border);border-radius:4px;height:4px;width:80px;overflow:hidden;margin-top:4px">
-          <div style="background:var(--green);height:100%;width:{{ ((phase_pushed | length / phase_feats | length) * 100) | int }}%;transition:width .3s"></div>
+          <div style="background:var(--green);height:100%;width:{{ ((phase_pushed | length / phase_display | length) * 100) | int }}%;transition:width .3s"></div>
         </div>
         {% endif %}
       </div>
