@@ -32,7 +32,12 @@ import time
 # as pricing changes. Fallback is intentionally on the high side so an unknown
 # model can't silently under-count against the cap.
 _PRICING = {
-    "claude-opus":    (15.0, 75.0),
+    # claude-opus-4-8 calibrated to 0.5x list (2026-06-18): the $15/$75 list
+    # constant over-counted real billing ~2.7x against the Anthropic console
+    # ($12.71 estimated vs $4.72 actual), tripping the daily escalation cap
+    # early. 0.5x lands closer to observed spend while staying on the safe
+    # (slightly-conservative) side of the ~0.37x measured ratio.
+    "claude-opus":    (7.5, 37.5),
     "claude-sonnet":  (3.0, 15.0),
     "claude-haiku":   (0.80, 4.0),
     "claude-fable":   (15.0, 75.0),
