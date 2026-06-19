@@ -397,6 +397,15 @@ _DDL_EXCLUDE_DIRS = frozenset({
     # hand-written code; only the build-tool output roots are.)
     ".next", ".nuxt", ".svelte-kit", "out", "coverage", ".turbo",
     ".cache", ".parcel-cache",
+    # Installed-dependency dirs — third-party library SOURCE, never product
+    # code. The agent pip-installs product deps into `.pylib` (and pip's
+    # --user fallback / download caches land in site-packages / .pf-cache /
+    # .local), so without these the detectors walk into sqlalchemy/fastapi/
+    # psutil source and file bogus chores. Canonical 2026-06-19: ~18 false-
+    # positive `duplicate_ddl` ("CREATE TABLE statement/to/for") and
+    # `unreachable_emitted_url` (`/proc/*/exe` from psutil) chores on
+    # HomeChoreService, all sourced from `.pylib/...`, filed at priority=1.
+    ".pylib", "site-packages", ".pf-cache", ".tox", ".eggs", ".local",
 })
 _DDL_EXCLUDE_PATH_SUBSTR = ("alembic/versions", "db/migrations")
 
@@ -741,6 +750,9 @@ _CODE_SCAN_EXCLUDE_DIRS = frozenset({
     ".git", ".venv", "venv", "env", "__pycache__", "node_modules",
     "Temp", "Results", "dist", "build", ".pytest_cache", ".mypy_cache",
     ".next", ".nuxt", "coverage", ".nyc_output", "docs",
+    # Installed-dependency dirs (see _DDL_EXCLUDE_DIRS) — third-party library
+    # source, never product code. 2026-06-19 .pylib false-positive incident.
+    ".pylib", "site-packages", ".pf-cache", ".tox", ".eggs", ".local",
 })
 
 _SANDBOX_LITERALS = ("/workspace", "/home/agent")
