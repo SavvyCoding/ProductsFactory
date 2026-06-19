@@ -2281,10 +2281,24 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # back to Approved carries escalation_active=true; this WRITEABLE coder
     # session runs on the globally-configured frontier LLM (sets AGENT_API_*
     # below + tags the session is_escalation for the daily-cost cap).
-    premium_escalation = (
-        persona == "coder"
-        and any(f.get("escalation_active") for f in assigned_features)
-    )
+    # Premium routing is gated on the GLOBAL blocked_escalation_enabled toggle,
+    # re-read from system_config EVERY session (sys_cfg is fetched fresh per
+    # run_claude_in_docker call) — NOT just the per-feature escalation_active
+    # flag. Without this, a feature still carrying escalation_active=true from
+    # an earlier pass (or a manual re-engage) routes to the premium model even
+    # after the operator turns the master switch OFF. Toggle off ⇒ no premium.
+    _esc_enabled = str(sys_cfg.get("blocked_escalation_enabled", "")).strip().lower() \
+        not in ("", "false", "0", "no", "off", "none")
+    _has_esc_feature = persona == "coder" and any(
+        f.get("escalation_active") for f in assigned_features)
+    premium_escalation = _esc_enabled and _has_esc_feature
+    if _has_esc_feature and not _esc_enabled:
+        log.info(
+            f"[escalation] {product.get('name', '?')}: escalation_active feature(s) "
+            f"{[f['id'] for f in assigned_features if f.get('escalation_active')]} "
+            f"present but blocked_escalation_enabled is OFF — running the base "
+            f"model, no premium routing."
+        )
     if premium_escalation:
         log.info(
             f"[escalation] {product.get('name', '?')}: PREMIUM session — feature(s) "
