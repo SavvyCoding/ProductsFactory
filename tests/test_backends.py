@@ -10,6 +10,7 @@ os.environ.setdefault("PM_API_URL", "http://pm-api:8080")
 
 from orchestrator.backends import (  # noqa: E402
     _messages_to_anthropic, _tools_to_anthropic, _price_for, _CostTracker,
+    _with_cache_control,
     _anthropic_response_to_openai, build_api_backend, ClaudeAPIBackend, OpenAIBackend,
 )
 
@@ -99,6 +100,30 @@ class TestMessageConversion:
         assert tu["input"] == {}
 
 
+class TestPromptCaching:
+    def test_cache_control_on_system_and_conversation_tail(self):
+        system, amsgs = _messages_to_anthropic([
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "go"},
+            {"content": "ok", "tool_calls": [
+                {"id": "c1", "function": {"name": "bash", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "out"},
+        ])
+        sp, am = _with_cache_control(system, amsgs)
+        # system → a single cached text block (not a bare string)
+        assert sp == [{"type": "text", "text": "sys",
+                       "cache_control": {"type": "ephemeral"}}]
+        # exactly one message-side breakpoint, on the last block of the last turn
+        assert am[-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+        # earlier blocks stay unmarked — a single tail breakpoint is enough
+        assert "cache_control" not in am[0]["content"][0]
+
+    def test_no_system_and_empty_messages(self):
+        sp, am = _with_cache_control("", [])
+        assert sp is None
+        assert am == []
+
+
 class TestCostTracking:
     def test_price_lookup_by_prefix(self):
         assert _price_for("claude-opus-4-8") == (15.0, 75.0)
@@ -112,6 +137,23 @@ class TestCostTracking:
         assert t.total_output_tokens == 1_000_000
         assert abs(t.total_cost_usd - 90.0) < 1e-6
         assert t.call_count == 1
+
+    def test_record_cache_pricing(self):
+        # Cache WRITE bills 1.25x base input, cache READ 0.10x. Opus = (15, 75)/M.
+        t = _CostTracker("claude-opus-4-8")
+        t._record(1_000_000, 1_000_000, cache_read=1_000_000, cache_write=1_000_000)
+        # 15 (uncached in) + 18.75 (write) + 1.5 (read) + 75 (out) = 110.25
+        assert abs(t.total_cost_usd - 110.25) < 1e-6
+        # all input-side tokens (uncached + read + write) roll into total_input_tokens
+        assert t.total_input_tokens == 3_000_000
+        assert t.total_output_tokens == 1_000_000
+
+    def test_cache_read_is_cheaper_than_uncached(self):
+        # A cached re-send costs 0.10x what the same tokens cost uncached — the
+        # whole point of caching the multi-turn prefix.
+        uncached = _CostTracker("claude-opus-4-8"); uncached._record(500_000, 0)
+        cached = _CostTracker("claude-opus-4-8"); cached._record(0, 0, cache_read=500_000)
+        assert abs(cached.total_cost_usd - uncached.total_cost_usd * 0.10) < 1e-6
 
 
 class TestAnthropicResponseParsing:
