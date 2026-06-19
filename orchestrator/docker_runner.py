@@ -790,6 +790,12 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                 "review_outcome": f.get("review_outcome"),
                 "phase_id": f.get("phase_id"),
                 "parent_id": f.get("parent_id"),
+                # Premium-escalation routing (docs/blocked_escalation_plan.md):
+                # run_claude_in_docker derives premium_escalation from this flag,
+                # so it MUST survive the slim — omitting it silently routes every
+                # escalated feature onto the base model (is_escalation never set).
+                "escalation_active": f.get("escalation_active"),
+                "priority": f.get("priority"),
             }
             for f in selected
         ], None, None
