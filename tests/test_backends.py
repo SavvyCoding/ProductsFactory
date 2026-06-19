@@ -65,6 +65,31 @@ class TestMessageConversion:
         results = [b for b in msgs[1]["content"] if b["type"] == "tool_result"]
         assert {r["tool_use_id"] for r in results} == {"c1", "c2"}
 
+    def test_roleless_assistant_turn_is_not_dropped(self):
+        # REGRESSION (2026-06-18 premium-escalation incident): the agent loop
+        # appends the raw backend response, which has NO "role" key. The
+        # converter must treat it as an assistant turn — otherwise the tool_use
+        # is dropped and the following tool_result orphans into the user turn,
+        # producing Anthropic 400 "unexpected tool_use_id in tool_result".
+        _, msgs = _messages_to_anthropic([
+            {"role": "user", "content": "go"},
+            # no "role" — exactly what backend() returns + agent_loop appends
+            {"content": "running it",
+             "tool_calls": [{"id": "c1", "function": {"name": "bash", "arguments": "{}"}}],
+             "finish_reason": "tool_calls"},
+            {"role": "tool", "tool_call_id": "c1", "content": "out1"},
+        ])
+        # Must be: user(text) → assistant(tool_use) → user(tool_result).
+        assert [m["role"] for m in msgs] == ["user", "assistant", "user"]
+        # The tool_use block survives in the assistant turn …
+        assert any(b["type"] == "tool_use" and b["id"] == "c1"
+                   for b in msgs[1]["content"])
+        # … and the tool_result lands in its OWN user turn, correctly paired —
+        # NOT merged into msgs[0] (the bug signature: msgs[0].content[1]).
+        assert len(msgs[0]["content"]) == 1
+        assert msgs[2]["content"][0]["type"] == "tool_result"
+        assert msgs[2]["content"][0]["tool_use_id"] == "c1"
+
     def test_bad_json_arguments_degrade_to_empty_input(self):
         _, msgs = _messages_to_anthropic([
             {"role": "assistant", "content": "", "tool_calls": [

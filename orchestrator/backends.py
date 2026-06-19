@@ -118,7 +118,17 @@ def _messages_to_anthropic(messages: list[dict]) -> tuple[str, list[dict]]:
                 "tool_use_id": m.get("tool_call_id") or "unknown",
                 "content": content or "(empty)",
             })
-        elif role == "assistant":
+        else:
+            # Assistant turn. CRITICAL: the agent loop appends the raw backend
+            # response dict (agent_loop.py ~L261), which carries NO explicit
+            # "role" key — agent_loop._is_assistant treats "anything not
+            # system/user/tool" as the assistant. So we MUST catch role==None
+            # (and "assistant") here, not just role=="assistant". Missing this
+            # silently DROPPED the tool_use turn, and the following tool_result
+            # then merged into the user turn → Anthropic 400 "unexpected
+            # tool_use_id in tool_result … no corresponding tool_use".
+            # (2026-06-18 premium-escalation incident: every Opus session died
+            # on turn 2.)
             blocks: list[dict] = []
             if content:
                 blocks.append({"type": "text", "text": content})
