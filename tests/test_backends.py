@@ -126,24 +126,24 @@ class TestPromptCaching:
 
 class TestCostTracking:
     def test_price_lookup_by_prefix(self):
-        assert _price_for("claude-opus-4-8") == (15.0, 75.0)
+        assert _price_for("claude-opus-4-8") == (7.5, 37.5)  # 0.5x list (calibrated)
         assert _price_for("gpt-4o") == (2.5, 10.0)
         assert _price_for("totally-unknown-model")  # falls back, non-zero
 
     def test_record_accumulates_tokens_and_cost(self):
         t = _CostTracker("claude-opus-4-8")
-        t._record(1_000_000, 1_000_000)   # 1M in, 1M out → $15 + $75
+        t._record(1_000_000, 1_000_000)   # 1M in, 1M out → $7.5 + $37.5
         assert t.total_input_tokens == 1_000_000
         assert t.total_output_tokens == 1_000_000
-        assert abs(t.total_cost_usd - 90.0) < 1e-6
+        assert abs(t.total_cost_usd - 45.0) < 1e-6
         assert t.call_count == 1
 
     def test_record_cache_pricing(self):
-        # Cache WRITE bills 1.25x base input, cache READ 0.10x. Opus = (15, 75)/M.
+        # Cache WRITE bills 1.25x base input, cache READ 0.10x. Opus = (7.5, 37.5)/M.
         t = _CostTracker("claude-opus-4-8")
         t._record(1_000_000, 1_000_000, cache_read=1_000_000, cache_write=1_000_000)
-        # 15 (uncached in) + 18.75 (write) + 1.5 (read) + 75 (out) = 110.25
-        assert abs(t.total_cost_usd - 110.25) < 1e-6
+        # 7.5 (uncached in) + 9.375 (write) + 0.75 (read) + 37.5 (out) = 55.125
+        assert abs(t.total_cost_usd - 55.125) < 1e-6
         # all input-side tokens (uncached + read + write) roll into total_input_tokens
         assert t.total_input_tokens == 3_000_000
         assert t.total_output_tokens == 1_000_000
