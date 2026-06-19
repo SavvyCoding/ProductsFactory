@@ -1068,6 +1068,41 @@ class TestImplementedBounceCircuitBreaker:
         assert f.status == "Blocked"
         assert f.blocked_reason
 
+    def test_escalation_active_block_redirects_to_stuck(self, client, db):
+        # An escalation_active feature that terminally Blocks BELOW the
+        # fix_attempts cap (e.g. false_success) must NOT land in plain Blocked
+        # (limbo: driver's one-shot marker skips re-escalation, Blocked hides
+        # it from dispatch). It routes to Stuck. Canonical: HomeChoreService
+        # #1659 — false_success block at fix_attempts=1 (2026-06-19).
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Implemented",
+                         escalation_active=True, fix_attempts=1)
+        r = client.patch(
+            f"/api/features/{f.id}",
+            json={"status": "Blocked",
+                  "blocked_reason": "Coder session X exited 0 with no code changes",
+                  "changed_by": "supervisor"},
+        )
+        assert r.status_code == 200
+        db.refresh(f)
+        assert f.status == "Stuck"            # redirected, not Blocked
+        assert f.escalation_active is False   # cleared → driver won't re-escalate
+        assert "premium escalation failed" in (f.blocked_reason or "")
+
+    def test_non_escalation_block_stays_blocked(self, client, db):
+        # Guard: the redirect is scoped to escalation_active features only — a
+        # normal feature still Blocks normally.
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Implemented", fix_attempts=1)
+        r = client.patch(
+            f"/api/features/{f.id}",
+            json={"status": "Blocked", "blocked_reason": "x",
+                  "changed_by": "supervisor"},
+        )
+        assert r.status_code == 200
+        db.refresh(f)
+        assert f.status == "Blocked"
+
     def test_normal_reclaim_does_not_bump(self, client, db):
         # Implementing→Implementing (coder re-claim) is not a bounce.
         p = make_product(db)

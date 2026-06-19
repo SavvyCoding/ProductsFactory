@@ -2167,6 +2167,43 @@ async def api_update_feature(
             ))
             # PR closing handled by the unified Blocked-transition block below.
 
+    # INVARIANT (migration 047 follow-up, 2026-06-19): an escalation_active
+    # feature can NEVER land in plain Blocked — that is the LIMBO state where
+    # the driver's one-shot escalation marker skips re-escalation, Blocked
+    # status hides it from normal dispatch, AND fix_attempts may be below the
+    # cap so the Stuck guard above never fired. Canonical: HomeChoreService
+    # #1659 — a false_success block ("exited 0 with no code changes") at
+    # fix_attempts=1 left it Blocked-but-not-Stuck, picked up by nothing.
+    # The cap path above handles the rework-bounce case; THIS is the single
+    # chokepoint for every OTHER way an escalated feature reaches Blocked
+    # (false_success, supervisor direct-Block, service_missing, verify). A
+    # premium pass that terminally blocks is a terminal premium failure →
+    # route to Stuck (human triage), not limbo. Runs BEFORE the PR closer so
+    # the closer sees status=Stuck (still in _TERMINAL_NON_PUSHED) and closes
+    # the session PR.
+    if (
+        feature.status == "Blocked"
+        and prev_status != "Blocked"
+        and feature.escalation_active
+    ):
+        feature.status = "Stuck"
+        feature.escalation_active = False
+        feature.blocked_reason = (
+            f"Stuck: premium escalation failed (was: "
+            f"{(feature.blocked_reason or 'blocked')[:180]}). Base AND premium "
+            f"models both failed — needs human intervention."
+        )
+        db.add(FeatureChangelog(
+            feature_id=feature_id, field="status",
+            old_value="Blocked", new_value="Stuck",
+            changed_by=f"{changed_by} (escalation→stuck redirect)",
+        ))
+        db.add(Alert(
+            product_id=feature.product_id, level="warning",
+            message=(f"Feature #{feature_id} is Stuck — premium escalation "
+                     f"failed (terminal block before cap)."),
+        ))
+
     # Unified terminal-transition PR closer — the single chokepoint for
     # "feature just transitioned to a terminal not-shipping status, close
     # its open session PR." Fires whenever this PATCH moves status into
