@@ -203,12 +203,8 @@
   {% set _t_in  = lifetime_tokens_in %}
   {% set _t_out = lifetime_tokens_out %}
   {% set _t_total = _t_in + _t_out %}
-
-  {% set sprint_active = sprints | selectattr('status','equalto','active') | rejectattr('kind','equalto','blocked') | list | first %}
-  {% set sprint_planned_count = sprints | selectattr('status','equalto','planned') | rejectattr('kind','equalto','blocked') | list | length %}
-  {% set sprint_completed_count = sprints | selectattr('status','equalto','completed') | list | length %}
-  {% set blocked_sprint = sprints | selectattr('kind','equalto','blocked') | list | first %}
-  {% set blocked_sprint_count = (features | selectattr('sprint_id','equalto', blocked_sprint.id) | list | length) if blocked_sprint else 0 %}
+  {# Sprint summary vars removed 2026-06-19 — sprints retired by migration 043;
+     the summary cards that used them are replaced by the Stuck-features card. #}
 
   <!-- METRIC CARDS — primary KPIs grouped by section -->
 
@@ -261,7 +257,7 @@
         <div class="metric-body">
           <div class="metric-value">{{ blocked }}</div>
           <div class="metric-label">Blocked</div>
-          <div class="metric-foot-text">{% if blocked_sprint_count %}{{ blocked_sprint_count }} on Blocked sprint{% else %}—{% endif %}</div>
+          <div class="metric-foot-text">{% if blocked %}needs triage{% else %}clear{% endif %}</div>
         </div>
       </div>
       <div class="metric-card {% if open_prs and open_prs >= 3 %}metric--warn{% endif %}">
@@ -272,38 +268,19 @@
           <div class="metric-foot-text">{% if open_prs and open_prs >= 3 %}⚠ at PR-gate{% else %}healthy{% endif %}</div>
         </div>
       </div>
-      <div class="metric-card">
-        <div class="metric-icon">▦</div>
+      {# Sprints were retired by migration 043 — the old "active/lifetime
+         sprint" cards here were dead (always empty). Replaced with a
+         needs-attention card surfacing Stuck (terminal: base AND premium
+         models failed) and Blocked features so PMs see triage debt at a
+         glance. #}
+      {% set stuck_count = features | selectattr('status', 'equalto', 'Stuck') | list | length %}
+      {% set blocked_count = features | selectattr('status', 'equalto', 'Blocked') | list | length %}
+      <div class="metric-card{% if stuck_count %} metric--warn{% endif %}">
+        <div class="metric-icon">🛑</div>
         <div class="metric-body">
-          {% if sprint_active %}
-          {# Rejected/Reverted stories are out-of-scope work — exclude
-             from progress so the bar reflects what's actually planned
-             to ship. They still count toward the DoD gate (terminal) so
-             a sprint with all stories Pushed-or-Rejected still
-             auto-completes. Display-only: sprint_id stays on the row. #}
-          {% set sf_planned = features | selectattr('sprint_id', 'equalto', sprint_active.id) | rejectattr('status', 'in', ['Rejected','Reverted']) | list %}
-          {% set sf_count = sf_planned | length %}
-          {% set sf_terminal = sf_planned | selectattr('status','in',['Pushed','Deferred']) | list | length %}
-          {% set sprint_pct = ((sf_terminal / sf_count) * 100) | int if sf_count else 0 %}
-          <div class="metric-value">{{ sf_terminal }}<span class="metric-suffix">/{{ sf_count }}</span></div>
-          <div class="metric-label">{{ sprint_active.name | as_feature_name }} (active)</div>
-          <div class="metric-foot">
-            <div class="metric-bar"><div class="metric-bar-fill metric-bar-fill--green" style="width:{{ sprint_pct }}%"></div></div>
-            <span class="metric-foot-text">{{ sprint_pct }}% complete</span>
-          </div>
-          {% else %}
-          <div class="metric-value metric-value--muted">—</div>
-          <div class="metric-label">No active sprint</div>
-          <div class="metric-foot-text">{{ sprint_planned_count }} planned · {{ sprint_completed_count }} done</div>
-          {% endif %}
-        </div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-icon">⊞</div>
-        <div class="metric-body">
-          <div class="metric-value">{{ sprint_planned_count + sprint_completed_count + (1 if sprint_active else 0) }}</div>
-          <div class="metric-label">Sprints lifetime</div>
-          <div class="metric-foot-text">{{ sprint_completed_count }} done · {{ sprint_planned_count }} planned{% if blocked_sprint_count %} · <span class="metric-foot-alert">{{ blocked_sprint_count }} stuck</span>{% endif %}</div>
+          <div class="metric-value{% if not stuck_count %} metric-value--muted{% endif %}">{{ stuck_count }}</div>
+          <div class="metric-label">Stuck features</div>
+          <div class="metric-foot-text">{% if stuck_count %}needs human triage{% else %}none stuck{% endif %}{% if blocked_count %} · {{ blocked_count }} blocked{% endif %}</div>
         </div>
       </div>
     </div>
