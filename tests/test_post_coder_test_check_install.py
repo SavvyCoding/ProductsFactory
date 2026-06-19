@@ -62,13 +62,49 @@ def test_pytest_install_step_runs_before_collect(tmp_path):
     assert result["passed"] is True
     assert result["env_broken"] is False
     assert result["framework"] == "pytest"
-    # pip install fired before pytest collect
+    # pip install fired before pytest collect. NB the gate now invokes
+    # `python -m pytest`, so cmd[0] is "python" and "pytest" is a list member
+    # (not cmd[0]) — match on list membership.
     pip_idx = next(i for i, c in enumerate(calls) if "pip" in c["cmd"][0])
     collect_idx = next(
         i for i, c in enumerate(calls)
-        if "pytest" in c["cmd"][0] and "--collect-only" in c["cmd"]
+        if "pytest" in c["cmd"] and "--collect-only" in c["cmd"]
     )
     assert pip_idx < collect_idx, "pip install must run before pytest --collect-only"
+
+
+def test_test_check_invokes_pytest_as_module(tmp_path):
+    """The gate must run `python -m pytest`, never the bare console-script shim
+    — the shim breaks on a product-pinned-pytest / image-pytest version split
+    (`cannot import name '_console_main'`). Canonical HomeChoreService #1662."""
+    (tmp_path / "pytest.ini").write_text("[pytest]\ntestpaths = tests\n")
+    _run, calls = _make_recorder([
+        {"match": "--collect-only", "returncode": 0, "stdout": "collected 1 item"},
+        {"match": "pytest -q", "returncode": 0, "stdout": "1 passed"},
+    ])
+    _post_coder_test_check(str(tmp_path), _run, product_name="t")
+    pytest_calls = [c for c in calls if "pytest" in c["cmd"]]
+    assert pytest_calls, "expected at least one pytest invocation"
+    for c in pytest_calls:
+        assert c["cmd"][:3] == ["python", "-m", "pytest"], \
+            f"gate must use `python -m pytest`, got {c['cmd']}"
+
+
+def test_pytest_console_script_mismatch_is_env_broken(tmp_path):
+    """A pytest env split (product-pinned pytest in ~/.local shadows the image's
+    pyenv pytest, breaking the launcher) is infra, not a code bug — it must be
+    classified env_broken so the coder isn't bounced. Canonical #1662."""
+    (tmp_path / "pytest.ini").write_text("[pytest]\ntestpaths = tests\n")
+    (tmp_path / "requirements.txt").write_text("pytest>=8.0,<9\n")
+    _run, calls = _make_recorder([
+        {"match": "pip install", "returncode": 0},
+        {"match": "--collect-only", "returncode": 1,
+         "stderr": "ImportError: cannot import name '_console_main' from "
+                   "'_pytest.config'. Did you mean: 'console_main'?"},
+    ])
+    result = _post_coder_test_check(str(tmp_path), _run, product_name="t")
+    assert result["env_broken"] is True
+    assert result["passed"] is False
 
 
 def test_pip_install_failure_is_env_broken(tmp_path):
@@ -85,8 +121,9 @@ def test_pip_install_failure_is_env_broken(tmp_path):
     assert result["env_broken"] is True
     assert result["passed"] is False
     assert "pip install" in result["first_failure"]
-    # pytest never ran (no pytest call recorded)
-    assert not any("pytest" in c["cmd"][0] for c in calls)
+    # pytest never ran (no pytest call recorded) — match list membership since
+    # the gate now invokes `python -m pytest` (cmd[0] would be "python").
+    assert not any("pytest" in c["cmd"] for c in calls)
 
 
 def test_no_requirements_file_skips_install(tmp_path):
