@@ -1903,6 +1903,9 @@ async def api_update_feature(
         "blocked-reprocessor",  # wave-8: re-engages Blocked features to
                                 # Approved/Implementing (a rank downgrade from
                                 # Blocked) for the bounded one-shot auto-retry.
+        "escalation-reprocessor",  # migration 047: re-engages Blocked features
+                                   # to Approved for the premium-model escalation
+                                   # pass (same Blocked→Approved downgrade).
         "post-doc:rollback",
         "post-coder:fallback",
         "post-coder:lint-guard",  # added 2026-05-07: post-coder auto-rejects
