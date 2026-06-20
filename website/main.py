@@ -1773,6 +1773,27 @@ async def api_approved_features(product_id: int, db: AsyncSession = Depends(get_
 _AC_BULLET_PATTERN = re.compile(r"^\s*[-*]\s+\S", re.MULTILINE)
 
 
+# Agent API-probe / placeholder detection (create-time). AI agent sessions
+# sometimes POST throwaway features to "test API connectivity" or explore the
+# query endpoint (canonical: product-33 "probe feature to test API query N",
+# "checking if any other features are in Designing status"). These land Approved,
+# fail design as placeholders, auto-Block, and pollute the backlog. Reject them
+# at the door instead. High-precision patterns only — must NOT catch real product
+# features (no bare "test"/"query"/"check"; anchored on probe-intent phrases).
+_PROBE_FEATURE_RE = re.compile(
+    r"\bprobe\b"
+    r"|api connectivity|connectivity (?:test|check|probe)"
+    r"|to test (?:the )?api|test (?:the )?api (?:query|connectivity)|test (?:the )?pm api"
+    r"|querying features",
+    re.IGNORECASE,
+)
+
+
+def _is_probe_feature(name: str | None, description: str | None) -> bool:
+    """True if the name/description looks like an agent API-probe, not real work."""
+    return bool(_PROBE_FEATURE_RE.search(f"{name or ''} {description or ''}"))
+
+
 def _validate_story_size(
     description: str | None,
     *,
@@ -1809,6 +1830,16 @@ async def api_create_feature(body: schemas.FeatureCreate, db: AsyncSession = Dep
     # Bypass: PM-initiated creates set source="pm"; everything else (planner,
     # recommender, refactorer, devops, analytics) goes through the gate.
     if (body.source or "").lower() != "pm":
+        if _is_probe_feature(body.name, body.description):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Rejected: this looks like an API probe / connectivity-test "
+                    "feature, not real product work. Agents must NOT create "
+                    "features to test or explore the PM API — do your assigned "
+                    "feature, or create only legitimate sizing-splits / infra stories."
+                ),
+            )
         violation = _validate_story_size(body.description)
         if violation:
             raise HTTPException(status_code=422, detail=violation)
