@@ -183,8 +183,15 @@ _VENDORED_PATH_SEGMENTS = frozenset({
 
 
 def _is_vendored_path(path: str) -> bool:
-    """True if any path segment is a vendored/tooling/scratch dir."""
-    return any(seg in _VENDORED_PATH_SEGMENTS for seg in path.replace("\\", "/").split("/"))
+    """True if any path segment is a vendored/tooling/scratch dir.
+
+    Matches the explicit set PLUS any `.venv*`-named dir, so arbitrary review/
+    test virtualenv names (`.venv_review`, `.venv_test`, …) are all caught even
+    for files outside `site-packages` (e.g. `.venv_test/bin/activate`)."""
+    return any(
+        seg in _VENDORED_PATH_SEGMENTS or seg.startswith(".venv")
+        for seg in path.replace("\\", "/").split("/")
+    )
 
 
 @contextlib.contextmanager
@@ -375,7 +382,16 @@ def _post_coder_lint_check(
             _parts = _raw.split("\t")
             if len(_parts) < 2:
                 continue
-            _ns_entries.append((_parts[0][:1], _parts[-1].strip()))
+            _path = _parts[-1].strip()
+            # Drop vendored/venv/site-packages debris at the SOURCE so EVERY
+            # guard is protected — not just the `files`-based ones. Several
+            # guards (e.g. Guard 22 zero-assertions) iterate `_ns_entries`
+            # directly; a committed review/test virtualenv (`.venv_review/`,
+            # `.venv_test/`, or any `*/site-packages/*`) once tripped them with
+            # vendored test files (false bounce on #1780/#1799).
+            if _is_vendored_path(_path):
+                continue
+            _ns_entries.append((_parts[0][:1], _path))
         files = [
             p for st, p in _ns_entries
             if st in ("A", "M")
