@@ -216,8 +216,6 @@ A "Feature" in product-speak (e.g. "Contact Management") is usually a `phases` r
   Reviewer and the planner are intentionally **not** gated. So only the current gating phase makes progress; approving it unlocks the next.
 - **Report** (`website/main.py::_build_phase_report`): deterministic facts (stats, shipped, blockers) computed in Python — including a **forward-dependency walk** that follows `feature_links` (`blocks`/`is_blocked_by`) and the `depends_on` FK from each unresolved feature into *strictly later* phases to warn which downstream features will be blocked — plus a best-effort `_llm_call` narration (summary/code_quality/challenges/recommendations). LLM failure degrades to facts-only; the gate still advances.
 
-**Historical planning docs in the repo root** (`futureplan.md`, `futureplan_v2.md`) are SUPERSEDED — `futureplan_v2.md`'s own header (line 3) marks it superseded by migration 043. Read them for *reasoning* (sizing-cap rationale, planner output spec) but **do not** treat them as live specs; the current model is documented here and in `orchestrator/INVARIANTS.md` Vocabulary.
-
 ### Per-Product Configuration
 
 `product.config` (JSONB column) stores per-product runtime state and overrides:
