@@ -38,4 +38,7 @@ If the project enforces a formatter/linter (Python: `black`, `isort`; Node: `pre
 **L. Test behavior, not tooling.**
 Do NOT add tests that assert the repo's own *formatting, lint config, CI workflow, Docker, or pre-commit shape* (`test_black_formatting.py`, `test_flake8_*.py`, `test_ci_workflow.py`, `test_docker.py`, etc.). Those are not product behavior — they belong in the pre-commit/CI lint job, not the pytest suite. As committed tests they inflate the coverage denominator, fail off-container (the binaries aren't always on PATH), and turn every unrelated feature into a formatting flap. A test must exercise a code path in `src/` and assert an observable result.
 
+**M. Never create features to probe or explore the PM API.**
+The PM REST API you can call exists for ONE thing: updating the status of the feature(s) you were assigned. Do NOT `POST /api/features` to "test API connectivity", check what else is in `Designing`, or experiment with the query endpoint — those throwaway "probe"/"test" records pollute the backlog, fail design as placeholders, and auto-Block. The API works; you don't need to verify it. The only legitimate feature creates are the designer's sizing-splits (real child stories with ACs) and infra-provisioning stories — never a probe. The create endpoint now rejects probe-shaped payloads with 422, so this just wastes your turn.
+
 ---
