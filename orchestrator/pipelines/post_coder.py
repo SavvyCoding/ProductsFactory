@@ -166,8 +166,25 @@ def _coder_stage_with_denylist(working_dir: str, _run, product_name: str = "?") 
 # brings the copy cost from ~21s (full repo) down to ~0.5s.
 _WORKSPACE_COPY_EXCLUDE = frozenset({
     ".git", ".pytest_cache", ".coverage", "__pycache__",
-    "node_modules", ".tox", ".venv", "venv", "env",
+    "node_modules", ".tox", ".venv", ".venv_review", "venv", "env",
 })
+
+# Path SEGMENTS that mark a file as vendored / tooling debris rather than
+# first-party source. The lint guards must never judge these — a committed
+# virtualenv (e.g. the review process's `.venv_review/`, whose name is not
+# the standard `.venv`) once tripped Guard 2 by flagging pytest's own
+# bundled `_pytest/*.py` as "skipped tests" and blocked feature #1799.
+# Filtering at the `files` source protects every guard at once.
+_VENDORED_PATH_SEGMENTS = frozenset({
+    ".git", ".venv", ".venv_review", "venv", "env", "site-packages",
+    "node_modules", "__pycache__", ".tox", ".mypy_cache", ".pytest_cache",
+    "dist", "build", "Temp", "Results",
+})
+
+
+def _is_vendored_path(path: str) -> bool:
+    """True if any path segment is a vendored/tooling/scratch dir."""
+    return any(seg in _VENDORED_PATH_SEGMENTS for seg in path.replace("\\", "/").split("/"))
 
 
 @contextlib.contextmanager
@@ -366,6 +383,7 @@ def _post_coder_lint_check(
             and not p.endswith("session_result.json")
             and not p.endswith("session_summary.md")
             and not p.startswith(".sprint-79")  # scaffold marker
+            and not _is_vendored_path(p)        # never lint venv/site-packages debris
         ]
     except Exception:
         return []
@@ -1636,9 +1654,9 @@ def _post_coder_lint_check(
             _stdlib = set(getattr(_sys, "stdlib_module_names", ()))
             # First-party: any top-level dir in working_dir that's not a
             # virtualenv/build/scratch dir.
-            _skip_dirs = {".git", ".venv", "venv", "env", "__pycache__",
-                          "node_modules", "Temp", "Results", "dist", "build",
-                          ".pytest_cache", ".mypy_cache"}
+            _skip_dirs = {".git", ".venv", ".venv_review", "venv", "env",
+                          "__pycache__", "node_modules", "Temp", "Results",
+                          "dist", "build", ".pytest_cache", ".mypy_cache"}
             try:
                 _first_party = {
                     p.name for p in _wd_path.iterdir()
