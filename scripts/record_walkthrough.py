@@ -1,25 +1,25 @@
-"""Record a narrated product walkthrough of the LIVE ProductFactory dashboard.
+"""Record a narrated product walkthrough of ProductFactory for a broad audience.
 
-Drives the running PM website with Playwright (Chromium), records the session to
-video, synthesises a voiceover with Edge TTS, and muxes the two into an MP4 in
-``output/``.
+Pipeline: synthesise an Edge-TTS voiceover, drive the real app with Playwright
+(Chromium) recording each scene to its own clip, then glue the clips with
+crossfades, lay the voiceover on each, and burn in synced captions — output MP4
+in ``output/``.
 
-Unlike ``scripts/build_pf_video.py`` (static slides), this captures the real app:
-the dashboard, the Add-Product wizard (greenfield flow), a product's backlog, and
-its architecture map.
+Structure:
+  1. Intro — opens the real ``design.html`` (project showcase: hero + D3 system
+     map) via file://, narrating what ProductFactory is and the problem it solves.
+  2. Fleet dashboard + the Add-Product greenfield wizard (real AI steps).
+  3. A product walkthrough with the LEFT SIDEBAR EXPANDED, visiting every
+     section: Summary, Backlog, Feature detail, Features/phases, Pull Requests,
+     History, Corrections, Videos, Live Session, Settings.
+  4. Architecture map + close.
 
-Prerequisites (all checked at startup):
-  - The PM website running and reachable (default http://localhost:8080).
-  - PM_USERNAME / PM_PASSWORD (read from .env or the environment) for Basic Auth.
-  - playwright + chromium, edge-tts, moviepy, ffmpeg.
+Prerequisites: the PM website running (default http://localhost:8080),
+PM_USERNAME/PM_PASSWORD (from .env), playwright+chromium, edge-tts, moviepy, ffmpeg.
 
-Run:
-    python scripts/record_walkthrough.py
-    PF_BASE_URL=http://localhost:8080 python scripts/record_walkthrough.py
-
-By design it does NOT click the wizard's final "Create" button, so no real repo
-is scaffolded during a render. Pass --create to actually submit the greenfield
-form (creates a real GitHub repo + product row).
+Run:  python scripts/record_walkthrough.py
+By design it does NOT submit the wizard (no real repo created). --create overrides.
+Captions can be disabled with --no-captions.
 """
 from __future__ import annotations
 
@@ -30,8 +30,7 @@ import sys
 import time
 from pathlib import Path
 
-# Windows consoles default to cp1252, which can't encode the arrows/ellipses in
-# our progress output. Force UTF-8 so prints never crash the run.
+# Windows consoles default to cp1252, which can't encode arrows/ellipses.
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8")
@@ -40,8 +39,32 @@ for _stream in (sys.stdout, sys.stderr):
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = ROOT / "output"
-VIEWPORT = {"width": 1280, "height": 720}
+DESIGN_HTML = ROOT / "design.html"
+VIEWPORT = {"width": 1920, "height": 1080}
 VOICE = "en-US-AriaNeural"
+
+# Runs in every page BEFORE its own scripts: force dark theme (theme.js reads
+# this on load) AND force the product-page left sidebar EXPANDED (it defaults to
+# collapsed / icon-only; the walkthrough needs the labels visible).
+INIT_SCRIPT = """
+try { localStorage.setItem('pf-theme', 'dark'); } catch (e) {}
+try { localStorage.setItem('pf-sidebar', 'expanded'); } catch (e) {}
+"""
+
+# Caption font — resolved at startup. Filled by _resolve_font().
+FONT_PATH: str | None = None
+CAPTIONS_ENABLED = True
+
+
+def _resolve_font() -> str | None:
+    for p in (
+        "C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/calibri.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ):
+        if Path(p).exists():
+            return p
+    return None
 
 
 def _load_env() -> dict:
@@ -57,107 +80,173 @@ def _load_env() -> dict:
     return env
 
 
-# ── Scene script ──────────────────────────────────────────────────────────────
-# Each scene: a narration line + an async action that drives the page for roughly
-# `budget` seconds (the narration's length), so audio and video stay aligned.
-
+# ── Narration script ────────────────────────────────────────────────────────
+# Grounded in the actual system (see CLAUDE.md / INVARIANTS.md) — no invented
+# metrics. Each key is one scene's voiceover; scene action duration is tied to
+# the voiceover length so there is no dead air.
 NARRATIONS = {
+    # The opener — the "why", told over the real design.html showcase page.
     "intro": (
-        "Welcome to ProductFactory — a twenty-four-seven autonomous software "
-        "development system. From this single dashboard, one project manager oversees "
-        "an entire fleet of products. Each one is designed, coded, tested, reviewed, "
-        "and shipped entirely by AI agents running in isolated containers — with no "
-        "human writing code, and no human opening pull requests."
+        "Building software has always been limited by people. Every feature needs "
+        "someone to design it, write it, review it, and ship it — and that human "
+        "capacity is the ceiling on how fast a product can move. ProductFactory "
+        "removes that ceiling. It is a twenty-four-seven autonomous development "
+        "system: you give it a product vision, and a team of specialized AI agents — "
+        "a designer, a coder, a reviewer, an architect, and more — builds it inside "
+        "isolated containers, around the clock."
+    ),
+    "intro2": (
+        "Every feature flows through a strict lifecycle and ships as its own reviewed "
+        "pull request, merged automatically. Deterministic quality gates and "
+        "rule-based supervisors keep the agents honest. The result: a single project "
+        "manager can run an entire fleet of products — with no human writing code, "
+        "and no human opening a pull request. Let's see it."
     ),
     "grid": (
-        "The fleet view shows every product the factory is building right now — a "
-        "document-signing app, a ride-matching service, a chore marketplace, and more. "
-        "The bar across the top counts how many are ready, in flight, or paused, and "
-        "each card surfaces live progress: features shipped, features awaiting review, "
-        "anything blocked, and the phase currently being built."
+        "This is the fleet. Every card is a real product the factory is building — "
+        "the bar across the top counts how many are ready, in flight, or paused, and "
+        "each card shows live progress: features shipped, features awaiting review, "
+        "and anything blocked."
     ),
-    "create": (
-        "Spinning up a brand-new product takes about a minute. The Add-Product wizard "
-        "opens a guided flow: we choose greenfield to start from scratch, then describe "
-        "the product in plain English. From that single paragraph, ProductFactory "
-        "recommends a technology stack, proposes a starter backlog, and — on the final "
-        "step — scaffolds a fresh GitHub repository and registers the product, all "
-        "without writing a single line of code by hand."
+    # Create wizard beats (timed to real AI steps).
+    "create_intro": (
+        "Spinning up a new product starts with the Add-Product wizard. We choose "
+        "greenfield to build from scratch, then describe the idea in a sentence."
     ),
+    "create_vision": (
+        "One click on Articulate Vision sends that to the model, which rewrites it "
+        "into a detailed, structured product spec the agents can build from."
+    ),
+    "create_stack": (
+        "From the vision, ProductFactory recommends a technology stack and database, "
+        "and pre-selects them, with its reasoning shown."
+    ),
+    "create_ui": (
+        "For web products it also suggests a matching UI template to start the "
+        "frontend from, chosen to fit what you described."
+    ),
+    "create_backlog": (
+        "Then it generates a complete starter backlog — real, themed features with "
+        "descriptions — straight from the vision."
+    ),
+    "create_details": (
+        "The final step names the product and would scaffold a fresh GitHub "
+        "repository. For this walkthrough we stop here, without creating it."
+    ),
+    # Product walkthrough — one per expanded-sidebar section.
     "summary": (
-        "Opening a product lands on its summary. Across the top are the delivery "
-        "metrics — features shipped, the approved backlog still waiting, open pull "
-        "requests, and overall health. This is the project manager's at-a-glance view "
-        "of how the agents are doing on this one product."
+        "Open a product and the left sidebar — expanded here — is your map through "
+        "it. Summary first: the delivery metrics — features shipped, the approved "
+        "backlog still waiting, open pull requests, and overall health."
     ),
     "backlog": (
-        "The backlog is where the work lives. Every feature moves through a strict "
-        "lifecycle — pending, approved, designed, implementing, reviewing, reviewed, "
-        "and finally pushed. The project manager approves what the agents are allowed "
-        "to pick up; everything after that flows automatically."
+        "The Backlog is where the work lives. Every feature moves through a strict "
+        "lifecycle — pending, approved, designed, implementing, reviewing, and "
+        "finally pushed. The manager approves what the agents may pick up; the rest "
+        "flows automatically."
     ),
     "feature": (
-        "Clicking any feature opens its full story. Here is the description and the "
-        "acceptance criteria the designer wrote, the current status and priority, the "
-        "linked pull request, and the running history of comments and decisions from "
-        "the agents — everything a developer would need to pick the work up."
+        "Click any feature to open its full story — the description and acceptance "
+        "criteria the designer wrote, its status and priority, the linked pull "
+        "request, and the running history of agent comments and decisions."
     ),
-    "phases": (
-        "Features are grouped into phases — foundational work first, then everything "
-        "that builds on it. This is also where the human-in-the-loop phase gate lives. "
-        "When a phase finishes, the factory freezes the next one and waits: the project "
-        "manager reviews a generated report and clicks approve to unlock the following "
-        "phase — keeping a person in control of direction while the agents handle execution."
+    "features": (
+        "The Features tab groups work into phases — foundational work first. This is "
+        "where the human-in-the-loop gate lives: when a phase finishes, the factory "
+        "freezes the next one until the manager reviews and approves it."
     ),
     "prs": (
-        "Every coder session opens its own pull request, straight to main. The "
-        "pull-requests tab tracks them as they're reviewed and squash-merged. One "
-        "feature, one PR — no giant integration branches, and no batch merges."
+        "Pull Requests: every coder session opens its own PR straight to main, and "
+        "the factory tracks each one as it is reviewed and squash-merged. One "
+        "feature, one PR — no giant integration branches."
+    ),
+    "history": (
+        "History is the full audit trail — every agent session ever run on this "
+        "product, what it touched, and how it ended. Nothing the agents do is hidden."
+    ),
+    "corrections": (
+        "Corrections surfaces the drift detectors — duplicate schema, oversized "
+        "files, insecure settings — that the factory files as fix-it chores, so "
+        "quality issues become tracked work instead of quietly rotting."
+    ),
+    "videos": (
+        "The Videos tab holds the product's auto-generated showcase reels: the "
+        "product-trainer agent narrates what has shipped, on demand."
     ),
     "live": (
-        "The live-session view streams an agent's work in real time. As a session runs "
-        "inside its container, its log lines appear here as they happen — so you can "
-        "watch the designer reason about a spec, or the coder implement and test a "
-        "feature, live."
+        "Live Session streams an agent's work in real time — as a session runs "
+        "inside its container, its log lines appear here as they happen."
+    ),
+    "settings": (
+        "Settings is the per-product control panel — quiet hours, daily session "
+        "caps, the phase gate, and the other guardrails that tune how aggressively "
+        "the factory works this product."
     ),
     "architecture": (
         "A dedicated architect agent maintains this living architecture document for "
-        "every product — the canonical modules, entry points, and rules. The "
-        "orchestrator feeds it back into each coding session, so the agents reuse "
-        "existing code instead of drifting into duplicate implementations."
-    ),
-    "admin": (
-        "Behind the scenes, the admin panel is mission control. From here you configure "
-        "the GitHub App that powers all git access, tune the orchestration loop — "
-        "session timeouts, daily caps, and fix-attempt budgets — and choose the agent "
-        "backend, whether that's the Claude models or a local Ollama setup."
+        "every product — the canonical modules, entry points, and rules — and feeds "
+        "it back into each coding session, so agents reuse existing code instead of "
+        "drifting into duplicates."
     ),
     "closing": (
-        "Deterministic quality gates, rule-based supervisors, and a human phase gate "
-        "keep the whole pipeline healthy, around the clock, with zero human pull "
-        "requests. That is ProductFactory — an autonomous engineering team you manage "
-        "from a single screen."
+        "Deterministic gates, rule-based supervisors, and a human phase gate keep the "
+        "whole pipeline healthy, around the clock. That is ProductFactory — an "
+        "autonomous engineering team you run from a single screen."
     ),
 }
 
 
+# ── Browser-driving helpers ──────────────────────────────────────────────────
 async def _smooth_scroll(page, total_px: int, budget: float):
-    """Scroll down by total_px over roughly `budget` seconds, then settle."""
+    """Scroll down by total_px over `budget` seconds (fills the narration)."""
+    budget = max(0.4, budget)
     steps = max(8, int(budget * 8))
     per = total_px / steps
-    dt = max(0.04, (budget * 0.8) / steps)
+    dt = (budget * 0.85) / steps
     for _ in range(steps):
         await page.mouse.wheel(0, per)
         await asyncio.sleep(dt)
-    await asyncio.sleep(max(0.0, budget * 0.2))
+    await asyncio.sleep(budget * 0.15)
 
 
-async def _settle(page, budget: float):
-    await asyncio.sleep(budget)
+async def _scroll_el(page, selector, budget, total=1400):
+    budget = max(0.4, budget)
+    steps = max(8, int(budget * 6))
+    per = total / steps
+    dt = (budget * 0.85) / steps
+    for _ in range(steps):
+        await page.evaluate(
+            "([s, d]) => { const e = document.querySelector(s); if (e) e.scrollTop += d; }",
+            [selector, per],
+        )
+        await asyncio.sleep(dt)
+    await asyncio.sleep(budget * 0.15)
 
 
-async def _click_sidebar(page, title, wait=1.2):
-    """Click a product-page sidebar tab by its title attribute."""
+async def _wait_for(page, js_expr, timeout=22.0):
+    waited = 0.0
+    while waited < timeout:
+        try:
+            if await page.evaluate(js_expr):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        await asyncio.sleep(0.5)
+        waited += 0.5
+    return False
+
+
+async def _expand_sidebar(page):
+    """Belt-and-suspenders: ensure the product-page sidebar is expanded."""
+    try:
+        await page.evaluate(
+            "var s=document.getElementById('pf-sidebar'); if(s) s.classList.remove('collapsed');"
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _click_sidebar(page, title, wait=1.0):
     try:
         await page.click(f"a.pf-sidebar-item[title='{title}']", timeout=4000)
     except Exception as e:  # noqa: BLE001
@@ -165,13 +254,7 @@ async def _click_sidebar(page, title, wait=1.2):
     await asyncio.sleep(wait)
 
 
-async def _to_top(page):
-    await page.evaluate("window.scrollTo({top:0,behavior:'instant'})")
-    await asyncio.sleep(0.3)
-
-
-# Real product names → neutral labels, set once in _record. Applied after every
-# navigation so no real product name appears anywhere in the recording.
+# Real product names → neutral labels. Applied after every navigation.
 REDACT_PAIRS: list[tuple[str, str]] = []
 
 
@@ -181,9 +264,7 @@ async def _redact_names(page):
     try:
         await page.evaluate(
             """(pairs) => {
-              // Neutralise the 2-letter card avatars (derived from the name).
               document.querySelectorAll('.product-card-mark').forEach((el) => { el.textContent = 'PF'; });
-              // Replace every real product name in any text node with its label.
               const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
               const nodes = []; while (walk.nextNode()) nodes.push(walk.currentNode);
               for (const n of nodes) {
@@ -191,8 +272,6 @@ async def _redact_names(page):
                 for (const [k, v] of pairs) { if (k && t.includes(k)) t = t.split(k).join(v); }
                 if (t !== n.nodeValue) n.nodeValue = t;
               }
-              // Title bar too (not on screen, but tidy).
-              for (const [k, v] of pairs) { if (k && document.title.includes(k)) document.title = document.title.split(k).join(v); }
             }""",
             REDACT_PAIRS,
         )
@@ -200,88 +279,162 @@ async def _redact_names(page):
         print(f"  [redact] non-fatal: {e}")
 
 
-async def act_intro(page, base, ctx, budget):
-    await page.goto(base + "/", wait_until="domcontentloaded")
-    await _redact_names(page)
-    await asyncio.sleep(1.5)
-    await _smooth_scroll(page, 300, budget - 1.5)
+# ── Scenes ───────────────────────────────────────────────────────────────────
+# Intro is TWO narration beats over the design.html showcase, in one clip.
+INTRO_BEATS = ["intro", "intro2"]
+
+
+async def act_intro(page, base, audio_dur):
+    """Open the real design.html (file://) and narrate the 'why'. Returns
+    [(audio_key, offset_seconds), ...] for the two intro beats."""
+    offsets = []
+    t0 = time.monotonic()
+    try:
+        await page.goto(DESIGN_HTML.as_uri(), wait_until="domcontentloaded")
+    except Exception as e:  # noqa: BLE001
+        print(f"  [intro] design.html load: {e}")
+        await page.goto(base + "/", wait_until="domcontentloaded")
+    await asyncio.sleep(2.0)  # let the hero + D3 graph animate in
+
+    # Beat 1 — hero + slow reveal of the system map.
+    offsets.append(("intro", time.monotonic() - t0))
+    await _smooth_scroll(page, 900, audio_dur["intro"] - 0.3)
+    # Beat 2 — continue through the system graph / lower sections.
+    offsets.append(("intro2", time.monotonic() - t0))
+    await _smooth_scroll(page, 1400, audio_dur["intro2"] - 0.3)
+    return offsets
 
 
 async def act_grid(page, base, ctx, budget):
     await page.goto(base + "/", wait_until="domcontentloaded")
     await _redact_names(page)
-    await asyncio.sleep(1.2)
-    await _smooth_scroll(page, 1100, budget - 1.6)
+    await asyncio.sleep(1.0)
+    await _smooth_scroll(page, 1100, budget - 1.0)
 
 
-async def _scroll_el(page, selector, budget, total=1400):
-    """Smoothly scroll an inner scroll-container (e.g. the slide-out panel body)."""
-    steps = max(8, int(budget * 6))
-    per = total / steps
-    dt = max(0.05, (budget * 0.8) / steps)
-    for _ in range(steps):
-        await page.evaluate(
-            "([s, d]) => { const e = document.querySelector(s); if (e) e.scrollTop += d; }",
-            [selector, per],
-        )
-        await asyncio.sleep(dt)
-    await asyncio.sleep(max(0.0, budget * 0.2))
+CREATE_BEATS = ["create_intro", "create_vision", "create_stack",
+                "create_ui", "create_backlog", "create_details"]
+
+VISION_SEED = (
+    "A community marketplace where neighbours lend and borrow tools and household "
+    "equipment, with listings, reservations, and reviews."
+)
 
 
-async def act_create(page, base, ctx, budget, do_create: bool):
-    """Full greenfield wizard: open -> greenfield -> vision -> final Details screen.
-    Does NOT submit unless do_create (so no real repo/product is created)."""
-    t = time.monotonic()
+async def act_create(page, base, audio_dur, do_create: bool):
+    offsets = []
+    t0 = time.monotonic()
+
+    async def beat(key):
+        offsets.append((key, time.monotonic() - t0))
+        return time.monotonic()
+
+    async def pad(started, key):
+        remain = audio_dur[key] + 0.3 - (time.monotonic() - started)
+        if remain > 0:
+            await asyncio.sleep(remain)
+
+    s = await beat("create_intro")
     await page.goto(base + "/", wait_until="domcontentloaded")
     await _redact_names(page)
     await asyncio.sleep(1.0)
-    vision = (
-        "A community marketplace where neighbours lend and borrow tools and "
-        "household equipment, with listings, reservations, and reviews."
-    )
     try:
         await page.evaluate("typeof openWizard==='function' && openWizard()")
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(1.0)
         await page.evaluate("typeof selectType==='function' && selectType('greenfield')")
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.8)
         await page.evaluate("typeof wizardNext==='function' && wizardNext()")
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.8)
         ta = page.locator("#gf-vision")
         if await ta.count():
             await ta.fill("")
-            for ch in vision:
-                await ta.type(ch, delay=11)
+            for ch in VISION_SEED:
+                await ta.type(ch, delay=9)
+    except Exception as e:  # noqa: BLE001
+        print(f"  [create:intro] {e}")
+    await pad(s, "create_intro")
+
+    s = await beat("create_vision")
+    try:
+        await page.click("#articulate-btn", timeout=4000)
+        await _wait_for(page, "document.getElementById('articulate-status') && "
+                              "document.getElementById('articulate-status').textContent.indexOf('Done') >= 0", 25)
         await asyncio.sleep(1.0)
-        for fn in ("wizardToStack", "wizardToUI", "wizardToBacklog", "wizardToDetailsFromBacklog"):
-            try:
-                await page.evaluate(f"typeof {fn}==='function' && {fn}()")
-            except Exception:  # noqa: BLE001
-                pass
-            await asyncio.sleep(0.7)
-        # Force the final "Details" screen visible regardless of step guards, with
-        # name/repo filled — but DO NOT submit (no real product created).
+    except Exception as e:  # noqa: BLE001
+        print(f"  [create:vision] {e}")
+    await pad(s, "create_vision")
+
+    s = await beat("create_stack")
+    try:
+        await page.evaluate("typeof wizardToStack==='function' && wizardToStack()")
+        await _wait_for(page, "!!document.querySelector('#stack-recommendation .recommendation-title') "
+                              "|| !!document.querySelector('.stack-option.recommended-badge')", 22)
+        await asyncio.sleep(1.5)
+    except Exception as e:  # noqa: BLE001
+        print(f"  [create:stack] {e}")
+    await pad(s, "create_stack")
+
+    s = await beat("create_ui")
+    try:
+        await page.evaluate("typeof wizardToUI==='function' && wizardToUI()")
+        await _wait_for(page, "!!document.querySelector('#ui-recommendation .recommendation-title') "
+                              "|| !!document.querySelector('.ui-template-card.recommended-badge') "
+                              "|| !!document.querySelector('#wp-5-backlog.active')", 18)
+        await asyncio.sleep(1.2)
+    except Exception as e:  # noqa: BLE001
+        print(f"  [create:ui] {e}")
+    await pad(s, "create_ui")
+
+    s = await beat("create_backlog")
+    try:
+        await page.evaluate("typeof wizardToBacklog==='function' && wizardToBacklog()")
+        await asyncio.sleep(0.6)
+        await page.click("#suggest-btn", timeout=4000)
+        got = await _wait_for(page, "!document.getElementById('gf-suggestions').classList.contains('hidden') "
+                                    "&& document.querySelectorAll('#suggestions-grid .suggestion-card').length > 0", 40)
+        if got:
+            await asyncio.sleep(1.0)
+            await _scroll_el(page, "#wp-5-backlog", 7.0, total=1100)
+    except Exception as e:  # noqa: BLE001
+        print(f"  [create:backlog] {e}")
+    await pad(s, "create_backlog")
+
+    s = await beat("create_details")
+    try:
+        await page.evaluate("typeof wizardToDetailsFromBacklog==='function' && wizardToDetailsFromBacklog()")
+        await asyncio.sleep(0.8)
         await page.evaluate(
             """() => {
-              document.querySelectorAll('.wizard-panel').forEach((p) => p.classList.remove('active'));
-              const d = document.getElementById('wp-6-details'); if (d) d.classList.add('active');
-              document.querySelectorAll('.wizard-step').forEach((s) => s.classList.toggle('active', s.id === 'ws-6'));
               const n = document.getElementById('gf-name'); if (n) n.value = 'NeighbourLend';
               const r = document.getElementById('gf-repo');
               if (r) { r.value = 'neighbour-lend'; r.dispatchEvent(new Event('input', {bubbles: true})); }
             }"""
         )
-        await asyncio.sleep(2.0)
-        if do_create:  # opt-in only: actually scaffolds a real repo + product row
+        if do_create:
             await page.evaluate("typeof submitGreenfield==='function' && submitGreenfield()")
             await asyncio.sleep(3.0)
     except Exception as e:  # noqa: BLE001
-        print(f"  [create] non-fatal: {e}")
-    await _settle(page, max(0.0, budget - (time.monotonic() - t)))
+        print(f"  [create:details] {e}")
+    await pad(s, "create_details")
+    await asyncio.sleep(0.6)
+    return offsets
 
 
-async def act_feature(page, base, ctx, budget, product_id):
-    """Open a feature's slide-out panel and reveal its story / AC / details."""
+async def act_section(page, base, budget, product_id, sidebar_title, scroll_px):
+    """Generic: open the product, expand the sidebar, click a section, scroll."""
     await page.goto(f"{base}/product/{product_id}", wait_until="domcontentloaded")
+    await _expand_sidebar(page)
+    await asyncio.sleep(0.6)
+    if sidebar_title:
+        await _click_sidebar(page, sidebar_title)
+    await _redact_names(page)
+    await _smooth_scroll(page, scroll_px, budget - 1.2)
+
+
+async def act_feature(page, base, budget, product_id):
+    """Open a feature's slide-out panel and reveal story / AC / details."""
+    await page.goto(f"{base}/product/{product_id}", wait_until="domcontentloaded")
+    await _expand_sidebar(page)
     await _click_sidebar(page, "Backlog")
     await _redact_names(page)
     try:
@@ -296,105 +449,193 @@ async def act_feature(page, base, ctx, budget, product_id):
             )
         else:
             await el.click()
-        await asyncio.sleep(1.8)
+        await asyncio.sleep(1.6)
     except Exception as e:  # noqa: BLE001
         print(f"  [feature] non-fatal: {e}")
     await _redact_names(page)
-    await _scroll_el(page, "#fp-body", budget - 2.5)
+    await _scroll_el(page, "#fp-body", budget - 2.2)
 
 
-async def act_summary(page, base, ctx, budget, product_id):
-    await page.goto(f"{base}/product/{product_id}", wait_until="domcontentloaded")
-    await _redact_names(page)
-    await asyncio.sleep(1.5)
-    await _smooth_scroll(page, 700, budget - 1.5)
-
-
-async def act_backlog(page, base, ctx, budget, product_id):
-    await page.goto(f"{base}/product/{product_id}", wait_until="domcontentloaded")
-    await _click_sidebar(page, "Backlog")
-    await _redact_names(page)
-    await _smooth_scroll(page, 1200, budget - 1.8)
-
-
-async def act_phases(page, base, ctx, budget, product_id):
-    await page.goto(f"{base}/product/{product_id}", wait_until="domcontentloaded")
-    await _click_sidebar(page, "Features")
-    await _redact_names(page)
-    await _smooth_scroll(page, 1400, budget - 1.8)
-
-
-async def act_prs(page, base, ctx, budget, product_id):
-    await page.goto(f"{base}/product/{product_id}", wait_until="domcontentloaded")
-    await _click_sidebar(page, "Pull Requests")
-    await _redact_names(page)
-    await _smooth_scroll(page, 900, budget - 1.8)
-
-
-async def act_live(page, base, ctx, budget, product_id):
-    await page.goto(f"{base}/product/{product_id}", wait_until="domcontentloaded")
-    await _click_sidebar(page, "Live Session", wait=2.0)
-    await _redact_names(page)
-    await _smooth_scroll(page, 500, budget - 2.8)
-
-
-async def act_architecture(page, base, ctx, budget, product_id):
+async def act_architecture(page, base, budget, product_id):
     await page.goto(f"{base}/product/{product_id}/architecture", wait_until="domcontentloaded")
     await _redact_names(page)
-    await asyncio.sleep(1.5)
-    await _smooth_scroll(page, 1100, budget - 1.9)
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(1.2)
+    await _smooth_scroll(page, 1100, budget - 1.4)
 
 
-async def act_admin(page, base, ctx, budget):
-    await page.goto(f"{base}/admin", wait_until="domcontentloaded")
-    # Redact secrets BEFORE anything is on screen — the admin System tab renders
-    # the GitHub App private key (PEM), App/Installation IDs, and webhook/API
-    # secrets in plaintext. Never let those land in a shareable recording.
-    await page.evaluate(
-        """() => {
-          const set = (id, val) => {
-            const e = document.getElementById(id);
-            if (e) {
-              try { e.type = 'text'; } catch (_) {}  // number inputs reject bullet strings
-              e.value = val; if ('textContent' in e) e.textContent = val;
-            }
-          };
-          set('a-pem', '\\u2022\\u2022\\u2022\\u2022  GitHub App private key (PEM) \\u2014 redacted for this recording  \\u2022\\u2022\\u2022\\u2022');
-          set('a-app-id', '\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022');
-          set('a-inst-id', '\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022');
-          set('a-root', 'C:/\\u2026/Products');
-          set('a-slack', 'https://hooks.slack.com/\\u2026 (redacted)');
-          ['a-wh-secret', 'p-anthropic-key', 'p-ollama-api-key'].forEach((i) => set(i, ''));
-        }"""
-    )
-    await asyncio.sleep(1.5)
-    per = max(1.5, (budget - 1.5) / 4)
-    for label in ("System", "Poller", "Agent"):
-        try:
-            await page.click(f"button.tab-btn:has-text('{label}')", timeout=3000)
-        except Exception as e:  # noqa: BLE001
-            print(f"  [admin tab '{label}'] non-fatal: {e}")
-        await _smooth_scroll(page, 300, per)
-        await _to_top(page)
-    await asyncio.sleep(max(0.0, budget - 1.5 - per * 3))
-
-
-async def act_closing(page, base, ctx, budget):
+async def act_admin_closing(page, base, budget):
     await page.goto(base + "/", wait_until="domcontentloaded")
     await _redact_names(page)
-    await asyncio.sleep(1.2)
-    await _smooth_scroll(page, 400, budget - 1.2)
+    await asyncio.sleep(1.0)
+    await _smooth_scroll(page, 400, budget - 1.0)
 
 
+# (scene_key, sidebar_title or None, scroll_px) — the expanded-sidebar tour.
+SECTION_SCENES = [
+    ("summary",     "Summary",        700),
+    ("backlog",     "Backlog",        1200),
+    ("feature",     None,             0),     # special — slide-out panel
+    ("features",    "Features",       1400),
+    ("prs",         "Pull Requests",  900),
+    ("history",     "History",        900),
+    ("corrections", "Corrections",    700),
+    ("videos",      "Videos",         500),
+    ("live",        "Live Session",   500),
+    ("settings",    "Settings",       900),
+]
+
+SCENE_ORDER = (
+    ["intro", "grid", "create"]
+    + [k for k, _, _ in SECTION_SCENES]
+    + ["architecture", "closing"]
+)
+
+HEAD_TRIM = 1.5    # drop the page-load flash at the start of each clip
+TAIL_PAD = 0.5     # short silent tail after the VO (was 1.2 → cut dead air)
+CROSSFADE = 0.5
+
+
+# ── Recording ────────────────────────────────────────────────────────────────
+async def _record_scene(browser, base, env, key, audio_dur, do_create, product_id, video_dir):
+    ctx = await browser.new_context(
+        viewport=VIEWPORT,
+        record_video_dir=str(video_dir),
+        record_video_size=VIEWPORT,
+        http_credentials={
+            "username": env.get("PM_USERNAME", ""),
+            "password": env.get("PM_PASSWORD", ""),
+        },
+    )
+    await ctx.add_init_script(INIT_SCRIPT)
+    page = await ctx.new_page()
+    multi_offsets = None
+    budget = HEAD_TRIM + audio_dur.get(key, 9.0) + TAIL_PAD
+    try:
+        if key == "intro":
+            multi_offsets = await act_intro(page, base, audio_dur)
+        elif key == "create":
+            multi_offsets = await act_create(page, base, audio_dur, do_create)
+        elif key == "grid":
+            await act_grid(page, base, ctx, budget)
+        elif key == "feature":
+            await act_feature(page, base, budget, product_id)
+        elif key == "architecture":
+            await act_architecture(page, base, budget, product_id)
+        elif key == "closing":
+            await act_admin_closing(page, base, budget)
+        else:  # a SECTION_SCENES entry
+            title, px = next(((t, p) for k, t, p in SECTION_SCENES if k == key), (None, 800))
+            await act_section(page, base, budget, product_id, title, px)
+    finally:
+        video = page.video
+        await ctx.close()
+    webm = Path(await video.path()) if video else None
+    return webm, multi_offsets
+
+
+async def _record(base, env, audio_dur, do_create, product_id, video_dir):
+    from playwright.async_api import async_playwright
+
+    clips: dict[str, Path] = {}
+    multi: dict[str, list] = {}
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(args=["--no-sandbox"])
+        for i, key in enumerate(SCENE_ORDER):
+            print(f"  scene {i + 1:2}/{len(SCENE_ORDER)}  '{key}'")
+            scene_dir = video_dir / key
+            scene_dir.mkdir(parents=True, exist_ok=True)
+            webm, offs = await _record_scene(
+                browser, base, env, key, audio_dur, do_create, product_id, scene_dir
+            )
+            clips[key] = webm
+            if offs:
+                multi[key] = offs
+        await browser.close()
+    return clips, multi
+
+
+# ── Captions ─────────────────────────────────────────────────────────────────
+def _caption_clips(text, start, dur, W, H):
+    """Bottom-centre burned-in captions for `text`, chunked across `dur`."""
+    if not CAPTIONS_ENABLED or not FONT_PATH:
+        return []
+    from moviepy import TextClip
+    words = text.split()
+    if not words:
+        return []
+    n = 9
+    chunks = [" ".join(words[i:i + n]) for i in range(0, len(words), n)]
+    per = dur / len(chunks)
+    out = []
+    for i, ch in enumerate(chunks):
+        try:
+            tc = (
+                TextClip(font=FONT_PATH, text=ch, font_size=38, color="white",
+                         stroke_color="black", stroke_width=3, method="caption",
+                         size=(int(W * 0.84), None), text_align="center")
+                .with_start(start + i * per)
+                .with_duration(per + 0.05)
+                .with_position(("center", int(H * 0.80)))
+            )
+            out.append(tc)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [caption] non-fatal: {e}")
+    return out
+
+
+def _assemble(clips, audio, out_mp4, multi):
+    from moviepy import (VideoFileClip, AudioFileClip, CompositeAudioClip,
+                         CompositeVideoClip, concatenate_videoclips, vfx)
+
+    W, H = VIEWPORT["width"], VIEWPORT["height"]
+    segs = []
+    for i, key in enumerate(SCENE_ORDER):
+        wp = clips.get(key)
+        if not wp or not wp.exists():
+            print(f"  [assemble] missing clip for '{key}', skipping")
+            continue
+        v = VideoFileClip(str(wp))
+        caps = []
+
+        if key in multi:  # multi-beat scene (intro, create)
+            beat_clips, last_end = [], 0.0
+            for akey, off in multi[key]:
+                ac = AudioFileClip(str(audio[akey]))
+                start = max(0.0, off - HEAD_TRIM)
+                beat_clips.append(ac.with_start(start))
+                caps += _caption_clips(NARRATIONS[akey], start, ac.duration, W, H)
+                last_end = max(last_end, start + ac.duration)
+            aud = CompositeAudioClip(beat_clips)
+            core = last_end + TAIL_PAD
+        else:
+            aud = AudioFileClip(str(audio[key]))
+            caps += _caption_clips(NARRATIONS[key], 0.0, aud.duration, W, H)
+            core = aud.duration + TAIL_PAD
+
+        end = min(v.duration, HEAD_TRIM + core)
+        v = v.subclipped(min(HEAD_TRIM, max(0.0, v.duration - 0.1)), end)
+        if caps:
+            v = CompositeVideoClip([v, *caps])
+        v = v.with_audio(aud)
+        if i > 0:
+            v = v.with_effects([vfx.CrossFadeIn(CROSSFADE)])
+        segs.append(v)
+
+    final = concatenate_videoclips(segs, method="compose", padding=-CROSSFADE)
+    final.write_videofile(
+        str(out_mp4), fps=24, codec="libx264", audio_codec="aac", logger=None
+    )
+    final.close()
+    for s in segs:
+        s.close()
+
+
+# ── Setup helpers ────────────────────────────────────────────────────────────
 def _pick_product(env, base) -> int:
-    """Pick a product to showcase: prefer a 'ready' one, else the first."""
     try:
         import httpx
         auth = (env.get("PM_USERNAME", ""), env.get("PM_PASSWORD", ""))
-        r = httpx.get(base + "/api/products", auth=auth, timeout=8)
-        r.raise_for_status()
-        prods = r.json()
+        prods = httpx.get(base + "/api/products", auth=auth, timeout=8).json()
         for p in prods:
             if p.get("status") == "ready":
                 return p["id"]
@@ -426,135 +667,38 @@ def _durations(audio: dict[str, Path]) -> dict[str, float]:
 
 
 def _build_redact_pairs(env, base):
-    """Map every real product name → a neutral label ('Product 1', ...).
-
-    Longer names first so substrings can't be partially replaced.
-    """
     try:
         import httpx
         auth = (env.get("PM_USERNAME", ""), env.get("PM_PASSWORD", ""))
         prods = httpx.get(base + "/api/products", auth=auth, timeout=8).json()
-        names = []
-        for p in prods:
-            n = (p.get("name") or "").strip()
-            if n:
-                names.append(n)
-        names = sorted(set(names), key=len, reverse=True)
+        names = sorted({(p.get("name") or "").strip() for p in prods if (p.get("name") or "").strip()},
+                       key=len, reverse=True)
         return [(n, f"Product {i + 1}") for i, n in enumerate(names)]
     except Exception as e:  # noqa: BLE001
         print(f"  [redact] could not fetch product names: {e}")
         return []
 
 
-SCENE_ORDER = [
-    "intro", "grid", "create",
-    "summary", "backlog", "feature", "phases", "prs", "live",
-    "architecture", "admin", "closing",
-]
-
-# How long the visible action lasts per scene = narration + this much tail. The
-# extra head/tail is trimmed/used by the crossfade so the cut never clips the VO.
-HEAD_TRIM = 1.5   # drop the white page-load flash at the start of each clip
-TAIL_PAD = 1.2    # silent tail after the VO, must exceed the crossfade duration
-CROSSFADE = 0.6   # dissolve between scenes
-
-
-async def _record_scene(browser, base, env, key, budget, do_create, product_id, video_dir):
-    """Record ONE scene into its own webm so scenes can be glued with transitions."""
-    ctx = await browser.new_context(
-        viewport=VIEWPORT,
-        record_video_dir=str(video_dir),
-        record_video_size=VIEWPORT,
-        http_credentials={
-            "username": env.get("PM_USERNAME", ""),
-            "password": env.get("PM_PASSWORD", ""),
-        },
-    )
-    page = await ctx.new_page()
+def _captions_selftest() -> bool:
+    """Confirm moviepy TextClip can render with the resolved font."""
+    if not FONT_PATH:
+        return False
     try:
-        if key == "intro":
-            await act_intro(page, base, ctx, budget)
-        elif key == "grid":
-            await act_grid(page, base, ctx, budget)
-        elif key == "create":
-            await act_create(page, base, ctx, budget, do_create)
-        elif key == "summary":
-            await act_summary(page, base, ctx, budget, product_id)
-        elif key == "backlog":
-            await act_backlog(page, base, ctx, budget, product_id)
-        elif key == "feature":
-            await act_feature(page, base, ctx, budget, product_id)
-        elif key == "phases":
-            await act_phases(page, base, ctx, budget, product_id)
-        elif key == "prs":
-            await act_prs(page, base, ctx, budget, product_id)
-        elif key == "live":
-            await act_live(page, base, ctx, budget, product_id)
-        elif key == "architecture":
-            await act_architecture(page, base, ctx, budget, product_id)
-        elif key == "admin":
-            await act_admin(page, base, ctx, budget)
-        elif key == "closing":
-            await act_closing(page, base, ctx, budget)
-    finally:
-        video = page.video
-        await ctx.close()  # flushes the webm
-    return Path(await video.path()) if video else None
-
-
-async def _record(base, env, audio_dur, do_create, product_id, video_dir):
-    from playwright.async_api import async_playwright
-
-    clips: dict[str, Path] = {}
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(args=["--no-sandbox"])
-        for i, key in enumerate(SCENE_ORDER):
-            budget = HEAD_TRIM + audio_dur[key] + TAIL_PAD
-            print(f"  scene {i + 1:2}/{len(SCENE_ORDER)}  '{key}'  (~{budget:.1f}s)")
-            scene_dir = video_dir / key
-            scene_dir.mkdir(parents=True, exist_ok=True)
-            clips[key] = await _record_scene(
-                browser, base, env, key, budget, do_create, product_id, scene_dir
-            )
-        await browser.close()
-    return clips
-
-
-def _assemble(clips: dict[str, Path], audio: dict[str, Path], out_mp4: Path):
-    """Glue the per-scene clips with crossfade dissolves, then lay the VO on each."""
-    from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips, vfx
-
-    segs = []
-    for i, key in enumerate(SCENE_ORDER):
-        wp = clips.get(key)
-        if not wp or not wp.exists():
-            print(f"  [assemble] missing clip for '{key}', skipping")
-            continue
-        v = VideoFileClip(str(wp))
-        a = AudioFileClip(str(audio[key]))
-        core = a.duration + TAIL_PAD                      # VO + silent tail
-        end = min(v.duration, HEAD_TRIM + core)
-        v = v.subclipped(min(HEAD_TRIM, max(0.0, v.duration - 0.1)), end)
-        v = v.with_audio(a)                               # VO starts at clip start
-        if i > 0:
-            v = v.with_effects([vfx.CrossFadeIn(CROSSFADE)])
-        segs.append(v)
-
-    final = concatenate_videoclips(segs, method="compose", padding=-CROSSFADE)
-    final.write_videofile(
-        str(out_mp4), fps=24, codec="libx264", audio_codec="aac", logger=None
-    )
-    final.close()
-    for s in segs:
-        s.close()
+        from moviepy import TextClip
+        TextClip(font=FONT_PATH, text="test", font_size=30, color="white",
+                 method="label")
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"  [captions] disabled — TextClip self-test failed: {e}")
+        return False
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--create", action="store_true",
                     help="Actually submit the greenfield wizard (creates a real repo).")
-    ap.add_argument("--product-id", type=int, default=None,
-                    help="Product to showcase on the product/architecture scenes.")
+    ap.add_argument("--product-id", type=int, default=None)
+    ap.add_argument("--no-captions", action="store_true", help="Skip burned-in captions.")
     args = ap.parse_args()
 
     env = _load_env()
@@ -562,8 +706,9 @@ def main():
     if not env.get("PM_USERNAME") or not env.get("PM_PASSWORD"):
         print("ERROR: PM_USERNAME / PM_PASSWORD not set (.env or environment).")
         sys.exit(1)
+    if not DESIGN_HTML.exists():
+        print(f"WARN: {DESIGN_HTML} missing — intro will fall back to the dashboard.")
 
-    # Fail fast if the app is unreachable.
     try:
         import httpx
         httpx.get(base + "/", auth=(env["PM_USERNAME"], env["PM_PASSWORD"]), timeout=6)
@@ -572,30 +717,37 @@ def main():
               f"`docker compose up -d`.")
         sys.exit(1)
 
+    global FONT_PATH, CAPTIONS_ENABLED, REDACT_PAIRS
+    FONT_PATH = _resolve_font()
+    CAPTIONS_ENABLED = (not args.no_captions) and _captions_selftest()
+    print(f"Captions: {'ON' if CAPTIONS_ENABLED else 'OFF'} (font={FONT_PATH})")
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    global REDACT_PAIRS
     REDACT_PAIRS = _build_redact_pairs(env, base)
-    print(f"Redacting {len(REDACT_PAIRS)} product name(s) from the recording.")
+    print(f"Redacting {len(REDACT_PAIRS)} product name(s).")
     product_id = args.product_id or _pick_product(env, base)
     ts = time.strftime("%Y%m%d_%H%M%S")
     out_mp4 = OUTPUT_DIR / f"productfactory_walkthrough_{ts}.mp4"
-    print(f"Recording walkthrough → {out_mp4}  (showcasing product #{product_id})")
+    print(f"Recording → {out_mp4}  (showcasing product #{product_id})")
 
     import tempfile
-    with tempfile.TemporaryDirectory() as tmpd:
+    # ignore_cleanup_errors: on Windows, Playwright/moviepy may still hold a
+    # .webm handle when the tempdir is torn down — without this the (successful)
+    # render exits 1 on a cosmetic cleanup PermissionError.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpd:
         tmp = Path(tmpd)
         print("Phase 1: synthesising narration (Edge TTS)…")
         audio = asyncio.run(_synth(NARRATIONS, tmp))
         dur = _durations(audio)
 
-        print("Phase 2: recording each scene as its own clip (Playwright)…")
-        clips = asyncio.run(_record(base, env, dur, args.create, product_id, tmp))
+        print("Phase 2: recording scenes (Playwright)…")
+        clips, multi = asyncio.run(_record(base, env, dur, args.create, product_id, tmp))
         if not any(p and p.exists() for p in clips.values()):
             print("ERROR: no video captured.")
             sys.exit(1)
 
-        print("Phase 3: gluing scenes with crossfades + voiceover (moviepy)…")
-        _assemble(clips, audio, out_mp4)
+        print("Phase 3: gluing scenes + voiceover + captions (moviepy)…")
+        _assemble(clips, audio, out_mp4, multi)
 
     size_mb = out_mp4.stat().st_size // 1024 // 1024
     print(f"Done! → {out_mp4}  ({size_mb} MB)")
