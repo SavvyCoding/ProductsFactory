@@ -22,3 +22,17 @@ import os
 def internal_headers() -> dict[str, str]:
     """Headers that unlock real secret values from ``GET /api/system-config``."""
     return {"X-PF-Internal-Token": os.environ.get("PF_INTERNAL_API_SECRET", "")}
+
+
+def sign_body(body: bytes) -> str:
+    """HMAC-sign a request body for internal write endpoints guarded by the
+    website's ``verify_internal_signature``. Returns ``"sha256=<hex>"`` or ``""``
+    when the secret is unset (signing disabled). Format MUST match the website's
+    ``_compute_internal_signature`` exactly: HMAC-SHA256 over the raw body bytes.
+    """
+    import hashlib
+    import hmac as _hmac
+    secret = os.environ.get("PF_INTERNAL_API_SECRET", "")
+    if not secret:
+        return ""
+    return "sha256=" + _hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()

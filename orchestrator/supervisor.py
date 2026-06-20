@@ -54,19 +54,26 @@ def _record_action(
     transient PM API hiccup doesn't drop the detector mid-cycle.
     """
     try:
+        # /api/supervisor/actions is guarded by verify_internal_signature: when
+        # PF_INTERNAL_API_SECRET is set the website rejects unsigned writes (401).
+        # Pre-serialize so we sign the exact bytes we send (content=, not json=).
+        import json as _json
+        from orchestrator.pm_internal import sign_body
+        payload = _json.dumps({
+            "detector":    detector,
+            "product_id":  product_id,
+            "target_type": target_type,
+            "target_id":   str(target_id),
+            "action":      action,
+            "reason":      reason,
+            "dry_run":     dry_run,
+        }).encode()
+        headers = {"Content-Type": "application/json"}
+        _sig = sign_body(payload)
+        if _sig:
+            headers["X-PF-Signature"] = _sig
         with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
-            client.post(
-                "/api/supervisor/actions",
-                json={
-                    "detector":    detector,
-                    "product_id":  product_id,
-                    "target_type": target_type,
-                    "target_id":   str(target_id),
-                    "action":      action,
-                    "reason":      reason,
-                    "dry_run":     dry_run,
-                },
-            )
+            client.post("/api/supervisor/actions", content=payload, headers=headers)
     except Exception:
         log.debug("supervisor audit write failed", exc_info=True)
 
