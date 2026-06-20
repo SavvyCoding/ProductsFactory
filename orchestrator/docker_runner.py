@@ -309,7 +309,12 @@ def _get_system_config_sync() -> dict:
     """Fetch current system config from PM API. Returns empty dict on failure."""
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
-            resp = client.get("/api/system-config")
+            # Internal token → PM API returns real secrets, not masked hints.
+            # No-op when PF_INTERNAL_API_SECRET is unset on both sides.
+            resp = client.get(
+                "/api/system-config",
+                headers={"X-PF-Internal-Token": os.environ.get("PF_INTERNAL_API_SECRET", "")},
+            )
             resp.raise_for_status()
             return resp.json()
     except Exception as e:
