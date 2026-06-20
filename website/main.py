@@ -623,7 +623,24 @@ def _cfg(config: SystemConfig | None, key: str):
     return _CFG_DEFAULTS.get(key)
 
 
-def _config_as_dict(config: SystemConfig | None) -> dict:
+# Secret-bearing config keys. Masked in the /api/system-config JSON response for
+# callers that don't present the internal token (see api_get_system_config). The
+# admin HTML page passes mask_secrets=False (it's Basic-Auth-gated and needs the
+# key prefixes for its "set (…)" hints).
+_SECRET_CFG_KEYS = frozenset({
+    "anthropic_api_key", "openai_api_key", "ollama_api_key",
+    "github_app_private_key", "github_webhook_secret",
+})
+
+
+def _mask_secret(value) -> str:
+    """Redact a secret to a non-reversible hint: ``"set (NN chars)"`` or ``""``."""
+    if not value:
+        return ""
+    return f"set ({len(str(value))} chars)"
+
+
+def _config_as_dict(config: SystemConfig | None, mask_secrets: bool = False) -> dict:
     base = {
         "products_root_dir":          (config.products_root_dir          if config else "") or "",
         "github_org":                 (config.github_org                 if config else "") or "",
@@ -638,6 +655,10 @@ def _config_as_dict(config: SystemConfig | None) -> dict:
     # Merge all operational settings with their effective values (DB → env → default)
     for key in _CFG_DEFAULTS:
         base[key] = _cfg(config, key)
+    if mask_secrets:
+        for key in _SECRET_CFG_KEYS:
+            if key in base:
+                base[key] = _mask_secret(base[key])
     return base
 
 
@@ -1317,23 +1338,29 @@ async def admin_save_poller_settings(
     # → drop the override for that persona. Personas not in this list are
     # left untouched in the JSONB so manual DB edits or future additions
     # survive a save through the UI.
-    # coder/designer intentionally excluded — they have dedicated chain fields
-    # (coder_model / designer_model); the per-persona grid only overrides the rest.
+    # The grid below covers the secondary personas (named ollama_chain_<persona>).
+    # coder/designer have dedicated fields (coder_model / designer_model), but the
+    # orchestrator's resolver reads ollama_model_map[persona] BEFORE those fields
+    # — so a stale map["coder"]/["designer"] would silently shadow the UI box
+    # (the glm-5.2 footgun). Mirror the dedicated fields into the map so the box
+    # is always authoritative: ("coder", "coder_model") / ("designer", ...).
     _personas_for_override = ("reviewer", "planner",
                               "documenter", "analytics", "recommender",
                               "devops", "refactorer", "product_trainer")
     _new_map = dict(config.ollama_model_map or {})
-    for _p in _personas_for_override:
-        _raw = form.get(f"ollama_chain_{_p}", "").strip()
-        if _raw:
-            _chain = [m.strip() for m in _raw.split(",") if m.strip()]
-            if _chain:
-                _new_map[_p] = _chain
-            elif _p in _new_map:
-                del _new_map[_p]
-        else:
-            if _p in _new_map:
-                del _new_map[_p]
+    # Secondary personas: read from their ollama_chain_<persona> field.
+    # coder/designer: read from their dedicated coder_model/designer_model field.
+    _chain_sources = (
+        [(p, f"ollama_chain_{p}") for p in _personas_for_override]
+        + [("coder", "coder_model"), ("designer", "designer_model")]
+    )
+    for _p, _field in _chain_sources:
+        _raw = form.get(_field, "").strip()
+        _chain = [m.strip() for m in _raw.split(",") if m.strip()] if _raw else []
+        if _chain:
+            _new_map[_p] = _chain
+        elif _p in _new_map:
+            del _new_map[_p]
     config.ollama_model_map = _new_map or None
     config.ollama_timeout              = _int("ollama_timeout")
     config.bash_timeout                = _int("bash_timeout")
@@ -2521,10 +2548,22 @@ async def api_get_feature(feature_id: int, db: AsyncSession = Depends(get_db)):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/system-config")
-async def api_get_system_config(db: AsyncSession = Depends(get_db)):
-    """Poller reads system config for greenfield scaffolding and GH_TOKEN injection."""
+async def api_get_system_config(request: Request, db: AsyncSession = Depends(get_db)):
+    """System config for the orchestrator (greenfield scaffolding, GH_TOKEN, agent
+    keys). This route is unauthenticated by the internal-API convention, so secret
+    fields are MASKED unless the caller proves it's the orchestrator by presenting
+    the shared ``PF_INTERNAL_API_SECRET`` in the ``X-PF-Internal-Token`` header.
+
+    Backward-compatible, matching the existing HMAC convention: if
+    ``PF_INTERNAL_API_SECRET`` is unset, the secret is revealed (transparent
+    no-op) so existing single-host deployments keep working. Set the secret on
+    BOTH the website and the orchestrator to engage masking for everyone else.
+    """
     config = await _get_system_config(db)
-    return _config_as_dict(config)
+    secret = os.environ.get("PF_INTERNAL_API_SECRET", "")
+    token = request.headers.get("X-PF-Internal-Token", "")
+    reveal = (not secret) or (bool(token) and hmac.compare_digest(token, secret))
+    return _config_as_dict(config, mask_secrets=not reveal)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

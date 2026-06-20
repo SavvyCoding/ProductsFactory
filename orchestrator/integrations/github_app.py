@@ -66,7 +66,10 @@ def _fetch_app_config() -> tuple[int | None, str | None, int | None]:
     if not PM_API_URL:
         return None, None, None
     try:
-        with httpx.Client(base_url=PM_API_URL, timeout=5) as client:
+        # github_app_private_key is a masked secret on /api/system-config — the
+        # internal token is REQUIRED here or git auth silently breaks.
+        from orchestrator.pm_internal import internal_headers
+        with httpx.Client(base_url=PM_API_URL, timeout=5, headers=internal_headers()) as client:
             resp = client.get("/api/system-config")
             resp.raise_for_status()
             data = resp.json()

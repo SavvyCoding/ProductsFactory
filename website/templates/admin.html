@@ -290,6 +290,7 @@
           <label>Per-persona models</label>
           <p class="field-hint" style="margin-top:0;margin-bottom:8px">
             Ollama model (chain) for each persona. Comma-separated for a fallback chain — primary first; the agent tries each up to 5× before falling through on transient errors. <strong>Coder</strong> and <strong>Designer</strong> are the base chains; every other persona falls back to them when left blank.
+            <br><strong>⚠ After editing, click “💾 Save Agent settings” at the bottom of this panel</strong> — the System-tab save button does NOT save models. (Coder/Designer become the orchestrator's authoritative chain on save.)
           </p>
           {% set _model_map = config.ollama_model_map or {} %}
           <div class="admin-fields-grid" style="grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 16px">
@@ -418,7 +419,7 @@
       </div><!-- /asub-escalation -->
 
       <div class="form-actions">
-        <button type="submit">Save settings</button>
+        <button type="submit">💾 Save Agent settings (models, backend, escalation)</button>
       </div>
     </div><!-- /agent settings-card -->
   </div><!-- /atab-agent -->

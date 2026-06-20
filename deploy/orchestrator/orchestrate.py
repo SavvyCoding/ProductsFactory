@@ -183,9 +183,20 @@ def startup_reconcile():
             log.warning("[reconcile] closing orphaned session %s (container %s not running)",
                         s["id"], s["container_id"])
             try:
+                # /api/sessions/{id}/kill is guarded by verify_internal_signature:
+                # sign the exact body bytes when PF_INTERNAL_API_SECRET is set, else
+                # this startup orphan-cleanup 401s and orphans linger until watchdog.
+                import json as _json
+                from orchestrator.pm_internal import sign_body
+                _payload = _json.dumps(
+                    {"reason": "orphaned - container gone on orchestrator restart"}
+                ).encode()
+                _headers = {"Content-Type": "application/json"}
+                _sig = sign_body(_payload)
+                if _sig:
+                    _headers["X-PF-Signature"] = _sig
                 with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-                    client.post(f"/api/sessions/{s['id']}/kill",
-                                json={"reason": "orphaned - container gone on orchestrator restart"})
+                    client.post(f"/api/sessions/{s['id']}/kill", content=_payload, headers=_headers)
             except Exception:
                 log.exception("[reconcile] POST /kill failed for session %s", s["id"])
 

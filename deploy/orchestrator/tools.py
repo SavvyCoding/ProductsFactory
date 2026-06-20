@@ -87,7 +87,11 @@ class _SigningClient(httpx.Client):
 
 def _pm_client() -> httpx.Client:
     auth = (PM_USERNAME, PM_PASSWORD) if PM_PASSWORD else None
-    return _SigningClient(base_url=PM_API_URL, timeout=REQUEST_TIMEOUT, auth=auth)
+    # Default header on every request so GET /api/system-config returns real
+    # secret values (not masked hints). Keyed by the same PF_INTERNAL_API_SECRET
+    # used for write-signing; inert when unset (website reveals regardless).
+    headers = {"X-PF-Internal-Token": _INTERNAL_API_SECRET}
+    return _SigningClient(base_url=PM_API_URL, timeout=REQUEST_TIMEOUT, auth=auth, headers=headers)
 
 
 def _get_github_token() -> str:
