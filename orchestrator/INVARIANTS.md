@@ -32,7 +32,7 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 - *Why*: Two orchestrators running against the same DB will both pick the same product, launch duplicate Docker containers for it, and race on `session_result.json` writes. Caused real corruption pre-lock.
 
 **I.2 ✅ A crashed orchestrator's lock self-heals within 30 seconds.**
-- *How*: `tools.poller_heartbeat` refreshes every cycle (~60 s default; cycle period in `orchestrate.CYCLE_SECONDS`); lock TTL is 30 s. The website handler clears stale rows whose `updated_at` is older than the TTL before issuing the next lock.
+- *How*: `tools.poller_heartbeat` refreshes every cycle (~60 s default; cycle period in `orchestrate.CYCLE_INTERVAL`); lock TTL is 30 s. The website handler clears stale rows whose `updated_at` is older than the TTL before issuing the next lock.
 - *Why*: Hard crashes (OOM, SIGKILL, host reboot) leave the lock held. Without TTL, the next orchestrator waits indefinitely or — worse — the operator manually clears it and double-runs.
 
 **I.3 ✅ An orchestrator whose lock was stolen mid-cycle exits, doesn't keep working.**
@@ -48,7 +48,7 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 ## II. Round-robin fairness across products
 
 **II.1 ✅ Each cycle visits one product max for an agent session.**
-- *How*: `tools.run_cycle` resolves to exactly one `launch_session` call (or `action=exit`) per call. `orchestrate.py`'s main loop calls `run_cycle` once per `CYCLE_SECONDS` tick.
+- *How*: `tools.run_cycle` resolves to exactly one `launch_session` call (or `action=exit`) per call. `orchestrate.py`'s main loop calls `run_cycle` once per `CYCLE_INTERVAL` tick.
 - *Why*: Concurrent agent sessions per cycle would exhaust Claude API rate limits, Docker host resources, and the GitHub PR cap. The system is built around serial per-cycle work.
 
 **II.2 ✅ `last_run_at` advances on every cycle visit, not only on session launch.**
@@ -88,27 +88,27 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 ## IV. Feature state machine — safety constraints
 
 **IV.1 ✅ A feature's status never silently downgrades.**
-- *How*: `docker_runner._apply_session_entry` ranks statuses (`_PROGRESS_RANK`: Pending=0 → Pushed=7) and rejects entries whose target rank is lower than the current feature's rank.
+- *How*: `session/state_machine._apply_session_entry` ranks statuses (`_PROGRESS_RANK`: Pending=0 → Pushed=7) and rejects entries whose target rank is lower than the current feature's rank. (`docker_runner` re-imports this symbol; the canonical definition lives in `orchestrator/session/state_machine.py`.)
 - *Why*: Without rank-checking, a stale agent message ("Designed") can clobber a freshly-Reviewed feature, making the system regress. Real incident.
 
 **IV.2 ✅ Two backward transitions ARE allowed: `Reviewing → Implementing` and `Reviewed → Implementing`.**
-- *How*: `_ALLOWED_BACKWARD` exception set in `docker_runner._apply_session_entry`.
+- *How*: `_ALLOWED_BACKWARD` exception set in `session/state_machine._apply_session_entry`.
 - *Why*: Reviewer requesting changes IS a backward move. Without the allowlist, the reviewer's `changes_requested` PATCH gets silently dropped (Implementing rank 4 < Reviewing rank 5) and the feature loops in Reviewing forever.
 
 **IV.3 ✅ A `Reviewed` entry without `review_outcome` is rejected.**
-- *How*: `docker_runner._apply_session_entry` rejection branch.
+- *How*: `session/state_machine._apply_session_entry` rejection branch.
 - *Why*: Auto-merge can't decide whether to merge without `review_outcome=approved`. Without rejection, malformed reviewer output silently strands features.
 
 **IV.4 ✅ Reviewer entries with `status=Reviewing` are filtered out.**
-- *How*: `docker_runner._reconcile_session_result` filter (`_is_blocked` predicate).
+- *How*: `session/reconciler._reconcile_session_result` filter (`_is_blocked` predicate).
 - *Why*: Reviewers must only write `Reviewed` or `Implementing`. Without the filter, a confused reviewer would loop the feature.
 
 **IV.5 ✅ Coder and reviewer entries with `status=Pushed` are filtered out.**
-- *How*: `docker_runner._reconcile_session_result` filter (same `_is_blocked` predicate as IV.4).
+- *How*: `session/reconciler._reconcile_session_result` filter (same `_is_blocked` predicate as IV.4).
 - *Why*: Only auto-merge or reconcile-against-GitHub can move a feature to Pushed. Without the filter, a coder could falsely declare success and bypass the merge gate.
 
 **IV.6 ✅ `Reviewing` entry without `pr_number` falls back to extracting from `pr_url`.**
-- *How*: `docker_runner._apply_session_entry` regex `r"/pull/(\d+)"` against `pr_url`.
+- *How*: `session/state_machine._apply_session_entry` regex `r"/pull/(\d+)"` against `pr_url`.
 - *Why*: Some reviewers wrote `pr_url` but not `pr_number`. Without the fallback, the feature would sit in Reviewing without a PR reference, never reconcilable.
 
 ---
@@ -120,7 +120,7 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 - *Why*: Crashed agents leave features pinned in agent states. Without this, a single crash poisons that feature forever.
 
 **V.2 ✅ A `claimed` feature with no PR after the session ends is rolled back.**
-- *How*: `docker_runner._rollback_stuck_features` called post-session per persona-specific status set (e.g. coder → Implementing). Features WITH `pr_number` are skipped (they're already in Reviewing).
+- *How*: `session/reconciler._rollback_stuck_features` called post-session per persona-specific status set (e.g. coder → Implementing). Features WITH `pr_number` are skipped (they're already in Reviewing).
 - *Why*: Session crash mid-claim must not leave the feature stranded for `stuck_feature_timeout` minutes.
 
 **V.3 ✅ In-flight features get reconciled against GitHub every cycle.**
@@ -132,7 +132,7 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 - *Why*: V.3 only catches features with `pr_number` set. Features whose `pr_number` was lost (DB volume wipe, agent crash before PATCH) need PR-side reconciliation to recover.
 
 **V.5 ✅ A session_result.json with no entry for an assigned feature → that feature rolls back to Approved.**
-- *How*: Enforced in `docker_runner._reconcile_session_result` + `docker_runner._rollback_stuck_features`. Agent contract documented as docstrings on `_read_session_result` and `_apply_session_entry`.
+- *How*: Enforced in `session/reconciler._reconcile_session_result` + `session/reconciler._rollback_stuck_features`. Agent contract documented as docstrings on `session/result_io._read_session_result` and `session/state_machine._apply_session_entry`.
 - *Why*: Crashed mid-session containers leave features claimed but uncommitted. Rollback is mandatory or they sit until V.1's timeout.
 
 ---
@@ -164,12 +164,12 @@ Each invariant is tagged with **why** (the failure mode it guards against) and *
 ## VII. Auto-merge
 
 **VII.1 ✅ Auto-merge fires for any Reviewed+approved+pr_number feature with `auto_merge_enabled` set.**
-- *How*: `auto_merge.sweep_all` (called from `tools.run_cycle` after the per-cycle reconcile pass) iterates every `ready` product per cycle. For each product it walks `(status=Reviewed AND pr_number AND review_outcome=approved)` features and attempts squash-merge against GitHub. The post-reviewer-session `docker_runner._auto_merge_approved` path is still in place as a belt-and-braces second layer for the reviewer-session-specific flow (it does PR `update-branch` before merge, which the sweep doesn't).
+- *How*: `auto_merge.sweep_all` (called from `tools.run_cycle` after the per-cycle reconcile pass) iterates every `ready` product per cycle. For each product it walks `(status=Reviewed AND pr_number AND review_outcome=approved)` features and attempts squash-merge against GitHub. The post-reviewer-session `pipelines/auto_merge_reviewer._auto_merge_approved` path is still in place as a belt-and-braces second layer for the reviewer-session-specific flow (it does PR `update-branch` before merge, which the sweep doesn't); `docker_runner` re-imports it.
 - *Why*: Approved PRs must move to Pushed within bounded time (1-2 cycles).
 - *Historical context*: Pre-Phase-1 there were two paths, both bound to a session ever launching — when only Reviewed features existed (no Reviewing), neither path fired and PRs stranded. The webcalculator class of deadlock. Phase 1 added the per-cycle sweep to cut that dependency.
 
 **VII.2 ✅ A 405 (not mergeable) response on auto-merge is logged and skipped.**
-- *How*: `auto_merge.sweep_product` and `docker_runner._auto_merge_approved` both branch on `code == 405`, log warning, increment conflict counter, and continue.
+- *How*: `auto_merge.sweep_product` and `pipelines/auto_merge_reviewer._auto_merge_approved` both branch on `code == 405`, log warning, increment conflict counter, and continue.
 - *Why*: PRs with conflicts must not crash the loop. Skip and let the PM resolve manually.
 
 **VII.3 ✅ A 422 (already merged) response is treated as success.**
@@ -210,11 +210,11 @@ If real-time persona-alternation detection ever becomes necessary again, the nat
 ## X. Session FSM (sessions.status)
 
 **X.1 ✅ Session lifecycle: `pending → starting → running → wrapping → ended | killed | orphaned`.**
-- *How*: `SESSION_STATUSES` enum in `website.models`.
+- *How*: `sessions.status` is a plain `Text` column (`website.models.Session`), not a formal enum constant — the state set is a documented convention enforced by the session-update paths in `website/main.py` and the FSM helpers under `orchestrator/session/state_machine.py`. (There is no `SESSION_STATUSES` tuple; `website.models` only defines `PRODUCT_STATUSES`/`ANALYSIS_STATUSES`.)
 - *Why*: A canonical FSM column means watchdog/reconciler/harvester can be written as pure transitions without parsing docker output or file mtimes.
 
 **X.2 ✅ Watchdog kills sessions past `expected_deadline`.**
-- *How*: `heartbeat.check_stale_sessions`, called per cycle from `tools.check_stale_sessions` (invoked by `tools.run_cycle`).
+- *How*: An inline per-cycle watchdog block in `tools.run_cycle` — `orchestrator/heartbeat.py` and the `heartbeat.check_stale_sessions` / `tools.check_stale_sessions` wrappers were deleted 2026-05-28. The block now `GET`s `/api/sessions/watchdog/targets` (sessions past `expected_deadline` or without a recent heartbeat) and cross-checks `docker ps` presence, then kills the offending containers.
 - *Why*: Default 90 min cap. Without it, runaway agents burn API quota indefinitely.
 
 **X.3 ✅ Orphaned sessions (DB says running but container missing) are recovered on orchestrator startup.**
@@ -271,6 +271,28 @@ These are properties the system *must* hold. If you can construct a scenario whe
 - **✅ A `Reviewed` feature is always either merged or PM-actioned within bounded cycles.** *Satisfied by VII.1 (per-cycle sweep) as of Phase 1 of PollerRevamp. Still depends on the feature having a valid `pr_number` — features with stale or wrong `pr_number` (e.g. webcalculator's feature 74 referencing a PR that covers different features) need data fixup, not orchestration.*
 - **⚠ A product is never invisibly stuck.** *Today "No actionable work" is just a debug log line. Need a per-product `stuck_reason` surface — the next phase of work.*
 - **❌ The four reconciliation layers + supervisor never produce conflicting writes.** *No transactional boundary between them; ordering is "cycle order = arbitrary." Hasn't bit yet but is a latent race.*
+
+---
+
+## XIV. Dispatch gating & sidecar services (shipped 2026-06)
+
+These subsystems landed after the original invariant set was written. Each is enforced today; listed here so a future refactor that breaks them is caught.
+
+**XIV.1 ✅ Phase-gate and `depends_on` gating are each enforced at TWO selection points that must agree.**
+- *How*: `cycle/phase_gate.gated_out_feature_ids` (later phases frozen until the current one is PM-approved) and `cycle/dependencies.dependency_blocked_feature_ids` (a feature whose `depends_on` target isn't shipped is held) are both called from **both** `cycle/persona._decide_action` (what a session is *launched for*) and `docker_runner._fetch_assigned_features` (what a launched session *claims*).
+- *Why*: `_fetch_assigned_features` selects independently of `_decide_action` (by status + priority ASC), so if only one point gated, a session launched for the current phase could still claim a frozen/blocked later-phase feature — and because both sort priority ASC, a low-priority-number later feature would even rank first. The logic is shared (not duplicated) precisely so the two points can't drift.
+
+**XIV.2 ✅ `infra` features are executed deterministically, never by an agent session.**
+- *How*: `tools._execute_infra_stories` (called per-cycle from `tools.run_cycle`) provisions the requested catalog service and marks the story Pushed. Both selection points (`cycle/persona._decide_action`, `docker_runner._fetch_assigned_features`) exclude `feature_type='infra'`.
+- *Why*: An infra story is a service-provisioning request, not code — routing it to a coder produced the DogTinder #1582 failure (agent vendored the entire Redis source tree because no other path to a live service existed).
+
+**XIV.3 ✅ Sidecar service containers are allowlist-bound and reaped every cycle.**
+- *How*: `services.ensure_session_services` launches one `pf-svc-{session_uid}-{name}` container per declared `product.config.services` entry at session launch; `services.teardown_session_services` removes them at finalize; `services.reap_orphan_services` (per-cycle from `tools.run_cycle`) GCs any whose session is no longer active. `services.SERVICE_CATALOG` is the allowlist — agent text can *name* a service, never supply an image.
+- *Why*: Agents have no docker socket by design; without the catalog + reaper, a crashed session would leak service containers and an agent could otherwise request an arbitrary image.
+
+**XIV.4 ✅ A feature whose `depends_on` points at a dead (Rejected/Reverted) target is rehomed, not stranded.**
+- *How*: `cycle/dependencies.dangling_dependency_repairs`, applied per-cycle via `tools._repair_dangling_dependencies`.
+- *Why*: Without this, a feature blocked behind a cancelled dependency (XIV.1) would wait forever — the gate would never release because its target never ships.
 
 ---
 

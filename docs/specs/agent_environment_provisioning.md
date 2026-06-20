@@ -1,8 +1,10 @@
 # Spec: Agent Environment Provisioning Strategy
 
-**Status:** Future consideration — **plan only, not implemented.**
+**Status:** Recommended strategy ADOPTED; escape-hatch still deferred (see implementation note).
 **Date:** 2026-06-09
 **Supersedes:** the earlier per-product-image drafts discussed in-session (v1 builder, v2 staged, "phase-0.5 predictive extraction"). Those over-engineered a divergence problem that has **not been observed**; this document is the rethought, evidence-driven strategy.
+
+> **Implementation status (updated 2026-06-19):** The strategy this spec recommends is the live model — language-deps-as-code, one growing shared base (`deploy/docker/Dockerfile`), and the Block-with-reason demand signal. Supporting machinery has since shipped: the **capability manifest** `orchestrator/capabilities.py::AGENT_IMAGE_TOOLS` (single source of truth for image tools, rendered into the designer prompt) plus the **`tool_missing` / `service_missing` triage** in `orchestrator/pipelines/post_coder.py` — together these realize principle 5 ("never silently run a session missing a declared tool"): a missing in-set tool → `env_broken` retry, a missing out-of-set tool → terminal Block-for-redesign. Related but separate work — live sidecar services (redis/postgres) via `orchestrator/services.py::SERVICE_CATALOG` and `feature_type='infra'` provisioning (migration 046) — covers *runtime services*, not the system-binary question this spec scopes. **Still deferred as designed:** the per-product environment-as-code escape hatch (🔲 below) — the divergence gate has not tripped (zero observed conflicting-system-lib cases as of 2026-06-19).
 
 ---
 
