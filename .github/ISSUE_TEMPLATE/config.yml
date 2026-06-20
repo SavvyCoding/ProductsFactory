@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/SavvyCoding/ProductsFactory/security/advisories/new
+    about: Please report security vulnerabilities privately — do NOT open a public issue. See SECURITY.md.
+  - name: Question / discussion
+    url: https://github.com/SavvyCoding/ProductsFactory/discussions
+    about: Ask questions and discuss ideas here instead of filing an issue.

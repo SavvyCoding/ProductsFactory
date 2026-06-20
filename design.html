@@ -620,10 +620,93 @@
     .env-grid { grid-template-columns: 1fr; }
     .dataflow { grid-template-columns: 1fr; }
     .flow-diagram { display: none; }
+    .system-graph-wrap { height: 420px; }
+  }
+
+  /* ── ANIMATED PARTICLE-NETWORK BACKGROUND ── */
+  #bg-net {
+    position: fixed; inset: 0; z-index: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    opacity: 0.55;
+  }
+
+  /* ── D3 SYSTEM GRAPH ── */
+  .system-graph-wrap {
+    position: relative;
+    margin-top: 56px;
+    height: 560px;
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    background:
+      radial-gradient(120% 120% at 50% 0%, rgba(59,130,246,0.07), transparent 60%),
+      linear-gradient(180deg, rgba(13,21,38,0.6), rgba(8,12,20,0.3));
+    overflow: hidden;
+    box-shadow: var(--glow-blue);
+  }
+  .system-graph-head {
+    position: absolute; top: 18px; left: 22px; z-index: 3;
+    pointer-events: none;
+  }
+  .system-graph-head .sg-title {
+    font-size: 13px; font-weight: 700; letter-spacing: -0.2px; color: var(--text);
+  }
+  .system-graph-head .sg-sub {
+    font-size: 11px; color: var(--text3); margin-top: 2px;
+  }
+  .system-graph-legend {
+    position: absolute; bottom: 16px; left: 22px; z-index: 3;
+    display: flex; gap: 16px; flex-wrap: wrap; pointer-events: none;
+  }
+  .sg-leg { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--text3); }
+  .sg-leg i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  #system-graph { width: 100%; height: 100%; display: block; cursor: grab; }
+  #system-graph:active { cursor: grabbing; }
+  #system-graph .sg-link { stroke-linecap: round; transition: stroke-opacity 0.25s; }
+  #system-graph .sg-node circle {
+    stroke: rgba(8,12,20,0.9); stroke-width: 2px;
+    transition: filter 0.25s, opacity 0.25s;
+    cursor: pointer;
+  }
+  #system-graph .sg-node text {
+    font-family: 'Inter', sans-serif; font-size: 10px; font-weight: 600;
+    fill: var(--text2); pointer-events: none;
+    paint-order: stroke; stroke: rgba(8,12,20,0.85); stroke-width: 3px;
+  }
+  #system-graph .sg-node.dim circle,
+  #system-graph .sg-node.dim text { opacity: 0.18; }
+  #system-graph .sg-link.dim { stroke-opacity: 0.04 !important; }
+  .graph-tip {
+    position: absolute; z-index: 5; pointer-events: none;
+    background: rgba(8,12,20,0.95); border: 1px solid var(--border2);
+    border-radius: 10px; padding: 9px 12px; max-width: 240px;
+    font-size: 11.5px; color: var(--text2); line-height: 1.5;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+    opacity: 0; transform: translateY(4px); transition: opacity 0.15s, transform 0.15s;
+  }
+  .graph-tip.show { opacity: 1; transform: translateY(0); }
+  .graph-tip b { color: var(--text); font-weight: 700; }
+
+  /* ── SCROLL REVEAL (GSAP-driven, with CSS fallback) ── */
+  .reveal { opacity: 0; transform: translateY(22px); }
+  .reveal.is-in { opacity: 1; transform: none; }
+
+  /* ── ANIMATED FLOW DASHES ── */
+  .flow-anim { stroke-dasharray: 5 4; animation: flowdash 0.9s linear infinite; }
+  @keyframes flowdash { to { stroke-dashoffset: -18; } }
+
+  @media (prefers-reduced-motion: reduce) {
+    #bg-net { display: none; }
+    .flow-anim { animation: none; }
+    .reveal { opacity: 1; transform: none; }
   }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/ScrollTrigger.min.js"></script>
 </head>
 <body>
+<canvas id="bg-net"></canvas>
 <div class="grid-bg"></div>
 <div class="page-content">
 
@@ -632,7 +715,7 @@
   <span class="nav-logo">⚙ ProductFactory</span>
   <div class="nav-links">
     <a href="#overview">Overview</a>
-    <a href="#poller">Poller</a>
+    <a href="#poller">Cycle</a>
     <a href="#workflow">Workflow</a>
     <a href="#personas">Personas</a>
     <a href="#lifecycle">Lifecycle</a>
@@ -642,7 +725,7 @@
     <a href="#security">Security</a>
     <a href="#env">Config</a>
   </div>
-  <span class="nav-badge">v2.2 — Sprint-Gated</span>
+  <span class="nav-badge">1-PR-per-feature · Phase-Gated</span>
 </nav>
 
 <!-- HERO -->
@@ -681,37 +764,53 @@
     <div class="subsystem-card blue">
       <div class="subsystem-icon">🔄</div>
       <div class="subsystem-name">Orchestrator</div>
-      <div class="subsystem-path">orchestrator/poller.py</div>
-      <div class="subsystem-desc">Windows host process. Polls every 60s, selects products via round-robin, determines persona, launches Docker containers, tracks session health.</div>
+      <div class="subsystem-path">deploy/orchestrator/ · tools.run_cycle</div>
+      <div class="subsystem-desc">Long-running process inside the pf-orchestrator container. Every ~60s: reviewer preempt → round-robin product select → per-product persona decision → launch one sandboxed agent, then run the deterministic post-session gates.</div>
     </div>
     <div class="subsystem-card violet">
       <div class="subsystem-icon">📊</div>
       <div class="subsystem-name">PM Dashboard</div>
       <div class="subsystem-path">website/main.py · FastAPI</div>
-      <div class="subsystem-desc">REST API + Jinja2 UI. Manages products, features, sessions, alerts. Streams live session logs via SSE. Multi-PM auth with admin panel.</div>
+      <div class="subsystem-desc">REST API + dashboard managing products, features, phases, sessions, and alerts. Async SQLAlchemy over PostgreSQL; shared by the agents and human PMs alike.</div>
     </div>
     <div class="subsystem-card green">
       <div class="subsystem-icon">🐳</div>
       <div class="subsystem-name">Agent Image</div>
       <div class="subsystem-path">deploy/docker/Dockerfile</div>
-      <div class="subsystem-desc">Isolated Docker container per session. Claude CLI or Ollama backend. 4GB RAM, 2 CPUs, isolated bridge network, read-only OAuth + deploy key mounts.</div>
+      <div class="subsystem-desc">Isolated container per session. Claude CLI or Ollama backend. Non-root, --cap-drop ALL, no docker socket, isolated bridge network; read-only OAuth mount + short-lived GitHub App tokens for git.</div>
     </div>
+  </div>
+
+  <!-- D3 SYSTEM GRAPH -->
+  <div class="system-graph-wrap reveal">
+    <div class="system-graph-head">
+      <div class="sg-title">Live system map</div>
+      <div class="sg-sub">Drag a node · hover to trace its connections</div>
+    </div>
+    <svg id="system-graph"></svg>
+    <div class="system-graph-legend">
+      <span class="sg-leg"><i style="background:var(--blue2)"></i>Core loop</span>
+      <span class="sg-leg"><i style="background:var(--violet2)"></i>Persona</span>
+      <span class="sg-leg"><i style="background:var(--green2)"></i>Pipeline</span>
+      <span class="sg-leg"><i style="background:var(--amber2)"></i>Product / PR</span>
+    </div>
+    <div class="graph-tip" id="graph-tip"></div>
   </div>
 </section>
 
 <!-- POLLER CYCLE -->
 <section id="poller">
   <div class="section-label">Orchestration</div>
-  <h2>Poller Cycle</h2>
-  <p class="section-sub">Every 60 seconds (5s between products), the poller executes a 13-step cycle — pre-fetching and claiming features before Docker launch so the agent is a pure executor.</p>
+  <h2>Orchestrator Cycle</h2>
+  <p class="section-sub">Every ~60 seconds the orchestrator runs one cycle inside the pf-orchestrator container — watchdog + reconcile sweeps, then a priority ladder (reviewer preempt → round-robin dispatch) that claims features before Docker launch so the agent is a pure executor.</p>
 
   <div class="cycle-grid">
     <div class="cycle-steps">
       <div class="cycle-step">
         <div class="step-num">①</div>
         <div class="step-body">
-          <div class="step-title">Auth Health Check</div>
-          <div class="step-desc">Runs <code>claude -p ping --max-budget-usd 0.001</code>. A "budget exceeded" response confirms auth is valid. Skips cycle if truly unhealthy, sends critical alert.</div>
+          <div class="step-title">Session Watchdog</div>
+          <div class="step-desc">Asks the PM API for sessions past <code>expected_deadline</code> or with a stale heartbeat, cross-checks <code>docker ps</code>, and kills orphaned containers. (The old per-cycle Claude auth probe was retired — containers get OAuth at launch.)</div>
           <span class="step-tag tag-health">HEALTH GATE</span>
         </div>
       </div>
@@ -719,7 +818,7 @@
         <div class="step-num">②</div>
         <div class="step-body">
           <div class="step-title">Scaffold Greenfield Products</div>
-          <div class="step-desc">Creates GitHub repo, adds deploy key, clones to working directory, applies stack templates. Runs for any product in <code>greenfield_pending</code> state.</div>
+          <div class="step-desc">Creates the GitHub repo via a GitHub App token, initializes the local repo, applies stack templates, and pushes. Runs for any product in <code>greenfield_pending</code> state.</div>
           <span class="step-tag tag-infra">INFRA</span>
         </div>
       </div>
@@ -734,9 +833,9 @@
       <div class="cycle-step">
         <div class="step-num">④</div>
         <div class="step-body">
-          <div class="step-title">Heartbeat — Kill Stale Containers</div>
-          <div class="step-desc">Checks if <code>progress.md</code> was pushed within the last 45 minutes. If not, kills the container and sends a warning alert.</div>
-          <span class="step-tag tag-health">HEALTH</span>
+          <div class="step-title">Supervisors + Blocked Reprocessor</div>
+          <div class="step-desc">Rule-based cascade detectors (false-success, repeated-feedback, stuck-PR) write auditable <code>supervisor_actions</code>; the blocked-feature reprocessor gives each Blocked feature one automatic retry.</div>
+          <span class="step-tag tag-health">SAFETY NET</span>
         </div>
       </div>
       <div class="cycle-step">
@@ -775,7 +874,7 @@
         <div class="step-num">⑦c</div>
         <div class="step-body">
           <div class="step-title">Persona Determination + Feature Pre-fetch</div>
-          <div class="step-desc">Queries <code>/api/features/next-for-persona</code> to pick designer or coder. Then <strong>fetches assigned features from PM API</strong> and <strong>PATCHes them to Implementing/Designing</strong> (claim-before-launch) so no other poller instance can double-claim. Injects <code>{assigned_features}</code> and <code>{prev_session_summary}</code> into the agent prompt.</div>
+          <div class="step-desc">Queries <code>/api/features/next-for-persona</code> to pick designer or coder. Then <strong>fetches assigned features from PM API</strong> and <strong>PATCHes them to Implementing/Designing</strong> (claim-before-launch) so no other cycle can double-claim. Injects <code>{assigned_features}</code> and <code>{prev_session_summary}</code> into the agent prompt.</div>
           <span class="step-tag tag-priority">ROUTING + CLAIM</span>
         </div>
       </div>
@@ -798,8 +897,8 @@
       <div class="cycle-step">
         <div class="step-num">⑩</div>
         <div class="step-body">
-          <div class="step-title">PR Count Gate (Coder only)</div>
-          <div class="step-desc">If ≥3 open PRs exist on GitHub for this product, pauses the coder for 5 minutes and sends a warning alert. Prevents PR pile-up.</div>
+          <div class="step-title">Phase Gate (human-in-loop)</div>
+          <div class="step-desc">Freezes features in later phases until a PM approves the current phase. On by default; phase-ordered dispatch (foundational-first) applies regardless.</div>
           <span class="step-tag tag-guard">GATE</span>
         </div>
       </div>
@@ -815,7 +914,7 @@
         <div class="step-num">⑫</div>
         <div class="step-body">
           <div class="step-title">Launch Docker Session + Live Poll</div>
-          <div class="step-desc">Runs <code>docker run --rm productfactory-agent</code> with isolated bridge network, read-only OAuth + deploy key mounts. Streams logs to PM API. A <strong>background thread polls <code>session_result.json</code> every 30 s</strong> and applies each NDJSON line to the DB in real-time as the agent completes phases.</div>
+          <div class="step-desc">Runs <code>docker run --rm productfactory-agent</code> with isolated bridge network, non-root + <code>--cap-drop ALL</code>, a read-only OAuth mount, and a short-lived GitHub App token for git. Streams logs to PM API. A <strong>background thread polls <code>session_result.json</code> every 30 s</strong> and applies each NDJSON line to the DB in real-time as the agent completes phases.</div>
           <span class="step-tag tag-run">RUN + LIVE POLL</span>
         </div>
       </div>
@@ -915,7 +1014,7 @@
 <!-- POLLER WORKFLOW DETAIL -->
 <section id="workflow">
   <div class="section-label">Detailed Internals</div>
-  <h2>Poller Session Workflow</h2>
+  <h2>Session Workflow</h2>
   <p class="section-sub">A deep dive into what happens during one product session — from feature selection through real-time DB updates to post-container cleanup.</p>
 
   <div class="wf-phases">
@@ -926,8 +1025,8 @@
       <div class="wf-phase-header">
         <div class="wf-phase-icon" style="background:rgba(59,130,246,0.15)">🔄</div>
         <div>
-          <div class="wf-phase-title">Phase 1 — Pre-Docker (Poller, on host)</div>
-          <div class="wf-phase-sub">Everything the poller does <em>before</em> launching the container. The agent receives pre-claimed features; it never self-selects work.</div>
+          <div class="wf-phase-title">Phase 1 — Pre-Docker (Orchestrator)</div>
+          <div class="wf-phase-sub">Everything the orchestrator does <em>before</em> launching the container. The agent receives pre-claimed features; it never self-selects work.</div>
         </div>
       </div>
       <div class="wf-steps">
@@ -946,13 +1045,13 @@
         <div class="wf-step">
           <div class="wf-step-num">STEP 3</div>
           <div class="wf-step-title">Claim Features (PATCH)</div>
-          <div class="wf-step-desc">PATCHes each feature to <code>Implementing</code> (coder) or <code>Designing</code> (designer) <em>before</em> Docker starts. Prevents double-claiming if the poller polls again mid-session.</div>
+          <div class="wf-step-desc">PATCHes each feature to <code>Implementing</code> (coder) or <code>Designing</code> (designer) <em>before</em> Docker starts. Prevents double-claiming if the cycle runs again mid-session.</div>
           <code class="wf-step-code">_claim_features(features, persona)</code>
         </div>
         <div class="wf-step">
           <div class="wf-step-num">STEP 4</div>
           <div class="wf-step-title">Read Session Summary</div>
-          <div class="wf-step-desc">Reads <code>session_summary.md</code> from the product workspace for session continuity. Falls back to last 50 lines of <code>progress.md</code> if summary doesn't exist. Truncated at 2000 chars.</div>
+          <div class="wf-step-desc">Reads <code>session_summary.md</code> from the product workspace for session continuity (it replaced the retired <code>progress.md</code>). Tail-kept so the freshest notes survive the prompt-size cap.</div>
           <code class="wf-step-code">_read_session_summary(working_dir)</code>
         </div>
         <div class="wf-step">
@@ -978,8 +1077,8 @@
       <div class="wf-phase-header">
         <div class="wf-phase-icon" style="background:rgba(139,92,246,0.15)">⚡</div>
         <div>
-          <div class="wf-phase-title">Phase 2 — During Docker (Agent + Poller, parallel)</div>
-          <div class="wf-phase-sub">The agent implements features while the poller's background thread applies DB updates in real-time — no waiting until container exit.</div>
+          <div class="wf-phase-title">Phase 2 — During Docker (Agent + Orchestrator, parallel)</div>
+          <div class="wf-phase-sub">The agent implements features while the orchestrator applies DB updates in real-time — no waiting until container exit.</div>
         </div>
       </div>
       <div class="wf-dual">
@@ -1026,7 +1125,7 @@
       <div class="wf-phase-header">
         <div class="wf-phase-icon" style="background:rgba(16,185,129,0.15)">✅</div>
         <div>
-          <div class="wf-phase-title">Phase 3 — Post-Docker (Poller, on host)</div>
+          <div class="wf-phase-title">Phase 3 — Post-Docker (Orchestrator)</div>
           <div class="wf-phase-sub">Cleanup, final reconcile, auto-merge, and optionally the post-coder chain.</div>
         </div>
       </div>
@@ -1058,7 +1157,7 @@
         <div class="wf-step">
           <div class="wf-step-num">STEP 11</div>
           <div class="wf-step-title">Post-Coder Chain</div>
-          <div class="wf-step-desc">On coder clean exit: runs QA Tester → Security Auditor. Each is a separate <code>docker run</code> in sequence. Recommender and the other maintenance agents are PM-triggered (not here). Failures don't block the chain.</div>
+          <div class="wf-step-desc">On coder clean exit: runs the deterministic gates (lint guards + drift detectors in-process, then tests + Verify recipes in a throwaway container). Pass → cut the branch, commit, push, open the PR. Fail → bounce the features back to <code>Implementing</code> with the reason.</div>
           <code class="wf-step-code">_run_post_coder_chain(product, session_uid)</code>
         </div>
         <div class="wf-step">
@@ -1079,31 +1178,31 @@
     <div style="background:var(--bg2);border:1px solid rgba(139,92,246,0.25);border-radius:10px;padding:16px;font-size:12px;">
       <strong style="color:var(--violet2)">Session Continuity via session_summary.md</strong>
       <div style="color:var(--text2);margin-top:8px;line-height:1.7">
-        Agents write <code style="font-family:'JetBrains Mono',monospace">session_summary.md</code> <em>incrementally</em> throughout their run — startup, key decisions, completions, blockers. The next session receives this as <code style="font-family:'JetBrains Mono',monospace">{prev_session_summary}</code> in the prompt. Fallback: last 50 lines of <code style="font-family:'JetBrains Mono',monospace">progress.md</code>.
+        Agents write <code style="font-family:'JetBrains Mono',monospace">session_summary.md</code> <em>incrementally</em> throughout their run — startup, key decisions, completions, blockers. The next session receives this as <code style="font-family:'JetBrains Mono',monospace">{prev_session_summary}</code> in the prompt (tail-capped to fit the prompt budget). It replaced the now-retired <code style="font-family:'JetBrains Mono',monospace">progress.md</code>.
       </div>
     </div>
     <div style="background:var(--bg2);border:1px solid rgba(6,182,212,0.25);border-radius:10px;padding:16px;font-size:12px;">
-      <strong style="color:var(--cyan)">Option B — Full Poller DB Ownership</strong>
+      <strong style="color:var(--cyan)">Orchestrator Owns DB Writes</strong>
       <div style="color:var(--text2);margin-top:8px;line-height:1.7">
-        Agents <strong>never</strong> call <code style="font-family:'JetBrains Mono',monospace">PATCH /api/features/{id}</code> directly. All DB updates flow through <code style="font-family:'JetBrains Mono',monospace">session_result.json</code> → poller <code style="font-family:'JetBrains Mono',monospace">_reconcile_session_result()</code>. The poller is the single source of truth for feature state transitions.
+        Agents <strong>never</strong> call <code style="font-family:'JetBrains Mono',monospace">PATCH /api/features/{id}</code> directly. All DB updates flow through <code style="font-family:'JetBrains Mono',monospace">session_result.json</code> → the orchestrator's <code style="font-family:'JetBrains Mono',monospace">_reconcile_session_result()</code>. The orchestrator is the single source of truth for feature state transitions.
       </div>
     </div>
     <div style="background:var(--bg2);border:1px solid rgba(16,185,129,0.25);border-radius:10px;padding:16px;font-size:12px;">
       <strong style="color:var(--green2)">Claim-Before-Launch</strong>
       <div style="color:var(--text2);margin-top:8px;line-height:1.7">
-        Features are PATCHed to <code style="font-family:'JetBrains Mono',monospace">Implementing</code> / <code style="font-family:'JetBrains Mono',monospace">Designing</code> by the poller <em>before</em> <code style="font-family:'JetBrains Mono',monospace">docker run</code>. If the poller polls again while the container is still running, those features are already claimed and won't be double-assigned.
+        Features are PATCHed to <code style="font-family:'JetBrains Mono',monospace">Implementing</code> / <code style="font-family:'JetBrains Mono',monospace">Designing</code> by the orchestrator <em>before</em> <code style="font-family:'JetBrains Mono',monospace">docker run</code>. If the cycle runs again while the container is still running, those features are already claimed and won't be double-assigned.
       </div>
     </div>
     <div style="background:var(--bg2);border:1px solid rgba(139,92,246,0.25);border-radius:10px;padding:16px;font-size:12px;">
-      <strong style="color:var(--violet2)">Strict Single-Sprint Scoping</strong>
+      <strong style="color:var(--violet2)">Phase-Ordered Dispatch</strong>
       <div style="color:var(--text2);margin-top:8px;line-height:1.7">
-        When an active sprint exists, agents only see features in that sprint — never features from future sprints. Newly approved features are auto-assigned to the next <em>planned</em> sprint (not the active one) to avoid scope creep mid-sprint.
+        Feature selection sorts by <em>(phase order, priority)</em> so foundational work is built first. With the phase gate on, later phases stay frozen until a PM approves the current one — one phase ships at a time.
       </div>
     </div>
     <div style="background:var(--bg2);border:1px solid rgba(245,158,11,0.25);border-radius:10px;padding:16px;font-size:12px;">
       <strong style="color:var(--amber2)">Live DB Updates Every 30s</strong>
       <div style="color:var(--text2);margin-top:8px;line-height:1.7">
-        A background thread on the host polls <code style="font-family:'JetBrains Mono',monospace">session_result.json</code> every 30 seconds. The PM dashboard shows real-time feature state changes mid-session — not just a batch update when the container exits.
+        The orchestrator polls <code style="font-family:'JetBrains Mono',monospace">session_result.json</code> every 30 seconds. The PM dashboard shows real-time feature state changes mid-session — not just a batch update when the container exits.
       </div>
     </div>
   </div>
@@ -1112,7 +1211,7 @@
 <!-- PERSONAS -->
 <section id="personas">
   <div class="section-label">Multi-Agent System</div>
-  <h2>11 AI Personas</h2>
+  <h2>13 AI Personas</h2>
   <p class="section-sub">Each persona is a separate Docker session with a specialized prompt. They run in priority order — delivery pipeline first, then maintenance, then planning. Two additional personas are on-demand only.</p>
 
   <div class="persona-section">
@@ -1175,22 +1274,22 @@
 
     <!-- Post-Coder Chain -->
     <div>
-      <div class="persona-group-label">Post-Coder Chain — auto-runs after every successful coder session (PR-level)</div>
+      <div class="persona-group-label">After a coder session — deterministic gates (not an LLM) + the on-demand security sweep</div>
       <div class="persona-cards">
 
         <div class="persona-card">
           <div class="persona-card-accent pc-sky"></div>
           <div class="persona-header">
-            <div class="persona-emoji">🧪</div>
+            <div class="persona-emoji">🛡️</div>
             <div>
-              <div class="persona-name">QA Tester</div>
-              <div class="persona-trigger">Auto-trigger: immediately after coder succeeds</div>
+              <div class="persona-name">Post-Coder Gates</div>
+              <div class="persona-trigger">Deterministic · runs after every coder session</div>
             </div>
           </div>
-          <div class="persona-desc">Finds the latest open PR, checks out the branch, reads the diff, and writes automated tests. Commits tests directly to the PR branch so the Reviewer sees full test coverage in the review.</div>
+          <div class="persona-desc">Not an LLM — a deterministic pipeline: 18 static lint guards + AST drift detectors (in the orchestrator), then the stack's test command and the designer's <code>Verify:</code> recipes (in a throwaway container). Bounces failures back to the coder before the PR is ever opened, so the reviewer never sees the patterns they catch.</div>
           <div class="persona-io">
-            <div class="io-row"><span class="io-label io-in">IN</span><span class="io-val">Latest open PR (gh pr list)</span></div>
-            <div class="io-row"><span class="io-label io-out">OUT</span><span class="io-val">tests/ files committed to PR branch</span></div>
+            <div class="io-row"><span class="io-label io-in">IN</span><span class="io-val">The coder's staged diff</span></div>
+            <div class="io-row"><span class="io-label io-out">OUT</span><span class="io-val">Pass → push + open PR · Fail → bounce to Implementing</span></div>
           </div>
         </div>
 
@@ -1200,13 +1299,13 @@
             <div class="persona-emoji">🔒</div>
             <div>
               <div class="persona-name">Security Auditor</div>
-              <div class="persona-trigger">Auto-trigger: after QA Tester</div>
+              <div class="persona-trigger">PM-triggered · read-only whole-product sweep</div>
             </div>
           </div>
-          <div class="persona-desc">Audits the PR diff against OWASP Top 10 checklist: SQL injection, XSS, hardcoded secrets, missing auth, path traversal, command injection. Files bug features for every issue found. Comments audit result on the PR.</div>
+          <div class="persona-desc">A read-only, on-demand audit of the whole product (OWASP-style: SQL injection, XSS, hardcoded secrets, missing auth, path traversal, command injection). Files bug features for each issue and writes no repo files. The per-PR security check now lives inside the Reviewer.</div>
           <div class="persona-io">
-            <div class="io-row"><span class="io-label io-in">IN</span><span class="io-val">PR diff (gh pr diff)</span></div>
-            <div class="io-row"><span class="io-label io-out">OUT</span><span class="io-val">Bug features filed + PR comment + last_security_auditor_at updated</span></div>
+            <div class="io-row"><span class="io-label io-in">IN</span><span class="io-val">Whole-product source (read-only)</span></div>
+            <div class="io-row"><span class="io-label io-out">OUT</span><span class="io-val">Bug features filed + last_security_auditor_at updated</span></div>
           </div>
         </div>
 
@@ -1291,9 +1390,9 @@
               <div class="persona-trigger">PM-triggered (run_persona_now=recommender)</div>
             </div>
           </div>
-          <div class="persona-desc">Searches competitors via web, analyses what was just built in the sprint, and suggests new feature ideas aligned with market direction. Posts them as Pending with source="ai" for PM approval.</div>
+          <div class="persona-desc">Searches competitors via web, analyses what was just built, and suggests new feature ideas aligned with market direction. Posts them as Pending with source="ai" for PM approval.</div>
           <div class="persona-io">
-            <div class="io-row"><span class="io-label io-in">IN</span><span class="io-val">Sprint release notes + product context + web search</span></div>
+            <div class="io-row"><span class="io-label io-in">IN</span><span class="io-val">Recent release notes + product context + web search</span></div>
             <div class="io-row"><span class="io-label io-out">OUT</span><span class="io-val">New Pending features (source: ai) + last_recommender_at updated</span></div>
           </div>
         </div>
@@ -1461,7 +1560,7 @@
 <section id="postcoder">
   <div class="section-label">Automation Chain</div>
   <h2>Post-Coder Pipeline</h2>
-  <p class="section-sub">After every successful coder session, two agents run automatically in sequence — QA Tester and Security Auditor operate at the PR level. Maintenance agents (Recommender, Documenter, etc.) are PM-triggered separately.</p>
+  <p class="section-sub">After a coder session exits, deterministic gates run <em>before</em> the PR is opened — static lint guards + AST drift detectors, then the stack's tests and the designer's Verify recipes. Only a clean pass pushes the branch and opens the PR; the reviewer runs next cycle, then auto-merge.</p>
 
   <div class="chain-flow">
     <div class="chain-node">
@@ -1478,10 +1577,10 @@
 
     <div class="chain-node">
       <div class="chain-circle cc-qa">
-        <div class="chain-emoji">🧪</div>
-        <div style="font-size:10px">QA Tester</div>
+        <div class="chain-emoji">🛡️</div>
+        <div style="font-size:10px">Lint + Drift</div>
       </div>
-      <div class="chain-label">Adds tests to PR branch</div>
+      <div class="chain-label">18 guards + AST drift</div>
     </div>
 
     <div class="chain-arrow">
@@ -1490,10 +1589,10 @@
 
     <div class="chain-node">
       <div class="chain-circle cc-sec">
-        <div class="chain-emoji">🔒</div>
-        <div style="font-size:10px">Security</div>
+        <div class="chain-emoji">✅</div>
+        <div style="font-size:10px">Test + Verify</div>
       </div>
-      <div class="chain-label">Audits diff · Files bugs</div>
+      <div class="chain-label">Runs tests + AC recipes</div>
     </div>
 
 
@@ -1515,16 +1614,16 @@
   <!-- Notes -->
   <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-top:20px;">
     <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px;font-size:12px;color:var(--text2)">
-      <strong style="color:var(--text)">Exit codes don't block the chain.</strong> QA Tester and Security Auditor are best-effort — their failure doesn't prevent the Reviewer from running next cycle.
+      <strong style="color:var(--text)">Gates bounce, never silently pass.</strong> A failing lint / test / verify gate sends the features back to <code>Implementing</code> with the reason quoted — the PR is only opened once everything is green.
     </div>
     <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px;font-size:12px;color:var(--text2)">
-      <strong style="color:var(--text)">Tests land before review.</strong> QA Tester pushes tests to the same PR branch, so the Reviewer sees the complete implementation + test suite.
+      <strong style="color:var(--text)">Deterministic by design.</strong> The gates are regex + AST + subprocess (no LLM), so the reviewer never has to catch the patterns they cover.
     </div>
     <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px;font-size:12px;color:var(--text2)">
-      <strong style="color:var(--text)">Security → PM backlog.</strong> Issues found by Security Auditor become bug features in the backlog (priority 90), approved and fixed in the next coder cycle.
+      <strong style="color:var(--text)">Drift findings get owners.</strong> High-severity drift-detector findings are filed as Approved chore features instead of dying in a PR comment.
     </div>
     <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px;font-size:12px;color:var(--text2)">
-      <strong style="color:var(--text)">Reviewer runs next cycle.</strong> After the chain completes, the Reviewer has global priority in the next poller cycle — it sees the tests added by QA Tester.
+      <strong style="color:var(--text)">Reviewer runs next cycle.</strong> Once the PR is open, the Reviewer has global priority in the next orchestrator cycle; on approval, auto-merge squashes it to <code>main</code>.
     </div>
   </div>
 </section>
@@ -1533,7 +1632,7 @@
 <section id="maintenance">
   <div class="section-label">On-Demand Agents</div>
   <h2>Maintenance Agents</h2>
-  <p class="section-sub">Five maintenance personas run on demand — the PM triggers them from the product page, the poller picks them up via <code style="font-family:'JetBrains Mono',monospace;color:var(--blue2)">product.run_persona_now</code> on the next cycle, and stamps <code style="font-family:'JetBrains Mono',monospace;color:var(--cyan)">last_{persona}_at</code> in <code style="font-family:'JetBrains Mono',monospace;color:var(--blue2)">product.config</code> after a successful run.</p>
+  <p class="section-sub">Five maintenance personas run on demand — the PM triggers them from the product page, the orchestrator picks them up via <code style="font-family:'JetBrains Mono',monospace;color:var(--blue2)">product.run_persona_now</code> on the next cycle, and stamps <code style="font-family:'JetBrains Mono',monospace;color:var(--cyan)">last_{persona}_at</code> in <code style="font-family:'JetBrains Mono',monospace;color:var(--blue2)">product.config</code> after a successful run.</p>
 
   <div class="schedule-grid" style="grid-template-columns:repeat(5,1fr)">
 
@@ -1546,7 +1645,7 @@
         </div>
       </div>
       <div class="schedule-name">Documenter</div>
-      <div class="schedule-desc">Updates README, CHANGELOG, and ARCHITECTURE.md to reflect the completed sprint. Writes for a new developer.</div>
+      <div class="schedule-desc">Updates README, CHANGELOG, and ARCHITECTURE.md to reflect recently shipped work. Writes for a new developer.</div>
       <div class="schedule-output">config key: last_documenter_at</div>
       <div class="schedule-bar" style="background:linear-gradient(90deg,#64748b,#94a3b8)"></div>
     </div>
@@ -1560,7 +1659,7 @@
         </div>
       </div>
       <div class="schedule-name">Analytics</div>
-      <div class="schedule-desc">Velocity reports, backlog health, sprint retrospective data, UX gap analysis. Files data-backed feature suggestions.</div>
+      <div class="schedule-desc">Velocity reports, backlog health, phase retrospective data, UX gap analysis. Files data-backed feature suggestions.</div>
       <div class="schedule-output">config key: last_analytics_at</div>
       <div class="schedule-bar" style="background:linear-gradient(90deg,#14b8a6,#06b6d4)"></div>
     </div>
@@ -1574,7 +1673,7 @@
         </div>
       </div>
       <div class="schedule-name">Refactorer</div>
-      <div class="schedule-desc">Identifies tech debt accumulated in the sprint: god classes, N+1 queries, dead code. Creates chore features (priority 40) for PM approval.</div>
+      <div class="schedule-desc">Identifies accumulated tech debt: god classes, N+1 queries, dead code. Creates chore features (priority 40) for PM approval.</div>
       <div class="schedule-output">config key: last_refactorer_at</div>
       <div class="schedule-bar" style="background:linear-gradient(90deg,#f97316,#fbbf24)"></div>
     </div>
@@ -1602,7 +1701,7 @@
         </div>
       </div>
       <div class="schedule-name">Recommender</div>
-      <div class="schedule-desc">Searches competitors, analyses the sprint's shipped features, suggests new feature ideas aligned with market direction. Posts as Pending for PM approval.</div>
+      <div class="schedule-desc">Searches competitors, analyses recently shipped features, suggests new feature ideas aligned with market direction. Posts as Pending for PM approval.</div>
       <div class="schedule-output">config key: last_recommender_at</div>
       <div class="schedule-bar" style="background:linear-gradient(90deg,#ec4899,#a78bfa)"></div>
     </div>
@@ -1680,13 +1779,13 @@
   <div class="arch-diagram">
     <div class="arch-layers">
 
-      <!-- Windows host -->
+      <!-- Orchestrator host -->
       <div class="arch-layer" style="border-color:rgba(59,130,246,0.2)">
-        <div class="arch-layer-label" style="color:var(--blue2)">🖥 Windows Host (always running)</div>
+        <div class="arch-layer-label" style="color:var(--blue2)">🖥 Orchestrator Host — pf-orchestrator container</div>
         <div class="arch-layer-items">
           <div class="arch-box">
             <div class="arch-box-dot" style="background:var(--blue2)"></div>
-            Python Poller <span style="color:var(--text3);font-size:10px">orchestrator/poller.py</span>
+            Cycle Loop <span style="color:var(--text3);font-size:10px">deploy/orchestrator/tools.run_cycle</span>
           </div>
           <div style="color:var(--text3);font-size:12px">→</div>
           <div class="arch-box">
@@ -1700,7 +1799,7 @@
           </div>
           <div class="arch-box">
             <div class="arch-box-dot" style="background:var(--amber2)"></div>
-            ~/.ssh/id_ed25519_* <span style="color:var(--text3);font-size:10px">deploy key :ro</span>
+            GitHub App <span style="color:var(--text3);font-size:10px">installation token (per push)</span>
           </div>
         </div>
       </div>
@@ -1745,7 +1844,7 @@
         <div class="arch-layer-items">
           <div class="arch-box">
             <div class="arch-box-dot" style="background:var(--amber)"></div>
-            GitHub API <span style="color:var(--text3);font-size:10px">PRs · Deploy keys · gh CLI (GH_TOKEN)</span>
+            GitHub API <span style="color:var(--text3);font-size:10px">PRs · GitHub App installation tokens · gh CLI</span>
           </div>
           <div class="arch-box">
             <div class="arch-box-dot" style="background:var(--cyan)"></div>
@@ -1847,7 +1946,7 @@
 <section id="security">
   <div class="section-label">Security Model</div>
   <h2>Container Isolation</h2>
-  <p class="section-sub">Each agent session runs in a minimal-privilege container. OAuth tokens and deploy keys are read-only mounts — the agent can never write to them.</p>
+  <p class="section-sub">Each agent session runs in a minimal-privilege container. The OAuth token is a read-only mount and git auth uses short-lived GitHub App tokens — the agent can never write to credentials.</p>
 
   <div class="security-grid">
     <div class="security-card">
@@ -1859,7 +1958,7 @@
         <li>4GB RAM, 2 CPU hard limits</li>
         <li>90-minute session timeout</li>
         <li>Session lock file prevents duplicate launches</li>
-        <li>Auto-killed if stale (&gt;45m no progress)</li>
+        <li>Auto-killed past the 90-min deadline / missing container</li>
       </ul>
     </div>
     <div class="security-card">
@@ -1867,11 +1966,11 @@
       <div class="security-title">Credential Handling</div>
       <ul class="security-items">
         <li>~/.claude mounted read-only (OAuth)</li>
-        <li>Only the specific deploy key mounted (not all of ~/.ssh)</li>
-        <li>Known_hosts baked into image</li>
-        <li>GH_TOKEN injected as env var, not file</li>
+        <li>Git auth via short-lived GitHub App tokens</li>
+        <li>Tokens minted per push, never written to .git/config</li>
+        <li>Secrets redacted from session logs</li>
         <li>No secrets in Docker image or source</li>
-        <li>Per-product deploy keys (id_ed25519_{name})</li>
+        <li>PM-curated files mounted read-only (EROFS on write)</li>
       </ul>
     </div>
     <div class="security-card">
@@ -1929,24 +2028,24 @@
 <section id="env">
   <div class="section-label">Configuration</div>
   <h2>Environment Variables</h2>
-  <p class="section-sub">All configuration lives in <code style="font-family:'JetBrains Mono',monospace;color:var(--blue2)">.env</code> in the repo root. Loaded before all imports by the poller — overrides Windows system env vars.</p>
+  <p class="section-sub">All configuration lives in <code style="font-family:'JetBrains Mono',monospace;color:var(--blue2)">.env</code> in the repo root, plus per-product overrides in the <code style="font-family:'JetBrains Mono',monospace;color:var(--blue2)">product.config</code> JSONB column.</p>
 
   <div class="env-grid">
     <div class="env-group">
       <div class="env-group-title">Core</div>
       <div class="env-row"><div class="env-key">DATABASE_URL</div><div class="env-val">asyncpg URL for PM website (SQLAlchemy async)</div></div>
-      <div class="env-row"><div class="env-key">PM_API_URL</div><div class="env-val">Poller → PM website (host-side, e.g. http://localhost:8080)</div></div>
+      <div class="env-row"><div class="env-key">PM_API_URL</div><div class="env-val">Orchestrator → PM website (e.g. http://pm-api:8080)</div></div>
       <div class="env-row"><div class="env-key">PM_API_URL_CONTAINER</div><div class="env-val">Inside Docker → PM website (e.g. http://pm-api:8080)</div></div>
-      <div class="env-row"><div class="env-key">POLL_INTERVAL</div><div class="env-val">Seconds to sleep when idle (default: 60)</div></div>
+      <div class="env-row"><div class="env-key">ORCHESTRATION_CYCLE_SECONDS</div><div class="env-val">Seconds between cycles (default: 60)</div></div>
       <div class="env-row"><div class="env-key">AGENT_IMAGE</div><div class="env-val">Docker image name (default: productfactory-agent)</div></div>
       <div class="env-row"><div class="env-key">CLAUDE_DIR</div><div class="env-val">Host path to ~/.claude (OAuth tokens)</div></div>
-      <div class="env-row"><div class="env-key">SSH_DIR</div><div class="env-val">Host path to ~/.ssh (deploy keys)</div></div>
+      <div class="env-row"><div class="env-key">AGENT_BACKEND</div><div class="env-val">"ollama" for local models, else the Claude CLI path</div></div>
     </div>
 
     <div class="env-group">
       <div class="env-group-title">Session Control</div>
       <div class="env-row"><div class="env-key">SESSION_TIMEOUT_MINUTES</div><div class="env-val">Kill container after N minutes (default: 90)</div></div>
-      <div class="env-row"><div class="env-key">STALE_THRESHOLD_MINUTES</div><div class="env-val">Alert if progress.md not pushed in N min (default: 45)</div></div>
+      <div class="env-row"><div class="env-key">STUCK_FEATURE_TIMEOUT_HOURS</div><div class="env-val">Reset Implementing/Designing/Reviewing features after N hours (default: 2)</div></div>
       <div class="env-row"><div class="env-key">MAX_FEATURES_PER_RUN</div><div class="env-val">Global default features per session (default: 1)</div></div>
       <div class="env-row"><div class="env-key">MAX_TURNS</div><div class="env-val">Hard cap on Ollama agent turns (default: 80)</div></div>
     </div>
@@ -1986,8 +2085,8 @@
         docker-compose up -d<br><br>
         <span style="color:var(--text3)"># Run migrations</span><br>
         alembic upgrade head<br><br>
-        <span style="color:var(--text3)"># Start poller (Windows)</span><br>
-        python orchestrator/poller.py
+        <span style="color:var(--text3)"># Start the orchestrator</span><br>
+        docker compose --profile orchestrator up -d
       </div>
     </div>
     <div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:24px;">
@@ -2016,7 +2115,7 @@
   <div style="display:flex;align-items:center;justify-content:center;gap:16px;flex-wrap:wrap">
     <span style="font-weight:800;letter-spacing:-0.5px;color:var(--text2)">⚙ ProductFactory</span>
     <span style="color:var(--border2)">·</span>
-    <span>13 Personas · Sprint-Gated · Zero Human PRs</span>
+    <span>13 Personas · Phase-Gated · Zero Human PRs</span>
     <span style="color:var(--border2)">·</span>
     <span style="font-family:'JetBrains Mono',monospace;font-size:11px">orchestrator/ · website/ · deploy/</span>
   </div>
@@ -2025,37 +2124,287 @@
 </div>
 
 <script>
-  // Animate stat numbers on scroll
-  const observer = new IntersectionObserver((entries) => {
-    entries.forEach(entry => {
-      if (entry.isIntersecting) {
-        entry.target.style.opacity = '1';
-        entry.target.style.transform = 'translateY(0)';
+(function () {
+  'use strict';
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+  /* ─────────────────────────────────────────────────────────────
+     1. ANIMATED PARTICLE-NETWORK BACKGROUND  (the agent constellation)
+     ───────────────────────────────────────────────────────────── */
+  (function particleNet() {
+    const canvas = document.getElementById('bg-net');
+    if (!canvas || reduceMotion) return;
+    const ctx = canvas.getContext('2d');
+    let w, h, dpr, particles = [];
+    const mouse = { x: -9999, y: -9999 };
+
+    function resize() {
+      dpr = Math.min(window.devicePixelRatio || 1, 2);
+      w = canvas.clientWidth; h = canvas.clientHeight;
+      canvas.width = w * dpr; canvas.height = h * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const target = Math.min(110, Math.floor((w * h) / 16000));
+      particles = Array.from({ length: target }, () => ({
+        x: Math.random() * w, y: Math.random() * h,
+        vx: (Math.random() - 0.5) * 0.35, vy: (Math.random() - 0.5) * 0.35,
+        r: Math.random() * 1.6 + 0.6
+      }));
+    }
+    window.addEventListener('mousemove', (e) => { mouse.x = e.clientX; mouse.y = e.clientY; });
+    window.addEventListener('mouseout', () => { mouse.x = -9999; mouse.y = -9999; });
+    window.addEventListener('resize', resize);
+
+    const C_LINK = '99,179,237', C_DOT = '120,170,255', C_HOT = '139,92,246';
+    function tick() {
+      ctx.clearRect(0, 0, w, h);
+      for (const p of particles) {
+        // gentle cursor attraction
+        const dx = mouse.x - p.x, dy = mouse.y - p.y, d2 = dx * dx + dy * dy;
+        if (d2 < 22000) { p.vx += dx / d2 * 6; p.vy += dy / d2 * 6; }
+        p.x += p.vx; p.y += p.vy;
+        p.vx *= 0.96; p.vy *= 0.96;
+        if (p.x < 0 || p.x > w) p.vx *= -1;
+        if (p.y < 0 || p.y > h) p.vy *= -1;
+        p.x = Math.max(0, Math.min(w, p.x)); p.y = Math.max(0, Math.min(h, p.y));
       }
+      for (let i = 0; i < particles.length; i++) {
+        const a = particles[i];
+        for (let j = i + 1; j < particles.length; j++) {
+          const b = particles[j];
+          const dx = a.x - b.x, dy = a.y - b.y, dist = Math.hypot(dx, dy);
+          if (dist < 130) {
+            ctx.strokeStyle = `rgba(${C_LINK},${(1 - dist / 130) * 0.22})`;
+            ctx.lineWidth = 0.6;
+            ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+          }
+        }
+        const near = Math.hypot(mouse.x - a.x, mouse.y - a.y) < 150;
+        ctx.fillStyle = `rgba(${near ? C_HOT : C_DOT},${near ? 0.9 : 0.6})`;
+        ctx.beginPath(); ctx.arc(a.x, a.y, a.r, 0, Math.PI * 2); ctx.fill();
+      }
+      requestAnimationFrame(tick);
+    }
+    resize(); tick();
+  })();
+
+  /* ─────────────────────────────────────────────────────────────
+     2. COUNT-UP HERO STATS
+     ───────────────────────────────────────────────────────────── */
+  (function countUp() {
+    const els = document.querySelectorAll('.hero-stat-val');
+    const io = new IntersectionObserver((entries, obs) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        const el = entry.target;
+        const raw = el.textContent.trim();
+        const num = parseInt(raw, 10);
+        obs.unobserve(el);
+        if (isNaN(num) || reduceMotion) return;
+        const dur = 1100, t0 = performance.now();
+        (function step(now) {
+          const k = Math.min(1, (now - t0) / dur);
+          const eased = 1 - Math.pow(1 - k, 3);
+          el.textContent = Math.round(num * eased).toString();
+          if (k < 1) requestAnimationFrame(step);
+        })(t0);
+      });
+    }, { threshold: 0.5 });
+    els.forEach((el) => io.observe(el));
+  })();
+
+  /* ─────────────────────────────────────────────────────────────
+     3. D3 FORCE-DIRECTED SYSTEM GRAPH
+     ───────────────────────────────────────────────────────────── */
+  (function systemGraph() {
+    const svgEl = document.getElementById('system-graph');
+    if (!svgEl || typeof d3 === 'undefined') return;
+
+    const COL = {
+      core:     css('--blue2')   || '#60a5fa',
+      persona:  css('--violet2') || '#a78bfa',
+      pipeline: css('--green2')  || '#34d399',
+      product:  css('--amber2')  || '#fbbf24'
+    };
+
+    // Architecture modeled on the current codebase.
+    const nodes = [
+      { id: 'orchestrator', label: 'Orchestrator', type: 'core', r: 22, info: 'deploy/orchestrator · tools.run_cycle — the ~60s cycle loop inside the pf-orchestrator container.' },
+      { id: 'website', label: 'PM Website + DB', type: 'core', r: 18, info: 'website/main.py — FastAPI dashboard & REST API over PostgreSQL. Source of truth for features/phases.' },
+      { id: 'agent', label: 'Agent Container', type: 'core', r: 18, info: 'Hardened per-session Docker container running one persona. Non-root, no docker socket.' },
+
+      { id: 'designer', label: 'Designer', type: 'persona', r: 11, info: 'Writes design docs / ACs straight to main.' },
+      { id: 'coder', label: 'Coder', type: 'persona', r: 13, info: 'Implements one feature; opens a session PR.' },
+      { id: 'reviewer', label: 'Reviewer', type: 'persona', r: 12, info: 'Reviews the session PR; writes per-feature decisions.' },
+      { id: 'architect', label: 'Architect', type: 'persona', r: 9, info: 'Quantitative drift detection; files architecture chores.' },
+      { id: 'planner', label: 'Planner', type: 'persona', r: 8, info: 'Groups approved features into phases.' },
+      { id: 'trainer', label: 'Trainer', type: 'persona', r: 8, info: 'Product-trainer persona; on-demand showcase.' },
+      { id: 'documenter', label: 'Documenter', type: 'persona', r: 8, info: 'Maintenance: keeps docs current.' },
+      { id: 'analytics', label: 'Analytics', type: 'persona', r: 8, info: 'Maintenance: product analytics.' },
+      { id: 'refactorer', label: 'Refactorer', type: 'persona', r: 8, info: 'Maintenance: targeted refactors.' },
+      { id: 'devops', label: 'DevOps', type: 'persona', r: 8, info: 'Maintenance: CI / infra hygiene.' },
+      { id: 'recommender', label: 'Recommender', type: 'persona', r: 8, info: 'Maintenance: suggests new features.' },
+      { id: 'security', label: 'Security Auditor', type: 'persona', r: 9, info: 'Read-only, PM-triggered whole-product security sweep.' },
+
+      { id: 'gates', label: 'Lint + Drift', type: 'pipeline', r: 12, info: 'post_coder.py — 18 static guards + AST drift detectors. Deterministic.' },
+      { id: 'tests', label: 'Test + Verify', type: 'pipeline', r: 12, info: 'Runs the stack test command + designer Verify recipes in a throwaway container.' },
+      { id: 'supervisor', label: 'Supervisors', type: 'pipeline', r: 11, info: 'supervisor.py — rule-based cascade detectors; route to Blocked with a reason.' },
+      { id: 'automerge', label: 'Auto-merge', type: 'pipeline', r: 11, info: 'Squash-merges approved session PRs to main.' },
+
+      { id: 'products', label: 'Products', type: 'product', r: 13, info: 'The product repos under management.' },
+      { id: 'pr', label: 'Session PR', type: 'product', r: 11, info: 'One PR per coder session → main.' },
+      { id: 'main', label: 'main', type: 'product', r: 12, info: 'Shipped: merged to the default branch.' }
+    ];
+    const L = (s, t, k) => ({ source: s, target: t, k: k || 1 });
+    const links = [
+      L('products', 'orchestrator', 2), L('orchestrator', 'website', 2), L('orchestrator', 'agent', 2),
+      L('agent', 'designer'), L('agent', 'coder'), L('agent', 'reviewer'), L('agent', 'architect'),
+      L('agent', 'planner'), L('agent', 'trainer'), L('agent', 'documenter'), L('agent', 'analytics'),
+      L('agent', 'refactorer'), L('agent', 'devops'), L('agent', 'recommender'), L('agent', 'security'),
+      L('coder', 'pr', 2), L('pr', 'gates', 2), L('gates', 'tests', 2), L('tests', 'reviewer', 2),
+      L('reviewer', 'automerge', 2), L('automerge', 'main', 2),
+      L('supervisor', 'orchestrator'), L('supervisor', 'pr'),
+      L('website', 'products')
+    ];
+
+    const svg = d3.select(svgEl);
+    let width = svgEl.clientWidth || 900, height = svgEl.clientHeight || 560;
+    svg.attr('viewBox', [0, 0, width, height]);
+
+    const root = svg.append('g');
+    const linkSel = root.append('g').attr('class', 'sg-links')
+      .selectAll('line').data(links).join('line')
+      .attr('class', 'sg-link')
+      .attr('stroke', '#3b82f6')
+      .attr('stroke-opacity', 0.18)
+      .attr('stroke-width', (d) => d.k);
+
+    const nodeSel = root.append('g').selectAll('g').data(nodes).join('g')
+      .attr('class', 'sg-node');
+    nodeSel.append('circle')
+      .attr('r', (d) => d.r)
+      .attr('fill', (d) => COL[d.type])
+      .attr('fill-opacity', 0.92)
+      .style('filter', (d) => `drop-shadow(0 0 ${d.r * 0.5}px ${COL[d.type]}66)`);
+    nodeSel.append('text')
+      .attr('y', (d) => d.r + 12)
+      .attr('text-anchor', 'middle')
+      .text((d) => d.label);
+
+    const adj = new Map(nodes.map((n) => [n.id, new Set([n.id])]));
+    links.forEach((l) => {
+      const s = typeof l.source === 'object' ? l.source.id : l.source;
+      const t = typeof l.target === 'object' ? l.target.id : l.target;
+      adj.get(s).add(t); adj.get(t).add(s);
     });
-  }, { threshold: 0.1 });
 
-  document.querySelectorAll('.persona-card, .schedule-card, .security-card, .subsystem-card').forEach(el => {
-    el.style.opacity = '0';
-    el.style.transform = 'translateY(16px)';
-    el.style.transition = 'opacity 0.4s ease, transform 0.4s ease';
-    observer.observe(el);
-  });
+    const tip = document.getElementById('graph-tip');
+    function showTip(d, evt) {
+      if (!tip) return;
+      tip.innerHTML = `<b>${d.label}</b><br>${d.info}`;
+      const wrap = svgEl.parentElement.getBoundingClientRect();
+      tip.style.left = Math.min(wrap.width - 250, evt.clientX - wrap.left + 14) + 'px';
+      tip.style.top = (evt.clientY - wrap.top + 14) + 'px';
+      tip.classList.add('show');
+    }
+    function hideTip() { if (tip) tip.classList.remove('show'); }
 
-  // Active nav link
-  const sections = document.querySelectorAll('section[id]');
-  const navLinks = document.querySelectorAll('.nav-links a');
-  const io = new IntersectionObserver(entries => {
-    entries.forEach(entry => {
-      if (entry.isIntersecting) {
-        navLinks.forEach(a => {
-          a.style.color = a.getAttribute('href') === '#' + entry.target.id ? 'var(--text)' : '';
-          a.style.background = a.getAttribute('href') === '#' + entry.target.id ? 'var(--bg3)' : '';
+    nodeSel
+      .on('mouseenter', function (evt, d) {
+        const near = adj.get(d.id);
+        nodeSel.classed('dim', (n) => !near.has(n.id));
+        linkSel.classed('dim', (l) => {
+          const s = l.source.id || l.source, t = l.target.id || l.target;
+          return !(s === d.id || t === d.id);
+        }).attr('stroke', (l) => {
+          const s = l.source.id || l.source, t = l.target.id || l.target;
+          return (s === d.id || t === d.id) ? COL[d.type] : '#3b82f6';
         });
-      }
+        showTip(d, evt);
+      })
+      .on('mousemove', (evt, d) => showTip(d, evt))
+      .on('mouseleave', function () {
+        nodeSel.classed('dim', false);
+        linkSel.classed('dim', false).attr('stroke', '#3b82f6');
+        hideTip();
+      });
+
+    const sim = d3.forceSimulation(nodes)
+      .force('link', d3.forceLink(links).id((d) => d.id).distance((d) => 60 / d.k).strength(0.5))
+      .force('charge', d3.forceManyBody().strength(-260))
+      .force('center', d3.forceCenter(width / 2, height / 2))
+      .force('collide', d3.forceCollide().radius((d) => d.r + 14))
+      .on('tick', () => {
+        linkSel
+          .attr('x1', (d) => d.source.x).attr('y1', (d) => d.source.y)
+          .attr('x2', (d) => d.target.x).attr('y2', (d) => d.target.y);
+        nodeSel.attr('transform', (d) => `translate(${d.x},${d.y})`);
+      });
+
+    nodeSel.call(d3.drag()
+      .on('start', (evt, d) => { if (!evt.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag', (evt, d) => { d.fx = evt.x; d.fy = evt.y; })
+      .on('end', (evt, d) => { if (!evt.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
+
+    window.addEventListener('resize', () => {
+      width = svgEl.clientWidth; height = svgEl.clientHeight;
+      svg.attr('viewBox', [0, 0, width, height]);
+      sim.force('center', d3.forceCenter(width / 2, height / 2)).alpha(0.3).restart();
     });
-  }, { rootMargin: '-40% 0px -55% 0px' });
-  sections.forEach(s => io.observe(s));
+  })();
+
+  /* ─────────────────────────────────────────────────────────────
+     4. SCROLL REVEALS  (GSAP if present, IntersectionObserver fallback)
+     ───────────────────────────────────────────────────────────── */
+  (function reveals() {
+    document.querySelectorAll('.persona-card, .schedule-card, .security-card, .subsystem-card, .cycle-step, .chain-link')
+      .forEach((el) => el.classList.add('reveal'));
+    const items = document.querySelectorAll('.reveal');
+
+    if (typeof gsap !== 'undefined' && typeof ScrollTrigger !== 'undefined' && !reduceMotion) {
+      gsap.registerPlugin(ScrollTrigger);
+      items.forEach((el) => {
+        gsap.fromTo(el, { autoAlpha: 0, y: 22 }, {
+          autoAlpha: 1, y: 0, duration: 0.6, ease: 'power3.out',
+          scrollTrigger: { trigger: el, start: 'top 88%' }
+        });
+      });
+    } else {
+      const io = new IntersectionObserver((entries) => {
+        entries.forEach((e) => { if (e.isIntersecting) { e.target.classList.add('is-in'); } });
+      }, { threshold: 0.1 });
+      items.forEach((el) => io.observe(el));
+    }
+  })();
+
+  /* ─────────────────────────────────────────────────────────────
+     5. ANIMATED FLOW LINES on the inline-SVG connectors
+     ───────────────────────────────────────────────────────────── */
+  (function flowLines() {
+    if (reduceMotion) return;
+    document.querySelectorAll('.flow-diagram svg path[marker-end], .dataflow svg path[marker-end]')
+      .forEach((p) => p.classList.add('flow-anim'));
+  })();
+
+  /* ─────────────────────────────────────────────────────────────
+     6. ACTIVE NAV LINK (preserved)
+     ───────────────────────────────────────────────────────────── */
+  (function activeNav() {
+    const sections = document.querySelectorAll('section[id]');
+    const navLinks = document.querySelectorAll('.nav-links a');
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        navLinks.forEach((a) => {
+          const on = a.getAttribute('href') === '#' + entry.target.id;
+          a.style.color = on ? 'var(--text)' : '';
+          a.style.background = on ? 'var(--bg3)' : '';
+        });
+      });
+    }, { rootMargin: '-40% 0px -55% 0px' });
+    sections.forEach((s) => io.observe(s));
+  })();
+})();
 </script>
 </body>
 </html>
