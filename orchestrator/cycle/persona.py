@@ -48,6 +48,8 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
 
     try:
         features_resp = client.get(f"/api/products/{product_id}/features")
+        # `client` is the orchestrator's _pm_client(), which already attaches the
+        # X-PF-Internal-Token header so this returns real secret values, not masks.
         syscfg_resp   = client.get("/api/system-config")
 
         features = features_resp.json() if features_resp.is_success else []

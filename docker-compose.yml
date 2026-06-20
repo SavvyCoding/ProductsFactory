@@ -45,6 +45,10 @@ services:
       PM_USERNAME: ${PM_USERNAME:-admin}
       # No default — PM_PASSWORD must be set in .env.
       PM_PASSWORD: ${PM_PASSWORD:?PM_PASSWORD must be set in .env}
+      # Shared internal secret. When set on BOTH web and orchestrator it (a) masks
+      # secret fields on GET /api/system-config for callers without the token, and
+      # (b) keys HMAC-signing of internal /api/* writes. Empty = transparent no-op.
+      PF_INTERNAL_API_SECRET: ${PF_INTERNAL_API_SECRET:-}
       STUCK_FEATURE_TIMEOUT_HOURS: ${STUCK_FEATURE_TIMEOUT_HOURS:-2}
       SESSION_LOG_MAXLEN: ${SESSION_LOG_MAXLEN:-1000}
       # Set this to enable AI feature recommendations on the Greenfield form
@@ -103,6 +107,10 @@ services:
       AGENT_IMAGE:        ${AGENT_IMAGE:-productfactory-agent}
       PM_USERNAME:        ${PM_USERNAME:-admin}
       PM_PASSWORD:        ${PM_PASSWORD:?PM_PASSWORD must be set in .env}
+      # Must match the web service's value — sends X-PF-Internal-Token so
+      # GET /api/system-config returns real secrets (else they're masked) and
+      # signs internal writes. Empty = transparent no-op (back-compat).
+      PF_INTERNAL_API_SECRET: ${PF_INTERNAL_API_SECRET:-}
       SESSION_TIMEOUT_MINUTES: ${SESSION_TIMEOUT_MINUTES:-90}
       MAX_FEATURES_PER_RUN: ${MAX_FEATURES_PER_RUN:-1}
       ORCHESTRATION_CYCLE_SECONDS: ${ORCHESTRATION_CYCLE_SECONDS:-60}

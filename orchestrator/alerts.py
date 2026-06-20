@@ -33,7 +33,10 @@ def _get_webhook_url() -> str:
         return _cached_webhook_url
     if PM_API_URL:
         try:
-            resp = httpx.get(f"{PM_API_URL}/api/system-config", timeout=5)
+            resp = httpx.get(
+                f"{PM_API_URL}/api/system-config", timeout=5,
+                headers={"X-PF-Internal-Token": os.environ.get("PF_INTERNAL_API_SECRET", "")},
+            )
             if "application/json" in resp.headers.get("content-type", ""):
                 url = resp.json().get("slack_webhook_url") or ""
                 if url:
