@@ -99,10 +99,9 @@ def _path_matches_allowlist(path: str, allowlist: tuple[str, ...]) -> bool:
     return False
 
 
-def _post_doc_allowlist_check(working_dir: str, _run, product_name: str = "?") -> list[str]:
-    """Refuse a designer commit that touches paths outside the agent's scope.
-
-    Returns a list of human-readable violation strings; empty list = clean.
+def _scan_post_doc_scope(working_dir: str, _run) -> list[dict]:
+    """Core scope scanner: returns the out-of-scope staged entries as
+    ``{"path", "status", "message"}`` dicts (empty list = clean).
 
     The designer prompt explicitly enumerates what the agent may write:
     docs/story_<id>.md, session_result.json, session_summary.md,
@@ -111,25 +110,27 @@ def _post_doc_allowlist_check(working_dir: str, _run, product_name: str = "?") -
     Real incident 2026-05-20: MyDocusign commit 5296af4 (designer-63e95f37
     for #608) modified ARCHITECTURE.md (-70 lines, stripping Phase-1
     sections) AND rewrote CLAUDE.md (+39/-39) alongside the legitimate
-    docs/story_*.md output. Neither file is in the designer's prompt-level
-    write set.
+    docs/story_*.md output. Neither file is in the designer's write set.
 
-    The check inspects `git diff --cached --name-status` and refuses any
-    M / D / R / C / T status on a path outside `_DESIGNER_MODIFY_ALLOWLIST`.
-    A (newly-added) paths use the broader `_DESIGNER_ADD_ALLOWLIST` so that
-    first-time designer commits on greenfield products — where the renderer
-    just installed CLAUDE.md / ARCHITECTURE.md / etc. as untracked files
-    that post-doc's `git add -A` legitimately stages — are not blocked.
+    Inspects `git diff --cached --name-status` and flags any M / D / R / C / T
+    status on a path outside `_DESIGNER_MODIFY_ALLOWLIST`. A (newly-added)
+    paths use the broader `_DESIGNER_ADD_ALLOWLIST` so that first-time designer
+    commits on greenfield products — where the renderer just installed
+    CLAUDE.md / ARCHITECTURE.md / etc. as untracked files that post-doc's
+    `git add -A` legitimately stages — are not flagged.
 
-    Idempotent and side-effect-free. Safe to call before commit.
+    Shared by `_post_doc_allowlist_check` (messages only) and the
+    partial-commit path in `_run_post_doc_pipeline` (which needs the PATHS so
+    it can DROP them from the commit instead of bouncing the whole thing).
+    Idempotent and side-effect-free.
     """
-    violations: list[str] = []
+    results: list[dict] = []
     try:
         diff_r = _run(["git", "diff", "--cached", "--name-status"], timeout=15)
     except Exception:
-        return violations
+        return results
     if diff_r.returncode != 0:
-        return violations
+        return results
 
     for raw in (diff_r.stdout or "").splitlines():
         line = raw.rstrip()
@@ -160,7 +161,7 @@ def _post_doc_allowlist_check(working_dir: str, _run, product_name: str = "?") -
             "T": "change type of",
             "A": "add",
         }.get(status, status)
-        violations.append(
+        message = (
             f"Designer commit attempts to {verb} `{path}` -- outside the "
             f"designer's authorized write set. Per orchestrator/prompts/"
             f"designer.md, designer sessions may only write "
@@ -171,7 +172,20 @@ def _post_doc_allowlist_check(working_dir: str, _run, product_name: str = "?") -
             f"web UI) or the architect persona (filed as chore features), "
             f"not to the designer agent."
         )
-    return violations
+        results.append({"path": path, "status": status, "message": message})
+    return results
+
+
+def _post_doc_allowlist_check(working_dir: str, _run, product_name: str = "?") -> list[str]:
+    """Backward-compatible wrapper around `_scan_post_doc_scope` that returns
+    just the human-readable violation messages; empty list = clean.
+
+    The pipeline itself no longer uses this to bounce — it calls
+    `_scan_post_doc_scope` directly to DROP the out-of-scope paths and commit
+    the in-scope docs (see `_run_post_doc_pipeline`). Retained for callers/
+    tests that only want the messages.
+    """
+    return [d["message"] for d in _scan_post_doc_scope(working_dir, _run)]
 
 
 def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
@@ -261,22 +275,46 @@ def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
         _rollback_doc_features(product, assigned_features)
         return
 
-    # Lint guard -- refuse the commit if it touches paths outside the
-    # designer's authorized write set (per orchestrator/prompts/designer.md).
-    # See _post_doc_allowlist_check for the rule and the MyDocusign #608
-    # incident this catches.
-    lint_violations = _post_doc_allowlist_check(working_dir, _run, pname)
-    if lint_violations:
+    # Scope guard -- the designer may only commit docs/story_*.md plus the
+    # documented append targets. Historically ANY out-of-scope path bounced
+    # the WHOLE commit -- which deadlocked spec_defect escalations: the
+    # designer was routed here to FIX a story doc, but its `git add -A` commit
+    # also swept an out-of-scope file (e.g. ARCHITECTURE.md), so the corrected
+    # doc never landed and the feature looped forever (DogTinder
+    # #1872/#1881/#1892, 2026-06-21).
+    #
+    # Fix: DROP the out-of-scope paths from the commit and still ship the
+    # in-scope design docs. Only bounce if NOTHING in-scope remains (the
+    # designer produced *only* out-of-scope edits -- the MyDocusign #608
+    # class). The out-of-scope working-tree edits are left unstaged and the
+    # next _reset_workspace discards them, so the original protection (those
+    # changes never reach origin) is preserved.
+    scope_oos = _scan_post_doc_scope(working_dir, _run)
+    if scope_oos:
+        oos_paths = [d["path"] for d in scope_oos]
+        _run(["git", "reset", "-q", "HEAD", "--", *oos_paths])
         log.warning(
-            f"[post-{persona}] {pname}: lint-guard fired "
-            f"({len(lint_violations)} out-of-scope path(s)) -- refusing "
-            f"commit, rolling features back to Approved for next "
-            f"designer cycle"
+            f"[post-{persona}] {pname}: scope-guard dropped {len(oos_paths)} "
+            f"out-of-scope path(s) from the commit: {oos_paths[:5]}"
         )
-        _bounce_doc_features_for_lint(
-            product, assigned_features, persona, lint_violations,
+        if _run(["git", "diff", "--cached", "--quiet"]).returncode == 0:
+            # Only out-of-scope changes were staged -- nothing in-scope to
+            # commit. Genuine bounce for re-design (MyDocusign #608 class).
+            log.warning(
+                f"[post-{persona}] {pname}: only out-of-scope changes staged "
+                f"-- nothing to commit, bouncing for re-design"
+            )
+            _bounce_doc_features_for_lint(
+                product, assigned_features, persona,
+                [d["message"] for d in scope_oos],
+            )
+            return
+        # In-scope design docs remain staged -- surface what we dropped
+        # (audit trail) and continue to commit the design.
+        _note_doc_scope_dropped(
+            product, assigned_features, persona,
+            [d["message"] for d in scope_oos],
         )
-        return
 
     # Clarification guard -- refuse the commit if any staged design doc
     # contains a [NEEDS CLARIFICATION: ...] marker. Borrowed from GitHub
@@ -593,6 +631,51 @@ def _bounce_doc_features_for_lint(
                     )
     except Exception as e:
         log.warning(f"[post-{persona}] {pname}: lint-guard PM client error: {e}")
+
+
+def _note_doc_scope_dropped(
+    product: dict,
+    assigned_features: list[dict],
+    persona: str,
+    violations: list[str],
+) -> None:
+    """Post an informational (NON-bouncing) comment recording that the
+    scope-guard dropped out-of-scope paths from the designer commit while
+    still committing the in-scope design docs.
+
+    The partial-commit counterpart to `_bounce_doc_features_for_lint`: the
+    design ships, so we do NOT roll the feature back — we only leave an audit
+    trail so a PM can see the designer reached outside its write set. This is
+    what breaks the spec_defect→designer→whole-commit-reject loop (DogTinder
+    #1872/#1881/#1892): the corrected story doc now lands even when an
+    out-of-scope file was swept into the working tree.
+    """
+    pname = product.get("name", "?")
+    body = (
+        f"ℹ️ post-doc scope-guard dropped {len(violations)} out-of-scope "
+        f"path(s) from the commit, but committed the in-scope design "
+        f"doc(s) so the design still ships:\n"
+        + "\n".join(f"- {v}" for v in violations)
+        + "\n\nThe out-of-scope edits were NOT committed (discarded by the "
+          "next workspace reset). If a structural change is genuinely "
+          "needed, route it through the PM (web UI) or the architect "
+          "persona — not the designer agent."
+    )
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            for f in assigned_features:
+                try:
+                    client.post(
+                        f"/api/features/{f['id']}/comments",
+                        json={"author": "scope-guard", "body": body},
+                    )
+                except Exception as e:
+                    log.warning(
+                        f"[post-{persona}] {pname}: scope-guard comment for "
+                        f"#{f['id']} failed: {e}"
+                    )
+    except Exception as e:
+        log.warning(f"[post-{persona}] {pname}: scope-guard PM client error: {e}")
 
 
 _AC_DEF_RE = __import__("re").compile(r"^\s*#{0,3}\s*AC\d{1,2}[.:]", __import__("re").M)
