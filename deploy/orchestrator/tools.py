@@ -1082,7 +1082,9 @@ def _run_supervisor_per_product_detectors(
     fetch; self-fetch fallback keeps standalone calls working.
     """
     import httpx as _httpx
-    from orchestrator.supervisor import detect_orphan_approved, detect_rapid_flap  # type: ignore
+    from orchestrator.supervisor import (  # type: ignore
+        detect_orphan_approved, detect_rapid_flap, detect_placeholder_blocks,
+    )
 
     pid = product.get("id")
     if not pid:
@@ -1101,6 +1103,12 @@ def _run_supervisor_per_product_detectors(
             detect_orphan_approved(product_id=pid, features=features)
         except Exception:
             log.exception(f"orphan_approved detector failed for product {pid}")
+        # Reject blocked placeholder/probe junk (runs BEFORE the phase-gate
+        # detector so reap_empty_phases sees the post-reject state this cycle).
+        try:
+            detect_placeholder_blocks(product_id=pid, features=features)
+        except Exception:
+            log.exception(f"placeholder_reject detector failed for product {pid}")
 
     # Pull flapping features (uses default thresholds from system_config
     # — endpoint accepts overrides via query string but we fall back to
@@ -1156,9 +1164,6 @@ def _run_phase_gate_detector(product: dict, features: list | None = None) -> Non
     fire while gate is 'open', and the report flips it to 'awaiting_review', so
     each settle transition alerts exactly once.
     """
-    cfg = product.get("config") or {}
-    if cfg.get("human_gate_phases", True) is False:   # ON by default (2026-06-09)
-        return
     pid = product.get("id")
     if not pid:
         return
@@ -1174,6 +1179,20 @@ def _run_phase_gate_detector(product: dict, features: list | None = None) -> Non
         log.exception(f"phase-gate detector fetch failed for product {pid}")
         return
     if not isinstance(phases, list) or not isinstance(features, list):
+        return
+
+    # Empty-phase reap runs for ALL products, regardless of the human-gate flag —
+    # empty/all-rejected phases are cruft either way. (Runs after this cycle's
+    # placeholder-reject, so phases emptied this cycle get cleaned up now.)
+    try:
+        from orchestrator.supervisor import reap_empty_phases  # type: ignore
+        reap_empty_phases(product_id=pid, phases=phases, features=features)
+    except Exception:
+        log.exception(f"empty_phase_reap failed for product {pid}")
+
+    # The human-in-loop gate sweep below is opt-in per product.
+    cfg = product.get("config") or {}
+    if cfg.get("human_gate_phases", True) is False:   # ON by default (2026-06-09)
         return
 
     by_phase: dict = {}
