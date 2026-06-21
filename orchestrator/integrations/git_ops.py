@@ -254,6 +254,23 @@ def _reset_workspace(working_dir: str, product_name: str) -> None:
     # the rest of this _reset_workspace cascade. See helper docstring.
     _remove_stale_git_lock(working_dir, product_name)
 
+    # Prune orphaned git worktrees BEFORE the `checkout main` below. The
+    # post-coder baseline-test step creates a throwaway worktree off origin/main
+    # (orchestrator/pipelines/post_coder.py::_baseline_pytest_failures). If its
+    # `git worktree remove` cleanup never runs — the orchestrator container is
+    # recreated mid-pipeline, the session is killed, or legacy code left one
+    # behind — the worktree DIRECTORY (in the container's ephemeral /tmp) is
+    # gone but its metadata persists in the mounted repo's .git/worktrees/,
+    # still HOLDING the branch it checked out. A worktree holding `main` then
+    # makes every `git checkout -f main` fail with rc=128 ("'main' is already
+    # used by worktree at ...") — silently breaking the entire reset cascade, so
+    # the workspace is never cleaned and stale/cross-feature state accumulates.
+    # Canonical: DogTinder /tmp/maincheck (legacy) wedged resets for ~8h on
+    # 2026-06-21, fuelling the #1872/#1881/#1892 contamination. `prune` only
+    # removes entries whose working dir is missing, so an in-use worktree is
+    # never touched. Best-effort; never raise.
+    safe_run(["git", "worktree", "prune", "-v"], cwd=wd, log_label=product_name)
+
     # Enforce HTTPS origin under the GitHub App auth model. Catches any
     # workspace that ended up with a stale SSH origin (from legacy products
     # migrated mid-flight, or `gh repo clone` defaults) and rewrites it back
