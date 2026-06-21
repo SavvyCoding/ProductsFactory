@@ -501,6 +501,20 @@ _SECTION_RE = re.compile(r"^[^a-z]*?(functional|tests?|security)\b", re.IGNORECA
 # the SAME complaint would produce different signatures.
 _SESSION_TAG_RE = re.compile(r"\s*\[[^\]]+\]\s*$")
 
+# `review_notes` is sometimes overwritten by the auto-merge path with an OPS
+# failure message (merge conflict / "coder must rebase main" / PR closed
+# without merging) rather than reviewer feedback — see
+# orchestrator/pipelines/auto_merge_reviewer.py. Those notes are byte-identical
+# every cycle, so hashing them would make the repeated-feedback detector block
+# an APPROVED-but-unmergeable feature after a few conflict bounces (canonical:
+# DogTinder #1506, 2026-06-20). A merge conflict is not the reviewer "requesting
+# the same change" — exclude these from the signature so they never accumulate.
+_OPS_NOTE_RE = re.compile(
+    r"merge failed|must rebase|will rebase|rebase and reopen"
+    r"|conflicts \(github|closed without merging",
+    re.IGNORECASE,
+)
+
 
 def _signature_from_comments(comments: list[dict]) -> str | None:
     """Build a stable signature from the reviewer's `❌ <section>: <body>`
@@ -550,8 +564,14 @@ def _signature_from_review_notes(review_notes: str | None) -> str | None:
     """Fallback signature when no per-section comments are present —
     happens when the reviewer wrote `review_notes` directly on the feature
     instead of (or in addition to) posting comments. Coarser than the
-    comment-based signature but still catches identical-text repeats."""
+    comment-based signature but still catches identical-text repeats.
+
+    Returns None for OPS failure notes (merge conflict / rebase-required / PR
+    closed without merging) — those are not reviewer feedback and must never
+    accumulate toward a repeated-feedback block (DogTinder #1506)."""
     if not review_notes:
+        return None
+    if _OPS_NOTE_RE.search(review_notes):
         return None
     norm = re.sub(r"[^a-z0-9 ]+", " ", review_notes.lower())
     norm = re.sub(r"\s+", " ", norm).strip()[:200]

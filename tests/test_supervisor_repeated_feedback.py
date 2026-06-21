@@ -107,6 +107,30 @@ class TestSignatureFromReviewNotes:
         assert supervisor._signature_from_review_notes("") is None
         assert supervisor._signature_from_review_notes("   ") is None
 
+    def test_merge_conflict_ops_notes_excluded(self):
+        """OPS failure notes written by the auto-merge path are NOT reviewer
+        feedback — they must return None so a conflict bounce can never
+        accumulate toward a repeated-feedback block (DogTinder #1506)."""
+        ops_notes = [
+            "Merge failed: conflicts (GitHub 405). Coder must rebase main.",
+            "Merge failed: conflicts (GitHub 409). Coder must rebase main.",
+            "PR #34 was closed without merging — coder will rebase and reopen.",
+        ]
+        for note in ops_notes:
+            assert supervisor._signature_from_review_notes(note) is None, note
+
+    def test_real_feedback_notes_still_fingerprinted(self):
+        """A genuine reviewer note that merely mentions unrelated words must
+        still produce a signature — the guard only excludes OPS failures."""
+        assert supervisor._signature_from_review_notes(
+            "Tests fail at line 42 of foo.spec.ts"
+        ) is not None
+        # "rebase" appears, but as legitimate guidance inside real feedback —
+        # word-boundary 'must rebase'/'will rebase' shouldn't trip on this.
+        assert supervisor._signature_from_review_notes(
+            "Consider whether to rebase the migration onto 047 for clarity"
+        ) is not None
+
 
 # ── Layer 2: detector integration tests via httpx.MockTransport ──────────────
 
