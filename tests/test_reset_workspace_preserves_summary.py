@@ -78,3 +78,42 @@ def test_excluded_artifact_dirs_also_survive(repo):
 
     for d in ("output", "Results", "Temp"):
         assert (repo / d / "artifact.txt").is_file(), f"{d}/ should survive the clean"
+
+
+def test_reset_prunes_orphaned_worktree_holding_main(repo, tmp_path):
+    """Regression for the 2026-06-21 DogTinder /tmp/maincheck wedge.
+
+    A post-coder baseline worktree that checked out `main` and whose directory
+    later vanished (container recreated mid-pipeline) leaves orphaned metadata
+    in .git/worktrees/ that still HOLDS `main`. Every `git checkout -f main` in
+    _reset_workspace then fails rc=128 ("'main' is already used by worktree at
+    ...") — silently breaking the whole reset, so the workspace never gets
+    cleaned and cross-feature state accumulates (fuelled the #1872/#1881/#1892
+    loops). _reset_workspace now `git worktree prune`s first.
+    """
+    import shutil
+
+    # Leave `main` free by moving the primary checkout onto a session branch.
+    _git(repo, "checkout", "-b", "coder/abc123")
+    # A worktree checks out `main`, then its dir disappears -> prunable orphan
+    # that still holds the branch.
+    wt = tmp_path / "orphan_wt"
+    _git(repo, "worktree", "add", str(wt), "main")
+    shutil.rmtree(wt)
+
+    # Pre-condition: with the orphan present, a plain checkout of main fails.
+    pre = _sp.run(["git", "checkout", "-f", "main"], cwd=repo,
+                  capture_output=True, text=True)
+    assert pre.returncode != 0 and "already used by worktree" in (pre.stderr or ""), \
+        "test setup must reproduce the locked-main condition"
+
+    # The fix: reset prunes the orphan, then successfully lands on main.
+    git_ops._reset_workspace(str(repo), "test-product")
+
+    head = _sp.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo,
+                   capture_output=True, text=True).stdout.strip()
+    assert head == "main", \
+        f"reset must land on main after pruning the orphan worktree (got {head!r})"
+    wl = _sp.run(["git", "worktree", "list"], cwd=repo,
+                 capture_output=True, text=True).stdout
+    assert "orphan_wt" not in wl, "orphaned worktree entry should be pruned"
