@@ -1905,7 +1905,12 @@ async def api_update_feature(
     # (wave-8) gives each Blocked feature ONE bounded auto-retry — it's a
     # deliberate, audited automation (one-shot dedup + per-cycle cap + env/
     # spec skip), so it gets the same re-engage authority as a PM.
-    _BLOCKED_REENGAGE_CALLERS = frozenset({"pm", "blocked-reprocessor", "escalation-reprocessor"})
+    _BLOCKED_REENGAGE_CALLERS = frozenset({
+        "pm", "blocked-reprocessor", "escalation-reprocessor",
+        # supervisor.detect_placeholder_blocks auto-rejects Blocked placeholder/
+        # probe junk (Blocked→Rejected) — same re-engage authority as a PM.
+        "placeholder-reaper",
+    })
     _is_blocked_data_cleanup = _peek_changed_by in _BLOCKED_DATA_CLEANUP_CALLERS
     if (
         feature.status == "Blocked"
@@ -1958,6 +1963,8 @@ async def api_update_feature(
         "rollback",
         "kill_recovery",
         "supervisor",
+        "placeholder-reaper",   # supervisor auto-reject of placeholder/probe
+                                # blocks (Blocked rank 7 → Rejected is a downgrade).
         "blocked-reprocessor",  # wave-8: re-engages Blocked features to
                                 # Approved/Implementing (a rank downgrade from
                                 # Blocked) for the bounded one-shot auto-retry.
@@ -3006,6 +3013,38 @@ async def api_update_phase(phase_id: int, body: schemas.PhaseUpdate, db: AsyncSe
         setattr(phase, field, value)
     await db.flush()
     return phase
+
+
+# Statuses that mean a feature is dead/terminal-rejected — a phase whose only
+# features are these is effectively empty and safe to reap.
+_DEAD_FEATURE_STATUSES = ("Rejected", "Reverted")
+
+
+@app.delete("/api/phases/{phase_id}", status_code=204)
+async def api_delete_phase(phase_id: int, db: AsyncSession = Depends(get_db)):
+    """Delete an EMPTY phase. Guarded: refuses (409) unless the phase has no
+    features other than Rejected/Reverted ones — so a populated or completed
+    phase can never be deleted, only genuinely-empty / all-junk groupings.
+    features.phase_id is ON DELETE SET NULL, so this never orphans real work.
+    Used by the supervisor's empty-phase reaper (changed_by='placeholder-reaper').
+    """
+    phase = await db.get(Phase, phase_id)
+    if not phase:
+        raise HTTPException(status_code=404, detail="Phase not found")
+    live = await db.scalar(
+        select(func.count())
+        .select_from(Feature)
+        .where(Feature.phase_id == phase_id,
+               Feature.status.notin_(_DEAD_FEATURE_STATUSES))
+    )
+    if live and live > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Phase #{phase_id} has {live} non-rejected feature(s) — refusing to delete a non-empty phase.",
+        )
+    await db.delete(phase)
+    await db.flush()
+    return None
 
 
 # ── Phase → feature tree / planner / release notes (post migration 043) ──────

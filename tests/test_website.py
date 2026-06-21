@@ -28,7 +28,7 @@ os.environ["PM_USERNAME"] = "admin"
 os.environ["PM_PASSWORD"] = "testpassword"
 
 from website.main import app
-from website.models import Base, Product, Feature, Session as DBSession, Alert
+from website.models import Base, Product, Feature, Session as DBSession, Alert, Phase
 from website.database import get_db
 from website.auth import _reset_rate_limit_state_for_tests
 
@@ -1324,3 +1324,55 @@ class TestFeatureReviews:
         })
         r = client.get(f"/api/features/{f.id}/reviews")
         assert r.json()[0]["session_uid"] == "test-abc123"
+
+
+# ── DELETE /api/phases/{id} — empty-phase reaper guard ───────────────────────
+
+def _mk_phase(db, product_id, name="Phase A", order=0):
+    ph = Phase(product_id=product_id, name=name, order=order)
+    db.add(ph)
+    db.flush()
+    return ph
+
+
+def test_delete_empty_phase_succeeds(client, db):
+    p = make_product(db, working_dir="/projects/reap-empty")
+    ph = _mk_phase(db, p.id)
+    r = client.delete(f"/api/phases/{ph.id}", auth=AUTH)
+    assert r.status_code == 204
+    assert db.get(Phase, ph.id) is None
+
+
+def test_delete_phase_with_live_feature_refused(client, db):
+    p = make_product(db, working_dir="/projects/reap-live")
+    ph = _mk_phase(db, p.id)
+    make_feature(db, p.id, name="real-feature", status="Approved", phase_id=ph.id)
+    r = client.delete(f"/api/phases/{ph.id}", auth=AUTH)
+    assert r.status_code == 409
+    assert db.get(Phase, ph.id) is not None  # still there
+
+
+def test_delete_phase_with_only_rejected_features_succeeds(client, db):
+    p = make_product(db, working_dir="/projects/reap-rejected")
+    ph = _mk_phase(db, p.id)
+    # Only dead features → phase is effectively empty → deletable.
+    make_feature(db, p.id, name="junk-1", status="Rejected", phase_id=ph.id)
+    make_feature(db, p.id, name="junk-2", status="Reverted", phase_id=ph.id)
+    r = client.delete(f"/api/phases/{ph.id}", auth=AUTH)
+    assert r.status_code == 204
+    assert db.get(Phase, ph.id) is None
+
+
+def test_delete_completed_phase_refused(client, db):
+    # A phase whose features all shipped (Pushed) is NOT empty — keep it.
+    p = make_product(db, working_dir="/projects/reap-shipped")
+    ph = _mk_phase(db, p.id)
+    make_feature(db, p.id, name="shipped", status="Pushed", phase_id=ph.id)
+    r = client.delete(f"/api/phases/{ph.id}", auth=AUTH)
+    assert r.status_code == 409
+    assert db.get(Phase, ph.id) is not None
+
+
+def test_delete_missing_phase_404(client, db):
+    r = client.delete("/api/phases/99999999", auth=AUTH)
+    assert r.status_code == 404

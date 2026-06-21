@@ -138,7 +138,36 @@ _DEFAULTS = {
     # then seen-and-block). Threshold=1 would block on the very first repeat.
     "supervisor_repeated_feedback_enabled":     True,
     "supervisor_repeated_feedback_threshold":   2,
+    # Placeholder/probe reaper: auto-Reject Blocked features that are agent
+    # API-probes or no-spec placeholders ("Placeholder story — …"). Complements
+    # the create-time guard in website.main (which stops NEW ones); this clears
+    # pre-guard stragglers that otherwise sit Blocked until manual triage.
+    "supervisor_placeholder_reject_enabled":    True,
+    # Empty-phase reaper: delete phases with no live features (0 features, or all
+    # Rejected/Reverted). Skips freshly-created phases to avoid racing the planner.
+    "supervisor_empty_phase_reap_enabled":      True,
+    "supervisor_empty_phase_min_age_min":       10,
 }
+
+
+# Placeholder / probe detection (mirrors website.main._is_probe_feature). Matches
+# the designer's no-spec block phrasing OR an API-probe name/description. Kept
+# tight so genuinely-underspecced REAL features (e.g. "Insufficient spec — N
+# NEEDS CLARIFICATION…") are NOT swept — those need a human, not a reject.
+_PLACEHOLDER_REASON_RE = re.compile(r"placeholder story", re.IGNORECASE)
+_PROBE_NAME_RE = re.compile(
+    r"\bprobe\b|api connectivity|to test (?:the )?api|"
+    r"test (?:the )?api (?:query|connectivity)|querying features",
+    re.IGNORECASE,
+)
+
+
+def _is_placeholder_block(f: dict) -> bool:
+    if f.get("status") != "Blocked":
+        return False
+    if _PLACEHOLDER_REASON_RE.search(f.get("blocked_reason") or ""):
+        return True
+    return bool(_PROBE_NAME_RE.search(f"{f.get('name') or ''} {f.get('description') or ''}"))
 
 
 def _resolve_max_fix_attempts() -> int:
@@ -284,6 +313,112 @@ def _close_github_pr_on_auto_block(
         log.exception(
             f"[{detector}] unexpected failure closing PR #{pr_number}"
         )
+
+
+def detect_placeholder_blocks(*, product_id: int, features: list) -> int:
+    """Auto-Reject Blocked features that are placeholder/probe junk (no spec).
+    Returns the count rejected. Audited; honors dry-run + enable flag."""
+    cfg = _get_supervisor_config()
+    if not cfg["supervisor_placeholder_reject_enabled"]:
+        return 0
+    dry_run = cfg["supervisor_dry_run_only"]
+    targets = [f for f in features if isinstance(f, dict) and _is_placeholder_block(f)]
+    if not targets:
+        return 0
+    n = 0
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            for f in targets:
+                fid = f["id"]
+                reason = (
+                    "Auto-rejected by supervisor.placeholder_reject: blocked "
+                    f"placeholder/probe story, no actionable spec "
+                    f"({(f.get('blocked_reason') or f.get('name') or '')[:80]})"
+                )
+                _record_action(
+                    detector="placeholder_reject", product_id=product_id,
+                    target_type="feature", target_id=fid,
+                    action="set_status_rejected", reason=reason, dry_run=dry_run,
+                )
+                if dry_run:
+                    continue
+                try:
+                    resp = client.patch(
+                        f"/api/features/{fid}",
+                        json={"status": "Rejected", "changed_by": "placeholder-reaper"},
+                    )
+                    if resp.is_success:
+                        n += 1
+                        log.warning(f"[placeholder_reject] Feature #{fid} -> Rejected (placeholder/probe)")
+                    else:
+                        log.warning(f"[placeholder_reject] PATCH failed #{fid}: HTTP {resp.status_code} {resp.text[:120]}")
+                except Exception as e:  # noqa: BLE001
+                    log.warning(f"[placeholder_reject] PATCH failed #{fid}: {e}")
+    except Exception:
+        log.exception(f"placeholder_reject detector failed for product {product_id}")
+    return n
+
+
+def reap_empty_phases(*, product_id: int, phases: list, features: list) -> int:
+    """Delete phases with no LIVE features (0 features, or all Rejected/Reverted).
+    Skips freshly-created phases (planner race). Audited; honors dry-run + flag.
+    The DELETE endpoint independently refuses non-empty phases (409)."""
+    cfg = _get_supervisor_config()
+    if not cfg["supervisor_empty_phase_reap_enabled"]:
+        return 0
+    if not isinstance(phases, list) or not isinstance(features, list):
+        return 0
+    dry_run = cfg["supervisor_dry_run_only"]
+    min_age_s = float(cfg["supervisor_empty_phase_min_age_min"]) * 60
+    _DEAD = {"Rejected", "Reverted"}
+    live_phase_ids = {
+        f.get("phase_id") for f in features
+        if isinstance(f, dict) and f.get("phase_id") is not None
+        and f.get("status") not in _DEAD
+    }
+    now = datetime.now(timezone.utc)
+    n = 0
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            for ph in phases:
+                if not isinstance(ph, dict):
+                    continue
+                pid = ph.get("id")
+                if pid is None or pid in live_phase_ids:
+                    continue  # has at least one non-rejected feature → keep
+                created = ph.get("created_at")
+                if created:
+                    try:
+                        ts = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        if (now - ts).total_seconds() < min_age_s:
+                            continue  # too fresh — may be a planner-created phase mid-fill
+                    except Exception:  # noqa: BLE001
+                        pass
+                _record_action(
+                    detector="empty_phase_reap", product_id=product_id,
+                    target_type="phase", target_id=pid,
+                    action="delete_empty_phase",
+                    reason=f"Deleted empty phase '{ph.get('name', '')}' (no live features)",
+                    dry_run=dry_run,
+                )
+                if dry_run:
+                    continue
+                try:
+                    resp = client.delete(f"/api/phases/{pid}")
+                    if resp.is_success:
+                        n += 1
+                        log.warning(f"[empty_phase_reap] phase #{pid} '{ph.get('name','')}' deleted")
+                    elif resp.status_code == 409:
+                        log.debug(f"[empty_phase_reap] phase #{pid} not empty (409) — skipped")
+                    else:
+                        log.warning(f"[empty_phase_reap] DELETE failed #{pid}: HTTP {resp.status_code} {resp.text[:120]}")
+                except Exception as e:  # noqa: BLE001
+                    log.warning(f"[empty_phase_reap] DELETE failed #{pid}: {e}")
+    except Exception:
+        log.exception(f"empty_phase_reap detector failed for product {product_id}")
+    return n
 
 
 def _route_to_blocked_if_at_cap(
