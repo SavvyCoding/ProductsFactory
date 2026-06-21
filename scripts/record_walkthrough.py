@@ -85,28 +85,39 @@ def _load_env() -> dict:
 # metrics. Each key is one scene's voiceover; scene action duration is tied to
 # the voiceover length so there is no dead air.
 NARRATIONS = {
-    # The opener — the "why", told over the real design.html showcase page.
+    # The opener — a guided tour of the real design.html showcase page.
     "intro": (
-        "Building software has always been limited by people. Every feature needs "
-        "someone to design it, write it, review it, and ship it — and that human "
-        "capacity is the ceiling on how fast a product can move. ProductFactory "
-        "removes that ceiling. It is a twenty-four-seven autonomous development "
-        "system: you give it a product vision, and a team of specialized AI agents — "
-        "a designer, a coder, a reviewer, an architect, and more — builds it inside "
-        "isolated containers, around the clock."
+        "Software has always moved at the speed of its team. Every feature needs a "
+        "person to design it, build it, review it, and ship it — and that human "
+        "capacity is the ceiling on how fast any product can grow. ProductFactory "
+        "lifts that ceiling. It is a twenty-four-seven autonomous development system: "
+        "you describe what you want to build, and a team of AI agents builds it for "
+        "you — continuously, inside isolated, secure containers."
     ),
-    "intro2": (
-        "Every feature flows through a strict lifecycle and ships as its own reviewed "
-        "pull request, merged automatically. Deterministic quality gates and "
-        "rule-based supervisors keep the agents honest. The result: a single project "
-        "manager can run an entire fleet of products — with no human writing code, "
-        "and no human opening a pull request. Let's see it."
+    "intro_map": (
+        "Here is the whole system at a glance. At the center sits the orchestrator. "
+        "Around it work specialized agents — a designer, a coder, a reviewer, an "
+        "architect — connected by a pipeline that carries every change from a rough "
+        "idea all the way to a merged, reviewed pull request."
+    ),
+    "intro_cycle": (
+        "It runs as a steady loop. About once a minute, the orchestrator wakes up, "
+        "looks across all of your products, decides what matters most, and launches a "
+        "single agent in a fresh container to do that one piece of work. Code reviews "
+        "always jump the queue, so finished work never sits waiting."
+    ),
+    "intro_personas": (
+        "Each agent is a focused specialist. The designer turns a request into a "
+        "precise spec, the coder implements it, and the reviewer scrutinizes it like a "
+        "senior engineer. Architects, refactorers, and security auditors quietly keep "
+        "the codebase healthy over time. Let's see all of this working, in the real "
+        "product."
     ),
     "grid": (
-        "This is the fleet. Every card is a real product the factory is building — "
-        "the bar across the top counts how many are ready, in flight, or paused, and "
-        "each card shows live progress: features shipped, features awaiting review, "
-        "and anything blocked."
+        "This is the command center — the fleet view. Every card is a real product the "
+        "factory is actively building. The bar across the top tracks the whole fleet "
+        "at a glance, and each card shows live progress: how many features have "
+        "shipped, how many are waiting for review, and anything that is blocked."
     ),
     # Create wizard beats (timed to real AI steps).
     "create_intro": (
@@ -126,8 +137,16 @@ NARRATIONS = {
         "frontend from, chosen to fit what you described."
     ),
     "create_backlog": (
-        "Then it generates a complete starter backlog — real, themed features with "
-        "descriptions — straight from the vision."
+        "Now the real payoff. ProductFactory takes that vision and generates a "
+        "complete starter backlog — not vague placeholders, but real, themed features, "
+        "each with a proper description. This is the very same planner the agents "
+        "themselves use, so the backlog is genuinely buildable from the first session. "
+        "In just a few moments, it lays out an entire product roadmap for you."
+    ),
+    "create_backlog2": (
+        "And here it is — a full backlog of concrete features, ready to go: "
+        "authentication, listings, search, payments, reviews, and more. From a single "
+        "sentence to a buildable plan, in under a minute."
     ),
     "create_details": (
         "The final step names the product and would scaffold a fresh GitHub "
@@ -197,30 +216,49 @@ NARRATIONS = {
 
 
 # ── Browser-driving helpers ──────────────────────────────────────────────────
+# Scrolling is driven by a SINGLE browser-side requestAnimationFrame animation
+# that resolves after exactly `budget` ms. The old approach fired ~100 mouse.wheel
+# calls and slept between them — the per-call round-trip latency made each scroll
+# overshoot its budget by ~20%, and that drift accumulated across multi-beat
+# scenes (intro/create), opening silent gaps between narration beats.
 async def _smooth_scroll(page, total_px: int, budget: float):
-    """Scroll down by total_px over `budget` seconds (fills the narration)."""
+    """Scroll the window down by total_px over exactly `budget` seconds."""
     budget = max(0.4, budget)
-    steps = max(8, int(budget * 8))
-    per = total_px / steps
-    dt = (budget * 0.85) / steps
-    for _ in range(steps):
-        await page.mouse.wheel(0, per)
-        await asyncio.sleep(dt)
-    await asyncio.sleep(budget * 0.15)
+    try:
+        await page.evaluate(
+            """([px, ms]) => new Promise((res) => {
+                const t0 = performance.now(), y0 = window.scrollY;
+                (function step(now) {
+                  const t = Math.min(1, (now - t0) / ms);
+                  window.scrollTo(0, y0 + px * t);
+                  if (t < 1) requestAnimationFrame(step); else res();
+                })(performance.now());
+            })""",
+            [total_px, int(budget * 1000)],
+        )
+    except Exception:  # noqa: BLE001
+        await asyncio.sleep(budget)
 
 
 async def _scroll_el(page, selector, budget, total=1400):
+    """Scroll an inner container by `total` px over exactly `budget` seconds."""
     budget = max(0.4, budget)
-    steps = max(8, int(budget * 6))
-    per = total / steps
-    dt = (budget * 0.85) / steps
-    for _ in range(steps):
+    try:
         await page.evaluate(
-            "([s, d]) => { const e = document.querySelector(s); if (e) e.scrollTop += d; }",
-            [selector, per],
+            """([s, px, ms]) => new Promise((res) => {
+                const e = document.querySelector(s);
+                if (!e) { setTimeout(res, ms); return; }
+                const t0 = performance.now(), y0 = e.scrollTop;
+                (function step(now) {
+                  const t = Math.min(1, (now - t0) / ms);
+                  e.scrollTop = y0 + px * t;
+                  if (t < 1) requestAnimationFrame(step); else res();
+                })(performance.now());
+            })""",
+            [selector, total, int(budget * 1000)],
         )
-        await asyncio.sleep(dt)
-    await asyncio.sleep(budget * 0.15)
+    except Exception:  # noqa: BLE001
+        await asyncio.sleep(budget)
 
 
 async def _wait_for(page, js_expr, timeout=22.0):
@@ -280,13 +318,20 @@ async def _redact_names(page):
 
 
 # ── Scenes ───────────────────────────────────────────────────────────────────
-# Intro is TWO narration beats over the design.html showcase, in one clip.
-INTRO_BEATS = ["intro", "intro2"]
+# A guided tour of design.html: (narration_key, scroll-to anchor or None=hero).
+# Each beat scrolls its section into view, then drifts gently while narrated — so
+# the voice always matches what's on screen and there is no scrolling-in-silence.
+INTRO_BEATS = [
+    ("intro",          None),                  # hero
+    ("intro_map",      ".system-graph-wrap"),  # the D3 system map
+    ("intro_cycle",    "#poller"),             # Orchestrator Cycle section
+    ("intro_personas", "#personas"),           # AI personas section
+]
 
 
 async def act_intro(page, base, audio_dur):
-    """Open the real design.html (file://) and narrate the 'why'. Returns
-    [(audio_key, offset_seconds), ...] for the two intro beats."""
+    """Open the real design.html (file://) and narrate a guided tour. Returns
+    [(audio_key, offset_seconds), ...] for each beat."""
     offsets = []
     t0 = time.monotonic()
     try:
@@ -294,14 +339,24 @@ async def act_intro(page, base, audio_dur):
     except Exception as e:  # noqa: BLE001
         print(f"  [intro] design.html load: {e}")
         await page.goto(base + "/", wait_until="domcontentloaded")
-    await asyncio.sleep(2.0)  # let the hero + D3 graph animate in
+    await asyncio.sleep(2.5)  # let the hero + D3 graph animate in
 
-    # Beat 1 — hero + slow reveal of the system map.
-    offsets.append(("intro", time.monotonic() - t0))
-    await _smooth_scroll(page, 900, audio_dur["intro"] - 0.3)
-    # Beat 2 — continue through the system graph / lower sections.
-    offsets.append(("intro2", time.monotonic() - t0))
-    await _smooth_scroll(page, 1400, audio_dur["intro2"] - 0.3)
+    for key, anchor in INTRO_BEATS:
+        offsets.append((key, time.monotonic() - t0))
+        lead = 0.0
+        if anchor:
+            try:
+                await page.evaluate(
+                    "(s) => { const e = document.querySelector(s); "
+                    "if (e) e.scrollIntoView({behavior:'smooth', block:'start'}); }",
+                    anchor,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            lead = 1.0
+            await asyncio.sleep(lead)  # let the smooth-scroll settle on the section
+        # Gentle drift so the section isn't frozen while it's narrated.
+        await _smooth_scroll(page, 180, max(0.4, audio_dur[key] - lead - 0.2))
     return offsets
 
 
@@ -312,8 +367,8 @@ async def act_grid(page, base, ctx, budget):
     await _smooth_scroll(page, 1100, budget - 1.0)
 
 
-CREATE_BEATS = ["create_intro", "create_vision", "create_stack",
-                "create_ui", "create_backlog", "create_details"]
+CREATE_BEATS = ["create_intro", "create_vision", "create_stack", "create_ui",
+                "create_backlog", "create_backlog2", "create_details"]
 
 VISION_SEED = (
     "A community marketplace where neighbours lend and borrow tools and household "
@@ -385,19 +440,29 @@ async def act_create(page, base, audio_dur, do_create: bool):
         print(f"  [create:ui] {e}")
     await pad(s, "create_ui")
 
+    # Beat: kick off generation — the longer create_backlog narration plays over
+    # the AI wait (the ~20s 'Generating backlog…' spinner that was dead-air before).
     s = await beat("create_backlog")
+    got = False
     try:
         await page.evaluate("typeof wizardToBacklog==='function' && wizardToBacklog()")
         await asyncio.sleep(0.6)
         await page.click("#suggest-btn", timeout=4000)
         got = await _wait_for(page, "!document.getElementById('gf-suggestions').classList.contains('hidden') "
-                                    "&& document.querySelectorAll('#suggestions-grid .suggestion-card').length > 0", 40)
-        if got:
-            await asyncio.sleep(1.0)
-            await _scroll_el(page, "#wp-5-backlog", 7.0, total=1100)
+                                    "&& document.querySelectorAll('#suggestions-grid .suggestion-card').length > 0", 45)
     except Exception as e:  # noqa: BLE001
         print(f"  [create:backlog] {e}")
     await pad(s, "create_backlog")
+
+    # Beat: review the generated cards — narration plays over the card scroll.
+    s = await beat("create_backlog2")
+    try:
+        if got:
+            await asyncio.sleep(0.4)
+            await _scroll_el(page, "#wp-5-backlog", audio_dur["create_backlog2"], total=1100)
+    except Exception as e:  # noqa: BLE001
+        print(f"  [create:backlog2] {e}")
+    await pad(s, "create_backlog2")
 
     s = await beat("create_details")
     try:
@@ -569,14 +634,17 @@ def _caption_clips(text, start, dur, W, H):
     out = []
     for i, ch in enumerate(chunks):
         try:
-            tc = (
-                TextClip(font=FONT_PATH, text=ch, font_size=38, color="white",
-                         stroke_color="black", stroke_width=3, method="caption",
-                         size=(int(W * 0.84), None), text_align="center")
-                .with_start(start + i * per)
-                .with_duration(per + 0.05)
-                .with_position(("center", int(H * 0.80)))
+            tc = TextClip(
+                font=FONT_PATH, text=ch, font_size=36, color="white",
+                stroke_color="black", stroke_width=3, method="caption",
+                size=(int(W * 0.80), None), text_align="center",
             )
+            # Anchor the caption's BOTTOM ~70px above the frame edge so multi-line
+            # captions never clip off the bottom (the previous fixed-top y did).
+            y = max(0, H - tc.h - 70)
+            tc = (tc.with_start(start + i * per)
+                    .with_duration(per + 0.05)
+                    .with_position(("center", y)))
             out.append(tc)
         except Exception as e:  # noqa: BLE001
             print(f"  [caption] non-fatal: {e}")
@@ -698,7 +766,8 @@ def main():
     ap.add_argument("--create", action="store_true",
                     help="Actually submit the greenfield wizard (creates a real repo).")
     ap.add_argument("--product-id", type=int, default=None)
-    ap.add_argument("--no-captions", action="store_true", help="Skip burned-in captions.")
+    ap.add_argument("--captions", action="store_true",
+                    help="Burn in captions (OFF by default).")
     args = ap.parse_args()
 
     env = _load_env()
@@ -719,8 +788,8 @@ def main():
 
     global FONT_PATH, CAPTIONS_ENABLED, REDACT_PAIRS
     FONT_PATH = _resolve_font()
-    CAPTIONS_ENABLED = (not args.no_captions) and _captions_selftest()
-    print(f"Captions: {'ON' if CAPTIONS_ENABLED else 'OFF'} (font={FONT_PATH})")
+    CAPTIONS_ENABLED = bool(args.captions) and _captions_selftest()
+    print(f"Captions: {'ON' if CAPTIONS_ENABLED else 'OFF (pass --captions to enable)'}")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     REDACT_PAIRS = _build_redact_pairs(env, base)
