@@ -554,6 +554,7 @@ _CFG_DEFAULTS = {
     "max_features_per_run":        5,
     "max_fix_attempts":            5,
     "brownfield_file_threshold":   10,
+    "max_pending_approved":        10,  # planner stops generating new features past this many Approved
     "auto_merge_enabled":            False,
     # Agent / Ollama
     "agent_backend":    "ollama",   # Claude-CLI base backend retired
@@ -1256,6 +1257,7 @@ _POLLER_INT_BOUNDS: dict[str, tuple[int, int]] = {
     "stuck_feature_timeout_hours": (0.25,  48),
     "max_features_per_run":        (1,     10),
     "max_fix_attempts":            (1,     20),
+    "max_pending_approved":        (1,    100),
     "brownfield_file_threshold":   (1,    100),
     "ollama_timeout":              (30,  1800),
     "bash_timeout":                (10,   600),
@@ -1315,6 +1317,7 @@ async def admin_save_poller_settings(
     config.stuck_feature_timeout_hours = _float("stuck_feature_timeout_hours")
     config.max_features_per_run        = _int("max_features_per_run")
     config.max_fix_attempts            = _int("max_fix_attempts")
+    config.max_pending_approved        = _int("max_pending_approved")
     config.brownfield_file_threshold       = _int("brownfield_file_threshold")
     config.auto_merge_enabled              = form.get("auto_merge_enabled") == "1"
     # Base backend is always Ollama now (the Claude-CLI radio was retired —
