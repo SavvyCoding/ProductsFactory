@@ -1084,6 +1084,7 @@ def _run_supervisor_per_product_detectors(
     import httpx as _httpx
     from orchestrator.supervisor import (  # type: ignore
         detect_orphan_approved, detect_rapid_flap, detect_placeholder_blocks,
+        detect_repeated_gate_rejection,
     )
 
     pid = product.get("id")
@@ -1109,6 +1110,20 @@ def _run_supervisor_per_product_detectors(
             detect_placeholder_blocks(product_id=pid, features=features)
         except Exception:
             log.exception(f"placeholder_reject detector failed for product {pid}")
+        # Gate-loop circuit-breaker: route features stuck on the SAME post-coder
+        # gate rejection (lint/test/verify) to the diagnose-first escalation
+        # early, before they burn hours or eat a misleading cap/flap block
+        # (#1873 class). Only for actively-cycling features below the escalation
+        # threshold — the detector self-fetches each one's comments and no-ops
+        # cheaply otherwise.
+        try:
+            _esc_thr = int(os.environ.get("ESCALATION_FIX_ATTEMPTS_THRESHOLD", "4"))
+            for _f in features:
+                if (_f.get("status") in ("Implementing", "Implemented", "Reviewing")
+                        and int(_f.get("fix_attempts") or 0) < _esc_thr):
+                    detect_repeated_gate_rejection(feature_id=_f["id"], product_id=pid)
+        except Exception:
+            log.exception(f"gate_loop detector failed for product {pid}")
 
     # Pull flapping features (uses default thresholds from system_config
     # — endpoint accepts overrides via query string but we fall back to
