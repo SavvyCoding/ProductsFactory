@@ -147,6 +147,18 @@ _DEFAULTS = {
     # Rejected/Reverted). Skips freshly-created phases to avoid racing the planner.
     "supervisor_empty_phase_reap_enabled":      True,
     "supervisor_empty_phase_min_age_min":       10,
+    # detect_repeated_gate_rejection (gate-loop circuit-breaker): the reviewer
+    # had a repeated-signature detector but the deterministic post-coder GATES
+    # (lint-guard / test-check / verify-check) had none — a feature looping on
+    # the SAME gate reason only exited via the fix_attempts cap, which
+    # reset_stuck/contention can keep artificially low. When the same gate
+    # signature appears >= threshold times within the recent `window` bounces,
+    # route the feature to the diagnose-first escalation EARLY (bump fix_attempts
+    # to the escalation threshold) instead of looping. Closes the gap that ran
+    # DogTinder #1873 for ~8h on a Guard-17 false positive.
+    "supervisor_gate_loop_enabled":             True,
+    "supervisor_gate_loop_threshold":           3,
+    "supervisor_gate_loop_window":              6,
 }
 
 
@@ -580,6 +592,45 @@ def _signature_from_review_notes(review_notes: str | None) -> str | None:
     return _hashlib.sha1(norm.encode("utf-8")).hexdigest()
 
 
+# ── Gate-rejection signature (for the gate-loop circuit-breaker) ─────────────
+# The deterministic post-coder gates post a rejection comment under one of
+# these authors. Unlike reviewer feedback, their bodies embed volatile output
+# (pytest durations, ordering, "(N violation(s))" counts) — so we fingerprint
+# only the SPECIFIC violated items (the bulleted lines: failing tests / symbols
+# / files), which are stable across identical bounces.
+_GATE_REJECTION_AUTHORS = frozenset({
+    "lint-guard", "post-coder:test-check", "post-coder:verify-check",
+})
+_GATE_BULLET_RE = re.compile(r"^\s*[-*]\s+(.*\S)", re.M)
+
+
+def _gate_signature(body: str | None) -> str | None:
+    """Stable fingerprint of a post-coder GATE rejection, keyed on the specific
+    violations/failing items (the bulleted lines) so volatile output doesn't
+    perturb the hash. Returns None if nothing usable.
+    """
+    if not body:
+        return None
+    keys: list[str] = []
+    for b in _GATE_BULLET_RE.findall(body):
+        # Keep dots/colons/underscores/slashes so module paths + filenames
+        # (e.g. `src.lib.push`, `debug_test.py`) survive normalization.
+        norm = re.sub(r"[^a-z0-9 ._:/]+", " ", b.lower())
+        norm = re.sub(r"\s+", " ", norm).strip()[:120]
+        if norm:
+            keys.append(norm)
+    if keys:
+        return _hashlib.sha1("|".join(sorted(set(keys))).encode("utf-8")).hexdigest()
+    # Fallback: hash the first non-empty line (the gate's headline).
+    for line in body.splitlines():
+        s = line.strip()
+        if s:
+            norm = re.sub(r"[^a-z0-9 ]+", " ", s.lower())
+            norm = re.sub(r"\s+", " ", norm).strip()[:120]
+            return _hashlib.sha1(norm.encode("utf-8")).hexdigest() if norm else None
+    return None
+
+
 # ── Detector: repeated review feedback (auto-block dead-end loops) ───────────
 # When a reviewer's changes_requested feedback fingerprint matches the
 # previous changes_requested cycle, the coder is going in circles. The
@@ -774,6 +825,137 @@ def detect_repeated_review_feedback(
         )
         return {"action": "no-op", "signature": None, "repeated": 0,
                 "reason": "exception (logged)"}
+
+
+# ── Detector: repeated GATE rejection (gate-loop circuit-breaker) ───────────
+# The reviewer-feedback detector above has no analogue for the deterministic
+# post-coder gates (lint-guard / test-check / verify-check). A feature looping
+# on the SAME gate reason therefore had no early exit — it relied on the
+# fix_attempts cap, which reset_stuck / host contention can keep artificially
+# low (DogTinder #1873: 16 rejections, fix_attempts only reached 4, looped ~8h
+# on a Guard-17 false positive before escalation finally fired). This detector
+# closes that gap: when the same gate signature repeats within the recent
+# window, route the feature to the diagnose-first escalation EARLY — decoupled
+# from fix_attempts — so the read-only diagnostician surfaces the root cause
+# (fixable / spec_defect / env_impossible) instead of more blind reworks.
+
+_ACTIVE_REWORK_STATUSES = frozenset({"Implementing", "Implemented", "Reviewing"})
+
+
+def detect_repeated_gate_rejection(
+    *,
+    feature_id: int,
+    product_id: int | None = None,
+    comments: list | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """Route a feature stuck on the SAME post-coder gate rejection to the
+    diagnose-first escalation early.
+
+    Returns {"action": "no-op|would_escalate|escalated", "repeated": int,
+    "reason": str}. Best-effort — never raises. Honors dry-run + the
+    per-detector flag. Naturally idempotent: once it bumps fix_attempts to the
+    escalation threshold, subsequent runs see fix_attempts >= threshold and
+    no-op (the escalation/cap machinery then owns the feature).
+    """
+    cfg = _get_supervisor_config()
+    if cfg.get("supervisor_dry_run_only"):
+        dry_run = True
+    if not cfg.get("supervisor_gate_loop_enabled", True):
+        return {"action": "no-op", "repeated": 0, "reason": "detector disabled"}
+
+    threshold = int(cfg.get("supervisor_gate_loop_threshold", 3))
+    window = int(cfg.get("supervisor_gate_loop_window", 6))
+    esc_threshold = int(os.environ.get("ESCALATION_FIX_ATTEMPTS_THRESHOLD", "4"))
+
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            feat_resp = client.get(f"/api/features/{feature_id}")
+            if feat_resp.status_code != 200:
+                return {"action": "no-op", "repeated": 0,
+                        "reason": f"feature fetch HTTP {feat_resp.status_code}"}
+            feat = feat_resp.json()
+            if feat.get("status") not in _ACTIVE_REWORK_STATUSES:
+                return {"action": "no-op", "repeated": 0,
+                        "reason": f"status {feat.get('status')} not active rework"}
+            # Natural dedupe: at/above the escalation threshold the escalation
+            # (and then cap) machinery already owns this feature.
+            if int(feat.get("fix_attempts") or 0) >= esc_threshold:
+                return {"action": "no-op", "repeated": 0,
+                        "reason": "already at escalation threshold"}
+
+            if comments is None:
+                c_resp = client.get(f"/api/features/{feature_id}/comments")
+                comments = c_resp.json() if c_resp.status_code == 200 else []
+
+            gate = [c for c in (comments or [])
+                    if (c.get("author") or "") in _GATE_REJECTION_AUTHORS]
+            if len(gate) < threshold:
+                return {"action": "no-op", "repeated": 0,
+                        "reason": f"only {len(gate)} gate rejection(s)"}
+
+            recent = gate[-window:]
+            sigs = [s for s in (_gate_signature(c.get("body")) for c in recent) if s]
+            if not sigs:
+                return {"action": "no-op", "repeated": 0,
+                        "reason": "no usable gate signatures"}
+
+            from collections import Counter
+            top_sig, top_count = Counter(sigs).most_common(1)[0]
+            if top_count < threshold:
+                return {"action": "no-op", "repeated": top_count,
+                        "reason": f"max repeat {top_count} < threshold {threshold}"}
+
+            reason = (
+                f"Same post-coder gate rejection {top_count}× within the last "
+                f"{len(recent)} bounces (threshold={threshold}, sig {top_sig[:12]}…); "
+                f"routing #{feature_id} to diagnose-first escalation "
+                f"(fix_attempts -> {esc_threshold}) instead of another blind rework."
+            )
+            _record_action(
+                detector="repeated_gate_rejection",
+                product_id=product_id or feat.get("product_id"),
+                target_type="feature",
+                target_id=feature_id,
+                action="route_to_escalation",
+                reason=reason,
+                dry_run=dry_run,
+            )
+            if dry_run:
+                return {"action": "would_escalate", "repeated": top_count,
+                        "reason": "dry-run: would bump fix_attempts to escalation threshold"}
+
+            client.patch(
+                f"/api/features/{feature_id}",
+                json={
+                    "fix_attempts": esc_threshold,
+                    "changed_by": "supervisor.gate_loop",
+                },
+            )
+            client.post(
+                f"/api/features/{feature_id}/comments",
+                json={
+                    "author": "gate-loop",
+                    "body": (
+                        f"🔁 Gate-loop circuit-breaker: this feature hit the SAME "
+                        f"post-coder gate rejection {top_count}× within its last "
+                        f"{len(recent)} bounces. A blind re-code won't help — routing "
+                        f"to the read-only diagnostician (fix_attempts set to "
+                        f"{esc_threshold}) so the next session diagnoses the root cause "
+                        f"(fixable / spec_defect / env_impossible) rather than looping. "
+                        f"Canonical: #1873 looped ~8h on a Guard-17 false positive "
+                        f"before escalation eventually fired."
+                    ),
+                },
+            )
+            log.warning(
+                f"[gate_loop] feature #{feature_id} -> escalation "
+                f"(same gate signature {top_count}× of last {len(recent)})"
+            )
+            return {"action": "escalated", "repeated": top_count, "reason": reason}
+    except Exception:
+        log.exception(f"detect_repeated_gate_rejection crashed for #{feature_id}")
+        return {"action": "no-op", "repeated": 0, "reason": "exception (logged)"}
 
 
 # ── Detector: divergent review feedback (Phase 6 of quality-specs) ──────────
