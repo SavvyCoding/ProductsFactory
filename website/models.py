@@ -225,6 +225,7 @@ class SystemConfig(Base):
     max_fix_attempts:           Mapped[Optional[int]] = mapped_column(Integer)  # default 5
     brownfield_file_threshold:  Mapped[Optional[int]] = mapped_column(Integer)  # default 10
     recommender_pending_threshold: Mapped[Optional[int]] = mapped_column(Integer)  # default 15
+    max_pending_approved:          Mapped[Optional[int]] = mapped_column(Integer)  # default 10 — planner backlog cap
     auto_merge_enabled:            Mapped[Optional[bool]] = mapped_column(Boolean)  # default False
 
     # ── Agent / Ollama settings ───────────────────────────────────────────────
