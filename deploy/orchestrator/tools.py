@@ -1084,7 +1084,7 @@ def _run_supervisor_per_product_detectors(
     import httpx as _httpx
     from orchestrator.supervisor import (  # type: ignore
         detect_orphan_approved, detect_rapid_flap, detect_placeholder_blocks,
-        detect_repeated_gate_rejection,
+        detect_repeated_gate_rejection, detect_no_progress_sessions,
     )
 
     pid = product.get("id")
@@ -1124,6 +1124,14 @@ def _run_supervisor_per_product_detectors(
                     detect_repeated_gate_rejection(feature_id=_f["id"], product_id=pid)
         except Exception:
             log.exception(f"gate_loop detector failed for product {pid}")
+        # No-progress guard: block a feature whose recent coder sessions keep
+        # running long and pushing nothing (hang/timeout token-burn loop that
+        # produces no bounce comment, so nothing else catches it — #1873 class).
+        # Self-fetches the product's recent sessions.
+        try:
+            detect_no_progress_sessions(product_id=pid)
+        except Exception:
+            log.exception(f"no_progress detector failed for product {pid}")
 
     # Pull flapping features (uses default thresholds from system_config
     # — endpoint accepts overrides via query string but we fall back to
