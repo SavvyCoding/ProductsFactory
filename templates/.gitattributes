@@ -1,0 +1,8 @@
+# Append-only running logs: auto-resolve concurrent appends with git's built-in
+# `union` merge driver (keeps both sides' lines) instead of conflicting. GitHub
+# honors `merge=union` server-side on the squash-merge button, and a local
+# rebase/merge resolves it too. Without this, every in-flight feature branch
+# that appends to features.md conflicts with whichever sibling merges to main
+# first -> the PR goes DIRTY/CONFLICTING and auto-merge fails even after the
+# reviewer approves (canonical: DogTinder PR #109 / feature #1882, 2026-06-22).
+features.md merge=union
