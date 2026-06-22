@@ -159,6 +159,19 @@ _DEFAULTS = {
     "supervisor_gate_loop_enabled":             True,
     "supervisor_gate_loop_threshold":           3,
     "supervisor_gate_loop_window":              6,
+    # detect_no_progress_sessions (hang/timeout token-burn guard): a coder
+    # session that runs long and pushes nothing produces no bounce comment, so
+    # gate/cap/flap detectors stay silent and fix_attempts never climbs to the
+    # cap — the feature can burn sessions indefinitely. Canonical: DogTinder
+    # #1873 burned ~4M input tokens/session across multiple 60–90min hangs with
+    # zero progress. When >= threshold such "dead" sessions (>= min_minutes,
+    # features_pushed==0) target the same feature within the recent window,
+    # block it for human triage (a re-run won't help — the agent isn't
+    # producing output).
+    "supervisor_no_progress_enabled":           True,
+    "supervisor_no_progress_min_minutes":       45,
+    "supervisor_no_progress_threshold":         3,
+    "supervisor_no_progress_window":            8,
 }
 
 
@@ -956,6 +969,151 @@ def detect_repeated_gate_rejection(
     except Exception:
         log.exception(f"detect_repeated_gate_rejection crashed for #{feature_id}")
         return {"action": "no-op", "repeated": 0, "reason": "exception (logged)"}
+
+
+# ── Detector: no-progress sessions (hang/timeout token-burn guard) ──────────
+# A coder session that runs long and pushes nothing leaves NO bounce comment,
+# so the gate/cap/flap detectors stay silent and fix_attempts never reaches the
+# cap. The feature can then burn session after session indefinitely (DogTinder
+# #1873: ~4M input tokens/session across multiple 60–90min hangs, zero
+# progress). This detector keys on session telemetry (duration + features_pushed)
+# rather than comments, and blocks the targeted feature for human triage once
+# enough dead sessions accumulate — a re-run won't help if the agent isn't
+# producing output.
+
+_NO_PROGRESS_ACTIVE = frozenset({"Implementing", "Implemented", "Reviewing"})
+
+
+def _session_minutes(s: dict) -> float:
+    """Wall-clock minutes for a session row (uses now if still running)."""
+    def _p(t):
+        if not t:
+            return None
+        try:
+            return datetime.fromisoformat(str(t).replace("Z", "+00:00"))
+        except Exception:
+            return None
+    st = _p(s.get("started_at"))
+    if not st:
+        return 0.0
+    en = _p(s.get("ended_at")) or datetime.now(timezone.utc)
+    return max(0.0, (en - st).total_seconds() / 60.0)
+
+
+def detect_no_progress_sessions(
+    *,
+    product_id: int,
+    sessions: list | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """Block a feature whose recent coder sessions repeatedly run long and push
+    nothing (the hang/timeout token-burn loop no other detector catches).
+
+    Returns {"action": "no-op|would_block|blocked", "blocked": [ids], "reason"}.
+    Best-effort — never raises. Honors dry-run + the per-detector flag.
+    Idempotent: features already Blocked are skipped, so it won't re-block.
+    """
+    cfg = _get_supervisor_config()
+    if cfg.get("supervisor_dry_run_only"):
+        dry_run = True
+    if not cfg.get("supervisor_no_progress_enabled", True):
+        return {"action": "no-op", "blocked": [], "reason": "detector disabled"}
+
+    min_min = float(cfg.get("supervisor_no_progress_min_minutes", 45))
+    threshold = int(cfg.get("supervisor_no_progress_threshold", 3))
+    window = int(cfg.get("supervisor_no_progress_window", 8))
+
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            if sessions is None:
+                r = client.get(f"/api/products/{product_id}/sessions",
+                               params={"limit": window})
+                sessions = r.json() if r.status_code == 200 else []
+            recent = (sessions or [])[:window]
+
+            # "Dead" = a coder session that ran >= min_min and pushed nothing
+            # despite attempting work. Quick failed bounces (short, with a
+            # comment) are NOT dead — those are normal rework.
+            dead = [
+                s for s in recent
+                if (s.get("persona") == "coder")
+                and int(s.get("features_pushed") or 0) == 0
+                and int(s.get("features_attempted") or 0) >= 1
+                and _session_minutes(s) >= min_min
+            ]
+            if len(dead) < threshold:
+                return {"action": "no-op", "blocked": [],
+                        "reason": f"{len(dead)} dead session(s) < threshold {threshold}"}
+
+            # Map dead sessions -> the feature(s) they touched (session changelog
+            # carries feature_id). A feature hit by >= threshold dead sessions is
+            # the one stuck in the burn loop.
+            from collections import Counter
+            hits: Counter = Counter()
+            tok_burned = 0
+            for s in dead:
+                tok_burned += int(s.get("tokens_input") or 0)
+                try:
+                    det = client.get(f"/api/sessions/{s['id']}")
+                    cl = det.json().get("changelog", []) if det.status_code == 200 else []
+                except Exception:
+                    cl = []
+                for fid in {c.get("feature_id") for c in cl if c.get("feature_id")}:
+                    hits[fid] += 1
+
+            blocked: list[int] = []
+            for fid, cnt in hits.items():
+                if cnt < threshold:
+                    continue
+                try:
+                    fr = client.get(f"/api/features/{fid}")
+                    if fr.status_code != 200:
+                        continue
+                    feat = fr.json()
+                except Exception:
+                    continue
+                if feat.get("status") not in _NO_PROGRESS_ACTIVE:
+                    continue  # already terminal/blocked — leave it
+                reason = (
+                    f"Auto-blocked by supervisor.no_progress: {cnt} coder session(s) "
+                    f"ran >= {min_min:.0f}min and pushed nothing (hang/timeout loop; "
+                    f"~{tok_burned:,} input tokens burned across dead sessions). No bounce "
+                    f"comments were produced, so the gate/cap/flap detectors stay silent "
+                    f"and fix_attempts never reaches the cap. Needs human triage — the "
+                    f"agent isn't producing output for this feature."
+                )
+                _record_action(
+                    detector="no_progress_sessions",
+                    product_id=product_id,
+                    target_type="feature",
+                    target_id=fid,
+                    action="block_no_progress",
+                    reason=reason,
+                    dry_run=dry_run,
+                )
+                if not dry_run:
+                    client.patch(f"/api/features/{fid}", json={
+                        "status": "Blocked",
+                        "blocked_reason": reason,
+                        "changed_by": "supervisor.no_progress",
+                    })
+                    client.post(f"/api/features/{fid}/comments", json={
+                        "author": "no-progress", "body": "🛑 " + reason,
+                    })
+                    log.warning(
+                        f"[no_progress] feature #{fid} -> Blocked "
+                        f"({cnt} dead sessions, ~{tok_burned:,} input tokens burned)"
+                    )
+                blocked.append(fid)
+
+            if not blocked:
+                return {"action": "no-op", "blocked": [],
+                        "reason": "dead sessions present but no active feature met threshold"}
+            return {"action": ("would_block" if dry_run else "blocked"),
+                    "blocked": blocked, "reason": f"{len(blocked)} feature(s) blocked"}
+    except Exception:
+        log.exception(f"detect_no_progress_sessions crashed for product {product_id}")
+        return {"action": "no-op", "blocked": [], "reason": "exception (logged)"}
 
 
 # ── Detector: divergent review feedback (Phase 6 of quality-specs) ──────────
