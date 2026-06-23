@@ -131,7 +131,7 @@ templates/           Files installed into each managed product repo on discovery
 tests/               Pytest suite (real Postgres, per-test rollback)
 evals/               Persona-prompt regression harness
 scripts/             Operational + dev utilities
-docs/                Specs
+docs/specs/          Design specs
 ```
 
 ---
