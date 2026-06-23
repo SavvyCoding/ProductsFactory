@@ -2256,7 +2256,7 @@ def _baseline_pytest_failures(working_dir: str, test_ids: list[str],
         # worktree — same image/deps/service env as the main run (_container_test_run
         # prepends a clean `pip install`), so a pre-existing failure reproduces here.
         base_run = _container_test_run(str(wt), service_env=service_env)
-        rr = base_run(["python", "-m", "pytest", "-q", "--no-header", "-s",
+        rr = base_run(["python", "-m", "pytest", "-q", "--no-header",
                        "-p", "no:cacheprovider", "--continue-on-collection-errors",
                        *test_ids], timeout=timeout)
         out = (rr.stdout or "") + "\n" + (rr.stderr or "")
@@ -2521,8 +2521,16 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
         # HomeChoreService #1662 (2026-06-19): the gate looped on
         # `cannot import name '_console_main'` until the diagnostician caught
         # it as env_impossible.
-        collect_cmd = ["python", "-m", "pytest", "--collect-only", "-q", "-s"]
-        run_cmd     = ["python", "-m", "pytest", "-q", "--no-header", "-s"]
+        # No `-s`: it was added (91f7867, 2026-05-26) for a pytest output-capture
+        # crash on a *Windows bind-mount* when the gate ran in-process. Since
+        # 7084967 (2026-06-08) the gate runs in a *Linux* container, so capture
+        # works fine and `-s` is vestigial — worse, it (a) dumps the app's own
+        # logger output to stdout, ballooning a passing run to thousands of lines
+        # and ~20x wall-time (the slow-suite that inflated coder sessions), and
+        # (b) lets application `ERROR [...]` log lines reach the failure parser.
+        # Dropping it lets pytest capture per-test (shown only on real failures).
+        collect_cmd = ["python", "-m", "pytest", "--collect-only", "-q"]
+        run_cmd     = ["python", "-m", "pytest", "-q", "--no-header"]
     elif (wd / "package.json").exists():
         try:
             import json as _json
