@@ -3085,6 +3085,49 @@ def _check_expected(actual_stdout: str, actual_exit: int, expected: str) -> bool
     return False
 
 
+def _recipe_defect_reason(stdout: str, stderr: str, exit_code: int) -> str | None:
+    """If a Verify recipe FAILED because the RECIPE'S OWN code is broken — not
+    because the app under test failed an assertion — return a short reason;
+    else None.
+
+    A defective designer recipe is a spec defect no coder can satisfy: the coder
+    can rewrite src/ all day and the recipe still raises. Bouncing it to the
+    coder loops until cap-Block (DogTinder: 32 features hit "Stagnant verify
+    mismatch" loops; #1872 AC1 used a non-existent `mw.options` attr →
+    AttributeError, #1565 called async init_db() synchronously, #1882 PRAGMA
+    index TypeError). It belongs back with the designer who OWNS the recipe.
+
+    Discriminator: a Python traceback whose DEEPEST `File "…"` frame is the
+    recipe's own inline code (`<string>`/`<stdin>` for `python -c`/`python -`)
+    means the recipe itself raised. An exception originating in the app's own
+    files (src/…) is the CODER's bug and is deliberately NOT flagged — e.g.
+    #1882's later `get_match_cache` RecursionError lives in src/lib/cache.py, a
+    real code bug the coder must fix. An AssertionError from the recipe is a
+    legitimate AC failure (the recipe asserted, the app didn't satisfy it) and
+    is also NOT flagged. Plus a non-traceback signature: an un-awaited coroutine
+    (the recipe drives an async API synchronously).
+    """
+    if exit_code == 0:
+        return None
+    out = (stdout or "") + "\n" + (stderr or "")
+    if re.search(r"coroutine '[^']+' was never awaited|RuntimeWarning:\s*coroutine", out):
+        return "recipe drives an async API synchronously (coroutine never awaited)"
+    if "Traceback (most recent call last)" not in out:
+        return None
+    frames = re.findall(r'File "([^"]+)", line \d+', out)
+    if not frames:
+        return None
+    if not frames[-1].startswith("<"):     # deepest frame is app code (src/…) → coder's bug
+        return None
+    # Match the raised exception name whether bare (`AssertionError`) or with a
+    # message (`AttributeError: ...`) — a no-message `assert` prints no colon.
+    excs = re.findall(r"^(\w*(?:Error|Exception))\b", out, re.M)
+    kind = excs[-1] if excs else "an exception"
+    if kind == "AssertionError":           # recipe asserted, app failed it → legit AC failure
+        return None
+    return f"recipe's own code raised {kind}"
+
+
 def _verify_actionable_hint(command: str, actual_stdout: str, actual_exit) -> str:
     """Turn a verify-check mismatch into ACTIONABLE feedback. Two structural
     aids that apply to every product / AC (added 2026-06-08):
@@ -3150,6 +3193,7 @@ def _post_coder_verify_check(
         return {"checked": False, "passed": True, "failures": [],
                 "skipped": [], "total": 0}
     failures: list[dict] = []
+    recipe_defects: list[dict] = []
     skipped: list[dict] = []
     total = 0
     for feat in assigned_features:
@@ -3192,7 +3236,7 @@ def _post_coder_verify_check(
                 })
                 continue
             if not _check_expected(r["stdout"], r["exit_code"], expected):
-                failures.append({
+                entry = {
                     "feature_id":    fid,
                     "ac":            ac_num,
                     "command":       cmd[:400],
@@ -3200,13 +3244,25 @@ def _post_coder_verify_check(
                     "actual_stdout": (r["stdout"] or "")[:300],
                     "actual_stderr": (r["stderr"] or "")[:200],
                     "actual_exit":   r["exit_code"],
-                })
+                }
+                # A recipe whose OWN code raised (not an app assertion) is a
+                # designer spec defect — route it to the designer, not the coder.
+                rdefect = _recipe_defect_reason(r["stdout"], r["stderr"], r["exit_code"])
+                if rdefect:
+                    entry["recipe_defect"] = rdefect
+                    recipe_defects.append(entry)
+                else:
+                    failures.append(entry)
     return {
-        "checked":  True,
-        "passed":   not failures,
-        "failures": failures,
-        "skipped":  skipped,
-        "total":    total,
+        "checked":         True,
+        # Both normal mismatches and recipe defects mean the AC isn't verified,
+        # so neither passes; the caller routes recipe_defects → designer and
+        # failures → coder.
+        "passed":          not failures and not recipe_defects,
+        "failures":        failures,
+        "recipe_defects":  recipe_defects,
+        "skipped":         skipped,
+        "total":           total,
     }
 
 
@@ -4631,12 +4687,58 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             f"skipped (server unavailable / shell unavailable); "
             f"{verify_result['total']} total recipe(s) attempted"
         )
+    # Recipe-defect routing (2026-06-23): a Verify recipe whose OWN code raises
+    # (AttributeError/TypeError on a non-existent attr, un-awaited coroutine —
+    # never an app AssertionError) is a designer spec defect no coder can
+    # satisfy. Route those features back to the DESIGNER — mirror the wave-9
+    # spec_defect escalation (status=Approved + design doc cleared), no
+    # fix_attempts bump — instead of bounce-looping the coder until cap-Block.
+    # Canonical: #1872 (mw.options AttributeError), #1565 (sync init_db()),
+    # #1882 (PRAGMA TypeError); 32 DogTinder features hit "Stagnant verify
+    # mismatch" loops before this. Triggers immediately, not after 4 wasted
+    # sessions like the fix_attempts-cap escalation.
+    routed_to_designer: set[int] = set()
+    if verify_result.get("checked") and verify_result.get("recipe_defects"):
+        rd_by_feat: dict[int, list[dict]] = {}
+        for d in verify_result["recipe_defects"]:
+            rd_by_feat.setdefault(d["feature_id"], []).append(d)
+        with httpx.Client(base_url=PM_API_URL, timeout=15) as _rd_client:
+            for fid, defects in rd_by_feat.items():
+                lines = "\n".join(
+                    f"- AC{d['ac']}: `{d['command'][:120]}` — {d['recipe_defect']}"
+                    for d in defects)
+                body = (
+                    f"🛠️ post-coder:verify-check — **design-doc Verify recipe defect** "
+                    f"({len(defects)}). The recipe's OWN code raised (not an app "
+                    f"assertion), so no `src/` change can satisfy it. Routed back to the "
+                    f"designer to fix the recipe — no fix_attempts bump:\n\n{lines}"
+                )
+                try:
+                    _rd_client.post(f"/api/features/{fid}/comments",
+                                    json={"author": "post-coder:verify-check", "body": body})
+                    _rd_client.patch(f"/api/features/{fid}", json={
+                        "status": "Approved", "changed_by": "post-coder:verify-check",
+                        "design_doc_path": None, "design_doc": None,
+                    })
+                    routed_to_designer.add(fid)
+                    log.warning(
+                        f"[verify-check] {pname}: #{fid} recipe defect → routed to "
+                        f"designer ({len(defects)} recipe(s): {defects[0]['recipe_defect']})"
+                    )
+                except Exception as e:
+                    log.warning(f"[verify-check] {pname}: #{fid} recipe-defect "
+                                f"routing failed (left for normal flow): {e}")
+
     if verify_result["checked"] and not verify_result["passed"]:
         n_fail = len(verify_result["failures"])
         # Group failures by feature so each bounced/advised feature gets one
-        # actionable comment with all its failing ACs.
+        # actionable comment with all its failing ACs. Features already routed to
+        # the designer (recipe defect) are skipped — they're no longer the
+        # coder's to fix.
         per_feature: dict[int, list[dict]] = {}
         for f in verify_result["failures"]:
+            if f["feature_id"] in routed_to_designer:
+                continue
             per_feature.setdefault(f["feature_id"], []).append(f)
         # Cycle GJ (2026-06-02): cap verify-check at 1 hard-bounce per feature.
         # A feature that has already received a `post-coder:verify-check`

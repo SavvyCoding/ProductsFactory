@@ -84,6 +84,57 @@ class TestAllFailingTests:
         assert pc._all_failing_tests("") == []
 
 
+class TestRecipeDefectDetection:
+    """A Verify recipe whose OWN code raises is a designer spec defect (route to
+    designer); an exception from the app under test is the coder's bug (bounce
+    coder); an AssertionError is a legit AC failure (bounce coder)."""
+
+    def _tb(self, deepest_frame, exc_line):
+        return (f"Traceback (most recent call last):\n"
+                f'  File "<string>", line 2, in <module>\n'
+                f'  File "{deepest_frame}", line 9, in check\n'
+                f"{exc_line}")
+
+    def test_recipe_attributeerror_is_defect(self):
+        # #1872: AC1 recipe used mw.options (starlette has .kwargs, never .options)
+        tb = ('Traceback (most recent call last):\n'
+              '  File "<string>", line 3, in <module>\n'
+              'AttributeError: \'Middleware\' object has no attribute \'options\'')
+        assert pc._recipe_defect_reason("", tb, 1)
+
+    def test_recipe_typeerror_is_defect(self):
+        # #1882: PRAGMA index_info row indexed with a string
+        tb = ('Traceback (most recent call last):\n'
+              '  File "<string>", line 5, in <module>\n'
+              'TypeError: list indices must be integers or slices, not str')
+        assert pc._recipe_defect_reason(tb, "", 1)
+
+    def test_unawaited_coroutine_is_defect(self):
+        # #1565: recipe calls async init_db() synchronously
+        out = "RuntimeWarning: coroutine 'init_db' was never awaited"
+        assert pc._recipe_defect_reason(out, "", 1)
+
+    def test_app_exception_is_not_defect(self):
+        # #1882 later: RecursionError from src/lib/cache.py is the CODER's bug.
+        tb = self._tb("/workspace/src/lib/cache.py",
+                      "RecursionError: maximum recursion depth exceeded")
+        assert pc._recipe_defect_reason(tb, "", 1) is None
+
+    def test_assertion_is_not_defect(self):
+        # Recipe asserted, app didn't satisfy it → legit AC failure, bounce coder.
+        tb_bare = ('Traceback (most recent call last):\n'
+                   '  File "<string>", line 1, in <module>\nAssertionError')
+        tb_msg = ('Traceback (most recent call last):\n'
+                  '  File "<string>", line 1, in <module>\n'
+                  'AssertionError: expected 10 got 0')
+        assert pc._recipe_defect_reason(tb_bare, "", 1) is None
+        assert pc._recipe_defect_reason(tb_msg, "", 1) is None
+
+    def test_clean_exit_and_plain_mismatch_not_defect(self):
+        assert pc._recipe_defect_reason("all good", "", 0) is None      # passed
+        assert pc._recipe_defect_reason("got 4 want 5", "", 1) is None  # mismatch, no traceback
+
+
 class TestVerifyCheckInContainer:
     """The verify-check (per-AC Verify recipes) must run in the agent container
     too — the recipes invoke stack tools (npx/tsc/node) the orchestrator lacks
