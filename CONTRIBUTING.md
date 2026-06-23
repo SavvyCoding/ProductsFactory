@@ -1,4 +1,4 @@
-# Contributing to ProductFactory
+# Contributing to ProductsFactory
 
 Thanks for your interest in contributing! This guide covers how to set up a dev
 environment, the conventions this codebase follows, and how to get a change merged.
@@ -93,7 +93,30 @@ for the orchestrator's behavioral contract.
 3. Add or update tests. If you fix a bug, add a test that would have caught it.
 4. Make sure `pytest tests/ -v` passes (plus `evals/` if you touched prompts).
 5. Write a clear PR description: what changed, why, and which behavior/invariant it touches.
-6. Be responsive to review feedback.
+6. **Sign off your commits** (see below) and be responsive to review feedback.
+
+## Sign-off (Developer Certificate of Origin)
+
+This project uses the [Developer Certificate of Origin](https://developercertificate.org/)
+(DCO) instead of a CLA. By signing off on a commit you certify that you wrote the
+change (or otherwise have the right to submit it) and that it may be distributed
+under this project's [Apache 2.0 license](LICENSE).
+
+Add a sign-off line to every commit:
+
+```bash
+git commit -s -m "your message"
+```
+
+This appends a trailer using your `git` name and email:
+
+```
+Signed-off-by: Your Name <your.email@example.com>
+```
+
+Use a real name and a reachable email. To sign off a branch you already committed,
+run `git rebase --signoff <base>`. PRs whose commits are not signed off may be asked
+to amend before merge.
 
 ## Reporting bugs and requesting features
 

@@ -2211,36 +2211,54 @@ def _excerpt_pytest_tracebacks(
 
 
 def _baseline_pytest_failures(working_dir: str, test_ids: list[str],
-                              timeout: int) -> set[str]:
-    """Run `test_ids` against a throwaway git worktree at origin/main and return
-    the subset that FAIL there (i.e. pre-existing failures).
+                              timeout: int,
+                              service_env: dict[str, str] | None = None) -> set[str]:
+    """Run `test_ids` against a throwaway git worktree at origin/main — INSIDE
+    the agent-image container (same toolchain + freshly-installed product deps +
+    sidecar service env as the main test run) — and return the subset that FAIL
+    there (i.e. pre-existing failures).
 
-    Uses `git worktree add --detach` so the live session branch / working tree
-    is never touched. Runs in the orchestrator's existing Python env (deps were
-    already pip-installed by the caller). `--continue-on-collection-errors` so a
-    test FILE that only exists on the feature branch (new test) doesn't abort
-    the baseline run — it simply won't appear in the baseline FAILED set, and is
-    therefore correctly classified as introduced.
+    MUST run in the container, NOT the orchestrator process: the orchestrator
+    has only Python + git, none of the product's deps (fastapi/redis/...), so an
+    in-process `pytest` errored on import for every id → empty FAILED set → the
+    baseline-diff silently classified EVERY failure as "introduced" → the gate
+    fell back to bounce-on-any-failure. That defeat is the root cause of the
+    2026-06-22 ship-freeze: the main test-check moved into a container in
+    7084967 but this baseline run was left in-process, so once any test failed
+    on origin/main (a redis REDIS_URL KeyError), every feature bounced on those
+    pre-existing failures. Routing the baseline through `_container_test_run`
+    (deps + REDIS_URL etc.) makes the comparison apples-to-apples again.
+
+    The worktree lives next to working_dir (same host-mounted volume as the
+    product + `.pf-cache`) so the sibling `docker run` can bind-mount it — a
+    /tmp worktree is invisible to the docker daemon (host_path can't map it).
+    `--continue-on-collection-errors` so a test FILE that only exists on the
+    feature branch (new test) doesn't abort the baseline run — it simply won't
+    appear in the baseline FAILED set, and is correctly classified as introduced.
 
     Best-effort: ANY error → empty set, which makes the caller treat every
     failure as introduced (fails safe toward the old bounce-on-any behaviour).
     """
-    import tempfile as _tf, shutil as _sh, os as _os, re as __re
+    import shutil as _sh, re as __re, uuid as _uuid
     if not test_ids:
         return set()
-    base_root = _tf.mkdtemp(prefix="pf-baseline-")
-    wt = _os.path.join(base_root, "wt")
+    wd = Path(working_dir)
+    wt = wd.parent / f".pf-baseline-{wd.name}-{_uuid.uuid4().hex[:8]}"
+    _sh.rmtree(str(wt), ignore_errors=True)
     try:
-        add = _sp.run(["git", "worktree", "add", "--detach", wt, "origin/main"],
+        add = _sp.run(["git", "worktree", "add", "--detach", str(wt), "origin/main"],
                       cwd=working_dir, capture_output=True, text=True, timeout=60)
         if add.returncode != 0:
             log.warning(f"[post-coder] baseline worktree add failed: "
                         f"{(add.stderr or '')[:200]}")
             return set()
-        rr = _sp.run(["python", "-m", "pytest", "-q", "--no-header", "-s",
-                      "-p", "no:cacheprovider", "--continue-on-collection-errors",
-                      *test_ids],
-                     cwd=wt, capture_output=True, text=True, timeout=timeout)
+        # Run the failing ids in the agent-image container against the baseline
+        # worktree — same image/deps/service env as the main run (_container_test_run
+        # prepends a clean `pip install`), so a pre-existing failure reproduces here.
+        base_run = _container_test_run(str(wt), service_env=service_env)
+        rr = base_run(["python", "-m", "pytest", "-q", "--no-header",
+                       "-p", "no:cacheprovider", "--continue-on-collection-errors",
+                       *test_ids], timeout=timeout)
         out = (rr.stdout or "") + "\n" + (rr.stderr or "")
         return set(__re.findall(r"^FAILED (\S+)", out, __re.M))
     except Exception as e:
@@ -2248,11 +2266,11 @@ def _baseline_pytest_failures(working_dir: str, test_ids: list[str],
         return set()
     finally:
         try:
-            _sp.run(["git", "worktree", "remove", "--force", wt],
+            _sp.run(["git", "worktree", "remove", "--force", str(wt)],
                     cwd=working_dir, capture_output=True, text=True, timeout=30)
         except Exception:
             pass
-        _sh.rmtree(base_root, ignore_errors=True)
+        _sh.rmtree(str(wt), ignore_errors=True)
 
 
 def _all_failing_tests(output: str) -> list[str]:
@@ -2271,8 +2289,15 @@ def _all_failing_tests(output: str) -> list[str]:
     found: list[str] = []
     seen: set = set()
     patterns = [
-        r"^FAILED\s+(\S+)",                  # pytest
-        r"^ERROR\s+(\S+)",                   # pytest collection error
+        # pytest — restrict to genuine node ids (contain '::' or end in '.py').
+        # The shape guard stops application ERROR-log lines surfaced by the
+        # gate's `-s` flag (e.g. `ERROR [src.lib.cache] Unexpected error ...:
+        # 'REDIS_URL'`) being mis-read as failing tests. That garbage both
+        # polluted the rework feedback the coder saw AND fed non-existent ids
+        # into the baseline-diff, which then could never match them on
+        # origin/main → bounce (contributor to the 2026-06-22 ship-freeze).
+        r"^FAILED\s+(\S+(?:::\S+|\.py))",    # pytest
+        r"^ERROR\s+(\S+(?:::\S+|\.py))",     # pytest collection error
         r"^\s*FAIL\s+(\S+\.\w+)",            # jest / vitest file-level FAIL
         r"❯\s+(\S+\.\w+)[^\n]*\bfailed\b",   # vitest file summary "❯ x.test.ts (.. | N failed)"
         r"❯\s+(\S+\.\w+)\s*\(0 test",        # vitest file collected 0 tests (error)
@@ -2432,7 +2457,8 @@ def _detect_missing_service(output: str) -> str | None:
 
 
 def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
-                            timeout: int = 300) -> dict:
+                            timeout: int = 300,
+                            service_env: dict[str, str] | None = None) -> dict:
     """
     Phase 5 of quality-specs (2026-05-19): run the stack-specific test
     command and classify the outcome.
@@ -2495,8 +2521,16 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
         # HomeChoreService #1662 (2026-06-19): the gate looped on
         # `cannot import name '_console_main'` until the diagnostician caught
         # it as env_impossible.
-        collect_cmd = ["python", "-m", "pytest", "--collect-only", "-q", "-s"]
-        run_cmd     = ["python", "-m", "pytest", "-q", "--no-header", "-s"]
+        # No `-s`: it was added (91f7867, 2026-05-26) for a pytest output-capture
+        # crash on a *Windows bind-mount* when the gate ran in-process. Since
+        # 7084967 (2026-06-08) the gate runs in a *Linux* container, so capture
+        # works fine and `-s` is vestigial — worse, it (a) dumps the app's own
+        # logger output to stdout, ballooning a passing run to thousands of lines
+        # and ~20x wall-time (the slow-suite that inflated coder sessions), and
+        # (b) lets application `ERROR [...]` log lines reach the failure parser.
+        # Dropping it lets pytest capture per-test (shown only on real failures).
+        collect_cmd = ["python", "-m", "pytest", "--collect-only", "-q"]
+        run_cmd     = ["python", "-m", "pytest", "-q", "--no-header"]
     elif (wd / "package.json").exists():
         try:
             import json as _json
@@ -2719,7 +2753,8 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
             failed_ids = _re.findall(r"^FAILED (\S+)", run_out, _re.M)
             result["failed_ids"] = failed_ids
             if failed_ids:
-                baseline = _baseline_pytest_failures(working_dir, failed_ids, timeout)
+                baseline = _baseline_pytest_failures(working_dir, failed_ids, timeout,
+                                                     service_env=service_env)
                 introduced = _introduced_failures(failed_ids, baseline)
                 result["pre_existing_failures"] = sorted(baseline & set(failed_ids))
                 result["introduced_failures"] = introduced
@@ -3058,6 +3093,49 @@ def _check_expected(actual_stdout: str, actual_exit: int, expected: str) -> bool
     return False
 
 
+def _recipe_defect_reason(stdout: str, stderr: str, exit_code: int) -> str | None:
+    """If a Verify recipe FAILED because the RECIPE'S OWN code is broken — not
+    because the app under test failed an assertion — return a short reason;
+    else None.
+
+    A defective designer recipe is a spec defect no coder can satisfy: the coder
+    can rewrite src/ all day and the recipe still raises. Bouncing it to the
+    coder loops until cap-Block (DogTinder: 32 features hit "Stagnant verify
+    mismatch" loops; #1872 AC1 used a non-existent `mw.options` attr →
+    AttributeError, #1565 called async init_db() synchronously, #1882 PRAGMA
+    index TypeError). It belongs back with the designer who OWNS the recipe.
+
+    Discriminator: a Python traceback whose DEEPEST `File "…"` frame is the
+    recipe's own inline code (`<string>`/`<stdin>` for `python -c`/`python -`)
+    means the recipe itself raised. An exception originating in the app's own
+    files (src/…) is the CODER's bug and is deliberately NOT flagged — e.g.
+    #1882's later `get_match_cache` RecursionError lives in src/lib/cache.py, a
+    real code bug the coder must fix. An AssertionError from the recipe is a
+    legitimate AC failure (the recipe asserted, the app didn't satisfy it) and
+    is also NOT flagged. Plus a non-traceback signature: an un-awaited coroutine
+    (the recipe drives an async API synchronously).
+    """
+    if exit_code == 0:
+        return None
+    out = (stdout or "") + "\n" + (stderr or "")
+    if re.search(r"coroutine '[^']+' was never awaited|RuntimeWarning:\s*coroutine", out):
+        return "recipe drives an async API synchronously (coroutine never awaited)"
+    if "Traceback (most recent call last)" not in out:
+        return None
+    frames = re.findall(r'File "([^"]+)", line \d+', out)
+    if not frames:
+        return None
+    if not frames[-1].startswith("<"):     # deepest frame is app code (src/…) → coder's bug
+        return None
+    # Match the raised exception name whether bare (`AssertionError`) or with a
+    # message (`AttributeError: ...`) — a no-message `assert` prints no colon.
+    excs = re.findall(r"^(\w*(?:Error|Exception))\b", out, re.M)
+    kind = excs[-1] if excs else "an exception"
+    if kind == "AssertionError":           # recipe asserted, app failed it → legit AC failure
+        return None
+    return f"recipe's own code raised {kind}"
+
+
 def _verify_actionable_hint(command: str, actual_stdout: str, actual_exit) -> str:
     """Turn a verify-check mismatch into ACTIONABLE feedback. Two structural
     aids that apply to every product / AC (added 2026-06-08):
@@ -3123,6 +3201,7 @@ def _post_coder_verify_check(
         return {"checked": False, "passed": True, "failures": [],
                 "skipped": [], "total": 0}
     failures: list[dict] = []
+    recipe_defects: list[dict] = []
     skipped: list[dict] = []
     total = 0
     for feat in assigned_features:
@@ -3165,7 +3244,7 @@ def _post_coder_verify_check(
                 })
                 continue
             if not _check_expected(r["stdout"], r["exit_code"], expected):
-                failures.append({
+                entry = {
                     "feature_id":    fid,
                     "ac":            ac_num,
                     "command":       cmd[:400],
@@ -3173,13 +3252,25 @@ def _post_coder_verify_check(
                     "actual_stdout": (r["stdout"] or "")[:300],
                     "actual_stderr": (r["stderr"] or "")[:200],
                     "actual_exit":   r["exit_code"],
-                })
+                }
+                # A recipe whose OWN code raised (not an app assertion) is a
+                # designer spec defect — route it to the designer, not the coder.
+                rdefect = _recipe_defect_reason(r["stdout"], r["stderr"], r["exit_code"])
+                if rdefect:
+                    entry["recipe_defect"] = rdefect
+                    recipe_defects.append(entry)
+                else:
+                    failures.append(entry)
     return {
-        "checked":  True,
-        "passed":   not failures,
-        "failures": failures,
-        "skipped":  skipped,
-        "total":    total,
+        "checked":         True,
+        # Both normal mismatches and recipe defects mean the AC isn't verified,
+        # so neither passes; the caller routes recipe_defects → designer and
+        # failures → coder.
+        "passed":          not failures and not recipe_defects,
+        "failures":        failures,
+        "recipe_defects":  recipe_defects,
+        "skipped":         skipped,
+        "total":           total,
     }
 
 
@@ -4224,7 +4315,8 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     from orchestrator import services as _pf_services
     _service_env = _pf_services.session_service_env(product, session_uid)
     test_result = _post_coder_test_check(
-        working_dir, _container_test_run(working_dir, service_env=_service_env), pname)
+        working_dir, _container_test_run(working_dir, service_env=_service_env), pname,
+        service_env=_service_env)
     if test_result.get("framework") != "none" and not test_result.get("passed"):
         env_broken = test_result.get("env_broken", False)
         first_failure = test_result.get("first_failure", "")
@@ -4603,12 +4695,58 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             f"skipped (server unavailable / shell unavailable); "
             f"{verify_result['total']} total recipe(s) attempted"
         )
+    # Recipe-defect routing (2026-06-23): a Verify recipe whose OWN code raises
+    # (AttributeError/TypeError on a non-existent attr, un-awaited coroutine —
+    # never an app AssertionError) is a designer spec defect no coder can
+    # satisfy. Route those features back to the DESIGNER — mirror the wave-9
+    # spec_defect escalation (status=Approved + design doc cleared), no
+    # fix_attempts bump — instead of bounce-looping the coder until cap-Block.
+    # Canonical: #1872 (mw.options AttributeError), #1565 (sync init_db()),
+    # #1882 (PRAGMA TypeError); 32 DogTinder features hit "Stagnant verify
+    # mismatch" loops before this. Triggers immediately, not after 4 wasted
+    # sessions like the fix_attempts-cap escalation.
+    routed_to_designer: set[int] = set()
+    if verify_result.get("checked") and verify_result.get("recipe_defects"):
+        rd_by_feat: dict[int, list[dict]] = {}
+        for d in verify_result["recipe_defects"]:
+            rd_by_feat.setdefault(d["feature_id"], []).append(d)
+        with httpx.Client(base_url=PM_API_URL, timeout=15) as _rd_client:
+            for fid, defects in rd_by_feat.items():
+                lines = "\n".join(
+                    f"- AC{d['ac']}: `{d['command'][:120]}` — {d['recipe_defect']}"
+                    for d in defects)
+                body = (
+                    f"🛠️ post-coder:verify-check — **design-doc Verify recipe defect** "
+                    f"({len(defects)}). The recipe's OWN code raised (not an app "
+                    f"assertion), so no `src/` change can satisfy it. Routed back to the "
+                    f"designer to fix the recipe — no fix_attempts bump:\n\n{lines}"
+                )
+                try:
+                    _rd_client.post(f"/api/features/{fid}/comments",
+                                    json={"author": "post-coder:verify-check", "body": body})
+                    _rd_client.patch(f"/api/features/{fid}", json={
+                        "status": "Approved", "changed_by": "post-coder:verify-check",
+                        "design_doc_path": None, "design_doc": None,
+                    })
+                    routed_to_designer.add(fid)
+                    log.warning(
+                        f"[verify-check] {pname}: #{fid} recipe defect → routed to "
+                        f"designer ({len(defects)} recipe(s): {defects[0]['recipe_defect']})"
+                    )
+                except Exception as e:
+                    log.warning(f"[verify-check] {pname}: #{fid} recipe-defect "
+                                f"routing failed (left for normal flow): {e}")
+
     if verify_result["checked"] and not verify_result["passed"]:
         n_fail = len(verify_result["failures"])
         # Group failures by feature so each bounced/advised feature gets one
-        # actionable comment with all its failing ACs.
+        # actionable comment with all its failing ACs. Features already routed to
+        # the designer (recipe defect) are skipped — they're no longer the
+        # coder's to fix.
         per_feature: dict[int, list[dict]] = {}
         for f in verify_result["failures"]:
+            if f["feature_id"] in routed_to_designer:
+                continue
             per_feature.setdefault(f["feature_id"], []).append(f)
         # Cycle GJ (2026-06-02): cap verify-check at 1 hard-bounce per feature.
         # A feature that has already received a `post-coder:verify-check`

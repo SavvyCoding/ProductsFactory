@@ -50,6 +50,28 @@ class TestAllFailingTests:
         got = pc._all_failing_tests(out)
         assert got == ["tests/test_a.py::test_x", "tests/test_b.py::test_y"]
 
+    def test_ignores_application_error_logs(self):
+        # The gate runs pytest with `-s`, so the app's own ERROR-level logs reach
+        # stdout. They must NOT be parsed as failing tests — doing so fed garbage
+        # ids like `[src.lib.cache]` into both the rework feedback and the
+        # baseline-diff (which could never match them on origin/main), bouncing
+        # every feature (2026-06-22 ship-freeze). Real pytest FAILED lines with a
+        # .py/:: node id are still picked up.
+        out = (
+            "ERROR [src.lib.cache] Unexpected error in get_match_cache: 'REDIS_URL'\n"
+            "ERROR [src.lib.push] Error sending push notification: FCM_CREDENTIALS_PATH must be set\n"
+            "ERROR [src.lib.celery_app] send_push_task failed for user 9: boom\n"
+            "INFO  [src.lib.celery_app] send_push_task result: sent=2 total=3\n"
+            "FAILED tests/test_admin.py::test_is_admin_column_exists\n"
+        )
+        got = pc._all_failing_tests(out)
+        assert got == ["tests/test_admin.py::test_is_admin_column_exists"]
+        assert not any("src.lib" in g for g in got)
+
+    def test_real_pytest_collection_error_kept(self):
+        # A genuine pytest collection error names a .py file → still captured.
+        assert pc._all_failing_tests("ERROR tests/test_imports.py\n") == ["tests/test_imports.py"]
+
     def test_go_failures(self):
         assert "TestFoo" in pc._all_failing_tests("--- FAIL: TestFoo (0.01s)\n")
 
@@ -60,6 +82,57 @@ class TestAllFailingTests:
     def test_empty_on_no_failures(self):
         assert pc._all_failing_tests("all good\n") == []
         assert pc._all_failing_tests("") == []
+
+
+class TestRecipeDefectDetection:
+    """A Verify recipe whose OWN code raises is a designer spec defect (route to
+    designer); an exception from the app under test is the coder's bug (bounce
+    coder); an AssertionError is a legit AC failure (bounce coder)."""
+
+    def _tb(self, deepest_frame, exc_line):
+        return (f"Traceback (most recent call last):\n"
+                f'  File "<string>", line 2, in <module>\n'
+                f'  File "{deepest_frame}", line 9, in check\n'
+                f"{exc_line}")
+
+    def test_recipe_attributeerror_is_defect(self):
+        # #1872: AC1 recipe used mw.options (starlette has .kwargs, never .options)
+        tb = ('Traceback (most recent call last):\n'
+              '  File "<string>", line 3, in <module>\n'
+              'AttributeError: \'Middleware\' object has no attribute \'options\'')
+        assert pc._recipe_defect_reason("", tb, 1)
+
+    def test_recipe_typeerror_is_defect(self):
+        # #1882: PRAGMA index_info row indexed with a string
+        tb = ('Traceback (most recent call last):\n'
+              '  File "<string>", line 5, in <module>\n'
+              'TypeError: list indices must be integers or slices, not str')
+        assert pc._recipe_defect_reason(tb, "", 1)
+
+    def test_unawaited_coroutine_is_defect(self):
+        # #1565: recipe calls async init_db() synchronously
+        out = "RuntimeWarning: coroutine 'init_db' was never awaited"
+        assert pc._recipe_defect_reason(out, "", 1)
+
+    def test_app_exception_is_not_defect(self):
+        # #1882 later: RecursionError from src/lib/cache.py is the CODER's bug.
+        tb = self._tb("/workspace/src/lib/cache.py",
+                      "RecursionError: maximum recursion depth exceeded")
+        assert pc._recipe_defect_reason(tb, "", 1) is None
+
+    def test_assertion_is_not_defect(self):
+        # Recipe asserted, app didn't satisfy it → legit AC failure, bounce coder.
+        tb_bare = ('Traceback (most recent call last):\n'
+                   '  File "<string>", line 1, in <module>\nAssertionError')
+        tb_msg = ('Traceback (most recent call last):\n'
+                  '  File "<string>", line 1, in <module>\n'
+                  'AssertionError: expected 10 got 0')
+        assert pc._recipe_defect_reason(tb_bare, "", 1) is None
+        assert pc._recipe_defect_reason(tb_msg, "", 1) is None
+
+    def test_clean_exit_and_plain_mismatch_not_defect(self):
+        assert pc._recipe_defect_reason("all good", "", 0) is None      # passed
+        assert pc._recipe_defect_reason("got 4 want 5", "", 1) is None  # mismatch, no traceback
 
 
 class TestVerifyCheckInContainer:

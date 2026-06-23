@@ -2628,7 +2628,17 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         "--tmpfs", "/home/agent/.cache:rw,size=1g,uid=1001,gid=1001",
         "--tmpfs", "/home/agent/.npm:rw,size=500m,uid=1001,gid=1001",
         "--tmpfs", "/home/agent/.config:rw,size=100m,uid=1001,gid=1001",
-        "--tmpfs", "/home/agent/.local:rw,size=500m,uid=1001,gid=1001",
+        # `exec` is REQUIRED here: this is the Python user-site (`pip install
+        # --user` target) under a --read-only rootfs. Docker's --tmpfs defaults
+        # to `noexec`, so C-extension wheels (`cryptography._rust`, `lupa.lua51`,
+        # numpy, …) installed here cannot mmap their `.so` and fail to import —
+        # silently breaking auth (PyJWT→cryptography) and the rate-limiter
+        # (fakeredis Lua→lupa) at import time, which red-inks the WHOLE suite and
+        # surfaced as the `[src.lib.*]` ERROR-log cascade. Root cause of the
+        # DogTinder 2026-06-22 freeze (diagnosed by coder session 02a625d8). The
+        # other writable tmpfs dirs stay noexec — only the package install path
+        # needs exec.
+        "--tmpfs", "/home/agent/.local:rw,exec,size=500m,uid=1001,gid=1001",
         # Volume mounts — unaffected by --read-only
         "-v", f"{working_dir_host}:/workspace",
         # Per-file RO overlays on PM-curated files. Kernel-level enforcement
