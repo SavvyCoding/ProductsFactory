@@ -1,4 +1,4 @@
-<!-- Thanks for contributing to ProductFactory! Please fill out the sections below. -->
+<!-- Thanks for contributing to ProductsFactory! Please fill out the sections below. -->
 
 ## What does this PR do?
 

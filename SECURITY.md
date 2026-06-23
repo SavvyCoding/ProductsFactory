@@ -21,7 +21,7 @@ on remediation progress and coordinate disclosure timing with you.
 
 ## Scope
 
-ProductFactory executes LLM-generated code and automates git operations, so its
+ProductsFactory executes LLM-generated code and automates git operations, so its
 security posture matters. In-scope concerns include, but are not limited to:
 
 - **Agent sandbox escape** — anything that lets an agent session break out of its
@@ -43,7 +43,7 @@ security posture matters. In-scope concerns include, but are not limited to:
 
 ## Operator responsibilities
 
-If you deploy ProductFactory, you are responsible for:
+If you deploy ProductsFactory, you are responsible for:
 
 - Setting strong, unique values for `POSTGRES_PASSWORD`, `PM_PASSWORD`, and all
   credentials in `.env` (never commit `.env`).

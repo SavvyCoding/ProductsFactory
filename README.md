@@ -1,6 +1,6 @@
-# ProductFactory
+# ProductsFactory
 
-**A 24/7 autonomous software-development system.** ProductFactory orchestrates Claude Code agents inside isolated Docker containers to design, implement, review, and ship features across multiple product repositories — supervised by a FastAPI project-management dashboard.
+**A 24/7 autonomous software-development system.** ProductsFactory orchestrates Claude Code agents inside isolated Docker containers to design, implement, review, and ship features across multiple product repositories — supervised by a FastAPI project-management dashboard.
 
 It runs a continuous cycle loop: pick a product, choose a persona (designer, coder, reviewer, …), launch a sandboxed agent session, run deterministic quality gates on the result, open a pull request, review it, and auto-merge — with a layer of rule-based supervisors that detect and recover from cascades (stuck features, review ping-pong, false success, environment failures).
 
@@ -176,7 +176,7 @@ pytest evals/ -v
 
 ## Security model
 
-ProductFactory runs untrusted-ish LLM output that edits code and touches git. The defenses, in brief:
+ProductsFactory runs untrusted-ish LLM output that edits code and touches git. The defenses, in brief:
 
 - Agent containers run as a **non-root** user with `--cap-drop ALL`, **no `--privileged`**, no host network, and **no docker socket**.
 - PM-curated files (e.g. `CLAUDE.md`, quality gates) are mounted **read-only** so agents physically cannot edit them.

@@ -3,7 +3,7 @@
 ## Our pledge
 
 We as members, contributors, and leaders pledge to make participation in the
-ProductFactory community a harassment-free experience for everyone, regardless of
+ProductsFactory community a harassment-free experience for everyone, regardless of
 background or identity. We pledge to act and interact in ways that contribute to an
 open, welcoming, diverse, inclusive, and healthy community.
 
