@@ -2211,36 +2211,54 @@ def _excerpt_pytest_tracebacks(
 
 
 def _baseline_pytest_failures(working_dir: str, test_ids: list[str],
-                              timeout: int) -> set[str]:
-    """Run `test_ids` against a throwaway git worktree at origin/main and return
-    the subset that FAIL there (i.e. pre-existing failures).
+                              timeout: int,
+                              service_env: dict[str, str] | None = None) -> set[str]:
+    """Run `test_ids` against a throwaway git worktree at origin/main — INSIDE
+    the agent-image container (same toolchain + freshly-installed product deps +
+    sidecar service env as the main test run) — and return the subset that FAIL
+    there (i.e. pre-existing failures).
 
-    Uses `git worktree add --detach` so the live session branch / working tree
-    is never touched. Runs in the orchestrator's existing Python env (deps were
-    already pip-installed by the caller). `--continue-on-collection-errors` so a
-    test FILE that only exists on the feature branch (new test) doesn't abort
-    the baseline run — it simply won't appear in the baseline FAILED set, and is
-    therefore correctly classified as introduced.
+    MUST run in the container, NOT the orchestrator process: the orchestrator
+    has only Python + git, none of the product's deps (fastapi/redis/...), so an
+    in-process `pytest` errored on import for every id → empty FAILED set → the
+    baseline-diff silently classified EVERY failure as "introduced" → the gate
+    fell back to bounce-on-any-failure. That defeat is the root cause of the
+    2026-06-22 ship-freeze: the main test-check moved into a container in
+    7084967 but this baseline run was left in-process, so once any test failed
+    on origin/main (a redis REDIS_URL KeyError), every feature bounced on those
+    pre-existing failures. Routing the baseline through `_container_test_run`
+    (deps + REDIS_URL etc.) makes the comparison apples-to-apples again.
+
+    The worktree lives next to working_dir (same host-mounted volume as the
+    product + `.pf-cache`) so the sibling `docker run` can bind-mount it — a
+    /tmp worktree is invisible to the docker daemon (host_path can't map it).
+    `--continue-on-collection-errors` so a test FILE that only exists on the
+    feature branch (new test) doesn't abort the baseline run — it simply won't
+    appear in the baseline FAILED set, and is correctly classified as introduced.
 
     Best-effort: ANY error → empty set, which makes the caller treat every
     failure as introduced (fails safe toward the old bounce-on-any behaviour).
     """
-    import tempfile as _tf, shutil as _sh, os as _os, re as __re
+    import shutil as _sh, re as __re, uuid as _uuid
     if not test_ids:
         return set()
-    base_root = _tf.mkdtemp(prefix="pf-baseline-")
-    wt = _os.path.join(base_root, "wt")
+    wd = Path(working_dir)
+    wt = wd.parent / f".pf-baseline-{wd.name}-{_uuid.uuid4().hex[:8]}"
+    _sh.rmtree(str(wt), ignore_errors=True)
     try:
-        add = _sp.run(["git", "worktree", "add", "--detach", wt, "origin/main"],
+        add = _sp.run(["git", "worktree", "add", "--detach", str(wt), "origin/main"],
                       cwd=working_dir, capture_output=True, text=True, timeout=60)
         if add.returncode != 0:
             log.warning(f"[post-coder] baseline worktree add failed: "
                         f"{(add.stderr or '')[:200]}")
             return set()
-        rr = _sp.run(["python", "-m", "pytest", "-q", "--no-header", "-s",
-                      "-p", "no:cacheprovider", "--continue-on-collection-errors",
-                      *test_ids],
-                     cwd=wt, capture_output=True, text=True, timeout=timeout)
+        # Run the failing ids in the agent-image container against the baseline
+        # worktree — same image/deps/service env as the main run (_container_test_run
+        # prepends a clean `pip install`), so a pre-existing failure reproduces here.
+        base_run = _container_test_run(str(wt), service_env=service_env)
+        rr = base_run(["python", "-m", "pytest", "-q", "--no-header", "-s",
+                       "-p", "no:cacheprovider", "--continue-on-collection-errors",
+                       *test_ids], timeout=timeout)
         out = (rr.stdout or "") + "\n" + (rr.stderr or "")
         return set(__re.findall(r"^FAILED (\S+)", out, __re.M))
     except Exception as e:
@@ -2248,11 +2266,11 @@ def _baseline_pytest_failures(working_dir: str, test_ids: list[str],
         return set()
     finally:
         try:
-            _sp.run(["git", "worktree", "remove", "--force", wt],
+            _sp.run(["git", "worktree", "remove", "--force", str(wt)],
                     cwd=working_dir, capture_output=True, text=True, timeout=30)
         except Exception:
             pass
-        _sh.rmtree(base_root, ignore_errors=True)
+        _sh.rmtree(str(wt), ignore_errors=True)
 
 
 def _all_failing_tests(output: str) -> list[str]:
@@ -2271,8 +2289,15 @@ def _all_failing_tests(output: str) -> list[str]:
     found: list[str] = []
     seen: set = set()
     patterns = [
-        r"^FAILED\s+(\S+)",                  # pytest
-        r"^ERROR\s+(\S+)",                   # pytest collection error
+        # pytest — restrict to genuine node ids (contain '::' or end in '.py').
+        # The shape guard stops application ERROR-log lines surfaced by the
+        # gate's `-s` flag (e.g. `ERROR [src.lib.cache] Unexpected error ...:
+        # 'REDIS_URL'`) being mis-read as failing tests. That garbage both
+        # polluted the rework feedback the coder saw AND fed non-existent ids
+        # into the baseline-diff, which then could never match them on
+        # origin/main → bounce (contributor to the 2026-06-22 ship-freeze).
+        r"^FAILED\s+(\S+(?:::\S+|\.py))",    # pytest
+        r"^ERROR\s+(\S+(?:::\S+|\.py))",     # pytest collection error
         r"^\s*FAIL\s+(\S+\.\w+)",            # jest / vitest file-level FAIL
         r"❯\s+(\S+\.\w+)[^\n]*\bfailed\b",   # vitest file summary "❯ x.test.ts (.. | N failed)"
         r"❯\s+(\S+\.\w+)\s*\(0 test",        # vitest file collected 0 tests (error)
@@ -2432,7 +2457,8 @@ def _detect_missing_service(output: str) -> str | None:
 
 
 def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
-                            timeout: int = 300) -> dict:
+                            timeout: int = 300,
+                            service_env: dict[str, str] | None = None) -> dict:
     """
     Phase 5 of quality-specs (2026-05-19): run the stack-specific test
     command and classify the outcome.
@@ -2719,7 +2745,8 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
             failed_ids = _re.findall(r"^FAILED (\S+)", run_out, _re.M)
             result["failed_ids"] = failed_ids
             if failed_ids:
-                baseline = _baseline_pytest_failures(working_dir, failed_ids, timeout)
+                baseline = _baseline_pytest_failures(working_dir, failed_ids, timeout,
+                                                     service_env=service_env)
                 introduced = _introduced_failures(failed_ids, baseline)
                 result["pre_existing_failures"] = sorted(baseline & set(failed_ids))
                 result["introduced_failures"] = introduced
@@ -4224,7 +4251,8 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     from orchestrator import services as _pf_services
     _service_env = _pf_services.session_service_env(product, session_uid)
     test_result = _post_coder_test_check(
-        working_dir, _container_test_run(working_dir, service_env=_service_env), pname)
+        working_dir, _container_test_run(working_dir, service_env=_service_env), pname,
+        service_env=_service_env)
     if test_result.get("framework") != "none" and not test_result.get("passed"):
         env_broken = test_result.get("env_broken", False)
         first_failure = test_result.get("first_failure", "")

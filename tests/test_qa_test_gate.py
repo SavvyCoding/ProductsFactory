@@ -50,6 +50,28 @@ class TestAllFailingTests:
         got = pc._all_failing_tests(out)
         assert got == ["tests/test_a.py::test_x", "tests/test_b.py::test_y"]
 
+    def test_ignores_application_error_logs(self):
+        # The gate runs pytest with `-s`, so the app's own ERROR-level logs reach
+        # stdout. They must NOT be parsed as failing tests — doing so fed garbage
+        # ids like `[src.lib.cache]` into both the rework feedback and the
+        # baseline-diff (which could never match them on origin/main), bouncing
+        # every feature (2026-06-22 ship-freeze). Real pytest FAILED lines with a
+        # .py/:: node id are still picked up.
+        out = (
+            "ERROR [src.lib.cache] Unexpected error in get_match_cache: 'REDIS_URL'\n"
+            "ERROR [src.lib.push] Error sending push notification: FCM_CREDENTIALS_PATH must be set\n"
+            "ERROR [src.lib.celery_app] send_push_task failed for user 9: boom\n"
+            "INFO  [src.lib.celery_app] send_push_task result: sent=2 total=3\n"
+            "FAILED tests/test_admin.py::test_is_admin_column_exists\n"
+        )
+        got = pc._all_failing_tests(out)
+        assert got == ["tests/test_admin.py::test_is_admin_column_exists"]
+        assert not any("src.lib" in g for g in got)
+
+    def test_real_pytest_collection_error_kept(self):
+        # A genuine pytest collection error names a .py file → still captured.
+        assert pc._all_failing_tests("ERROR tests/test_imports.py\n") == ["tests/test_imports.py"]
+
     def test_go_failures(self):
         assert "TestFoo" in pc._all_failing_tests("--- FAIL: TestFoo (0.01s)\n")
 
