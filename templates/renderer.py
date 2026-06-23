@@ -275,6 +275,19 @@ def install_templates(
             context, force,
         )
 
+    # 3b2. .gitattributes — stack-agnostic. Sets `features.md merge=union` so the
+    # append-only feature log auto-resolves concurrent appends instead of
+    # conflicting. Without it, every in-flight feature branch that appends to
+    # features.md conflicts with whichever sibling merges to main first, the PR
+    # goes DIRTY/CONFLICTING, and auto-merge fails even after reviewer approval
+    # (canonical: DogTinder PR #109 / feature #1882, 2026-06-22). Universal —
+    # every product ships features.md, so this is not stack-specific.
+    written += _write_file(
+        working_dir / ".gitattributes",
+        TEMPLATES_DIR / ".gitattributes",
+        context, force,
+    )
+
     # 3c. quality_gates.json — stack-specific. Machine-readable mirror of the
     # CONFIG GATES section in ARCHITECTURE.md. Consumed by the post-coder
     # _check_config_gates lint (Phase 4 of quality-specs). Skipped (passes

@@ -154,6 +154,19 @@ class TestInstallTemplatesPositive:
         assert "ARCHITECTURE.md" in names
         assert "CONTRIBUTING.md" in names
 
+    def test_seeds_gitattributes_union_for_features_md(self, product_dir):
+        """.gitattributes must declare `features.md merge=union` so the
+        append-only feature log auto-resolves concurrent appends instead of
+        conflicting. Without it, in-flight feature branches that append to
+        features.md collide with whichever sibling merges to main first and the
+        PR goes DIRTY/CONFLICTING, blocking auto-merge even after reviewer
+        approval (canonical: DogTinder PR #109 / feature #1882, 2026-06-22)."""
+        p = make_product(product_dir)
+        written = install_templates(p, PM_API)
+        assert any(Path(f).name == ".gitattributes" for f in written)
+        ga = (product_dir / ".gitattributes").read_text(encoding="utf-8")
+        assert "features.md merge=union" in ga
+
     def test_contributing_md_describes_sprint_pr_flow(self, product_dir):
         """Pre-filled CONTRIBUTING.md must describe the sprint-PR-mode flow,
         not generic fork→feature-branch→PR-against-main boilerplate, so a
