@@ -374,7 +374,8 @@
       {% if fc_pending %}<div class="ppb-pending" style="flex:{{ fc_pending }}"></div>{% endif %}
     </div>
     <div class="product-progress-meta">
-      <span>{{ fc_pushed }}/{{ fc_total }} shipped</span>
+      {# denominator excludes Pending (not yet approved → not planned to ship), matching product.html ship_pct #}
+      <span>{{ fc_pushed }}/{{ fc_total - fc_pending }} shipped</span>
       {% if fc_pending > 0 %}<span class="meta-warning">{{ fc_pending }} awaiting review</span>{% endif %}
       {% if fc_blocked > 0 %}<span class="meta-danger">{{ fc_blocked }} blocked</span>{% endif %}
     </div>

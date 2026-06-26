@@ -313,7 +313,7 @@
                      value="{{ config.designer_model or '' }}"
                      placeholder="gemma3:27b, qwen3-coder:480b" autocomplete="off">
             </div>
-            {% for _p in ['reviewer', 'planner', 'documenter', 'analytics', 'recommender', 'devops', 'refactorer', 'product_trainer'] %}
+            {% for _p in ['reviewer', 'code_auditor', 'planner', 'documenter', 'analytics', 'recommender', 'devops', 'refactorer', 'product_trainer'] %}
             <div class="form-group" style="margin:0">
               <label for="p-mc-{{ _p }}" style="font-size:0.85em">{{ _p }}</label>
               <input type="text" id="p-mc-{{ _p }}" name="ollama_chain_{{ _p }}"

@@ -175,13 +175,17 @@ _ONDEMAND_PERSONAS = ("documenter", "analytics", "refactorer", "devops", "recomm
                       # Phase 8 of quality-specs (2026-05-19): architect persona
                       # for quantitative drift detection. Maintenance-shape
                       # (read-only on source); PM triggers on demand via
-                      # run_persona_now="architect", or the cycle/persona gate
-                      # fires it automatically every ~50 features pushed.
+                      # run_persona_now="architect", or _check_architect_due
+                      # fires it automatically every ~3 features pushed (default N).
                       "architect",
                       # Wave-6 (2026-06-13): read-only product-wide security
                       # audit that files findings as bug features. PM-triggered
                       # only — opt-in by design, never auto-scheduled.
-                      "security_auditor")
+                      "security_auditor",
+                      # 2026-06-24: read-only whole-product code review fired at
+                      # phase boundaries by _run_phase_review_gate (or PM click).
+                      # Comment-only soak: raises dashboard alerts, files no bugs.
+                      "code_auditor")
 _FEATURE_KEEP = {"id", "product_id", "phase_id", "parent_id", "name", "status",
                  "feature_type", "design_doc_path", "pr_number", "pr_url",
                  "fix_attempts", "merge_notes"}
@@ -681,7 +685,18 @@ def run_cycle(args: dict, **kwargs) -> str:
             except Exception:
                 log.exception(f"architect-scheduler failed for product {p.get('id')}")
 
-        # Priority 0: PM-triggered on-demand sessions. Bypasses round-robin
+        # Phase-boundary code-review trigger (2026-06-24, comment-only soak).
+        # Runs AFTER the architect scheduler on purpose: a cycle that just queued
+        # the architect leaves run_persona_now set, so the gate defers and the
+        # semantic audit follows in a later cycle — reading the architect's fresh
+        # ARCHITECTURE.md + chores. OPT-IN via CODE_AUDITOR_ENABLED /
+        # config.code_auditor; no-op otherwise. Runs for ALL products (autonomous
+        # included), like reap_empty_phases — not gated behind human_gate_phases.
+        for p in ready:
+            try:
+                _run_phase_review_gate(p, features=features_by_pid.get(p["id"]))
+            except Exception:
+                log.exception(f"phase-review gate failed for product {p.get('id')}")
         # and the determine_next_action decision tree — the PM clicked a
         # button, run that persona for that product. Flag is cleared up
         # front so a crashing launch doesn't re-fire on every cycle.
@@ -1085,6 +1100,7 @@ def _run_supervisor_per_product_detectors(
     from orchestrator.supervisor import (  # type: ignore
         detect_orphan_approved, detect_rapid_flap, detect_placeholder_blocks,
         detect_repeated_gate_rejection, detect_no_progress_sessions,
+        detect_designer_bounce, detect_dead_dependency,
     )
 
     pid = product.get("id")
@@ -1132,6 +1148,23 @@ def _run_supervisor_per_product_detectors(
             detect_no_progress_sessions(product_id=pid)
         except Exception:
             log.exception(f"no_progress detector failed for product {pid}")
+        # Designer-starvation guard: a designer-pool feature repeatedly claimed
+        # (→Designing) and rolled back to Approved with no design doc — the
+        # designer finds nothing to design (moot / already-shipped duplicate).
+        # rapid_flap misses it (slow, <10 transitions/h). Self-fetches changelog
+        # for the top-ranked candidates only.
+        try:
+            detect_designer_bounce(product_id=pid, features=features)
+        except Exception:
+            log.exception(f"designer_bounce detector failed for product {pid}")
+        # Dependency-deadlock guard: a feature waiting for dispatch whose
+        # depends_on target is terminal (Rejected/Reverted/Deferred) is frozen
+        # forever (the gate only releases on Pushed). Pure in-memory check over
+        # the features payload — Block the dependent for PM review.
+        try:
+            detect_dead_dependency(product_id=pid, features=features)
+        except Exception:
+            log.exception(f"dead_dependency detector failed for product {pid}")
 
     # Pull flapping features (uses default thresholds from system_config
     # — endpoint accepts overrides via query string but we fall back to
@@ -1169,6 +1202,140 @@ _GATE_ACTIVE_STATUSES = frozenset({
     "Pending", "Approved", "Designing", "Designed",
     "Implementing", "Reviewing", "Reviewed",
 })
+
+
+# Audit after this many architect runs since the last audit. Default 1 during the
+# SOAK (max data density — one audit per architect pass for precision sampling);
+# steady-state target is 2 (~every 6 features). Env-tunable so the cadence changes
+# with a container recreate, no rebuild.
+try:
+    _CODE_AUDIT_ARCHITECT_RUNS = max(1, int(os.environ.get("CODE_AUDIT_ARCHITECT_RUNS", "1")))
+except (TypeError, ValueError):
+    _CODE_AUDIT_ARCHITECT_RUNS = 1
+
+
+def _code_auditor_enabled(product: dict) -> bool:
+    """Resolve the code-auditor flag. OPT-IN (default OFF) — the comment-only
+    soak must be deliberately enabled. Resolution:
+      1. product.config["code_auditor"] explicit bool wins (per-product override).
+      2. else CODE_AUDITOR_ENABLED env — ON only if truthy (1/true/yes/on);
+         anything else (incl. unset) is OFF.
+    """
+    cfg = (product.get("config") or {}).get("code_auditor")
+    if isinstance(cfg, bool):
+        return cfg
+    return os.environ.get("CODE_AUDITOR_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _code_auditor_filing_enabled(product: dict) -> bool:
+    """Increment 1 of the filing promotion (2026-06-25): does this product's
+    code_auditor FILE findings as `bug` features (filing mode) or only raise
+    dashboard alerts (comment-only soak)? OPT-IN, default OFF. Resolution
+    mirrors _code_auditor_enabled and the prompt-builder's _code_auditor_filing_on:
+      1. product.config["code_auditor_filing"] explicit bool wins.
+      2. else CODE_AUDITOR_FILING_ENABLED env — ON only if truthy.
+    The prompt builder owns the actual filing instructions; this helper exists so
+    the orchestrator can report the mode (and, later, gate the blocker check on it).
+    """
+    cfg = (product.get("config") or {}).get("code_auditor_filing")
+    if isinstance(cfg, bool):
+        return cfg
+    return os.environ.get("CODE_AUDITOR_FILING_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _select_phase_for_review(phases: list, features: list) -> dict | None:
+    """Pure: the lowest-order SETTLED phase with a real outcome — the "phase
+    boundary" checkpoint (is there reviewable shipped work at all?). Settled =
+    no feature in _GATE_ACTIVE_STATUSES AND >=1 Pushed. The size floor is NOT
+    here: cadence is gated on cumulative features-Pushed since the last audit
+    (>= _CODE_AUDIT_FEATURE_FLOOR) in the caller, so small phases BATCH instead
+    of each triggering a sweep. Returns the phase dict (for logging) or None.
+    """
+    if not isinstance(phases, list) or not isinstance(features, list):
+        return None
+    by_phase: dict = {}
+    for f in features:
+        if f.get("phase_id") is not None:
+            by_phase.setdefault(f["phase_id"], []).append(f)
+    candidates = []
+    for ph in phases:
+        feats = by_phase.get(ph.get("id"), [])
+        if not feats:
+            continue
+        if any(f.get("status") in _GATE_ACTIVE_STATUSES for f in feats):
+            continue                                         # still active — not settled
+        if not any(f.get("status") == "Pushed" for f in feats):
+            continue                                         # no real outcome to review
+        candidates.append(ph)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: (p.get("order", 0), p.get("id", 0)))
+    return candidates[0]
+
+
+def _run_phase_review_gate(product: dict, features: list | None = None) -> None:
+    """Phase-boundary code-review trigger (2026-06-24). When a phase settles and
+    hasn't been code-reviewed, queue the read-only ``code_auditor`` persona for the
+    product (run_persona_now → Priority-0 launch). Comment-only soak: the auditor
+    raises dashboard alerts and files nothing.
+
+    OPT-IN: no-op unless CODE_AUDITOR_ENABLED / config.code_auditor is on. Runs for
+    ALL products (autonomous included), like reap_empty_phases — NOT gated behind
+    human_gate_phases.
+
+    Cadence: a phase boundary is the CHECKPOINT (>=1 settled phase with a ship);
+    the GATE is architect-run count — fire after _CODE_AUDIT_ARCHITECT_RUNS (2)
+    architect runs since the last audit. Architect runs every ~3 features Pushed,
+    refreshing ARCHITECTURE.md and filing drift chores each time; riding 1-per-2
+    means the semantic audit always follows a FRESH architect pass and dedups
+    against its just-filed chores. Small phases naturally batch (2 runs ≈ ~6
+    features). Tracks config['architect_runs_at_last_audit'] vs the architect's
+    config['architect_run_count'] (no migration for the soak). The two personas
+    are deliberately tightly coupled: if the architect were disabled the audit
+    would not fire — architect owns structural drift, this owns the semantic pass.
+    Best-effort; never raises.
+
+    MUST be called AFTER the architect scheduler in run_cycle: a cycle that queues
+    the architect leaves run_persona_now set, so this returns early and the audit
+    follows in a later cycle — never preempting the architect run it rides behind.
+    """
+    pid = product.get("id")
+    if not pid or not _code_auditor_enabled(product):
+        return
+    if product.get("run_persona_now"):                       # don't stomp a queued session
+        return
+    try:
+        with _pm_client() as client:
+            ph_resp = client.get(f"/api/products/{pid}/phases")
+            phases = ph_resp.json() if ph_resp.is_success else []
+            if features is None:
+                feat_resp = client.get(f"/api/products/{pid}/features")
+                features = feat_resp.json() if feat_resp.is_success else []
+            if not _select_phase_for_review(phases, features):
+                return                                       # no settled phase → nothing to review
+            cfg = product.get("config") or {}
+            arch_runs = cfg.get("architect_run_count")
+            arch_runs = arch_runs if isinstance(arch_runs, int) else 0
+            last_audit = cfg.get("architect_runs_at_last_audit")
+            last_audit = last_audit if isinstance(last_audit, int) else 0
+            if arch_runs - last_audit < _CODE_AUDIT_ARCHITECT_RUNS:
+                return                                       # wait for N architect runs since the
+                                                             # last audit (each refreshes
+                                                             # ARCHITECTURE.md + files drift chores)
+            new_cfg = dict(cfg)
+            new_cfg["architect_runs_at_last_audit"] = arch_runs
+            client.patch(f"/api/products/{pid}",
+                         json={"run_persona_now": "code_auditor", "config": new_cfg})
+            product["run_persona_now"] = "code_auditor"       # reflect for this cycle's Priority-0
+            product["config"] = new_cfg
+            _mode = "filing" if _code_auditor_filing_enabled(product) else "comment-only"
+            log.info(f"[code-audit] product={pid}: {arch_runs - last_audit} architect run(s) "
+                     f"since last audit (>= {_CODE_AUDIT_ARCHITECT_RUNS}) — queued "
+                     f"code_auditor ({_mode})")
+    except Exception:
+        log.exception(f"phase-review gate failed for product {pid}")
 
 
 def _run_phase_gate_detector(product: dict, features: list | None = None) -> None:
@@ -1743,7 +1910,8 @@ def _check_architect_due(
     """Per-cycle: launch the architect persona when ARCHITECTURE.md drift
     is likely. Two triggers, either is sufficient:
 
-      1. **Delta-since-last-run >= N.** Count of features with status=Pushed
+      1. **Delta-since-last-run >= N.** Count of *product features*
+         (feature_type='feature' — NOT bugs/chores/infra) with status=Pushed
          minus `product.config.features_pushed_at_last_architect`. N defaults
          to 3, soft-overrideable via `system_config.architect_pending_threshold`
          (no migration required — falls back if the column doesn't exist).
@@ -1791,8 +1959,22 @@ def _check_architect_due(
     except Exception:
         pass  # use default
 
-    # Count Pushed features. Normally supplied by run_cycle's per-cycle
-    # snapshot; self-fetch fallback for standalone calls.
+    # Count Pushed *product features* — feature_type='feature' ONLY. Bugs and
+    # chores (and infra) are deliberately EXCLUDED from the architect cadence:
+    #   (a) they're small/corrective and don't reshape the architecture the way
+    #       feature work does, so 3 bug-fixes in a row shouldn't trigger a drift
+    #       review; and
+    #   (b) counting them creates a self-reinforcing loop — the code_auditor
+    #       (whose cadence rides on architect_run_count) FILES bugs, those bugs
+    #       get fixed + Pushed, that count re-triggers the architect, which
+    #       re-triggers the code_auditor, which files more bugs. Excluding
+    #       bug/chore here breaks that loop at the source.
+    # Same pushed_count is reused for the baseline write below, so read and
+    # write stay consistent. The stored baseline from the old all-types count
+    # self-heals: the first post-change delta errs toward NOT firing, and the
+    # next architect run re-baselines on the feature-only count.
+    # Normally supplied by run_cycle's per-cycle snapshot; self-fetch fallback
+    # for standalone calls.
     pushed_count = 0
     try:
         if features is None:
@@ -1800,7 +1982,11 @@ def _check_architect_due(
                 f_resp = client.get(f"/api/products/{pid}/features")
                 features = f_resp.json() if f_resp.is_success else []
         if isinstance(features, list):
-            pushed_count = sum(1 for f in features if f.get("status") == "Pushed")
+            pushed_count = sum(
+                1 for f in features
+                if f.get("status") == "Pushed"
+                and (f.get("feature_type") or "feature") == "feature"
+            )
     except Exception:
         return  # can't decide without features; defer to next cycle
 
@@ -1882,6 +2068,11 @@ def _check_architect_due(
         **existing_cfg,
         "last_architect_at": _dt.now(_tz.utc).isoformat(),
         "features_pushed_at_last_architect": pushed_count,
+        # Monotonic count of architect runs (advanced at queue time, same as the
+        # other cadence counters above). The code_auditor gate rides on this:
+        # it fires after every _CODE_AUDIT_ARCHITECT_RUNS architect runs, so the
+        # semantic audit always follows a fresh architect pass.
+        "architect_run_count": (existing_cfg.get("architect_run_count") or 0) + 1,
     }
     try:
         with _pm_client() as client:

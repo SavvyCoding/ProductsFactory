@@ -55,7 +55,6 @@ PM_API_URL = os.environ["PM_API_URL"]
 #   - product_config.json   — PM-set greenfield config
 #   - product_memory.md     — architect / cross-session bookkeeping
 #   - .gitignore            — PM-set at greenfield (Phase 1 of quality-specs)
-#   - session_summary.md    — other-persona working file
 #
 # Real incident driving this denylist: MyDocusign 2026-05-21 PR #36 was a
 # coder commit that added a 58-line `## AWS Shield Standard` section to
@@ -74,8 +73,17 @@ _CODER_DENYLIST = (
     "product_config.json",
     "product_memory.md",
     ".gitignore",
-    "session_summary.md",
 )
+# session_summary.md is DELIBERATELY NOT in this list. The coder is told
+# (brownfield.md / AGENT_WORKFLOW.md) to write its `## AC<N> verification:`
+# evidence blocks there, and the reviewer (reviewer.md) requires them ON THE
+# committed branch. The 2026-05-21 MyDocusign audit blanket-added it as an
+# "other-persona file", which silently STRIPPED the coder's own evidence out of
+# every commit → the branch never got the blocks → eternal "AC verification
+# blocks missing" reject loop (HomeChoreService #1847/#1850/#1858, 2026-06-25).
+# The architect/designer who also write it are gated by their OWN
+# post_maintenance/post_doc allowlists, not this coder denylist — so do NOT
+# re-add it here.
 
 
 def _coder_stage_with_denylist(working_dir: str, _run, product_name: str = "?") -> tuple[int, list[str]]:
@@ -2365,11 +2373,39 @@ def _agent_container_base(working_dir: str, service_env: dict[str, str] | None =
     except Exception:
         cache_args = []
 
+    # Node stack: keep the ~1200-package `npm ci` extraction OFF the /workspace
+    # bind-mount. On Docker Desktop for Windows /workspace is an NTFS bind whose
+    # 9p/virtiofs layer turns the thousands-of-small-files node_modules write into
+    # a ~1-minute crawl (vs ~10-15s on ext4). That crawl eats the gate `timeout`
+    # budget, so heavy Verify recipes get SIGTERM'd with exit 124 and bounce as a
+    # phantom "AC mismatch" the coder can't fix — canonical IndianFoodTruck #1644
+    # (AC3/AC4 JSDOM+React renders looped to fix_attempts=4). A fresh per-run
+    # tmpfs at /workspace/node_modules moves that I/O onto RAM-backed storage AND
+    # hides any host-built node_modules (e.g. a Windows-built sqlite3 .node that
+    # can't dlopen inside the Linux container) so `npm ci` installs clean.
+    #   mode=1777 → the non-root agent (uid 1001) can write into it.
+    #   exec      → native .node addons (sqlite3, better-sqlite3) can dlopen
+    #               (Docker `--tmpfs` defaults to noexec, which would break them).
+    #   size=3g   → hard cap; generous for a typical Next/React tree (tunable).
+    # tmpfs pages count against the cgroup, so bump --memory for node to leave
+    # headroom for jest workers. Each gate gets its OWN container/tmpfs (--rm), so
+    # node_modules no longer persists between the test-check and verify-check —
+    # but both already run `install` anyway, and on tmpfs the reinstall is cheap.
+    # NOTE: the `.pf-cache` npm-tarball cache (above) is still on the NTFS bind;
+    # tarball reads are far fewer/larger than node_modules extraction, so this
+    # captures the dominant win. The strategic fix is relocating PRODUCTS_BASE_DIR
+    # onto WSL2 ext4, which retires this AND the uid/permission bind-mount class.
+    node_tmpfs: list[str] = []
+    mem = "4g"
+    if (wd / "package.json").exists():
+        node_tmpfs = ["--tmpfs", "/workspace/node_modules:rw,exec,mode=1777,size=3g"]
+        mem = "6g"
+
     prefix = [
         "docker", "run", "--rm",
         "--network", "productfactory-net",
         "--add-host", "pm-api:host-gateway",
-        "--memory", "4g", "--cpus", "2", "--pids-limit", "512",
+        "--memory", mem, "--cpus", "2", "--pids-limit", "512",
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
         # CI=true → vitest/jest/most runners run once and exit (no watch hang).
         "-e", "CI=true",
@@ -2377,6 +2413,7 @@ def _agent_container_base(working_dir: str, service_env: dict[str, str] | None =
         # containers the agent run used; teardown happens after finalize.
         *[a for k, v in (service_env or {}).items() for a in ("-e", f"{k}={v}")],
         *cache_args,                       # persistent per-product download cache
+        *node_tmpfs,                       # node_modules on fast tmpfs, off the NTFS bind
         "-v", f"{host_path(working_dir)}:/workspace",
         "-w", "/workspace",
         img, "sh", "-lc",
@@ -2737,6 +2774,19 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
         if r.returncode == 0:
             result["passed"] = True
             return result
+        # exit 124 == the inner GNU `timeout` killed the test command. Infra/IO
+        # (e.g. a slow `npm ci` extraction on the NTFS bind-mount eating the
+        # budget), not a code bug — classify as env_broken so the operator is
+        # alerted and fix_attempts is NOT bumped (a coder re-run can't speed up
+        # the mount). Pairs with the node_modules tmpfs in _agent_container_base,
+        # which removes the usual cause. Canonical: IndianFoodTruck #1644.
+        if r.returncode == 124:
+            result["env_broken"] = True
+            result["passed"] = False
+            result["first_failure"] = (
+                "test command timed out (exit 124) — infra/IO, not a code failure"
+            )
+            return result
         # Non-zero exit: classify
         if _ENV_BROKEN_RE.search(run_out):
             result["env_broken"] = True
@@ -3024,6 +3074,21 @@ def _run_verify(cmd: str, cwd: str, timeout: int,
         r = _sp.run(prefix + [script], capture_output=True, text=True,
                     timeout=timeout + 180)
         stderr = (r.stderr or "")[:500]
+        # exit 124 == the inner GNU `timeout` SIGTERM'd the recipe. That's an
+        # infra/IO signal (slow dep install on a bind-mount, or a recipe too
+        # heavy for the budget), NOT something the coder can fix by editing src/.
+        # Classify it as a SKIP, not a mismatch, so it never bounces the feature
+        # (mirrors the 127 container-runtime-unavailable skip below). Canonical:
+        # IndianFoodTruck #1644 — AC3/AC4 JSDOM renders hit exit 124 every cycle
+        # and were reported to the coder as "AC mismatch" → fix_attempts loop.
+        if r.returncode == 124:
+            return {"exit_code": 124, "stdout": r.stdout,
+                    "stderr": (stderr or f"timed out after {timeout}s"),
+                    "skipped": True,
+                    "skip_reason": "recipe timed out (exit 124) — infra/IO or an "
+                                   "over-heavy recipe, not a code failure; the "
+                                   "reviewer should judge whether the recipe is "
+                                   "satisfiable in the time budget"}
         if any(mk in stderr for mk in _SERVER_UNAVAILABLE_MARKERS):
             return {"exit_code": r.returncode, "stdout": r.stdout, "stderr": stderr,
                     "skipped": True,
@@ -3031,8 +3096,12 @@ def _run_verify(cmd: str, cwd: str, timeout: int,
         return {"exit_code": r.returncode, "stdout": r.stdout, "stderr": stderr,
                 "skipped": False, "skip_reason": ""}
     except _sp.TimeoutExpired:
+        # Outer subprocess timeout (install + recipe exceeded timeout+180). Same
+        # infra classification as the inner 124 above — skip, don't bounce.
         return {"exit_code": 124, "stdout": "", "stderr": f"timed out after {timeout}s",
-                "skipped": False, "skip_reason": ""}
+                "skipped": True,
+                "skip_reason": "recipe timed out (exit 124) — infra/IO or an "
+                               "over-heavy recipe, not a code failure"}
     except FileNotFoundError as e:
         # `docker` not in PATH — skip rather than bounce.
         return {"exit_code": 127, "stdout": "", "stderr": f"container runtime unavailable: {e}",
@@ -3120,6 +3189,39 @@ def _recipe_defect_reason(stdout: str, stderr: str, exit_code: int) -> str | Non
     out = (stdout or "") + "\n" + (stderr or "")
     if re.search(r"coroutine '[^']+' was never awaited|RuntimeWarning:\s*coroutine", out):
         return "recipe drives an async API synchronously (coroutine never awaited)"
+    # Setup-failure crash (2026-06-25): the recipe forged an auth/id value from a
+    # FAILED setup call — e.g. registration returned an error envelope, so
+    # `user['id']`/`.get('id')` was missing → `str(None)` → `int('None')`. The
+    # crash surfaces in APP code (auth `get_current_user`), so the frame-based
+    # discriminator below misses it, but its ROOT is the recipe's bad setup data:
+    # no `src/` change makes registration accept a 7-char password, so it's the
+    # designer's recipe to fix, NOT the coder's. `'None'`/`''` specifically — a
+    # real id is always a valid int, so the false-positive risk is ~nil. Canonical:
+    # HomeChoreService #1852 (recipe used a 7-char password vs the API's >=8 min →
+    # registration 422 → looped the coder for sessions on an unsatisfiable recipe).
+    if re.search(r"invalid literal for int\(\) with base 10: '(?:None|)'", out):
+        return ("recipe setup failed — it forged an auth/id token from a failed "
+                "setup call (int('None')); registration/login in the recipe did "
+                "not succeed, so no feature code can satisfy it")
+    # PARSE error in the recipe's OWN inline code. A SyntaxError / IndentationError
+    # / TabError from `python -c`/`python -` prints `File "<string>", line N` + the
+    # echoed source + a caret, but NO "Traceback (most recent call last)" header — a
+    # *runtime* error in <string> always has one, so its absence beside a <string>
+    # location uniquely identifies a parse failure. We match the display SHAPE, not
+    # the word "SyntaxError", because the verify-check caps stderr at 500 chars and
+    # the long echoed source usually truncates the literal "SyntaxError:" line off
+    # (only 3 of 14 such rejects in the last 7d even contained the word). A coder's
+    # `src/` change cannot introduce a parse error into the recipe's <string> code,
+    # so this is zero-false-positive; an IMPORTED module's SyntaxError raises a real
+    # Traceback (caught by the deepest-frame rule below as the coder's bug instead).
+    # Canonical: HCS #1864 / #1849 / #1832 — multi-statement async snippets crammed
+    # into a single `-c` line that won't compile, looping the coder on an
+    # unsatisfiable recipe.
+    if ("Traceback (most recent call last)" not in out
+            and re.search(r'File "(?:<string>|<stdin>)", line \d+', out)):
+        return ("recipe's inline code failed to parse (SyntaxError-class) — the "
+                "designer's `python -c` snippet won't compile; no feature code can "
+                "satisfy it")
     if "Traceback (most recent call last)" not in out:
         return None
     frames = re.findall(r'File "([^"]+)", line \d+', out)

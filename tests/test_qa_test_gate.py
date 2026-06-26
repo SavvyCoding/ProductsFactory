@@ -134,6 +134,59 @@ class TestRecipeDefectDetection:
         assert pc._recipe_defect_reason("all good", "", 0) is None      # passed
         assert pc._recipe_defect_reason("got 4 want 5", "", 1) is None  # mismatch, no traceback
 
+    def test_setup_failure_int_none_is_defect_even_in_app_frame(self):
+        # #1852: recipe used a 7-char password → registration 422 → missing id →
+        # str(None) → int('None') ValueError. The crash surfaces in APP code
+        # (src/auth/deps.py), so the frame-based discriminator alone misses it,
+        # but the int('None') signature means the recipe's SETUP failed → designer.
+        tb = self._tb("/workspace/src/auth/deps.py",
+                      "ValueError: invalid literal for int() with base 10: 'None'")
+        assert pc._recipe_defect_reason(tb, "", 1)
+
+    def test_setup_failure_int_empty_is_defect(self):
+        tb = self._tb("/workspace/src/auth/deps.py",
+                      "ValueError: invalid literal for int() with base 10: ''")
+        assert pc._recipe_defect_reason(tb, "", 1)
+
+    def test_real_int_parse_error_not_flagged(self):
+        # int('abc') is NOT the forged-from-missing-setup signature — could be a
+        # real coder bug parsing genuine input → leave it for the coder.
+        tb = self._tb("/workspace/src/api/widgets.py",
+                      "ValueError: invalid literal for int() with base 10: 'abc'")
+        assert pc._recipe_defect_reason(tb, "", 1) is None
+
+    def test_recipe_syntaxerror_full_display_is_defect(self):
+        # #1864: multi-statement async snippet crammed into one `python -c` line.
+        out = ('  File "<string>", line 1\n'
+               "    async def f(): for x in y: pass\n"
+               "                   ^^^\n"
+               "SyntaxError: invalid syntax")
+        assert pc._recipe_defect_reason("", out, 1)
+
+    def test_recipe_syntaxerror_TRUNCATED_is_defect(self):
+        # Real shape: verify-check caps stderr at 500 chars, so the long echoed
+        # source truncates the literal "SyntaxError:" line OFF. Detect by shape:
+        # `File "<string>"` + no traceback header. (HCS #1864/#1849/#1832.)
+        out = ('File "<string>", line 1\n'
+               "    import os, asyncio; from sqlalchemy import update; "
+               "os.environ['JWT_SECRET']='x'; os.environ.setdefault('REDIS_U")
+        assert pc._recipe_defect_reason("", out, 1)
+
+    def test_stdin_parse_error_is_defect(self):
+        out = 'File "<stdin>", line 2\n    bad syntax here'
+        assert pc._recipe_defect_reason(out, "", 1)
+
+    def test_imported_module_syntaxerror_is_NOT_recipe_defect(self):
+        # A SyntaxError in an IMPORTED src/ module raises a real Traceback whose
+        # deepest frame is src/ → the CODER's bug, not the recipe's. Must NOT flag.
+        tb = ('Traceback (most recent call last):\n'
+              '  File "<string>", line 1, in <module>\n'
+              '  File "/workspace/src/api/broken.py", line 9\n'
+              '    def f(:\n'
+              '          ^\n'
+              'SyntaxError: invalid syntax')
+        assert pc._recipe_defect_reason("", tb, 1) is None
+
 
 class TestVerifyCheckInContainer:
     """The verify-check (per-AC Verify recipes) must run in the agent container

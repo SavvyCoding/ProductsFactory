@@ -868,6 +868,19 @@ async def product_detail(
             }
 
     tab = request.query_params.get("tab", "board")
+
+    # code_auditor Workflow-card checkboxes render the EFFECTIVE state — a
+    # per-product config bool wins, else the global env flag. Computing this
+    # here (not in the template) keeps the env resolution server-side, and
+    # ensures an unchecked box that's actually env-ON doesn't silently write
+    # False and disable the soak on save. Mirrors _code_auditor_enabled /
+    # _code_auditor_filing_on in the orchestrator/builder.
+    def _audit_effective(cfg_key: str, env_name: str) -> bool:
+        v = (product.config or {}).get(cfg_key)
+        if isinstance(v, bool):
+            return v
+        return os.environ.get(env_name, "").strip().lower() in ("1", "true", "yes", "on")
+
     response = templates.TemplateResponse("product.html", {
         "request": request,
         "product": product,
@@ -898,6 +911,8 @@ async def product_detail(
         "lifetime_ok":         int(_life_row.n_ok or 0),
         "lifetime_killed":     int(_life_row.n_killed or 0),
         "lifetime_running":    int(_life_row.n_running or 0),
+        "code_auditor_enabled_effective": _audit_effective("code_auditor", "CODE_AUDITOR_ENABLED"),
+        "code_auditor_filing_effective":  _audit_effective("code_auditor_filing", "CODE_AUDITOR_FILING_ENABLED"),
     })
     # Force browsers to re-fetch the HTML on every navigation. Without this,
     # the cached HTML keeps pointing at older CSS/JS hashes and the user
@@ -1347,7 +1362,7 @@ async def admin_save_poller_settings(
     # — so a stale map["coder"]/["designer"] would silently shadow the UI box
     # (the glm-5.2 footgun). Mirror the dedicated fields into the map so the box
     # is always authoritative: ("coder", "coder_model") / ("designer", ...).
-    _personas_for_override = ("reviewer", "planner",
+    _personas_for_override = ("reviewer", "code_auditor", "planner",
                               "documenter", "analytics", "recommender",
                               "devops", "refactorer", "product_trainer")
     _new_map = dict(config.ollama_model_map or {})
@@ -1524,6 +1539,8 @@ async def save_workflow_settings(
     product_id: int,
     human_gate_phases: str = Form(""),
     reconciler_chores: str = Form(""),
+    code_auditor: str = Form(""),
+    code_auditor_filing: str = Form(""),
     db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
 ):
     """Save per-product workflow settings — the human-in-loop phase gate
@@ -1542,6 +1559,13 @@ async def save_workflow_settings(
     cfg = dict(product.config or {})
     cfg["human_gate_phases"] = human_gate_phases.strip().lower() in ("on", "true", "1", "yes")
     cfg["reconciler_chores"] = reconciler_chores.strip().lower() in ("on", "true", "1", "yes")
+    # code_auditor enable + filing are opt-in overrides on the global env flags.
+    # The form's checkboxes are pre-rendered from the EFFECTIVE state (config OR
+    # env), so saving persists an explicit per-product bool: checked → True,
+    # unchecked → False (opt-out). Resolution at read time is config-bool-wins-
+    # else-env (orchestrator _code_auditor_enabled / builder _code_auditor_filing_on).
+    cfg["code_auditor"] = code_auditor.strip().lower() in ("on", "true", "1", "yes")
+    cfg["code_auditor_filing"] = code_auditor_filing.strip().lower() in ("on", "true", "1", "yes")
     product.config = cfg
     await db.flush()
     return RedirectResponse(f"/product/{product_id}?tab=settings", status_code=303)
@@ -1825,6 +1849,36 @@ def _validate_story_size(
     return None
 
 
+async def _ensure_code_review_phase(product_id: int, db: AsyncSession) -> int:
+    """Get-or-create the standing 'Code-Review Hardening' phase for a product.
+
+    Increment 1.5 of the code_auditor filing promotion (2026-06-25). Audit
+    findings (code_auditor / security_auditor: source=ai + feature_type=bug)
+    auto-attach here at filing time so they're dispatchable the moment the PM
+    approves them — instead of landing un-phased and sitting forever (the
+    planner buries new phases at order=max, and un-phased Approved work is never
+    claimed because dispatch sorts phase_order NULLS-last). Ordered at 0 (the
+    active build window) so Critical/High findings sort to the front by priority
+    — the soft stop-the-line until the Increment-2 verifier + hard blocker gate
+    lands. Idempotent: one such phase per product, reused across audits.
+    """
+    name = "Code-Review Hardening"
+    existing = (await db.execute(
+        select(Phase).where(Phase.product_id == product_id, Phase.name == name)
+    )).scalar_one_or_none()
+    if existing:
+        return existing.id
+    phase = Phase(
+        product_id=product_id,
+        name=name,
+        goal="Standing lane for code_auditor / security_auditor findings — worked promptly, severity-ordered.",
+        order=0,
+    )
+    db.add(phase)
+    await db.flush()
+    return phase.id
+
+
 @app.post("/api/features", response_model=schemas.FeatureOut, status_code=201)
 async def api_create_feature(body: schemas.FeatureCreate, db: AsyncSession = Depends(get_db)):
     """PM or Claude (AI-recommended) creates a new feature."""
@@ -1846,7 +1900,22 @@ async def api_create_feature(body: schemas.FeatureCreate, db: AsyncSession = Dep
         violation = _validate_story_size(body.description)
         if violation:
             raise HTTPException(status_code=422, detail=violation)
-    feature = Feature(**body.model_dump())
+    feature_data = body.model_dump()
+    # Increment 1.5 (2026-06-25): auto-route AI-filed audit findings to the
+    # standing 'Code-Review Hardening' phase so they don't sit un-phased after
+    # the PM approves them. source=ai + feature_type=bug uniquely identifies
+    # code_auditor / security_auditor output (PM creates are source=pm;
+    # recommender files features; drift detectors file chores). Resolve the
+    # phase BEFORE the INSERT (not via a post-insert UPDATE): a post-insert
+    # UPDATE fires trg_features_updated, which expires `updated_at`, and the
+    # async response serializer then hits MissingGreenlet (a 500 that looped
+    # code_auditor session 9926 to death). A single INSERT keeps server-set
+    # columns populated. Only when the caller didn't pin a phase explicitly.
+    if feature_data.get("phase_id") is None \
+            and (body.source or "").lower() == "ai" \
+            and (body.feature_type or "").lower() == "bug":
+        feature_data["phase_id"] = await _ensure_code_review_phase(body.product_id, db)
+    feature = Feature(**feature_data)
     db.add(feature)
     await db.flush()
     return feature
