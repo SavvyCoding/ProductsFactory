@@ -131,6 +131,36 @@ def sweep_product(product: dict, sys_cfg: dict) -> dict:
 
     try:
         with httpx.Client(base_url=PM_API_URL, timeout=15) as client:
+            # (Fix 1a, 2026-06-29) The sweep is a catch-up SAFETY NET, not a
+            # competitor to a live reviewer finalize. A reviewer session still
+            # running/wrapping is mid-reconcile, and the feature's
+            # `Reviewed+approved` state may be a TRANSIENT intermediate — an
+            # `approved` entry about to be corrected to `changes_requested` by a
+            # later entry in the same session_result. Merging then irreversibly
+            # ships an un-finalized review. Canonical: HCS/IFT 2026-06-29 features
+            # #2172/#2173 squash-merged with review_outcome=changes_requested via
+            # exactly this race (reviewer LGTM'd in prose but the structured field
+            # flip-flopped). Defer to a later cycle once the product is quiescent —
+            # no merge is lost: a genuinely-approved feature is re-swept then.
+            try:
+                _sess_resp = client.get(
+                    f"/api/products/{product_id}/sessions", params={"limit": 5})
+                if _sess_resp.status_code == 200:
+                    _sessions = _sess_resp.json() or []
+                    if any(isinstance(s, dict)
+                           and s.get("persona") == "reviewer"
+                           and s.get("status") in ("running", "wrapping")
+                           for s in _sessions):
+                        log.info(
+                            f"[auto-merge sweep] product={product_id} has a live "
+                            f"reviewer session — deferring merge to a quiescent "
+                            f"cycle (avoids racing the reviewer finalize)"
+                        )
+                        counters["skipped"] = 1
+                        return counters
+            except Exception:
+                pass  # best-effort guard; fall through on a sessions-API hiccup
+
             feats_resp = client.get(f"/api/products/{product_id}/features")
             if feats_resp.status_code != 200:
                 return counters
@@ -162,6 +192,33 @@ def sweep_product(product: dict, sys_cfg: dict) -> dict:
                     client.patch(f"/api/features/{fid}", json=_patch_pushed)
                     counters["merged"] += 1
                     merged_features.append(f)
+                    continue
+
+                # (Fix 1c, 2026-06-29) Re-confirm eligibility at the moment of the
+                # IRREVERSIBLE GitHub merge. `feats` was fetched once at the top of
+                # the sweep; a concurrent reviewer reconcile may have flipped this
+                # feature to Implementing+changes_requested since. Re-fetch and
+                # re-assert Reviewed+approved; skip on ANY change or fetch error —
+                # a missed merge is harmlessly re-swept next cycle, but a wrong
+                # merge to main is permanent. Backstops the Fix-1a session guard
+                # for the residual window between that check and this merge.
+                try:
+                    _fresh = client.get(f"/api/features/{fid}")
+                    _fj = _fresh.json() if _fresh.status_code == 200 else {}
+                    _still_eligible = (
+                        isinstance(_fj, dict)
+                        and _fj.get("status") == "Reviewed"
+                        and _fj.get("review_outcome") == "approved"
+                        and _fj.get("pr_number"))
+                except Exception:
+                    _still_eligible = False
+                if not _still_eligible:
+                    log.info(
+                        f"[auto-merge sweep] product={product_id} feature #{fid} "
+                        f"no longer Reviewed+approved at merge time — skipping "
+                        f"(concurrent reconcile or fetch error)"
+                    )
+                    counters["skipped"] += 1
                     continue
 
                 code, body = _try_merge_pr(repo_slug, pr_num, pat)

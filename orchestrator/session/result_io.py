@@ -12,6 +12,7 @@ Extracted from docker_runner.py during Phase 1 of OrchestratorRefactor.
 import json
 import logging
 import os
+import re
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,7 +24,56 @@ from orchestrator.session.state_machine import _apply_session_entry
 
 log = logging.getLogger("poller.docker")
 
+# A reviewer NEGATIVE VERDICT in the prose — used to validate the structured
+# `review_outcome` against the comment text. Matches verdict markers, NOT the
+# verb "reject(s)" used to DESCRIBE correct code behavior. The old check was a
+# bare `"REJECT" in body.upper()` substring, which matched "Query rejects empty
+# input" / "rejected the malformed request" — normal validation-behavior prose
+# in an APPROVING review — and false-bounced genuine LGTMs (HCS #1867; 34
+# features hit this in one week). Negative verdict = a ❌ marker, the structured
+# term changes_requested, an explicit "request changes", or "reject" with a
+# this/the-PR object or an I/we/reviewer subject (never "rejects <input-noun>").
+# Keep IN SYNC with the copy in orchestrator/supervisor.py.
+_NEG_VERDICT_RE = re.compile(
+    r"❌"
+    r"|changes[_\s]requested"
+    r"|request(?:ing|s)?\s+changes"
+    r"|\b(?:i|we|reviewer)\s+(?:would\s+)?reject"
+    r"|\breject(?:ing|ed)?\s+(?:this|the\s+(?:pr|merge|commit|change|story|feature))"
+    r"|\bmust\s+(?:be\s+)?(?:reject|rework)",
+    re.IGNORECASE,
+)
+
 PM_API_URL = os.environ["PM_API_URL"]
+
+
+def _superseded_reviewer_outcome_indices(new_lines: list, persona: str) -> set:
+    """Indices in ``new_lines`` whose reviewer-outcome entry is SUPERSEDED by a
+    later entry for the SAME feature in the same drain batch.
+
+    A reviewer LLM occasionally emits multiple entries for one feature with
+    conflicting verdicts (e.g. ``approved`` then ``changes_requested``). Applied
+    in order, the feature transits Reviewed+approved -> Implementing+
+    changes_requested, briefly exposing a merge-eligible state the per-cycle
+    auto-merge sweep can race and merge irreversibly (HCS/IFT 2026-06-29
+    #2172/#2173). Applying only the FINAL outcome per feature keeps the verdict
+    a single transition. Non-reviewer batches collapse nothing (return empty)."""
+    superseded: set = set()
+    if persona != "reviewer":
+        return superseded
+    last_idx: dict = {}
+    for i, ln in enumerate(new_lines):
+        try:
+            e = json.loads(ln)
+        except Exception:
+            continue
+        if (isinstance(e, dict) and e.get("id")
+                and e.get("review_outcome") in ("approved", "changes_requested")):
+            fid = e["id"]
+            if fid in last_idx:
+                superseded.add(last_idx[fid])
+            last_idx[fid] = i
+    return superseded
 
 
 def _validate_reviewer_outcome_consistency(entry: dict, pm_client, log_prefix: str) -> tuple[str, str]:
@@ -117,10 +167,10 @@ def _validate_reviewer_outcome_consistency(entry: dict, pm_client, log_prefix: s
         return ("✅" in h) or ("LGTM" in h.upper()) or ("APPROVED" in h.upper())
 
     has_pos_head = any(_pos_head(b) for b in bodies)
-    has_neg_body = any(
-        ("❌" in b) or ("CHANGES_REQUESTED" in b.upper()) or ("REJECT" in b.upper())
-        for b in bodies
-    )
+    # Negative VERDICT (not the verb "rejects" describing code behavior) — see
+    # _NEG_VERDICT_RE. A bare "REJECT" substring false-bounced approvals whose
+    # prose described validation ("Query rejects empty input"). HCS #1867.
+    has_neg_body = any(_NEG_VERDICT_RE.search(b) for b in bodies)
 
     mismatch = False
     kind = ""
@@ -356,11 +406,31 @@ def _live_poll_session_result(working_dir: str, stop_event: threading.Event, per
         new_lines = lines[applied_up_to:]
         if not new_lines:
             return
+        # (Fix 2, 2026-06-29) Collapse SUPERSEDED reviewer-outcome entries within
+        # this batch. A reviewer LLM occasionally emits multiple entries for the
+        # same feature with conflicting verdicts (e.g. `approved` then
+        # `changes_requested`). Applied in order, the feature transits
+        # Reviewed+approved -> Implementing+changes_requested, briefly exposing a
+        # merge-eligible state the per-cycle auto-merge sweep can race and merge
+        # irreversibly (HCS/IFT 2026-06-29 #2172/#2173). Apply only the FINAL
+        # reviewer-outcome entry per feature so the verdict lands in a single
+        # transition with no transient Reviewed+approved. (Pairs with the Fix-1a/1c
+        # guards in auto_merge.py, which cover the cross-tick / cross-process case.)
+        _superseded = _superseded_reviewer_outcome_indices(new_lines, persona)
         try:
             with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
-                for line in new_lines:
+                for _idx, line in enumerate(new_lines):
                     line = line.strip()
                     if not line:
+                        applied_up_to += 1
+                        continue
+                    if _idx in _superseded:
+                        log.info(
+                            f"[{label}] skipping superseded reviewer outcome "
+                            f"(a later verdict for the same feature exists in this "
+                            f"batch) — avoids a transient Reviewed+approved the "
+                            f"auto-merge sweep could race"
+                        )
                         applied_up_to += 1
                         continue
                     try:
