@@ -230,7 +230,10 @@ def reconcile_in_flight_prs(product: dict):
     import re as _re
 
     # Statuses to scan for: anything that may have a PR attached but is not terminal.
-    # Designed is included so a coder that opened a PR before advancing status is healed.
+    # Designed stays in the set so a Designed feature whose PR later MERGES or
+    # CLOSES is still reconciled (→ Pushed / reset) — but it is NOT auto-advanced
+    # on an *open* PR (see the open-PR branch below): a Designed+open-PR feature
+    # is a gate-bounced one, and advancing it would launder the gate to a merge.
     IN_FLIGHT = {"Designed", "Implementing", "Reviewing", "Reviewed"}
 
     try:
@@ -321,13 +324,31 @@ def reconcile_in_flight_prs(product: dict):
                 # Open PR + non-terminal disagreement: only advance if no agent
                 # decision exists. Once review_outcome is set, the reviewer's
                 # status is authoritative until something terminal happens to the PR.
-                if state == "open" and not has_review:
-                    if cur_status in ("Implementing", "Designed"):
-                        client.patch(f"/api/features/{fid}", json={"status": "Reviewing"})
-                        log.info(
-                            f"[in-flight] Feature #{fid} → Reviewing "
-                            f"(PR #{pr_n} open, status was {cur_status})"
-                        )
+                #
+                # ONLY heal `Implementing` → Reviewing. That is the genuine
+                # crash-recovery case: a coder always advances a claimed feature
+                # to Implementing, and post-coder opens the PR while the feature
+                # is Implementing — so an open PR on an Implementing feature means
+                # the session died after PR-open but before the Reviewing PATCH.
+                #
+                # A `Designed` feature with an open PR is the OPPOSITE signal: a
+                # post-coder gate (env_broken, a lint/test bounce, a declared
+                # service unreachable, …) deliberately rolled it BACK to Designed
+                # *after* its PR had been opened, and left the PR open for the
+                # next coder session to reuse. Advancing it here launders that
+                # gate straight to a merge — the HomeChoreService 2026-06-27
+                # incident: a test-suite timeout (mis)classified env_broken rolled
+                # features to Designed with the PR left open and no review_outcome,
+                # this reconciler advanced them Designed→Reviewing, and untested
+                # code merged 0/1. A gate-bounced feature must wait for the next
+                # coder session, never be auto-advanced. (Designed was removed
+                # from this advance set on 2026-06-28; Approved was never in it.)
+                if state == "open" and not has_review and cur_status == "Implementing":
+                    client.patch(f"/api/features/{fid}", json={"status": "Reviewing"})
+                    log.info(
+                        f"[in-flight] Feature #{fid} → Reviewing "
+                        f"(PR #{pr_n} open, status was {cur_status})"
+                    )
 
     except Exception as e:
         log.warning(f"reconcile_in_flight_prs failed: {e}")

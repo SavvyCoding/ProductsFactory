@@ -1541,6 +1541,7 @@ async def save_workflow_settings(
     reconciler_chores: str = Form(""),
     code_auditor: str = Form(""),
     code_auditor_filing: str = Form(""),
+    test_gate_timeout: str = Form(""),
     db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
 ):
     """Save per-product workflow settings — the human-in-loop phase gate
@@ -1566,6 +1567,18 @@ async def save_workflow_settings(
     # else-env (orchestrator _code_auditor_enabled / builder _code_auditor_filing_on).
     cfg["code_auditor"] = code_auditor.strip().lower() in ("on", "true", "1", "yes")
     cfg["code_auditor_filing"] = code_auditor_filing.strip().lower() in ("on", "true", "1", "yes")
+    # Test-gate timeout override (seconds). Blank / non-positive / out-of-range
+    # → drop the key so the orchestrator's self-calibrating budget takes over
+    # (_resolve_test_gate_timeout: p95 of recent green runs × margin, floored).
+    # A positive int pins the gate for this product. Clamp to the same
+    # [floor, ceiling] band the auto-budget uses so the UI can't set an absurd
+    # value. Setting an override also makes the orchestrator stop recording
+    # calibration samples (they'd be unused).
+    _tgt = test_gate_timeout.strip()
+    if _tgt.isdigit() and int(_tgt) > 0:
+        cfg["test_gate_timeout"] = max(30, min(3600, int(_tgt)))
+    else:
+        cfg.pop("test_gate_timeout", None)
     product.config = cfg
     await db.flush()
     return RedirectResponse(f"/product/{product_id}?tab=settings", status_code=303)

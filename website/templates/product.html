@@ -1296,6 +1296,17 @@
             When unchecked (default), the audit is comment-only. No stop-the-line yet — a Critical
             simply sorts to the front of the queue.</p>
         </div>
+        <div class="form-group">
+          <label>Test-gate timeout override (seconds)</label>
+          <input type="number" name="test_gate_timeout" min="30" max="3600"
+                 value="{{ (product.config or {}).get('test_gate_timeout', '') }}"
+                 placeholder="auto" style="width:120px">
+          <p class="field-hint">Max seconds the post-coder gate lets the test suite run before
+            killing it (a timeout bounces the feature for rework — it never ships untested). Leave
+            blank for <strong>auto</strong>: the budget self-calibrates to ~2.5× the recent green-run
+            time (floor 300s, ceiling 1800s) and grows with the suite. Set a number only to pin it
+            for this product (e.g. while a suite is being optimised).</p>
+        </div>
         <button type="submit">Save workflow</button>
       </form>
     </div>

@@ -8,9 +8,18 @@ and `npm ci` extracting ~1200 packages into /workspace/node_modules over the
 Verify recipes (AC3/AC4 JSDOM renders on #1644) were SIGTERM'd with exit 124
 and bounced as phantom "AC mismatches" the coder could not fix.
 
-Fix B moves node_modules onto a fast per-run tmpfs; the classifier reclassifies
-exit 124 as infra (verify-check → skipped; test-check → env_broken) so a mount
-timeout never bumps fix_attempts.
+Fix B moves node_modules onto a fast per-run tmpfs. The verify-check still
+treats exit 124 as a skip (a heavy AC recipe — don't bounce).
+
+UPDATED 2026-06-28: the TEST-check no longer classifies a test-run exit 124 as
+env_broken. That classification (fe13dd5) left the already-opened PR open with
+no review_outcome, and reconcile_in_flight_prs then advanced the rolled-back
+feature Designed→Reviewing — laundering untested code to a merge
+(HomeChoreService 2026-06-27, every feature 0/1). A test-run timeout is now a
+real failure bounce (sets review_outcome upstream → held), matching the outer
+TimeoutExpired handler. The self-calibrating gate budget that stops a
+legitimately-slow suite from timing out in the first place is covered in
+test_post_coder_gate_timeout.py.
 
 These are pure / mock-based (no Docker), so they run on every platform.
 """
@@ -90,8 +99,11 @@ class TestVerifyExit124IsSkip:
 
 
 # ── exit-124 classifier: test-check side ─────────────────────────────────────
-class TestTestCheckExit124IsEnvBroken:
-    def test_node_test_timeout_124_is_env_broken_no_bump(self, tmp_path):
+# A TEST-RUN timeout (exit 124) is a real failure bounce, NOT env_broken — it
+# must set review_outcome upstream so the in-flight reconciler holds the feature
+# instead of laundering its open PR to a merge. See module docstring + Fix 1.
+class TestTestCheckExit124Bounces:
+    def test_node_test_timeout_124_bounces_not_env_broken(self, tmp_path):
         (tmp_path / "package.json").write_text(
             '{"name":"x","scripts":{"test":"jest"}}', encoding="utf-8")
 
@@ -101,9 +113,11 @@ class TestTestCheckExit124IsEnvBroken:
             return _fake_completed(124, stdout="added 1198 packages in 1m")
 
         res = _post_coder_test_check(str(tmp_path), _run, product_name="t", timeout=30)
-        assert res["env_broken"] is True
-        assert res["passed"] is False
-        assert "timed out" in res["first_failure"]
+        assert res["env_broken"] is False   # NOT laundered as infra
+        assert res["passed"] is False       # real bounce → review_outcome upstream
+        # Message is an actionable gate-budget signal naming the exit code.
+        assert "124" in res["first_failure"]
+        assert "timeout" in res["first_failure"].lower()
 
     def test_node_real_test_failure_still_bounces(self, tmp_path):
         (tmp_path / "package.json").write_text(
@@ -115,3 +129,16 @@ class TestTestCheckExit124IsEnvBroken:
         res = _post_coder_test_check(str(tmp_path), _run, product_name="t", timeout=30)
         assert res["env_broken"] is False
         assert res["passed"] is False
+
+    def test_green_run_records_duration(self, tmp_path):
+        # A passing run must stamp duration_s (fed to the self-calibrating budget).
+        (tmp_path / "package.json").write_text(
+            '{"name":"x","scripts":{"test":"jest"}}', encoding="utf-8")
+
+        def _run(cmd, **kw):
+            return _fake_completed(0, stdout="Tests: 3 passed")
+
+        res = _post_coder_test_check(str(tmp_path), _run, product_name="t", timeout=30)
+        assert res["passed"] is True
+        assert isinstance(res.get("duration_s"), (int, float))
+        assert res["duration_s"] >= 0

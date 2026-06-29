@@ -43,6 +43,93 @@ log = logging.getLogger("poller.docker")
 PM_API_URL = os.environ["PM_API_URL"]
 
 
+# ---- Self-calibrating post-coder test-gate timeout -------------------------
+# The gate kills the suite after a timeout (inner GNU `timeout`, exit 124). A
+# single fixed value can't serve a factory whose suites grow without bound: too
+# short and a legitimately-growing suite false-times-out. HomeChoreService
+# (2026-06-27) crossed a static 300s once its suite passed ~490 tests and every
+# feature then shipped 0/1 via the env_broken→PR-laundering path.
+#
+# The budget self-calibrates off OBSERVED green-run wall-time, deliberately NOT
+# off #tests: runtime is dominated by a few slow tests (real bcrypt, a DB engine
+# per test), not the count, and #tests isn't even available for npm/go (no
+# collect step). Precedence: explicit operator override → p95(recent green runs)
+# × MARGIN clamped to [FLOOR, CEILING] → FLOOR when there's no history.
+TEST_GATE_TIMEOUT_FLOOR   = int(os.environ.get("TEST_GATE_TIMEOUT_FLOOR", "300"))
+TEST_GATE_TIMEOUT_CEILING = int(os.environ.get("TEST_GATE_TIMEOUT_CEILING", "1800"))
+TEST_GATE_TIMEOUT_MARGIN  = float(os.environ.get("TEST_GATE_TIMEOUT_MARGIN", "2.5"))
+TEST_GATE_RUNTIME_SAMPLES = int(os.environ.get("TEST_GATE_RUNTIME_SAMPLES", "10"))
+
+
+def _percentile(values, pct: float) -> float:
+    """Nearest-rank percentile of the positive numbers in `values` (unsorted ok).
+    Empty / all-invalid → 0.0."""
+    import math as _math
+    xs = sorted(float(v) for v in values
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0)
+    if not xs:
+        return 0.0
+    k = max(1, _math.ceil(pct / 100.0 * len(xs)))
+    return xs[min(k, len(xs)) - 1]
+
+
+def _resolve_test_gate_timeout(product: dict) -> int:
+    """Per-product post-coder test-gate timeout, in seconds.
+
+    1. `config.test_gate_timeout` — explicit operator override (the stopgap
+       knob); any positive int wins outright.
+    2. Self-calibrating — p95 of the last N green-run durations
+       (`config.test_gate_runtimes`) × MARGIN, clamped to [FLOOR, CEILING].
+       Derived from PRIOR green runs, so a feature that suddenly inflates the
+       suite still trips its OWN historical budget (a real perf-regression
+       signal) rather than buying itself slack.
+    3. No usable history → FLOOR.
+    """
+    import math as _math
+    cfg = product.get("config") or {}
+    override = cfg.get("test_gate_timeout")
+    if isinstance(override, (int, float)) and not isinstance(override, bool) and override > 0:
+        return int(override)
+    p95 = _percentile(cfg.get("test_gate_runtimes") or [], 95)
+    if p95 > 0:
+        scaled = _math.ceil(p95 * TEST_GATE_TIMEOUT_MARGIN)
+        return max(TEST_GATE_TIMEOUT_FLOOR, min(TEST_GATE_TIMEOUT_CEILING, scaled))
+    return TEST_GATE_TIMEOUT_FLOOR
+
+
+def _record_test_gate_runtime(product: dict, duration_s) -> None:
+    """Append a GREEN-run suite wall-time to `config.test_gate_runtimes`
+    (rolling window of the last TEST_GATE_RUNTIME_SAMPLES). Fetch-merge-PATCH:
+    `config` is a JSONB column the API replaces wholesale, so re-read the
+    freshest config before writing to avoid clobbering a concurrent cadence
+    counter (architect_run_count, last_*_at, …). Best-effort — a telemetry
+    write must never fail the pipeline.
+
+    Records even when an explicit `test_gate_timeout` override is set: the
+    override wins for the budget *decision*, but keeping the rolling history
+    warm means dropping the override later hands straight off to the auto-budget
+    (p95 × MARGIN) instead of resetting to FLOOR. Without this, a product whose
+    suite already exceeds FLOOR can never bootstrap calibration — it would never
+    get a green run to record (the chicken-and-egg the override exists to break).
+    """
+    pid = product.get("id")
+    if (not pid or not isinstance(duration_s, (int, float))
+            or isinstance(duration_s, bool) or duration_s <= 0):
+        return
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            r = client.get(f"/api/products/{pid}")
+            cfg = dict((r.json() or {}).get("config") or {}) if r.status_code == 200 \
+                else dict(product.get("config") or {})
+            samples = [float(s) for s in (cfg.get("test_gate_runtimes") or [])
+                       if isinstance(s, (int, float)) and not isinstance(s, bool) and s > 0]
+            samples.append(round(float(duration_s), 1))
+            cfg["test_gate_runtimes"] = samples[-TEST_GATE_RUNTIME_SAMPLES:]
+            client.patch(f"/api/products/{pid}", json={"config": cfg})
+    except Exception as e:
+        log.debug(f"[post-coder] test-gate runtime record failed: {e}")
+
+
 # Files coders may NOT modify. The coder's scope is broad (src/, tests/,
 # alembic/, requirements.txt, etc.) so a denylist is more compact than an
 # allowlist. These paths are PM-curated contracts or other-persona territory:
@@ -2768,24 +2855,59 @@ def _post_coder_test_check(working_dir: str, _run, product_name: str = "?",
                 return result
 
         # ---- run actual tests ----
+        # Wall-time the whole gate run (container start + install + suite). On a
+        # green run this is fed into the self-calibrating gate budget
+        # (_resolve_test_gate_timeout): end-to-end wall-time is stack-agnostic
+        # (pytest/npm/go) and slightly conservative for the test-only inner
+        # `timeout` cap — the MARGIN absorbs that and host-load variance.
+        import time as _time
+        _t0 = _time.monotonic()
         r = _run(run_cmd, timeout=timeout)
+        result["duration_s"] = round(_time.monotonic() - _t0, 1)
         run_out = (r.stdout or "") + "\n" + (r.stderr or "")
         result["output"] = run_out
         if r.returncode == 0:
             result["passed"] = True
             return result
-        # exit 124 == the inner GNU `timeout` killed the test command. Infra/IO
-        # (e.g. a slow `npm ci` extraction on the NTFS bind-mount eating the
-        # budget), not a code bug — classify as env_broken so the operator is
-        # alerted and fix_attempts is NOT bumped (a coder re-run can't speed up
-        # the mount). Pairs with the node_modules tmpfs in _agent_container_base,
-        # which removes the usual cause. Canonical: IndianFoodTruck #1644.
+        # exit 124 == the inner GNU `timeout {N}s` killed the TEST command after
+        # the gate budget. This is the SAME phenomenon the outer-subprocess
+        # `TimeoutExpired` handler below catches (a test run that overruns), just
+        # caught one layer in — so it MUST be classified identically: a real test
+        # failure (passed=False, env_broken=False), NOT an environment break.
+        #
+        # fe13dd5 classified exit 124 as env_broken (intent: a slow node `npm ci`
+        # mount-crawl on NTFS eating the budget, IndianFoodTruck #1644). That was
+        # wrong on two counts: (1) the `timeout` wrapper guards only the test
+        # command, never the install step, so a slow install trips the OUTER
+        # timeout, not this 124 — exit 124 always means the test RUN itself
+        # overran; (2) env_broken sets no review_outcome and leaves the
+        # already-opened PR open, so the in-flight PR reconciler advanced the
+        # rolled-back feature Designed→Reviewing and the untested code MERGED.
+        # Canonical: HomeChoreService 2026-06-27 — its ~540-test suite crossed
+        # the 300s budget and every feature shipped 0/1 (coder pushed nothing;
+        # the reviewer merged the laundered PR). The node mount-crawl fe13dd5
+        # worried about is fixed at its source by the node_modules tmpfs in
+        # _agent_container_base, not by mislabelling a test-run timeout.
+        #
+        # Bouncing as a failure HOLDS the feature (review_outcome=changes_requested
+        # → the reconciler's has_review guard blocks any auto-advance) and gives
+        # an actionable, non-code-blaming message. A legitimately large suite is
+        # an operator knob (raise the gate `timeout` for the product) — a
+        # deliberate, visible decision, never a silent auto-ship.
         if r.returncode == 124:
-            result["env_broken"] = True
             result["passed"] = False
-            result["first_failure"] = (
-                "test command timed out (exit 124) — infra/IO, not a code failure"
+            result["env_broken"] = False
+            _timeout_msg = (
+                f"⏱️ test command exceeded the post-coder gate timeout "
+                f"({timeout}s) and was killed (exit 124). This is a gate-budget "
+                f"signal, not a bug in any single feature: the full suite is too "
+                f"slow to finish in {timeout}s, or a test hangs. Fixes: mark/skip "
+                f"the slow or hanging test(s), split or parallelise the suite "
+                f"(e.g. pytest-xdist), or ask the operator to raise the gate "
+                f"timeout for this product. Partial run output follows."
             )
+            result["first_failure"] = _timeout_msg
+            result["output"] = _timeout_msg + "\n\n" + run_out
             return result
         # Non-zero exit: classify
         if _ENV_BROKEN_RE.search(run_out):
@@ -4416,9 +4538,16 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
     # finalize); the gate containers connect to the same names.
     from orchestrator import services as _pf_services
     _service_env = _pf_services.session_service_env(product, session_uid)
+    _gate_timeout = _resolve_test_gate_timeout(product)
     test_result = _post_coder_test_check(
         working_dir, _container_test_run(working_dir, service_env=_service_env), pname,
-        service_env=_service_env)
+        timeout=_gate_timeout, service_env=_service_env)
+    # Record green-run wall-time so the gate budget self-calibrates as the suite
+    # grows (no-op under an explicit config.test_gate_timeout override). Recorded
+    # only on a real pass — env_broken / failure / timeout durations would skew
+    # the budget. The failure branch below returns, so reaching past it == green.
+    if test_result.get("framework") != "none" and test_result.get("passed"):
+        _record_test_gate_runtime(product, test_result.get("duration_s"))
     if test_result.get("framework") != "none" and not test_result.get("passed"):
         env_broken = test_result.get("env_broken", False)
         first_failure = test_result.get("first_failure", "")

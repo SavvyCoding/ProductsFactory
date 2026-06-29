@@ -153,6 +153,33 @@ class TestWorkflowSettingsForm:
                         data={"human_gate_phases": "on"}, follow_redirects=False)
         assert r.status_code == 401
 
+    def test_test_gate_timeout_override_saved_and_clamped(self, client, db):
+        prod = make_product(db, "/projects/gate-wf4")
+        # In-band value persists as an int.
+        r = client.post(f"/product/{prod.id}/workflow-settings",
+                        data={"test_gate_timeout": "900"}, auth=AUTH,
+                        follow_redirects=False)
+        assert r.status_code == 303
+        db.refresh(prod)
+        assert prod.config["test_gate_timeout"] == 900
+        # Out-of-range is clamped to the [30, 3600] band.
+        client.post(f"/product/{prod.id}/workflow-settings",
+                    data={"test_gate_timeout": "99999"}, auth=AUTH,
+                    follow_redirects=False)
+        db.refresh(prod)
+        assert prod.config["test_gate_timeout"] == 3600
+
+    def test_blank_test_gate_timeout_clears_override(self, client, db):
+        # An existing pin must clear back to auto-calibration when blanked.
+        prod = make_product(db, "/projects/gate-wf5",
+                            config={"test_gate_timeout": 900})
+        r = client.post(f"/product/{prod.id}/workflow-settings",
+                        data={"test_gate_timeout": ""}, auth=AUTH,
+                        follow_redirects=False)
+        assert r.status_code == 303
+        db.refresh(prod)
+        assert "test_gate_timeout" not in prod.config
+
 
 class TestPhaseApproveForm:
     def test_approve_from_awaiting_review(self, client, db):
