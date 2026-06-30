@@ -2497,15 +2497,22 @@ async def api_reset_stuck(db: AsyncSession = Depends(get_db)):
     """
     sys_cfg = await _get_system_config(db)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=_cfg(sys_cfg, "stuck_feature_timeout_hours"))
-    # Implemented is a transient handoff state: the agent writes it to
-    # session_result.json on completion, post-coder PATCHes it to Reviewing
-    # within seconds. Anything sitting in Implemented for more than a few
-    # minutes is an orphaned handoff (post-coder crashed / session killed
-    # mid-push). Use a much tighter 5-min cutoff for it so recovery doesn't
-    # wait the full 45 min that legitimate Implementing/Designing/Reviewing
-    # work states need. (Without this split the same hole observed on #377
-    # twice in one day reopens for 30+ min on every kill.)
-    implemented_cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+    # Implemented is a transient handoff state: the agent writes it on
+    # completion, then post-coder runs its gates and PATCHes it to Reviewing.
+    # An Implemented feature is an orphaned handoff (post-coder crashed /
+    # session killed mid-push) ONLY once that pipeline is no longer running —
+    # which is enforced two ways below: (a) the active-coder-session guard skips
+    # features whose pipeline is still in-flight, and (b) this cutoff.
+    #
+    # The cutoff was 5 min on the assumption post-coder "PATCHes within seconds".
+    # That broke after the env_broken fix: the 900s gate budget lets HCS's full
+    # ~400s test suite run to completion, so post-coder now takes ~6-8 min and
+    # the feature legitimately sits in Implemented that whole time. The 5-min
+    # cutoff fired DURING the live pipeline for ~40% of coder sessions, so
+    # reset_stuck did 100% of HCS's Implemented->Reviewing advances and inflated
+    # the coder 0/1 telemetry (2026-06-30 RCA). 10 min is comfortably past the
+    # worst-case pipeline, and the active-session guard is the real protection.
+    implemented_cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
     result = await db.execute(
         select(Feature).where(
             or_(
@@ -2521,7 +2528,29 @@ async def api_reset_stuck(db: AsyncSession = Depends(get_db)):
         )
     )
     stuck = result.scalars().all()
+
+    # Products with a live coder session — their Implemented features are
+    # in-flight (post-coder is still finalizing them), NOT orphaned. The
+    # per-product mutex means at most one active session per product, so this is
+    # effectively "the session that owns this feature right now". Rescuing an
+    # Implemented feature mid-pipeline steals post-coder's transition and can
+    # advance it PAST its still-running gates — a gate-bounce could then be
+    # laundered to review (same race class as the auto-merge sweep). 2026-06-30 RCA.
+    _active = await db.execute(
+        select(DBSession.product_id).where(
+            DBSession.persona == "coder",
+            DBSession.status.in_(["running", "wrapping"]),
+        ).distinct()
+    )
+    active_coder_products = {row[0] for row in _active}
+
+    reset_count = 0
     for f in stuck:
+        # Never race a live post-coder pipeline: leave Implemented features whose
+        # product has an active coder session for post-coder (or a later
+        # quiescent reset_stuck cycle) to advance.
+        if f.status == "Implemented" and f.product_id in active_coder_products:
+            continue
         old_status = f.status
         if f.status == "Implementing":
             # Reset to Designed if a design doc was written, otherwise back to Approved
@@ -2576,8 +2605,9 @@ async def api_reset_stuck(db: AsyncSession = Depends(get_db)):
                 new_value=f.status,
                 changed_by="reset_stuck",
             ))
+            reset_count += 1
     await db.flush()
-    return {"reset_count": len(stuck)}
+    return {"reset_count": reset_count}
 
 
 @app.get("/api/features/next-for-persona", response_model=schemas.FeatureOut | None)

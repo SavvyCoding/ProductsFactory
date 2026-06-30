@@ -845,6 +845,57 @@ class TestResetStuck:
         db.refresh(f)
         assert f.status == "Blocked"
 
+    # ── 2026-06-30 RCA: don't race the live post-coder pipeline ──────────────
+    def _coder_session(self, db, product_id, *, status, uid="cs"):
+        s = DBSession(product_id=product_id, session_uid=uid, persona="coder",
+                      status=status,
+                      started_at=datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc))
+        db.add(s); db.flush(); return s
+
+    def _age_feature(self, db, fid, interval):
+        db.execute(__import__("sqlalchemy").text(
+            f"UPDATE features SET updated_at = NOW() - INTERVAL '{interval}' WHERE id = :id"),
+            {"id": fid})
+        db.flush()
+
+    def test_skips_implemented_while_coder_session_active(self, client, db):
+        # An Implemented feature whose product still has a live (wrapping) coder
+        # session is in-flight — post-coder is finalizing it. Must NOT be rescued
+        # mid-pipeline (that steals the transition / can advance past the gates).
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Implemented", pr_number=42)
+        self._coder_session(db, p.id, status="wrapping")
+        self._age_feature(db, f.id, "3 hours")
+        r = client.post("/api/features/reset_stuck")
+        assert r.json()["reset_count"] == 0
+        db.refresh(f)
+        assert f.status == "Implemented"          # left for post-coder
+
+    def test_rescues_implemented_when_session_ended(self, client, db):
+        # Same orphan, but the coder session has ENDED → genuinely orphaned →
+        # rescued forward to Reviewing (PR exists). The guard is scoped to LIVE
+        # sessions, so recovery of true orphans is unaffected.
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Implemented", pr_number=42)
+        self._coder_session(db, p.id, status="ended")
+        self._age_feature(db, f.id, "3 hours")
+        r = client.post("/api/features/reset_stuck")
+        assert r.json()["reset_count"] == 1
+        db.refresh(f)
+        assert f.status == "Reviewing"
+
+    def test_implemented_under_10min_cutoff_not_reset(self, client, db):
+        # Sat in Implemented 7 min (past the OLD 5-min cutoff, under the NEW
+        # 10-min cutoff) with no active session → not yet rescued; post-coder
+        # still has headroom for a slow suite.
+        p = make_product(db)
+        f = make_feature(db, p.id, status="Implemented", pr_number=42)
+        self._age_feature(db, f.id, "7 minutes")
+        r = client.post("/api/features/reset_stuck")
+        assert r.json()["reset_count"] == 0
+        db.refresh(f)
+        assert f.status == "Implemented"
+
 
 class TestBlockedQuarantine:
     """Regression suite for the 2026-05-27 Blocked-state inversion bug.
