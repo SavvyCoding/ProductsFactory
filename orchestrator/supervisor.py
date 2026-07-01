@@ -1336,6 +1336,21 @@ def detect_divergent_review_feedback(
 # detect_repeated_review_feedback / detect_divergent_review_feedback,
 # only when the session entry carries review_outcome=changes_requested.
 
+# Negative VERDICT in reviewer prose. Verdict markers only — NOT the verb
+# "reject(s)" describing code behavior ("Query rejects empty input"), which a
+# bare "REJECT" substring matched and false-bounced approvals (HCS #1867; 34
+# features in one week). Keep IN SYNC with the copy in session/result_io.py.
+_NEG_VERDICT_RE = re.compile(
+    r"❌"
+    r"|changes[_\s]requested"
+    r"|request(?:ing|s)?\s+changes"
+    r"|\b(?:i|we|reviewer)\s+(?:would\s+)?reject"
+    r"|\breject(?:ing|ed)?\s+(?:this|the\s+(?:pr|merge|commit|change|story|feature))"
+    r"|\bmust\s+(?:be\s+)?(?:reject|rework)",
+    re.IGNORECASE,
+)
+
+
 def detect_reviewer_outcome_text_mismatch(
     *,
     feature_id: int,
@@ -1389,8 +1404,9 @@ def detect_reviewer_outcome_text_mismatch(
             head_upper = upper[:200]
             has_pos_head = ("✅" in head) or ("LGTM" in head_upper) \
                 or ("APPROVED" in head_upper)
-            has_neg_anywhere = ("❌" in latest) or ("CHANGES_REQUESTED" in upper) \
-                or ("REJECT" in upper)
+            # Negative VERDICT only (see _NEG_VERDICT_RE) — not the verb
+            # "rejects" describing validation behavior. HCS #1867.
+            has_neg_anywhere = bool(_NEG_VERDICT_RE.search(latest))
 
             mismatch = False
             kind = ""
