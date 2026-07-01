@@ -835,14 +835,21 @@ class TestResetStuck:
         expire_all() forces the endpoint (same session) to re-read the row.
         """
         import sqlalchemy as sa
-        n, unit = interval.split()
-        key = "minutes" if unit.startswith("min") else "hours"
+        # features carries a BEFORE UPDATE trigger (trg_features_updated →
+        # set_updated_at(), migration 001) that forces updated_at=now() on EVERY
+        # update. It exists in the alembic-built schema (CI) but NOT the
+        # create_all schema (local test_engine), so a plain backdating UPDATE was
+        # silently reset to now() in CI — every reset_count==1 assert saw 0 while
+        # passing locally. Disable user triggers on the table for just this
+        # UPDATE so the backdate sticks; DISABLE/ENABLE TRIGGER USER is a no-op
+        # where the trigger is absent, so this is schema-agnostic. Raw SQL (not
+        # sa.update) so the ORM's onupdate=func.now() doesn't re-stamp it either.
+        db.execute(sa.text("ALTER TABLE features DISABLE TRIGGER USER"))
         db.execute(
-            sa.update(Feature)
-            .where(Feature.id == fid)
-            .values(updated_at=datetime.now(timezone.utc) - timedelta(**{key: float(n)}))
-            .execution_options(synchronize_session=False)
+            sa.text(f"UPDATE features SET updated_at = NOW() - INTERVAL '{interval}' WHERE id = :id"),
+            {"id": fid},
         )
+        db.execute(sa.text("ALTER TABLE features ENABLE TRIGGER USER"))
         db.expire_all()
 
     def test_skips_implemented_while_coder_session_active(self, client, db):
