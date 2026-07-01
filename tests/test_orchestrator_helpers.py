@@ -191,7 +191,13 @@ class TestAlerts:
 
         from orchestrator import alerts
         monkeypatch.setattr(alerts, "ALERT_WEBHOOK_URL", "https://hooks.example.com/alert")
-        monkeypatch.setattr(alerts, "WEBHOOK_FAIL_COUNTER", 0)
+        # The counter was renamed private + thread-safe (module global
+        # `_webhook_fail_counter`, guarded by `_webhook_lock`); the old public
+        # `WEBHOOK_FAIL_COUNTER` no longer exists. Also pin `_cached_webhook_url`
+        # so `_get_webhook_url` returns the configured URL directly instead of
+        # trying (and failing) the PM_API_URL system-config lookup.
+        monkeypatch.setattr(alerts, "_cached_webhook_url", "https://hooks.example.com/alert")
+        monkeypatch.setattr(alerts, "_webhook_fail_counter", 0)
 
         post_calls = []
 
@@ -222,7 +228,8 @@ class TestAlerts:
     def test_increments_fail_counter_on_bad_status(self, monkeypatch):
         from orchestrator import alerts
         monkeypatch.setattr(alerts, "ALERT_WEBHOOK_URL", "https://hooks.example.com/alert")
-        monkeypatch.setattr(alerts, "WEBHOOK_FAIL_COUNTER", 0)
+        monkeypatch.setattr(alerts, "_cached_webhook_url", "https://hooks.example.com/alert")
+        monkeypatch.setattr(alerts, "_webhook_fail_counter", 0)
 
         def fake_post(url, **kwargs):
             resp = MagicMock()
@@ -232,12 +239,13 @@ class TestAlerts:
         with patch("httpx.post", side_effect=fake_post):
             alerts.send_alert("error", "failing webhook")
 
-        assert alerts.WEBHOOK_FAIL_COUNTER == 1
+        assert alerts._webhook_fail_counter == 1
 
     def test_resets_fail_counter_on_success(self, monkeypatch):
         from orchestrator import alerts
         monkeypatch.setattr(alerts, "ALERT_WEBHOOK_URL", "https://hooks.example.com/alert")
-        monkeypatch.setattr(alerts, "WEBHOOK_FAIL_COUNTER", 2)  # was partially failing
+        monkeypatch.setattr(alerts, "_cached_webhook_url", "https://hooks.example.com/alert")
+        monkeypatch.setattr(alerts, "_webhook_fail_counter", 2)  # was partially failing
 
         def fake_post(url, **kwargs):
             resp = MagicMock()
@@ -247,7 +255,7 @@ class TestAlerts:
         with patch("httpx.post", side_effect=fake_post):
             alerts.send_alert("info", "success now")
 
-        assert alerts.WEBHOOK_FAIL_COUNTER == 0
+        assert alerts._webhook_fail_counter == 0
 
     def test_level_prefix_in_message(self, monkeypatch):
         from orchestrator import alerts

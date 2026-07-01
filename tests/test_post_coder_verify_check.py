@@ -40,6 +40,43 @@ from orchestrator.pipelines.post_coder import (  # noqa: E402
     _is_server_required,
     _post_coder_verify_check,
 )
+import orchestrator.pipelines.post_coder as _pc  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _run_verify_in_local_bash(monkeypatch):
+    """Execute Verify recipes in the local shell instead of the agent
+    Docker container.
+
+    WHY THIS EXISTS — the CI-vs-local split. Production `_run_verify` shells
+    each recipe INTO the agent image via
+    `docker run productfactory-agent … sh -lc <script>` (see
+    `_agent_container_base`). That makes every recipe-executing test depend
+    on (a) a running Docker daemon AND (b) the `productfactory-agent:latest`
+    image being present locally. On a dev box that has built the image both
+    hold, so these tests pass. In CI they do NOT: the `test` job
+    (`.github/workflows/ci.yml`) runs on a bare ubuntu runner and the agent
+    image is built only in the *separate* `dockerfile-scan` job (as
+    `productfactory-agent:ci`, never loaded into the test job). So
+    `docker run productfactory-agent` finds no local image, tries to pull
+    `:latest` from Docker Hub, is denied, and exits non-zero with EMPTY
+    stdout — every `echo OK` recipe then mis-reports (all-pass → failures,
+    mismatch → wrong exit, etc.), and the 8 recipe-executing tests fail only
+    in CI.
+
+    Patching `_agent_container_base` to a bare `bash -lc` prefix removes the
+    Docker dependency while preserving ALL of `_run_verify`'s real logic
+    (server-required pre-detect, exit-124 timeout skip, connection-refused
+    skip markers, exit-code/stdout matching). The recipes are trivial
+    `echo`/`exit`/`sleep`/`curl` shell one-liners that run identically in the
+    container or the host shell. The recipe-touching classes are already
+    `@skipif(Windows)`, so a POSIX bash + coreutils `timeout` are guaranteed
+    wherever this fixture actually drives a subprocess.
+    """
+    monkeypatch.setattr(
+        _pc, "_agent_container_base",
+        lambda cwd, service_env=None: (["bash", "-lc"], ""),
+    )
 
 
 class TestIsServerRequired:

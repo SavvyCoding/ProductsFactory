@@ -2429,7 +2429,12 @@ async def api_feature_reviews(feature_id: int, db: AsyncSession = Depends(get_db
     result = await db.execute(
         select(FeatureReview)
         .where(FeatureReview.feature_id == feature_id)
-        .order_by(FeatureReview.created_at.desc())
+        # id.desc() is the deterministic tiebreaker: created_at defaults to
+        # server-side now(), which returns the *transaction* start time, so
+        # multiple reviews written in one transaction share an identical
+        # created_at and ordering by it alone is non-deterministic. The
+        # monotonic PK preserves true insertion (= newest-first) order.
+        .order_by(FeatureReview.created_at.desc(), FeatureReview.id.desc())
     )
     return result.scalars().all()
 
@@ -3629,7 +3634,15 @@ async def api_start_session(body: schemas.SessionCreate, db: AsyncSession = Depe
     payload["expected_deadline"] = now + timedelta(minutes=timeout_min)
     session = DBSession(**payload)
     db.add(session)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:
+        # sessions.session_uid is UNIQUE — a duplicate launch (e.g. a retried
+        # POST) must be a clean 409, not an unhandled 500 traceback.
+        raise HTTPException(
+            status_code=409,
+            detail=f"Session with uid {payload.get('session_uid')!r} already exists",
+        )
     await db.execute(text(
         "INSERT INTO session_events (session_id, event, detail) VALUES (:sid, 'launched', :detail)"
     ), {"sid": session.id, "detail": f"persona={session.persona} backend={session.backend}"})

@@ -82,6 +82,12 @@ class _AsyncSessionFacade:
     async def execute(self, *a, **kw):
         return self._s.execute(*a, **kw)
 
+    async def scalar(self, *a, **kw):
+        return self._s.scalar(*a, **kw)
+
+    async def scalars(self, *a, **kw):
+        return self._s.scalars(*a, **kw)
+
     async def get(self, *a, **kw):
         return self._s.get(*a, **kw)
 
@@ -254,7 +260,9 @@ class TestProductDetail:
         make_feature(db, p.id, name="feat", status="Pushed",
                      pr_url="https://github.com/x/y/pull/1", pr_number=1)
         r = client.get(f"/product/{p.id}", auth=AUTH)
-        assert "PR #1" in r.text
+        # The feature row renders the PR as a link to the pr_url labelled "#<n>".
+        assert "https://github.com/x/y/pull/1" in r.text
+        assert "#1" in r.text
 
     def test_shows_blocked_reason(self, client, db):
         p = make_product(db)
@@ -280,7 +288,10 @@ class TestProductDetail:
     def test_analysis_run_button_visible_for_brownfield(self, client, db):
         p = make_product(db, type="brownfield", analysis_status="pending")
         r = client.get(f"/product/{p.id}", auth=AUTH)
-        assert "Run Analysis" in r.text
+        # The button is now an icon action; identify it by its trigger_analysis
+        # form action and "Run analysis" tooltip/aria-label.
+        assert "trigger_analysis" in r.text
+        assert "Run analysis" in r.text
 
     def test_analysis_run_button_hidden_after_done(self, client, db):
         p = make_product(db, type="brownfield", analysis_status="done")
@@ -602,14 +613,21 @@ class TestApiNextProduct:
 
 class TestApiFeatures:
     def test_get_approved_features(self, client, db):
+        # /api/features/approved is the coder-eligibility feed: a feature is
+        # returned only when it's Designed, or Approved *with a design doc*
+        # already written. A bare Approved feature (no design doc) is the
+        # designer's queue, not the coder's, so it's excluded. Pending is
+        # always excluded.
         p = make_product(db)
-        make_feature(db, p.id, "feat-a", status="Approved", priority=10)
-        make_feature(db, p.id, "feat-b", status="Approved", priority=20)
-        make_feature(db, p.id, "feat-c", status="Pending")
+        make_feature(db, p.id, "feat-a", status="Designed", priority=10)
+        make_feature(db, p.id, "feat-b", status="Approved", priority=20,
+                     design_doc_path="docs/feat-b.md")
+        make_feature(db, p.id, "feat-c", status="Approved", priority=5)  # no design doc → excluded
+        make_feature(db, p.id, "feat-d", status="Pending")
         r = client.get(f"/api/features/approved?product_id={p.id}")
         assert r.status_code == 200
         names = [f["name"] for f in r.json()]
-        assert names == ["feat-a", "feat-b"]  # priority order, Pending excluded
+        assert names == ["feat-a", "feat-b"]  # priority order, undesigned + Pending excluded
 
     def test_create_feature_json(self, client, db):
         p = make_product(db)
@@ -716,13 +734,7 @@ class TestResetStuck:
     def test_resets_stale_implementing_to_approved(self, client, db):
         p = make_product(db)
         f = make_feature(db, p.id, status="Implementing")  # no design_doc_path → Approved
-        db.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
-            ),
-            {"id": f.id}
-        )
-        db.flush()
+        self._age_feature(db, f.id, "3 hours")
         r = client.post("/api/features/reset_stuck")
         assert r.status_code == 200
         assert r.json()["reset_count"] == 1
@@ -732,13 +744,7 @@ class TestResetStuck:
     def test_resets_stale_implementing_to_designed_when_has_design_doc(self, client, db):
         p = make_product(db)
         f = make_feature(db, p.id, status="Implementing", design_doc_path="docs/feature_001_design.md")
-        db.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
-            ),
-            {"id": f.id}
-        )
-        db.flush()
+        self._age_feature(db, f.id, "3 hours")
         r = client.post("/api/features/reset_stuck")
         assert r.json()["reset_count"] == 1
         db.refresh(f)
@@ -747,13 +753,7 @@ class TestResetStuck:
     def test_resets_stale_designing(self, client, db):
         p = make_product(db)
         f = make_feature(db, p.id, status="Designing")
-        db.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
-            ),
-            {"id": f.id}
-        )
-        db.flush()
+        self._age_feature(db, f.id, "3 hours")
         r = client.post("/api/features/reset_stuck")
         assert r.json()["reset_count"] == 1
         db.refresh(f)
@@ -762,13 +762,7 @@ class TestResetStuck:
     def test_resets_stale_reviewing(self, client, db):
         p = make_product(db)
         f = make_feature(db, p.id, status="Reviewing", pr_number=42)
-        db.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
-            ),
-            {"id": f.id}
-        )
-        db.flush()
+        self._age_feature(db, f.id, "3 hours")
         r = client.post("/api/features/reset_stuck")
         assert r.json()["reset_count"] == 1
         db.refresh(f)
@@ -779,13 +773,7 @@ class TestResetStuck:
         # never ran. PR was already pushed, so promote forward.
         p = make_product(db)
         f = make_feature(db, p.id, status="Implemented", pr_number=42)
-        db.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
-            ),
-            {"id": f.id}
-        )
-        db.flush()
+        self._age_feature(db, f.id, "3 hours")
         r = client.post("/api/features/reset_stuck")
         assert r.json()["reset_count"] == 1
         db.refresh(f)
@@ -796,13 +784,7 @@ class TestResetStuck:
         # (re-pickable by coder via Designed branch of next-for-persona).
         p = make_product(db)
         f = make_feature(db, p.id, status="Implemented", design_doc_path="docs/story_1.md")
-        db.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
-            ),
-            {"id": f.id}
-        )
-        db.flush()
+        self._age_feature(db, f.id, "3 hours")
         r = client.post("/api/features/reset_stuck")
         assert r.json()["reset_count"] == 1
         db.refresh(f)
@@ -812,13 +794,7 @@ class TestResetStuck:
         # Agent wrote Implemented, no PR, no design doc → Approved (designer retries).
         p = make_product(db)
         f = make_feature(db, p.id, status="Implemented")
-        db.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
-            ),
-            {"id": f.id}
-        )
-        db.flush()
+        self._age_feature(db, f.id, "3 hours")
         r = client.post("/api/features/reset_stuck")
         assert r.json()["reset_count"] == 1
         db.refresh(f)
@@ -833,13 +809,7 @@ class TestResetStuck:
     def test_does_not_affect_other_statuses(self, client, db):
         p = make_product(db)
         f = make_feature(db, p.id, status="Blocked")
-        db.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
-            ),
-            {"id": f.id}
-        )
-        db.flush()
+        self._age_feature(db, f.id, "3 hours")
         r = client.post("/api/features/reset_stuck")
         assert r.json()["reset_count"] == 0
         db.refresh(f)
@@ -853,10 +823,34 @@ class TestResetStuck:
         db.add(s); db.flush(); return s
 
     def _age_feature(self, db, fid, interval):
-        db.execute(__import__("sqlalchemy").text(
-            f"UPDATE features SET updated_at = NOW() - INTERVAL '{interval}' WHERE id = :id"),
-            {"id": fid})
-        db.flush()
+        """Backdate a feature's updated_at by `interval` ('3 hours', '7 minutes').
+
+        The previous raw `UPDATE ... updated_at = NOW() - INTERVAL + db.flush()`
+        passed locally but found 0 stale rows in CI (all reset_count==1 asserts
+        got 0). Root cause: the trailing ORM flush re-stamped updated_at back to
+        now() via the column's onupdate=func.now(). This version is CI-robust:
+        a Core UPDATE with an EXPLICIT updated_at value (onupdate only fills
+        columns NOT in the SET, so an explicit value wins), computed off the same
+        aware-UTC clock the endpoint's cutoff uses, and no trailing flush —
+        expire_all() forces the endpoint (same session) to re-read the row.
+        """
+        import sqlalchemy as sa
+        # features carries a BEFORE UPDATE trigger (trg_features_updated →
+        # set_updated_at(), migration 001) that forces updated_at=now() on EVERY
+        # update. It exists in the alembic-built schema (CI) but NOT the
+        # create_all schema (local test_engine), so a plain backdating UPDATE was
+        # silently reset to now() in CI — every reset_count==1 assert saw 0 while
+        # passing locally. Disable user triggers on the table for just this
+        # UPDATE so the backdate sticks; DISABLE/ENABLE TRIGGER USER is a no-op
+        # where the trigger is absent, so this is schema-agnostic. Raw SQL (not
+        # sa.update) so the ORM's onupdate=func.now() doesn't re-stamp it either.
+        db.execute(sa.text("ALTER TABLE features DISABLE TRIGGER USER"))
+        db.execute(
+            sa.text(f"UPDATE features SET updated_at = NOW() - INTERVAL '{interval}' WHERE id = :id"),
+            {"id": fid},
+        )
+        db.execute(sa.text("ALTER TABLE features ENABLE TRIGGER USER"))
+        db.expire_all()
 
     def test_skips_implemented_while_coder_session_active(self, client, db):
         # An Implemented feature whose product still has a live (wrapping) coder
@@ -1216,10 +1210,17 @@ class TestPersonaRouting:
         r = client.get(f"/api/features/next-for-persona?persona=reviewer&product_id={p.id}")
         assert r.json() is None
 
-    def test_unknown_persona_rejected(self, client, db):
+    def test_unknown_persona_returns_no_work(self, client, db):
+        # next-for-persona only assigns work for the three dispatch personas
+        # (designer/coder/reviewer). Any other persona — maintenance personas
+        # like documenter/security_auditor, or an unrecognised name — falls
+        # through to the "discover your own work" branch and gets a null body
+        # (200), never a match. There is deliberately no persona whitelist here.
         p = make_product(db)
+        make_feature(db, p.id, status="Approved")  # would be dispatched to a real persona
         r = client.get(f"/api/features/next-for-persona?persona=hacker&product_id={p.id}")
-        assert r.status_code == 422
+        assert r.status_code == 200
+        assert r.json() is None
 
     def test_next_product_includes_designed_features(self, client, db):
         p = make_product(db, status="ready")
@@ -1306,11 +1307,17 @@ class TestApiSessions:
         )
         assert patch_r.status_code == 200
         body = patch_r.json()
-        # Status and exit_code must be preserved at the killed values…
-        assert body["status"] == "killed"
+        # exit_code must be preserved at the killed value (-1), NOT clobbered to
+        # the incoming 0. SessionOut doesn't serialise `status`, so we assert the
+        # guarded status directly on the DB row (the endpoint mutated it on the
+        # same session the `db` fixture wraps).
         assert body["exit_code"] == -1
         # …but features_pushed must still be merged in.
         assert body["features_pushed"] == 2
+        killed = db.get(DBSession, session_id)
+        assert killed.status == "killed"
+        assert killed.exit_code == -1
+        assert killed.features_pushed == 2
 
 
 class TestFeatureReviews:

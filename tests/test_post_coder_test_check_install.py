@@ -107,8 +107,19 @@ def test_pytest_console_script_mismatch_is_env_broken(tmp_path):
     assert result["passed"] is False
 
 
-def test_pip_install_failure_is_env_broken(tmp_path):
-    """Failed pip install does not bounce the agent — it's an env issue."""
+def test_pip_install_bad_dependency_is_coder_bounce(tmp_path):
+    """A pip-install failure caused by an UNRESOLVABLE dependency in
+    requirements.txt (bogus name / nonexistent version / unsatisfiable
+    constraint) is the CODER's bug, not an infra break.
+
+    Tightened classification 2026-06-08 (post_coder.py ~L2799): counting
+    bad-dependency failures as env_broken let features oscillate instead of
+    climbing to a clean cap-Block (canonical testingcalc #1423 — Guard 18
+    told the coder to declare deps, it declared an unresolvable package, and
+    env_broken kept resetting fix_attempts → flap loop → rapid_flap Block).
+    So `No matching distribution found` → env_broken=False, a real bounce
+    with a pointed message; pytest never runs.
+    """
     (tmp_path / "pytest.ini").write_text("[pytest]\ntestpaths = tests\n")
     (tmp_path / "requirements.txt").write_text("nonexistent-pkg-xyz\n")
 
@@ -118,11 +129,38 @@ def test_pip_install_failure_is_env_broken(tmp_path):
     ])
     result = _post_coder_test_check(str(tmp_path), _run, product_name="t")
 
-    assert result["env_broken"] is True
+    assert result["env_broken"] is False   # coder's bug → real bounce, fix_attempts++
     assert result["passed"] is False
-    assert "pip install" in result["first_failure"]
+    # Message points the coder at the offending requirement.
+    assert "pip cannot install" in result["first_failure"]
+    assert "No matching distribution found" in result["first_failure"]
     # pytest never ran (no pytest call recorded) — match list membership since
     # the gate now invokes `python -m pytest` (cmd[0] would be "python").
+    assert not any("pytest" in c["cmd"] for c in calls)
+
+
+def test_pip_install_infra_failure_is_env_broken(tmp_path):
+    """A pip-install failure with NO unresolvable-dependency signature —
+    i.e. a genuine infra/transient failure (network drop, wheel-build
+    toolchain, disk) — stays env_broken: no fix_attempts bump, operator
+    alert. This is the half of the 2026-06-08 split that still protects the
+    coder from being punished for the environment.
+    """
+    (tmp_path / "pytest.ini").write_text("[pytest]\ntestpaths = tests\n")
+    (tmp_path / "requirements.txt").write_text("flask\n")
+
+    _run, calls = _make_recorder([
+        {"match": "pip install", "returncode": 1,
+         "stderr": "WARNING: Retrying (Retry(total=0, ...)) after connection "
+                   "broken by 'NewConnectionError': Failed to establish a new "
+                   "connection: [Errno -3] Temporary failure in name resolution"},
+    ])
+    result = _post_coder_test_check(str(tmp_path), _run, product_name="t")
+
+    assert result["env_broken"] is True    # infra/transient → no bump
+    assert result["passed"] is False
+    assert "infra/transient" in result["first_failure"]
+    # pytest never ran.
     assert not any("pytest" in c["cmd"] for c in calls)
 
 
