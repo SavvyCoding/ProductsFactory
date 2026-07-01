@@ -60,6 +60,58 @@ class TestReviewerAutoMergeNoSprintShortCircuit:
         assert out[0]["pr_number"] is None
 
 
+class TestReviewerMerge405AlreadyMergedRace:
+    """A 405 on the merge PUT is ambiguous. If a racing path (the per-cycle
+    sweep) already merged the PR between our pre-check and this attempt, the 405
+    means 'already merged', NOT a conflict — the reviewer path must re-check and
+    mark Pushed, not write a spurious changes_requested + Implementing bounce.
+    Regression for HCS #2218 / #2212 (shipped Pushed+changes_requested)."""
+
+    def _run(self, *, recheck_json, merge_status=405):
+        _set_pm_url()
+        from orchestrator.pipelines import auto_merge_reviewer
+        product = {"id": 9, "name": "P", "github_repo": "https://github.com/o/r.git"}
+        features = [{"id": 1, "review_outcome": "approved", "pr_number": 200}]
+
+        pre_check = MagicMock(status_code=200, headers={"content-type": "application/json"},
+                              json=MagicMock(return_value={"state": "open", "merged_at": None}))
+        recheck = MagicMock(status_code=200, headers={"content-type": "application/json"},
+                            json=MagicMock(return_value=recheck_json))
+        upd = MagicMock(status_code=422, text="up-to-date")
+        merge_405 = MagicMock(status_code=merge_status,
+                              headers={"content-type": "application/json"}, text="not mergeable",
+                              json=MagicMock(return_value={"message": "Pull Request is not mergeable"}))
+        with patch.object(auto_merge_reviewer, "_get_gh_token", return_value="tok"), \
+             patch.object(auto_merge_reviewer.httpx, "get", side_effect=[pre_check, recheck]), \
+             patch.object(auto_merge_reviewer.httpx, "put", side_effect=[upd, merge_405]), \
+             patch.object(auto_merge_reviewer.httpx, "post", return_value=MagicMock(status_code=201)) as post:
+            out = auto_merge_reviewer._auto_merge_approved(product, features)
+        return out[0], post
+
+    def test_405_already_merged_by_race_marks_pushed_not_bounced(self):
+        # Racing sweep merged it → re-check shows merged_at set.
+        entry, post = self._run(recheck_json={"state": "closed", "merged_at": "2026-07-01T18:57:40Z"})
+        assert entry["status"] == "Pushed"
+        assert entry["pr_number"] is None
+        # THE BUG: must NOT stamp changes_requested on an already-merged feature.
+        assert entry.get("review_outcome") != "changes_requested"
+        post.assert_not_called()  # no spurious "merge conflict" comment
+
+    def test_405_genuine_conflict_still_bounces_changes_requested(self):
+        # PR still open + not mergeable → a REAL conflict; preserve the bounce.
+        entry, post = self._run(recheck_json={"state": "open", "merged_at": None})
+        assert entry["status"] == "Implementing"
+        assert entry["review_outcome"] == "changes_requested"
+        post.assert_called_once()  # conflict comment posted
+
+    def test_405_racing_close_requeues_without_changes_requested(self):
+        # PR closed without merging (racing close) → re-queue, neutral outcome.
+        entry, post = self._run(recheck_json={"state": "closed", "merged_at": None})
+        assert entry["status"] == "Implementing"
+        assert entry.get("review_outcome") is None
+        post.assert_not_called()
+
+
 class TestSweepMergesSessionPR:
     """Under 1-PR every approved session PR is merged independently."""
 

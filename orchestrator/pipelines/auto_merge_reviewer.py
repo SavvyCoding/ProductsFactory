@@ -192,16 +192,61 @@ def _auto_merge_approved(product: dict, features: list[dict]) -> list[dict]:
                     log.warning(f"[auto-merge] PR #{pr_number} still reports draft after polling — skipping (no destructive close)")
                     continue
                 if resp.status_code == 405 or "not mergeable" in gh_msg.lower():
-                    # Conflicts — re-queue the feature for the coder to rebase.
-                    # Keep pr_number set and add a review comment to the PR
-                    # explaining the bounce; the coder's rework path (Fix #2 in
-                    # _run_post_coder_pipeline) will detect the existing PR and
-                    # force-push fresh main-based commits to its branch.
-                    # IMPORTANT: review_outcome must be "changes_requested" so
-                    # the dispatcher's codeable check matches and the next coder
-                    # cycle picks this feature up immediately. Setting it to
-                    # None would leave the feature in in_agent_stuck for ~45min
-                    # until reset_stuck nudged it.
+                    # A 405 / "not mergeable" is AMBIGUOUS: a real merge conflict,
+                    # OR a racing merge path (the per-cycle auto_merge.py sweep)
+                    # already merged/closed this PR between our pre-check (above)
+                    # and this PUT. The pre-check only catches "already merged
+                    # BEFORE we tried"; it can't see a merge that lands DURING our
+                    # attempt. Treating that already-merged 405 as a conflict
+                    # writes a spurious changes_requested + Implementing bounce
+                    # onto a feature that actually shipped — leaving it Pushed
+                    # with review_outcome=changes_requested and tripping the
+                    # changes_requested_merge detector (canonical: HCS #2218 /
+                    # #2212, 2026-07-01). Re-fetch the PR and let reality decide
+                    # BEFORE bouncing (same guard as the pre-merge check, applied
+                    # to the post-attempt window).
+                    try:
+                        recheck = httpx.get(
+                            f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}",
+                            headers=gh_headers, timeout=10,
+                        )
+                        rj = recheck.json() if recheck.status_code == 200 else {}
+                    except Exception as _re:
+                        log.warning(f"[auto-merge] PR #{pr_number} 405 re-check failed: {_re}")
+                        rj = {}
+                    if rj.get("merged_at"):
+                        # A racing path won — the PR is merged. The 405 was
+                        # "already merged", not a conflict. Mark Pushed, not a bounce.
+                        log.info(
+                            f"[auto-merge] PR #{pr_number} was merged by a racing path "
+                            f"(405 = already-merged, not a conflict) — marking feature #{fid} Pushed"
+                        )
+                        entry.update({"status": "Pushed", "pr_number": None})
+                        continue
+                    if rj.get("state") == "closed":
+                        # Closed without merging (racing close) — re-queue with a
+                        # neutral outcome, NOT changes_requested (no reviewer
+                        # rejected the code; the PR just vanished).
+                        log.info(
+                            f"[auto-merge] PR #{pr_number} closed w/o merge — re-queuing feature #{fid} to Implementing"
+                        )
+                        entry.update({
+                            "status": "Implementing",
+                            "pr_number": None,
+                            "review_outcome": None,
+                            "review_notes": f"PR #{pr_number} was closed without merging — coder will rebase and reopen.",
+                        })
+                        continue
+                    # Genuinely still open + not mergeable → a REAL conflict.
+                    # Re-queue the feature for the coder to rebase. Keep pr_number
+                    # set and add a review comment to the PR explaining the bounce;
+                    # the coder's rework path (Fix #2 in _run_post_coder_pipeline)
+                    # will detect the existing PR and force-push fresh main-based
+                    # commits to its branch. IMPORTANT: review_outcome must be
+                    # "changes_requested" so the dispatcher's codeable check
+                    # matches and the next coder cycle picks this feature up
+                    # immediately. Setting it to None would leave the feature in
+                    # in_agent_stuck for ~45min until reset_stuck nudged it.
                     httpx.post(
                         f"https://api.github.com/repos/{repo_slug}/issues/{pr_number}/comments",
                         json={"body": (
