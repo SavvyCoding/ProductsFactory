@@ -82,6 +82,12 @@ class _AsyncSessionFacade:
     async def execute(self, *a, **kw):
         return self._s.execute(*a, **kw)
 
+    async def scalar(self, *a, **kw):
+        return self._s.scalar(*a, **kw)
+
+    async def scalars(self, *a, **kw):
+        return self._s.scalars(*a, **kw)
+
     async def get(self, *a, **kw):
         return self._s.get(*a, **kw)
 
@@ -254,7 +260,9 @@ class TestProductDetail:
         make_feature(db, p.id, name="feat", status="Pushed",
                      pr_url="https://github.com/x/y/pull/1", pr_number=1)
         r = client.get(f"/product/{p.id}", auth=AUTH)
-        assert "PR #1" in r.text
+        # The feature row renders the PR as a link to the pr_url labelled "#<n>".
+        assert "https://github.com/x/y/pull/1" in r.text
+        assert "#1" in r.text
 
     def test_shows_blocked_reason(self, client, db):
         p = make_product(db)
@@ -280,7 +288,10 @@ class TestProductDetail:
     def test_analysis_run_button_visible_for_brownfield(self, client, db):
         p = make_product(db, type="brownfield", analysis_status="pending")
         r = client.get(f"/product/{p.id}", auth=AUTH)
-        assert "Run Analysis" in r.text
+        # The button is now an icon action; identify it by its trigger_analysis
+        # form action and "Run analysis" tooltip/aria-label.
+        assert "trigger_analysis" in r.text
+        assert "Run analysis" in r.text
 
     def test_analysis_run_button_hidden_after_done(self, client, db):
         p = make_product(db, type="brownfield", analysis_status="done")
@@ -602,14 +613,21 @@ class TestApiNextProduct:
 
 class TestApiFeatures:
     def test_get_approved_features(self, client, db):
+        # /api/features/approved is the coder-eligibility feed: a feature is
+        # returned only when it's Designed, or Approved *with a design doc*
+        # already written. A bare Approved feature (no design doc) is the
+        # designer's queue, not the coder's, so it's excluded. Pending is
+        # always excluded.
         p = make_product(db)
-        make_feature(db, p.id, "feat-a", status="Approved", priority=10)
-        make_feature(db, p.id, "feat-b", status="Approved", priority=20)
-        make_feature(db, p.id, "feat-c", status="Pending")
+        make_feature(db, p.id, "feat-a", status="Designed", priority=10)
+        make_feature(db, p.id, "feat-b", status="Approved", priority=20,
+                     design_doc_path="docs/feat-b.md")
+        make_feature(db, p.id, "feat-c", status="Approved", priority=5)  # no design doc → excluded
+        make_feature(db, p.id, "feat-d", status="Pending")
         r = client.get(f"/api/features/approved?product_id={p.id}")
         assert r.status_code == 200
         names = [f["name"] for f in r.json()]
-        assert names == ["feat-a", "feat-b"]  # priority order, Pending excluded
+        assert names == ["feat-a", "feat-b"]  # priority order, undesigned + Pending excluded
 
     def test_create_feature_json(self, client, db):
         p = make_product(db)
@@ -1216,10 +1234,17 @@ class TestPersonaRouting:
         r = client.get(f"/api/features/next-for-persona?persona=reviewer&product_id={p.id}")
         assert r.json() is None
 
-    def test_unknown_persona_rejected(self, client, db):
+    def test_unknown_persona_returns_no_work(self, client, db):
+        # next-for-persona only assigns work for the three dispatch personas
+        # (designer/coder/reviewer). Any other persona — maintenance personas
+        # like documenter/security_auditor, or an unrecognised name — falls
+        # through to the "discover your own work" branch and gets a null body
+        # (200), never a match. There is deliberately no persona whitelist here.
         p = make_product(db)
+        make_feature(db, p.id, status="Approved")  # would be dispatched to a real persona
         r = client.get(f"/api/features/next-for-persona?persona=hacker&product_id={p.id}")
-        assert r.status_code == 422
+        assert r.status_code == 200
+        assert r.json() is None
 
     def test_next_product_includes_designed_features(self, client, db):
         p = make_product(db, status="ready")
@@ -1306,11 +1331,17 @@ class TestApiSessions:
         )
         assert patch_r.status_code == 200
         body = patch_r.json()
-        # Status and exit_code must be preserved at the killed values…
-        assert body["status"] == "killed"
+        # exit_code must be preserved at the killed value (-1), NOT clobbered to
+        # the incoming 0. SessionOut doesn't serialise `status`, so we assert the
+        # guarded status directly on the DB row (the endpoint mutated it on the
+        # same session the `db` fixture wraps).
         assert body["exit_code"] == -1
         # …but features_pushed must still be merged in.
         assert body["features_pushed"] == 2
+        killed = db.get(DBSession, session_id)
+        assert killed.status == "killed"
+        assert killed.exit_code == -1
+        assert killed.features_pushed == 2
 
 
 class TestFeatureReviews:

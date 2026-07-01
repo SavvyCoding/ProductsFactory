@@ -155,11 +155,18 @@ RUNNER_MODULE = "orchestrator.docker_runner"
 
 
 @pytest.fixture
-def product():
+def product(tmp_path):
+    # Real, existing working dir (was a hardcoded '/home/user/...' path that
+    # doesn't resolve off the original dev box — docker_runner then tried to
+    # re-install templates into it and raised FileNotFoundError, failing the
+    # whole class in CI). tmp_path is portable + writable so the template
+    # re-install succeeds and the command-construction assertions still run.
+    wd = tmp_path / "my_test_product"
+    wd.mkdir()
     return {
         "id": "abc123",
         "name": "My Test Product",
-        "working_dir": "/home/user/products/my_test_product",
+        "working_dir": str(wd),
     }
 
 
@@ -225,40 +232,56 @@ class TestDockerRunCommand:
         docker_runner.run_claude_in_docker(product)
         assert "--privileged" not in captured_cmd
 
-    def test_claude_dir_mounted_readonly(self, product, env_vars, tmp_path, monkeypatch):
+    def test_claude_credentials_never_exposed_writable(self, product, env_vars, tmp_path, monkeypatch):
+        """Security: the host's real ~/.claude credentials are never bind-mounted
+        writable into the container.
+
+        The mount target moved from /root/.claude to /home/agent/.claude (the
+        container now runs as non-root user `agent`, UID 1001). The runner
+        stages a disposable copy of only the auth files and mounts THAT at
+        /home/agent/.claude — read-write is safe there because it's a throwaway
+        temp dir (source path prefix ``pf_claude_creds_``), so writes never reach
+        the host. A read-only (:ro) direct mount of the originals is only the
+        copy-failure fallback. Either way, the host's real credentials dir
+        (CLAUDE_DIR) is never exposed writable inside the container.
+        """
         from orchestrator import docker_runner
         captured_cmd, _ = _setup_runner(monkeypatch, docker_runner, tmp_path)
 
         docker_runner.run_claude_in_docker(product)
 
-        # Find the ~/.claude mount — must end with :ro
+        # Find the ~/.claude mount(s) at the current (non-root) target path.
         claude_mounts = [
             arg for arg in captured_cmd
-            if "/root/.claude" in arg
+            if "/home/agent/.claude" in arg
         ]
-        assert len(claude_mounts) >= 1
-        assert all(m.endswith(":ro") for m in claude_mounts), \
-            f"~/.claude mount must be :ro, got: {claude_mounts}"
+        assert len(claude_mounts) >= 1, f"expected a Claude creds mount, cmd={captured_cmd}"
+        for m in claude_mounts:
+            staged_copy = "pf_claude_creds_" in m   # disposable temp copy, not the originals
+            read_only = m.endswith(":ro")
+            assert staged_copy or read_only, \
+                f"Claude creds mount must be a staged disposable copy or :ro, got: {m}"
+            # The host's real credentials dir (CLAUDE_DIR == tmp_path here) must
+            # never be bind-mounted writable into the container.
+            assert str(tmp_path) not in m or read_only, \
+                f"host CLAUDE_DIR must not be exposed writable in container: {m}"
 
-    def test_deploy_key_mounted_as_file_not_dir(self, product, env_vars, tmp_path, monkeypatch):
-        """Verify only the deploy key FILE is mounted, not the entire .ssh dir.
-        Mounting the whole dir would overwrite known_hosts baked into the image."""
+    def test_no_ssh_deploy_key_mounted(self, product, env_vars, tmp_path, monkeypatch):
+        """SSH deploy keys are retired: git auth is GitHub App installation
+        tokens only (see CLAUDE.md Auth & Security). The runner must not mount
+        any ~/.ssh deploy key into the container — even when a legacy per-product
+        key file happens to exist on disk."""
         from orchestrator import docker_runner
 
-        # Create a per-product deploy key
+        # A stale per-product deploy key must be ignored, not mounted.
         key_file = tmp_path / "id_ed25519_my_test_product"
         key_file.write_text("fake-key-content")
 
         captured_cmd, _ = _setup_runner(monkeypatch, docker_runner, tmp_path)
         docker_runner.run_claude_in_docker(product)
 
-        # The SSH mount must go to /root/.ssh/id_ed25519 (specific file), not /root/.ssh/
-        ssh_mounts = [arg for arg in captured_cmd if "/root/.ssh" in arg]
-        assert len(ssh_mounts) >= 1
-        for m in ssh_mounts:
-            assert "/root/.ssh/id_ed25519" in m, f"Must mount specific file, got: {m}"
-            assert m.endswith(":ro"), f"Deploy key must be :ro, got: {m}"
-            assert not m.split(":")[1].endswith("/.ssh/"), f"Must not mount entire .ssh dir: {m}"
+        ssh_mounts = [arg for arg in captured_cmd if "/root/.ssh" in arg or "/home/agent/.ssh" in arg]
+        assert ssh_mounts == [], f"SSH deploy-key mounting is retired, got: {ssh_mounts}"
 
     def test_uses_rm_flag(self, product, env_vars, tmp_path, monkeypatch):
         from orchestrator import docker_runner
@@ -298,7 +321,7 @@ class TestDockerRunCommand:
         captured_cmd, _ = _setup_runner(monkeypatch, docker_runner, tmp_path)
         monkeypatch.setattr(docker_runner, "AGENT_BACKEND", "ollama")
         docker_runner.run_claude_in_docker(product, persona="coder")
-        claude_mounts = [a for a in captured_cmd if "/root/.claude" in a]
+        claude_mounts = [a for a in captured_cmd if "/home/agent/.claude" in a]
         assert claude_mounts == [], "Ollama backend must not mount Claude OAuth dir"
 
     def test_persona_env_var_injected(self, product, env_vars, tmp_path, monkeypatch):
@@ -311,28 +334,13 @@ class TestDockerRunCommand:
 # ── Session lock guard tests ──────────────────────────────────────────────────
 
 class TestSessionLockGuard:
-    def test_skips_launch_when_lock_exists(self, tmp_path, monkeypatch):
-        from orchestrator import docker_runner
-        lock = tmp_path / "session.lock"
-        lock.write_text("locked")
-
-        product = {"name": "Locked Product", "id": "6", "working_dir": str(tmp_path)}
-
-        popen_called = []
-        monkeypatch.setenv("PM_API_URL", "http://pm-api:8080")
-        monkeypatch.setattr(docker_runner, "PM_API_URL", "http://pm-api:8080")
-        monkeypatch.setattr(docker_runner, "SSH_DIR", tmp_path)
-        monkeypatch.setattr(docker_runner, "CLAUDE_DIR", tmp_path)
-        monkeypatch.setattr(docker_runner, "AGENT_BACKEND", "claude")
-        fake_client = MagicMock()
-        fake_client.__enter__ = MagicMock(return_value=fake_client)
-        fake_client.__exit__ = MagicMock(return_value=False)
-        monkeypatch.setattr("httpx.Client", lambda *a, **kw: fake_client)
-        monkeypatch.setattr("subprocess.Popen", lambda cmd, **kw: popen_called.append(cmd))
-
-        result = docker_runner.run_claude_in_docker(product)
-        assert result == 1
-        assert popen_called == [], "Docker must not be launched when session.lock exists"
+    # NOTE: the host-mode poller's file-based session.lock guard (orchestrator/
+    # cycle/locks.py) was retired with the host-mode poller (2026-05-18).
+    # Concurrency is now serialized by the DB active-session check + per-product
+    # mutex in the website / tools.py, not a working_dir lock file. The old
+    # test_skips_launch_when_lock_exists (asserted run_claude_in_docker returns 1
+    # and never calls Popen when a session.lock exists) was removed because that
+    # code path no longer exists — a stray session.lock file is ignored.
 
     def test_launches_when_no_lock(self, tmp_path, monkeypatch):
         from orchestrator import docker_runner

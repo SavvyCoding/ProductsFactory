@@ -47,6 +47,21 @@ class TestRoundTrip:
 
 class TestVerifyDependency:
     """The FastAPI dependency: opt-in based on env var, raises 401 on mismatch."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_auth_module(self):
+        # Each test below sets PF_INTERNAL_API_SECRET then importlib.reload()s
+        # website.auth to re-capture the module-level _INTERNAL_API_SECRET.
+        # monkeypatch restores the ENV VAR on teardown but NOT the reloaded
+        # module var, so the test secret leaked and made every later file's
+        # internal-signature endpoint 401 (caught test_website's terminal-state
+        # guard in the full-suite run). Reload once more with the env cleared so
+        # _INTERNAL_API_SECRET returns to its "" default.
+        yield
+        import os, importlib, website.auth
+        os.environ.pop("PF_INTERNAL_API_SECRET", None)
+        importlib.reload(website.auth)
+
     @pytest.mark.asyncio
     async def test_noop_when_secret_unset(self, monkeypatch):
         monkeypatch.delenv("PF_INTERNAL_API_SECRET", raising=False)
