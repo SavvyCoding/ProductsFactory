@@ -734,13 +734,7 @@ class TestResetStuck:
     def test_resets_stale_implementing_to_approved(self, client, db):
         p = make_product(db)
         f = make_feature(db, p.id, status="Implementing")  # no design_doc_path → Approved
-        db.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
-            ),
-            {"id": f.id}
-        )
-        db.flush()
+        self._age_feature(db, f.id, "3 hours")
         r = client.post("/api/features/reset_stuck")
         assert r.status_code == 200
         assert r.json()["reset_count"] == 1
@@ -750,13 +744,7 @@ class TestResetStuck:
     def test_resets_stale_implementing_to_designed_when_has_design_doc(self, client, db):
         p = make_product(db)
         f = make_feature(db, p.id, status="Implementing", design_doc_path="docs/feature_001_design.md")
-        db.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
-            ),
-            {"id": f.id}
-        )
-        db.flush()
+        self._age_feature(db, f.id, "3 hours")
         r = client.post("/api/features/reset_stuck")
         assert r.json()["reset_count"] == 1
         db.refresh(f)
@@ -765,13 +753,7 @@ class TestResetStuck:
     def test_resets_stale_designing(self, client, db):
         p = make_product(db)
         f = make_feature(db, p.id, status="Designing")
-        db.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
-            ),
-            {"id": f.id}
-        )
-        db.flush()
+        self._age_feature(db, f.id, "3 hours")
         r = client.post("/api/features/reset_stuck")
         assert r.json()["reset_count"] == 1
         db.refresh(f)
@@ -780,13 +762,7 @@ class TestResetStuck:
     def test_resets_stale_reviewing(self, client, db):
         p = make_product(db)
         f = make_feature(db, p.id, status="Reviewing", pr_number=42)
-        db.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
-            ),
-            {"id": f.id}
-        )
-        db.flush()
+        self._age_feature(db, f.id, "3 hours")
         r = client.post("/api/features/reset_stuck")
         assert r.json()["reset_count"] == 1
         db.refresh(f)
@@ -797,13 +773,7 @@ class TestResetStuck:
         # never ran. PR was already pushed, so promote forward.
         p = make_product(db)
         f = make_feature(db, p.id, status="Implemented", pr_number=42)
-        db.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
-            ),
-            {"id": f.id}
-        )
-        db.flush()
+        self._age_feature(db, f.id, "3 hours")
         r = client.post("/api/features/reset_stuck")
         assert r.json()["reset_count"] == 1
         db.refresh(f)
@@ -814,13 +784,7 @@ class TestResetStuck:
         # (re-pickable by coder via Designed branch of next-for-persona).
         p = make_product(db)
         f = make_feature(db, p.id, status="Implemented", design_doc_path="docs/story_1.md")
-        db.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
-            ),
-            {"id": f.id}
-        )
-        db.flush()
+        self._age_feature(db, f.id, "3 hours")
         r = client.post("/api/features/reset_stuck")
         assert r.json()["reset_count"] == 1
         db.refresh(f)
@@ -830,13 +794,7 @@ class TestResetStuck:
         # Agent wrote Implemented, no PR, no design doc → Approved (designer retries).
         p = make_product(db)
         f = make_feature(db, p.id, status="Implemented")
-        db.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
-            ),
-            {"id": f.id}
-        )
-        db.flush()
+        self._age_feature(db, f.id, "3 hours")
         r = client.post("/api/features/reset_stuck")
         assert r.json()["reset_count"] == 1
         db.refresh(f)
@@ -851,13 +809,7 @@ class TestResetStuck:
     def test_does_not_affect_other_statuses(self, client, db):
         p = make_product(db)
         f = make_feature(db, p.id, status="Blocked")
-        db.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE features SET updated_at = NOW() - INTERVAL '3 hours' WHERE id = :id"
-            ),
-            {"id": f.id}
-        )
-        db.flush()
+        self._age_feature(db, f.id, "3 hours")
         r = client.post("/api/features/reset_stuck")
         assert r.json()["reset_count"] == 0
         db.refresh(f)
@@ -871,10 +823,27 @@ class TestResetStuck:
         db.add(s); db.flush(); return s
 
     def _age_feature(self, db, fid, interval):
-        db.execute(__import__("sqlalchemy").text(
-            f"UPDATE features SET updated_at = NOW() - INTERVAL '{interval}' WHERE id = :id"),
-            {"id": fid})
-        db.flush()
+        """Backdate a feature's updated_at by `interval` ('3 hours', '7 minutes').
+
+        The previous raw `UPDATE ... updated_at = NOW() - INTERVAL + db.flush()`
+        passed locally but found 0 stale rows in CI (all reset_count==1 asserts
+        got 0). Root cause: the trailing ORM flush re-stamped updated_at back to
+        now() via the column's onupdate=func.now(). This version is CI-robust:
+        a Core UPDATE with an EXPLICIT updated_at value (onupdate only fills
+        columns NOT in the SET, so an explicit value wins), computed off the same
+        aware-UTC clock the endpoint's cutoff uses, and no trailing flush —
+        expire_all() forces the endpoint (same session) to re-read the row.
+        """
+        import sqlalchemy as sa
+        n, unit = interval.split()
+        key = "minutes" if unit.startswith("min") else "hours"
+        db.execute(
+            sa.update(Feature)
+            .where(Feature.id == fid)
+            .values(updated_at=datetime.now(timezone.utc) - timedelta(**{key: float(n)}))
+            .execution_options(synchronize_session=False)
+        )
+        db.expire_all()
 
     def test_skips_implemented_while_coder_session_active(self, client, db):
         # An Implemented feature whose product still has a live (wrapping) coder
