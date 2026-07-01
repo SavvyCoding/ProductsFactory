@@ -172,6 +172,32 @@ _DEFAULTS = {
     "supervisor_no_progress_min_minutes":       45,
     "supervisor_no_progress_threshold":         3,
     "supervisor_no_progress_window":            8,
+    # detect_designer_bounce (designer-starvation guard): a feature in the
+    # designer pool (Approved, no design_doc_path) that is repeatedly claimed
+    # (→Designing) and rolled back to Approved with NO design doc produced —
+    # the designer keeps finding nothing to design (the work is already shipped
+    # by an overlapping/duplicate feature, or the story is moot). rapid_flap
+    # misses it: each bounce is only 2 transitions and they're slow (well under
+    # the 10-in-1h bar), so a moot top-ranked feature silently starves the
+    # designer queue forever (canonical: HomeChoreService #1954, a code_auditor
+    # finding already fixed by its sibling #1949 on the same function). Block
+    # after `threshold` Designing→Approved rollbacks within `window_hours`.
+    # max_check caps the per-cycle changelog fetches to the highest-ranked
+    # designer-pool candidates (the bounce always hits the top of the queue).
+    "supervisor_designer_bounce_enabled":       True,
+    "supervisor_designer_bounce_threshold":     3,
+    "supervisor_designer_bounce_window_hours":  24,
+    "supervisor_designer_bounce_max_check":     10,
+    # detect_dead_dependency (dependency-deadlock guard): the dependency gate
+    # (cycle/dependencies.py) only releases a feature when its depends_on target
+    # reaches Pushed. If the target is terminal-non-Pushed (Rejected/Reverted/
+    # Deferred) it never will, so the dependent feature is frozen forever with no
+    # signal (canonical: HomeChoreService #1786, Designed, depends_on the
+    # Rejected #1785). Block the dependent for PM review — the dep target's
+    # status is already in the per-cycle features payload, so this is a pure
+    # in-memory check (no extra API calls). No threshold: a dead dep is an
+    # immediate, deterministic deadlock.
+    "supervisor_dead_dependency_enabled":       True,
 }
 
 
@@ -1310,6 +1336,21 @@ def detect_divergent_review_feedback(
 # detect_repeated_review_feedback / detect_divergent_review_feedback,
 # only when the session entry carries review_outcome=changes_requested.
 
+# Negative VERDICT in reviewer prose. Verdict markers only — NOT the verb
+# "reject(s)" describing code behavior ("Query rejects empty input"), which a
+# bare "REJECT" substring matched and false-bounced approvals (HCS #1867; 34
+# features in one week). Keep IN SYNC with the copy in session/result_io.py.
+_NEG_VERDICT_RE = re.compile(
+    r"❌"
+    r"|changes[_\s]requested"
+    r"|request(?:ing|s)?\s+changes"
+    r"|\b(?:i|we|reviewer)\s+(?:would\s+)?reject"
+    r"|\breject(?:ing|ed)?\s+(?:this|the\s+(?:pr|merge|commit|change|story|feature))"
+    r"|\bmust\s+(?:be\s+)?(?:reject|rework)",
+    re.IGNORECASE,
+)
+
+
 def detect_reviewer_outcome_text_mismatch(
     *,
     feature_id: int,
@@ -1363,8 +1404,9 @@ def detect_reviewer_outcome_text_mismatch(
             head_upper = upper[:200]
             has_pos_head = ("✅" in head) or ("LGTM" in head_upper) \
                 or ("APPROVED" in head_upper)
-            has_neg_anywhere = ("❌" in latest) or ("CHANGES_REQUESTED" in upper) \
-                or ("REJECT" in upper)
+            # Negative VERDICT only (see _NEG_VERDICT_RE) — not the verb
+            # "rejects" describing validation behavior. HCS #1867.
+            has_neg_anywhere = bool(_NEG_VERDICT_RE.search(latest))
 
             mismatch = False
             kind = ""
@@ -2106,6 +2148,195 @@ def _bounce_author_signature(client, feature_id: int, limit: int = 25) -> str:
         return ", ".join(f"{n}x {a}" for a, n in authors.most_common(3))
     except Exception:
         return ""
+
+
+def _count_designing_rollbacks(client, feature_id: int, within_hours: float) -> int:
+    """Count Designing→Approved status rollbacks for a feature within the
+    window, from its changelog. Each such rollback is one designer session that
+    claimed the feature but produced no design doc (the reconciler reverted it).
+    Best-effort: any fetch/parse failure returns 0 (no false block)."""
+    from datetime import timedelta
+    try:
+        r = client.get(f"/api/features/{feature_id}/changelog")
+        if not (200 <= r.status_code < 300):
+            return 0
+        rows = r.json() or []
+    except Exception:
+        return 0
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=within_hours)
+    n = 0
+    for row in rows:
+        if not isinstance(row, dict) or row.get("field") != "status":
+            continue
+        if row.get("old_value") != "Designing" or row.get("new_value") != "Approved":
+            continue
+        ts = row.get("changed_at")
+        if ts:
+            try:
+                if datetime.fromisoformat(str(ts).replace("Z", "+00:00")) < cutoff:
+                    continue
+            except Exception:
+                pass  # unparseable timestamp → count it rather than miss a bounce
+        n += 1
+    return n
+
+
+def detect_designer_bounce(*, product_id: int, features: list) -> int:
+    """Designer-starvation guard. A feature in the designer pool (Approved, no
+    design_doc_path) that is repeatedly claimed (→Designing) and rolled back to
+    Approved with NO design doc keeps starving the queue: the designer finds
+    nothing to design (already shipped by an overlapping/duplicate feature, or
+    moot) but the feature is re-selected every cycle because it's the top of the
+    pool. rapid_flap misses it (each bounce is 2 slow transitions, well under
+    its 10-in-1h bar). Block after `threshold` Designing→Approved rollbacks in
+    `window_hours`, so a PM sees it and the queue advances. Canonical:
+    HomeChoreService #1954 (a code_auditor finding already fixed by sibling
+    #1949 on the same function). Returns number Blocked (or that would in dry-run).
+    """
+    cfg = _get_supervisor_config()
+    if not cfg["supervisor_designer_bounce_enabled"]:
+        return 0
+    dry_run = cfg["supervisor_dry_run_only"]
+    threshold = int(cfg["supervisor_designer_bounce_threshold"])
+    window = float(cfg["supervisor_designer_bounce_window_hours"])
+    max_check = int(cfg["supervisor_designer_bounce_max_check"])
+
+    candidates = [
+        f for f in (features or [])
+        if isinstance(f, dict)
+        and f.get("status") == "Approved"
+        and not f.get("design_doc_path")
+        and f.get("feature_type") != "infra"
+    ]
+    if not candidates:
+        return 0
+    # The bounce always hits the top of the designer queue, so check the
+    # highest-ranked first and cap the per-cycle changelog fetches. Rank by
+    # priority ASC then id (lower priority number = higher rank), matching the
+    # dispatcher's tiebreak; phase_order isn't in this payload but priority is a
+    # good-enough proxy for *which* candidates to inspect.
+    candidates.sort(key=lambda f: (f.get("priority", 50), f.get("id", 0)))
+    candidates = candidates[:max_check]
+
+    routed = 0
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=15) as client:
+            for f in candidates:
+                fid = f.get("id")
+                if not fid:
+                    continue
+                if _recent_action(product_id=product_id, detector="designer_bounce",
+                                  target_type="feature", target_id=fid, within_hours=24):
+                    continue
+                n = _count_designing_rollbacks(client, fid, window)
+                if n < threshold:
+                    continue
+                reason = (
+                    f"Feature #{fid} was claimed for design and rolled back to "
+                    f"Approved {n}x in {int(window)}h with no design doc produced "
+                    f"— the designer keeps finding nothing to design (work likely "
+                    f"already shipped by an overlapping/duplicate feature, or the "
+                    f"story is moot). Setting status=Blocked for PM review so it "
+                    f"stops starving the designer queue."
+                )
+                _record_action(detector="designer_bounce", product_id=product_id,
+                               target_type="feature", target_id=fid,
+                               action="set_status_blocked", reason=reason, dry_run=dry_run)
+                routed += 1
+                if not dry_run:
+                    try:
+                        client.patch(
+                            f"/api/features/{fid}",
+                            json={
+                                "status": "Blocked",
+                                "blocked_reason": f"Auto-blocked by supervisor.designer_bounce: {reason}",
+                                "changed_by": "supervisor",
+                            },
+                        )
+                    except Exception:
+                        log.exception(f"designer_bounce: Block PATCH failed for #{fid}")
+    except Exception:
+        log.exception(f"designer_bounce detector failed for product {product_id}")
+    return routed
+
+
+# Terminal statuses a depends_on target can sit in that mean it will NEVER reach
+# Pushed → the dependency gate freezes the dependent permanently.
+_DEAD_DEP_STATUSES = {"Rejected", "Reverted", "Deferred"}
+# The dependent states where the dep gate actually freezes a feature: it's
+# waiting for the next agent dispatch (designer/coder) and gets excluded. Active
+# in-session states (Designing/Implementing/Reviewing) are left alone so we don't
+# disrupt a running session.
+_DEAD_DEP_WAITING = {"Approved", "Designed"}
+
+
+def detect_dead_dependency(*, product_id: int, features: list) -> int:
+    """Dependency-deadlock guard. A feature waiting for dispatch (Approved/
+    Designed) whose `depends_on` target is terminal-non-Pushed (Rejected/
+    Reverted/Deferred) is frozen forever — the dependency gate only releases on
+    Pushed, which a terminal dep never reaches. Block the dependent for PM review
+    so the deadlock becomes a visible, actionable row instead of a silently-stuck
+    feature. The dep target's status is read from the same per-cycle `features`
+    payload (no extra API calls). Canonical: HomeChoreService #1786 (Designed,
+    depends_on the Rejected #1785). Returns number Blocked (or would in dry-run).
+    """
+    cfg = _get_supervisor_config()
+    if not cfg["supervisor_dead_dependency_enabled"]:
+        return 0
+    dry_run = cfg["supervisor_dry_run_only"]
+    by_id = {f.get("id"): f for f in (features or [])
+             if isinstance(f, dict) and f.get("id")}
+    if not by_id:
+        return 0
+
+    routed = 0
+    pending: list[tuple[int, int, str, str]] = []  # (fid, dep, dep_status, reason)
+    for f in by_id.values():
+        fid = f.get("id")
+        dep = f.get("depends_on")
+        if not dep or f.get("status") not in _DEAD_DEP_WAITING:
+            continue
+        dep_f = by_id.get(dep)
+        if dep_f is None:
+            continue  # dep not in this product's payload — can't judge; skip
+        dep_status = dep_f.get("status")
+        if dep_status not in _DEAD_DEP_STATUSES:
+            continue
+        if _recent_action(product_id=product_id, detector="dead_dependency",
+                          target_type="feature", target_id=fid, within_hours=24):
+            continue
+        reason = (
+            f"Feature #{fid} depends_on #{dep} which is {dep_status} — a terminal "
+            f"status that will never reach Pushed, so the dependency gate freezes "
+            f"this feature permanently. Setting status=Blocked for PM review: "
+            f"re-open #{dep} if its foundation is still needed, or clear the "
+            f"dependency (it may already be built elsewhere)."
+        )
+        _record_action(detector="dead_dependency", product_id=product_id,
+                       target_type="feature", target_id=fid,
+                       action="set_status_blocked", reason=reason, dry_run=dry_run)
+        routed += 1
+        if not dry_run:
+            pending.append((int(fid), int(dep), dep_status, reason))
+
+    if pending:
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=15) as client:
+                for fid, _dep, _ds, reason in pending:
+                    try:
+                        client.patch(
+                            f"/api/features/{fid}",
+                            json={
+                                "status": "Blocked",
+                                "blocked_reason": f"Auto-blocked by supervisor.dead_dependency: {reason}",
+                                "changed_by": "supervisor",
+                            },
+                        )
+                    except Exception:
+                        log.exception(f"dead_dependency: Block PATCH failed for #{fid}")
+        except Exception:
+            log.exception(f"dead_dependency detector failed for product {product_id}")
+    return routed
 
 
 # ── Detector: unproductive-coder auto-heal ───────────────────────────────────

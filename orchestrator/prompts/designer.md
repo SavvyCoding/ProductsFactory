@@ -512,6 +512,26 @@ correctly, design it normally — don't recursively split.
          - For ACs that genuinely require an external service that
            can't be booted in-process, write `Verify: see unit test`
            and lean on the named test.
+   - [ ] **A `python -c "..."` recipe is ONE line of SIMPLE statements joined
+         by `;` — it CANNOT contain a compound statement with an indented
+         block.** Defining a new `async def`/`def` whose body is `async with`
+         / `with` / `for` / `while` / `if:` / `try:` — crammed after the colon
+         on one line — is a hard **SyntaxError**; the recipe never runs, prints
+         only the env marker, exits 1, and loops the coder on something no
+         `src/` change can fix. (`asyncio.run(existing_coro())` is fine — that
+         CALLS a coroutine; the trap is DEFINING one with a block body inline.)
+         **If verifying the AC needs that kind of setup — e.g. directly mutating
+         DB state via `async with engine.connect(): await conn.execute(update(...))`,
+         seeding rows in a loop, or any multi-statement control flow — it is NOT
+         expressible as a one-liner. Write `Verify: see unit test` and put that
+         exact setup in the named `Test:` (a real pytest function IS multi-line
+         and can express it). Do NOT duplicate the test's async/compound setup
+         into a broken `-c` snippet.** The named `Test:` is the authoritative
+         check for these ACs; a brittle one-liner that duplicates it adds zero
+         coverage and one infinite loop. Canonical: HCS #1864/#1849/#1832 —
+         `async def flip(): async with engine.connect(): ...` jammed into one
+         `-c` line won't compile, while the equivalent multi-line pytest test
+         passes; those ACs should have been `Verify: see unit test`.
    - [ ] **No AC or test depends on a live external service that isn't
          declared.** The agent/test containers provide language toolchains
          and client CLIs — but NO running services. What IS available:

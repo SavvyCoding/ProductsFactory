@@ -55,6 +55,13 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # Host path to the products root — used to map working_dir → /workspace for video serving
       PRODUCTS_BASE_DIR: ${PRODUCTS_BASE_DIR:-}
+      # code_auditor flags are mirrored here (also set on `orchestrator`) so the
+      # PM dashboard can render the Workflow card checkboxes with the EFFECTIVE
+      # state (per-product config override OR global env). Without this the web
+      # container sees them empty and an unchecked box could silently disable the
+      # running soak on save. Values must match the orchestrator service.
+      CODE_AUDITOR_ENABLED: ${CODE_AUDITOR_ENABLED:-}
+      CODE_AUDITOR_FILING_ENABLED: ${CODE_AUDITOR_FILING_ENABLED:-}
     volumes:
       # Mount products root read-only so the PM dashboard can serve output/ videos
       # Set PRODUCTS_BASE_DIR in your .env, e.g. PRODUCTS_BASE_DIR=C:/Users/you/Products
@@ -128,6 +135,23 @@ services:
       # because the post-coder pipeline doesn't currently spin up the app —
       # adding uvicorn-bg startup for FastAPI products is a follow-up.
       POST_CODER_VERIFY_CHECK_ENABLED: ${POST_CODER_VERIFY_CHECK_ENABLED:-}
+      # Code-auditor soak (2026-06-24): read-only whole-product semantic review
+      # (security/correctness/tests) fired after every 2 architect runs. Comment-
+      # only — raises dashboard alerts, files no bugs. Default off; set
+      # CODE_AUDITOR_ENABLED=1 in .env to trial. Per-product opt-out via
+      # product.config.code_auditor.
+      CODE_AUDITOR_ENABLED: ${CODE_AUDITOR_ENABLED:-}
+      # code_auditor cadence: audit after this many architect runs since the last
+      # audit. Default 1 during the soak (one audit per architect pass = max
+      # precision-sample density); steady-state target 2. Recreate (no rebuild)
+      # to change.
+      CODE_AUDIT_ARCHITECT_RUNS: ${CODE_AUDIT_ARCHITECT_RUNS:-1}
+      # Filing promotion (Increment 1, 2026-06-25): when ON, code_auditor FILES
+      # each finding as a `bug` feature (status=Pending → PM triages) instead of
+      # only raising alerts. Severity → priority (Critical 1 / High 5 / Medium 20
+      # / Low 40). No stop-the-line yet (Increment 2 adds the verifier session +
+      # blocker gate). Default off; per-product override product.config.code_auditor_filing.
+      CODE_AUDITOR_FILING_ENABLED: ${CODE_AUDITOR_FILING_ENABLED:-}
       # Agent backend — `ollama` for local/offline/TOS-compliant, `claude` for API
       AGENT_BACKEND:      ${AGENT_BACKEND:-ollama}
       # OLLAMA_HOST: leave overridable via .env so we can switch between local

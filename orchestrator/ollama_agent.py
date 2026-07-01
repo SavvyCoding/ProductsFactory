@@ -404,7 +404,7 @@ def dispatch_tool(name: str, args: dict) -> tuple[str, bool]:
     # filter mutating bash commands (git commit, git add, sed -i, awk -i,
     # tee >>, redirect to file). Read-only bash (ls, cat, grep, pytest,
     # gh pr view, gh pr review) still works.
-    _READONLY_PERSONAS = {"reviewer", "security_auditor"}
+    _READONLY_PERSONAS = {"reviewer", "security_auditor", "code_auditor"}
     # Escalated coder sessions are read-only too — same tool-layer enforcement,
     # so the diagnose-first contract can't be ignored (wave-9).
     _is_readonly = AGENT_PERSONA in _READONLY_PERSONAS or AGENT_ESCALATED

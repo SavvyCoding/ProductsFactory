@@ -127,6 +127,106 @@ HOW to do it on this backend specifically:
 """
 
 
+# ---------------------------------------------------------------------------
+# code_auditor output modes (Increment 1 of the filing promotion, 2026-06-25).
+#
+# The audit (Steps 0-3) is identical in both modes; only the SINK differs, so
+# the prompt body carries a single {code_auditor_output_steps} placeholder and
+# the builder injects exactly one of these. Keeping the switch deterministic
+# (builder picks the block) rather than agent-branched ("if filing is on...")
+# is what stops a local model from doing the wrong half on a bad turn.
+#
+#   comment-only (default)  -> raise dashboard alerts, file nothing (soak)
+#   filing (CODE_AUDITOR_FILING_ENABLED) -> file each finding as a `bug`
+#       feature. Findings land status=Pending (FeatureCreate default), so the
+#       PM triages before any coder session runs — a false positive costs one
+#       rejection, never a wasted session. That's why filing is safe here even
+#       before the Increment-2 verifier session / stop-the-line blocker gate.
+# ---------------------------------------------------------------------------
+_CODE_AUDITOR_ALERT_STEPS = """## Step 4 — Raise each surviving finding as a dashboard alert
+
+Run mode is **comment-only**. Raise **at most 8** findings, highest-severity
+first. For EACH one:
+
+```
+POST {pm_api_url}/api/alerts
+{"product_id": {product_id},
+ "message": "[code-audit][<SEVERITY>][<dimension>] <file:line> — <one-line essence>. Fix: <one-line fix>"}
+```
+
+Keep each `message` to a single line. Lead with `[code-audit]` so the operator can
+filter the soak's output. Do NOT create or modify features or files — alerts only.
+
+---
+
+## Step 5 — Finish
+
+Post one final summary alert:
+
+```
+POST {pm_api_url}/api/alerts
+{"product_id": {product_id},
+ "message": "[code-audit][summary] {product_name}: raised N finding(s) — <C critical / H high / M medium / L low>."}
+```
+
+Then stop. You wrote no files and filed no features — that is correct for this mode."""
+
+_CODE_AUDITOR_FILING_STEPS = """## Step 4 — File each surviving finding as a `bug` feature
+
+Run mode is **filing**. File **at most 8** findings, highest-severity first, as
+bug features in the PM backlog — the coder pipeline fixes what you file, you
+still write NO files yourself. ONE http_request per finding:
+
+```
+POST {pm_api_url}/api/features
+{
+  "product_id": {product_id},
+  "name": "Code-review: <short specific title, max 8 words>",
+  "description": "[<dimension>] <what + where: the defect and the file:line>\\n- <AC1: the observable correct behavior the fix must produce>\\n- <AC2: a Verify-able check — an HTTP status, a persisted row, a real assertion>\\n- <AC3 if needed>",
+  "feature_type": "bug",
+  "source": "ai",
+  "priority": <PRIORITY>
+}
+```
+
+Set `priority` by severity (LOWER number = more urgent): **Critical → 1,
+High → 5, Medium → 20, Low → 40.** Every finding MUST quote the actual code
+(`file:line`) and carry at least two checkable ACs — no speculative findings.
+Filed bugs land as `Pending` for the PM to approve, so a false positive costs
+one rejection, never a wasted coder session. If you already saw this issue as
+an open bug or unread alert in Step 0, do NOT re-file it.
+
+---
+
+## Step 5 — Finish
+
+Post one final summary alert so the run is visible on the dashboard:
+
+```
+POST {pm_api_url}/api/alerts
+{"product_id": {product_id},
+ "message": "[code-audit][summary] {product_name}: filed N bug(s) — <C critical / H high / M medium / L low>."}
+```
+
+Then stop. You wrote no files — you only filed bug features and one summary alert."""
+
+
+def _code_auditor_filing_on(product: dict) -> bool:
+    """Increment 1: resolve the code_auditor filing flag.
+
+    Precedence (mirrors deploy/orchestrator/tools._code_auditor_enabled):
+      1. product.config["code_auditor_filing"] explicit bool wins (per-product).
+      2. else CODE_AUDITOR_FILING_ENABLED env — ON only if truthy.
+    Default OFF — comment-only soak until an operator flips it.
+    """
+    cfg = (product.get("config") or {}).get("code_auditor_filing")
+    if isinstance(cfg, bool):
+        return cfg
+    return os.environ.get("CODE_AUDITOR_FILING_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 def build_prompt(product: dict, session_uid: str, persona: str | None = None, max_features: int | None = None, backend: str = "claude") -> str:
     """
     Returns the full Claude prompt string for this product session.
@@ -169,6 +269,13 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
         # on 2026-05-06 (that merge is unchanged). PM-triggered on-demand
         # only; never auto-scheduled.
         template_name = "security_auditor"
+    elif persona == "code_auditor":
+        # Phase-boundary whole-product review (2026-06-24). Read-only,
+        # product-wide, triggered when a phase settles (tools._run_phase_review_gate).
+        # Comment-only soak mode: raises findings as dashboard alerts, files no
+        # bugs. Distinct from per-PR reviewer (one diff) and drift detectors
+        # (pattern matchers) — this is the cross-cutting semantic pass.
+        template_name = "code_auditor"
     elif persona == "documenter":
         template_name = "documenter"
     elif persona == "refactorer":
@@ -184,8 +291,8 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
         # against ARCHITECTURE.md's MODULES / ENTRY POINTS / CONFIG GATES
         # sections. Maintenance persona — read-only on source, may write
         # /workspace/docs/architecture_review_*.md and product_memory.md.
-        # Schedule: every ~50 features pushed (gate in cycle/persona.py),
-        # or on-demand via run_persona_now="architect".
+        # Schedule: every ~3 features pushed (default N, _check_architect_due
+        # in tools.py), or on-demand via run_persona_now="architect".
         template_name = "architect"
     elif persona == "coder":
         # Coder always uses brownfield.md regardless of product.type. The
@@ -343,6 +450,15 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
         "{hard_rules}": _HARD_RULES,
         "{declared_services}": _svc_block,
     }
+    # code_auditor sink (filing vs comment-only) is pre-substituted BEFORE the
+    # main loop because the injected block itself contains {pm_api_url} /
+    # {product_id} / {product_name}; the loop below then resolves those. No-op
+    # for other personas (their templates lack this placeholder).
+    template = template.replace(
+        "{code_auditor_output_steps}",
+        _CODE_AUDITOR_FILING_STEPS if _code_auditor_filing_on(product)
+        else _CODE_AUDITOR_ALERT_STEPS,
+    )
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)
 

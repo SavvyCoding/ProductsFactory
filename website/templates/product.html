@@ -176,10 +176,11 @@
   {% for f in features %}{% set _ = status_counts.update({f.status: status_counts.get(f.status, 0) + 1}) %}{% endfor %}
   {% set type_counts = {'feature': 0, 'bug': 0, 'chore': 0} %}
   {% for f in features %}{% set _ = type_counts.update({f.feature_type: type_counts.get(f.feature_type, 0) + 1}) %}{% endfor %}
-  {# Rejected/Reverted stories are out-of-scope — exclude from the total
-     so ship_pct ("X% of N") reflects what's actually planned to ship.
-     The status_counts breakdown above still shows both buckets. #}
-  {% set total_features = features | rejectattr('status', 'in', ['Rejected', 'Reverted']) | list | length %}
+  {# Exclude from the total so ship_pct ("X% of N") reflects what's actually
+     APPROVED-and-planned to ship: Rejected/Reverted (out-of-scope) AND Pending
+     (not yet PM-approved, so not yet in the build pipeline). The status_counts
+     breakdown above still shows every bucket, incl. Pending. #}
+  {% set total_features = features | rejectattr('status', 'in', ['Rejected', 'Reverted', 'Pending']) | list | length %}
   {% set pushed = status_counts.get('Pushed', 0) %}
   {% set blocked = status_counts.get('Blocked', 0) %}
   {% set in_flight = status_counts.get('Implementing', 0) + status_counts.get('Reviewing', 0) + status_counts.get('Reviewed', 0) %}
@@ -1270,6 +1271,41 @@
             are filed automatically as Approved chore features for the coder to fix (capped at 3 per
             cycle, deduped against open chores). Uncheck to opt this product OUT. Findings are still
             posted as feature comments either way.</p>
+        </div>
+        <div class="form-group">
+          <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
+            <input type="checkbox" name="code_auditor" value="on" style="width:auto"
+                   {% if code_auditor_enabled_effective %}checked{% endif %}>
+            Run periodic whole-product code audit
+          </label>
+          <p class="field-hint">Read-only semantic review (security · correctness · tests) that runs
+            at phase boundaries, riding a fresh architect pass. It catches cross-cutting bugs the
+            per-PR reviewer (one diff) and drift detectors (pattern matchers) can't — IDOR,
+            payment-never-persisted, hollow tests. Reflects the effective state (this toggle overrides
+            the global default).</p>
+        </div>
+        <div class="form-group">
+          <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
+            <input type="checkbox" name="code_auditor_filing" value="on" style="width:auto"
+                   {% if code_auditor_filing_effective %}checked{% endif %}>
+            File code-audit findings as bugs
+          </label>
+          <p class="field-hint">Only takes effect when the audit above is on. When checked, each
+            finding is filed as a <code>bug</code> feature (status <em>Pending</em> → you triage it)
+            instead of only a dashboard alert, severity-routed by priority (Critical → 1 … Low → 40).
+            When unchecked (default), the audit is comment-only. No stop-the-line yet — a Critical
+            simply sorts to the front of the queue.</p>
+        </div>
+        <div class="form-group">
+          <label>Test-gate timeout override (seconds)</label>
+          <input type="number" name="test_gate_timeout" min="30" max="3600"
+                 value="{{ (product.config or {}).get('test_gate_timeout', '') }}"
+                 placeholder="auto" style="width:120px">
+          <p class="field-hint">Max seconds the post-coder gate lets the test suite run before
+            killing it (a timeout bounces the feature for rework — it never ships untested). Leave
+            blank for <strong>auto</strong>: the budget self-calibrates to ~2.5× the recent green-run
+            time (floor 300s, ceiling 1800s) and grows with the suite. Set a number only to pin it
+            for this product (e.g. while a suite is being optimised).</p>
         </div>
         <button type="submit">Save workflow</button>
       </form>
