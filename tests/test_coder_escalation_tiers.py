@@ -12,6 +12,7 @@ from orchestrator.coder_tiers import (
     is_last_tier,
     is_paid_backend,
     resolve_coder_tier,
+    tier_index_for_step,
     total_attempts,
     validate_coder_tiers,
 )
@@ -99,6 +100,20 @@ def test_is_last_tier():
 
 def test_is_last_tier_unconfigured_is_false():
     assert is_last_tier(None, 0) is False
+
+
+# ── tier_index_for_step (telemetry, migration 050) ────────────────────────────
+
+def test_tier_index_for_step():
+    # LADDER = minimax(2)→glm(3)→opus(2): 0-1=tier0, 2-4=tier1, 5-6=tier2, 7+=exhausted
+    assert tier_index_for_step(LADDER, 0) == 0
+    assert tier_index_for_step(LADDER, 1) == 0
+    assert tier_index_for_step(LADDER, 2) == 1
+    assert tier_index_for_step(LADDER, 4) == 1
+    assert tier_index_for_step(LADDER, 5) == 2   # opus tier
+    assert tier_index_for_step(LADDER, 6) == 2
+    assert tier_index_for_step(LADDER, 7) == -1  # exhausted
+    assert tier_index_for_step(None, 0) == -1    # unconfigured
 
 
 # ── paid-backend detection (daily-USD cap driver) ─────────────────────────────

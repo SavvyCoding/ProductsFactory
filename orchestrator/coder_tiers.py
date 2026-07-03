@@ -100,6 +100,22 @@ def total_attempts(coder_tiers: Optional[list]) -> int:
     return sum(_tier_max_attempts(t) for t in effective_tiers(coder_tiers))
 
 
+def tier_index_for_step(coder_tiers: Optional[list], escalation_step: int) -> int:
+    """0-based index of the active tier for ``escalation_step`` (0 = First Attempt).
+    Returns -1 when unconfigured or past the last tier (EXHAUSTED). Used by the
+    escalation telemetry to record which tier a coder session actually ran on."""
+    eff = effective_tiers(coder_tiers)
+    if not eff:
+        return -1
+    step = max(0, int(escalation_step or 0))
+    ceiling = 0
+    for idx, tier in enumerate(eff):
+        ceiling += _tier_max_attempts(tier)
+        if step < ceiling:
+            return idx
+    return -1
+
+
 def is_last_tier(coder_tiers: Optional[list], escalation_step: int) -> bool:
     """True when ``escalation_step`` falls in the FINAL live tier's window
     (a further failure past this tier's budget → EXHAUSTED → Blocked)."""

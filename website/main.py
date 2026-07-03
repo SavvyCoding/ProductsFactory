@@ -3674,6 +3674,56 @@ async def api_start_session(body: schemas.SessionCreate, db: AsyncSession = Depe
     return session
 
 
+@app.get("/api/escalation-stats")
+async def api_escalation_stats(product_id: Optional[int] = None, db: AsyncSession = Depends(get_db)):
+    """Durable coder-ladder telemetry (migration 050). Answers, cleanly and
+    countably: how many features stayed on First Attempt vs escalated, how many
+    of each shipped, and how many coder sessions ran on each model.
+
+    Optional ``product_id`` scopes to one product; omitted = all products.
+    """
+    fwhere = "WHERE product_id = :pid" if product_id else ""
+    swhere = "WHERE persona = 'coder' AND ladder_model IS NOT NULL"
+    if product_id:
+        swhere += " AND product_id = :pid"
+    params = {"pid": product_id} if product_id else {}
+
+    # Feature cohort by highest tier ever reached (0 = First Attempt only), with
+    # ship outcome. max_ladder_tier is monotonic (never reset), so this is exact.
+    feat_rows = (await db.execute(text(f"""
+        SELECT max_ladder_tier AS tier,
+               count(*)                                    AS total,
+               count(*) FILTER (WHERE status = 'Pushed')   AS pushed,
+               count(*) FILTER (WHERE status = 'Blocked')  AS blocked
+        FROM features {fwhere}
+        GROUP BY max_ladder_tier ORDER BY max_ladder_tier
+    """), params)).mappings().all()
+
+    # Per-session model counts (which model each coder session actually ran).
+    sess_rows = (await db.execute(text(f"""
+        SELECT ladder_model AS model, count(*) AS sessions
+        FROM sessions {swhere}
+        GROUP BY ladder_model ORDER BY count(*) DESC
+    """), params)).mappings().all()
+
+    first_attempt = next((r for r in feat_rows if r["tier"] == 0), None)
+    escalated = [r for r in feat_rows if r["tier"] >= 1]
+    return {
+        "product_id": product_id,
+        "features": {
+            "first_attempt_only": dict(first_attempt) if first_attempt else {"total": 0, "pushed": 0, "blocked": 0},
+            "escalated": {
+                "total":   sum(r["total"] for r in escalated),
+                "pushed":  sum(r["pushed"] for r in escalated),
+                "blocked": sum(r["blocked"] for r in escalated),
+                "by_tier": [dict(r) for r in escalated],
+            },
+            "by_tier": [dict(r) for r in feat_rows],
+        },
+        "coder_sessions_by_model": [dict(r) for r in sess_rows],
+    }
+
+
 @app.post("/api/sessions/{session_id}/heartbeat")
 async def api_session_heartbeat(session_id: int, db: AsyncSession = Depends(get_db)):
     """Agent calls this periodically; watchdog reads heartbeat_at to detect hangs."""

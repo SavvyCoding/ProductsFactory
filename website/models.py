@@ -97,6 +97,10 @@ class Feature(Base):
     # cheapest tier on a re-processor retry. The active tier is derived by walking
     # cumulative per-tier max_attempts (orchestrator/coder_tiers.resolve_coder_tier).
     escalation_step: Mapped[int]           = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # migration 050 — durable escalation telemetry: highest ladder tier this feature
+    # ever ran a coder session on (0 = First Attempt only, 1 = reached glm, …).
+    # MONOTONIC — only raised, never reset (escalation_step gets reset on unblock).
+    max_ladder_tier: Mapped[int]           = mapped_column(Integer, nullable=False, default=0, server_default="0")
     source:         Mapped[str]            = mapped_column(Text, nullable=False, default="pm")
     feature_type:   Mapped[str]            = mapped_column(Text, nullable=False, default="feature")
     branch_name:    Mapped[Optional[str]]  = mapped_column(Text)
@@ -176,6 +180,11 @@ class Session(Base):
     # migration 047 — true when this session ran a feature's premium escalation
     # pass; the daily-USD-cap query sums cost_usd over today's is_escalation rows.
     is_escalation:       Mapped[bool]           = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # migration 050 — coder-ladder telemetry: which tier this coder session ran on.
+    # ladder_tier: 0-based tier index (0 = First Attempt). ladder_model: the actual
+    # model (e.g. "minimax-m3" / "glm-5.2"). NULL for non-coder / no-ladder sessions.
+    ladder_tier:         Mapped[Optional[int]]  = mapped_column(Integer)
+    ladder_model:        Mapped[Optional[str]]  = mapped_column(Text)
 
     # FSM — canonical lifecycle state. Watchdog/reconciler/harvester drive
     # transitions. Never parse docker output or file mtimes; consult these.

@@ -940,6 +940,9 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                 # advancement. Both MUST survive the slim — omitting escalation_step
                 # would peg every coder session to tier 0 (reads None → 0).
                 "escalation_step": f.get("escalation_step", 0),
+                # Telemetry (migration 050): highest ladder tier reached; read to
+                # raise it monotonically at session launch.
+                "max_ladder_tier": f.get("max_ladder_tier", 0),
                 # Legacy migration-047 flag — retained on the row but no longer
                 # drives routing (coder ladder superseded it); harmless to pass.
                 "escalation_active": f.get("escalation_active"),
@@ -2440,9 +2443,14 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # A paid tier (claude-api/openai) is routed via AGENT_API_* in the launch
     # block below and tags the session is_escalation for the daily-USD cap.
     coder_tier_api = None  # (backend, model, key) when the active tier is a paid API
+    _ladder_tier = None    # telemetry (migration 050): tier index this session ran
+    _ladder_model = None   # telemetry: the model this session ran (minimax/glm/…)
     if coder_ladder["active"]:
-        from orchestrator.coder_tiers import is_paid_backend as _is_paid_backend
+        from orchestrator.coder_tiers import is_paid_backend as _is_paid_backend, tier_index_for_step
         _chosen = coder_ladder["tier0"] if escalated else coder_ladder["tier"]
+        # Diagnostician (escalated) runs tier 0; else the tier for the current step.
+        _ladder_tier = 0 if escalated else tier_index_for_step(coder_ladder["tiers"], coder_ladder["step"])
+        _ladder_model = _chosen.get("model") if _chosen else None
         if _chosen:
             _tb = (_chosen.get("backend") or "").strip().lower()
             _tm = (_chosen.get("model") or "").strip()
@@ -2470,6 +2478,20 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                     coder_tier_api = (_tb, _tm, _key)
                     log.info(f"[coder-ladder] {product.get('name','?')}: tier -> paid "
                              f"{_tb}/{_tm} (step={coder_ladder['step']})")
+
+    # Telemetry (migration 050): record the highest ladder tier each assigned coder
+    # feature has run on — monotonic (raise-only), so it survives escalation_step
+    # resets. One PATCH per feature that just climbed; skipped otherwise.
+    if coder_ladder["active"] and _ladder_tier is not None:
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=10) as _tc:
+                for _f in assigned_features:
+                    _fid = _f.get("id")
+                    if isinstance(_fid, int) and _ladder_tier > int(_f.get("max_ladder_tier") or 0):
+                        _tc.patch(f"/api/features/{_fid}", json={
+                            "max_ladder_tier": _ladder_tier, "changed_by": "coder-ladder"})
+        except Exception:
+            log.debug("[coder-ladder] max_ladder_tier telemetry patch failed (non-fatal)", exc_info=True)
 
     # Threaded to _finalize_session (read via the product dict): an escalated
     # read-only session writes no code, so it must SKIP the post-coder
@@ -2824,6 +2846,9 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 # Tag paid-tier (claude-api/openai) sessions so the daily-USD cap
                 # sums their cost_usd — any paid coder tier, not just escalations.
                 "is_escalation": bool(coder_tier_api),
+                # Coder-ladder telemetry (migration 050): which tier/model this session ran.
+                "ladder_tier":  _ladder_tier,
+                "ladder_model": _ladder_model,
             })
             resp.raise_for_status()
             session_id = resp.json()["id"]
