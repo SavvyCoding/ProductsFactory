@@ -38,6 +38,10 @@ COPY alembic.ini .
 # website doesn't have.
 COPY orchestrator/__init__.py orchestrator/
 COPY orchestrator/integrations/__init__.py orchestrator/integrations/github_app.py orchestrator/integrations/
+# coder_tiers.py is a pure-stdlib leaf; the admin "Coder Models" save handler
+# imports validate_coder_tiers from it (migration 049). Kept as a single source
+# of truth with the orchestrator resolver rather than duplicated in website/.
+COPY orchestrator/coder_tiers.py orchestrator/
 
 # Run Alembic migrations then start the server.
 # startup.sh: self-heals stale alembic_version (tables gone but version row
