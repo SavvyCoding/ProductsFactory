@@ -562,6 +562,11 @@ _CFG_DEFAULTS = {
     "ollama_api_key":   "",   # required for Ollama Cloud, ignored for local
     "designer_model":   "gemma3:27b",
     "coder_model":      "qwen3-coder:30b",
+    # Coder model ladder (migration 049) — MUST be exposed here or the
+    # orchestrator's /api/system-config read never sees the configured ladder and
+    # the coder silently falls back to coder_model (the curated-dict-drops-fields
+    # footgun). None ⇒ runtime builds a single default tier from coder_model.
+    "coder_tiers":      None,
     "ollama_model_map": {},
     "ollama_timeout":   300,
     "bash_timeout":     180,
