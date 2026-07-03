@@ -1348,7 +1348,10 @@ async def admin_save_poller_settings(
     if _new_ollama_key:
         config.ollama_api_key = _new_ollama_key
     config.designer_model              = _str("designer_model")
-    config.coder_model                 = _str("coder_model")
+    # NOTE: the coder is governed by the coder_tiers ladder ("🧠 Model Selection"
+    # tab), NOT a coder_model box — so we do NOT read/blank coder_model here.
+    # config.coder_model is preserved untouched as the empty-ladder fallback
+    # (docker_runner._resolve_coder_ladder builds a default tier from it).
     # Per-persona overrides for the orchestrator's runtime model resolver
     # (orchestrator/docker_runner.py reads ollama_model_map[persona] BEFORE
     # falling back to designer_model/coder_model). Form fields are named
@@ -1356,21 +1359,18 @@ async def admin_save_poller_settings(
     # → drop the override for that persona. Personas not in this list are
     # left untouched in the JSONB so manual DB edits or future additions
     # survive a save through the UI.
-    # The grid below covers the secondary personas (named ollama_chain_<persona>).
-    # coder/designer have dedicated fields (coder_model / designer_model), but the
-    # orchestrator's resolver reads ollama_model_map[persona] BEFORE those fields
-    # — so a stale map["coder"]/["designer"] would silently shadow the UI box
-    # (the glm-5.2 footgun). Mirror the dedicated fields into the map so the box
-    # is always authoritative: ("coder", "coder_model") / ("designer", ...).
+    # The grid covers the secondary personas (named ollama_chain_<persona>);
+    # designer has a dedicated field mirrored into the map so the box is always
+    # authoritative (the glm-5.2 shadowing footgun). map["coder"] is left alone.
     _personas_for_override = ("reviewer", "code_auditor", "planner",
                               "documenter", "analytics", "recommender",
                               "devops", "refactorer", "product_trainer")
     _new_map = dict(config.ollama_model_map or {})
     # Secondary personas: read from their ollama_chain_<persona> field.
-    # coder/designer: read from their dedicated coder_model/designer_model field.
+    # designer: read from its dedicated designer_model field.
     _chain_sources = (
         [(p, f"ollama_chain_{p}") for p in _personas_for_override]
-        + [("coder", "coder_model"), ("designer", "designer_model")]
+        + [("designer", "designer_model")]
     )
     for _p, _field in _chain_sources:
         _raw = form.get(_field, "").strip()

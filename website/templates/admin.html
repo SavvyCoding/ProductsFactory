@@ -275,7 +275,7 @@
         <button type="button" class="tab-btn active" onclick="agentSub('ollama',this)">⚡ Ollama</button>
         <button type="button" class="tab-btn" onclick="agentSub('anthropic',this)">✦ Anthropic</button>
         <button type="button" class="tab-btn" onclick="agentSub('openai',this)">◯ OpenAI</button>
-        <button type="button" class="tab-btn" onclick="agentSub('coder',this)">🧠 Coder Models</button>
+        <button type="button" class="tab-btn" onclick="agentSub('models',this)">🧠 Model Selection</button>
       </div>
 
       <div id="asub-ollama" class="agent-subpanel admin-fields-grid">
@@ -293,36 +293,10 @@
                  placeholder="{% if config.ollama_api_key %}set ({{ config.ollama_api_key|length }} chars, starts with {{ config.ollama_api_key[:8] }}…; leave blank to keep){% else %}required for Ollama Cloud; ignored for local{% endif %}">
           <p class="field-hint">Required for Ollama Cloud (<code>https://ollama.com</code>). Ignored when host is a local Ollama. Leave blank on save to keep the existing key — only non-empty submissions overwrite. After a save, the placeholder updates to reflect the new key's prefix (visible confirmation of rotation).</p>
         </div>
-        <div class="form-group form-group-wide">
-          <label>Per-persona models</label>
-          <p class="field-hint" style="margin-top:0;margin-bottom:8px">
-            Ollama model (chain) for each persona. Comma-separated for a fallback chain — primary first; the agent tries each up to 5× before falling through on transient errors. <strong>Coder</strong> and <strong>Designer</strong> are the base chains; every other persona falls back to them when left blank.
-            <br><strong>⚠ After editing, click “💾 Save Agent settings” at the bottom of this panel</strong> — the System-tab save button does NOT save models. (Coder/Designer become the orchestrator's authoritative chain on save.)
-          </p>
-          {% set _model_map = config.ollama_model_map or {} %}
-          <div class="admin-fields-grid" style="grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 16px">
-            <div class="form-group" style="margin:0">
-              <label for="p-coder" style="font-size:0.85em"><strong>coder</strong></label>
-              <input type="text" id="p-coder" name="coder_model"
-                     value="{{ config.coder_model or '' }}"
-                     placeholder="qwen3-coder:480b, deepseek-v4-flash" autocomplete="off">
-            </div>
-            <div class="form-group" style="margin:0">
-              <label for="p-designer" style="font-size:0.85em"><strong>designer</strong></label>
-              <input type="text" id="p-designer" name="designer_model"
-                     value="{{ config.designer_model or '' }}"
-                     placeholder="gemma3:27b, qwen3-coder:480b" autocomplete="off">
-            </div>
-            {% for _p in ['reviewer', 'code_auditor', 'planner', 'documenter', 'analytics', 'recommender', 'devops', 'refactorer', 'product_trainer'] %}
-            <div class="form-group" style="margin:0">
-              <label for="p-mc-{{ _p }}" style="font-size:0.85em">{{ _p }}</label>
-              <input type="text" id="p-mc-{{ _p }}" name="ollama_chain_{{ _p }}"
-                     value="{% if _model_map.get(_p) %}{{ _model_map[_p] | join(', ') }}{% endif %}"
-                     placeholder="(falls back to coder/designer)" autocomplete="off">
-            </div>
-            {% endfor %}
-          </div>
-        </div>
+        <p class="field-hint" style="margin:0 0 4px">
+          Connection + runtime limits for the Ollama backend. <strong>Model choice</strong>
+          (coder ladder + per-persona models) now lives in the <strong>🧠 Model Selection</strong> tab.
+        </p>
         <div class="form-group">
           <label for="p-ollama-to">Ollama timeout <span class="field-unit">seconds</span></label>
           <input type="number" id="p-ollama-to" name="ollama_timeout"
@@ -384,7 +358,8 @@
         </div>
       </div><!-- /asub-openai -->
 
-      <div id="asub-coder" class="agent-subpanel hidden">
+      <div id="asub-models" class="agent-subpanel hidden">
+        <div style="font-weight:600;margin-bottom:6px">Coder — model ladder</div>
         <p class="field-hint" style="margin-top:0;margin-bottom:12px">
           The coder's <strong>model ladder</strong>. <strong>First Attempt</strong> runs first;
           on repeated failure the diagnose-first check decides whether to climb to the next
@@ -438,7 +413,34 @@
             <strong>0 or blank ⇒ paid tiers never run</strong> (the coder falls back to the cheapest
             Ollama tier). Sums this UTC day's paid-session cost.</p>
         </div>
-      </div><!-- /asub-coder -->
+
+        <hr style="margin:20px 0;border:none;border-top:1px solid var(--border, #333)">
+        <div style="font-weight:600;margin-bottom:6px">Other personas — Ollama models</div>
+        <p class="field-hint" style="margin-top:0;margin-bottom:10px">
+          Ollama model (chain) for each non-coder persona. Comma-separated for a fallback chain —
+          primary first; the agent tries each up to 5× before falling through on transient errors.
+          <strong>Designer</strong> is the base chain for <strong>reviewer</strong> and the other
+          maintenance personas — they fall back to it (and it to coder) when left blank. The coder
+          uses the ladder above, not this section.
+        </p>
+        {% set _model_map = config.ollama_model_map or {} %}
+        <div class="admin-fields-grid" style="grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 16px">
+          <div class="form-group" style="margin:0">
+            <label for="p-designer" style="font-size:0.85em"><strong>designer</strong></label>
+            <input type="text" id="p-designer" name="designer_model"
+                   value="{{ config.designer_model or '' }}"
+                   placeholder="gemma3:27b, qwen3-coder:480b" autocomplete="off">
+          </div>
+          {% for _p in ['reviewer', 'code_auditor', 'planner', 'documenter', 'analytics', 'recommender', 'devops', 'refactorer', 'product_trainer'] %}
+          <div class="form-group" style="margin:0">
+            <label for="p-mc-{{ _p }}" style="font-size:0.85em">{{ _p }}</label>
+            <input type="text" id="p-mc-{{ _p }}" name="ollama_chain_{{ _p }}"
+                   value="{% if _model_map.get(_p) %}{{ _model_map[_p] | join(', ') }}{% endif %}"
+                   placeholder="(falls back to designer/coder)" autocomplete="off">
+          </div>
+          {% endfor %}
+        </div>
+      </div><!-- /asub-models -->
 
       <div class="form-actions">
         <button type="submit">💾 Save Agent settings (models, backend, coder ladder)</button>
@@ -512,7 +514,7 @@
 </div>
 
 {% block scripts %}
-<script src="/static/js/admin.js?v=2026-07-02-coder-ladder"></script>
+<script src="/static/js/admin.js?v=2026-07-02-model-selection"></script>
 <script>
 // Restore last tab or auto-open the saved one
 (function() {

@@ -1444,12 +1444,26 @@ from website.models import SystemConfig
 
 
 def _save_agent_settings(client, **extra):
-    """POST the poller/agent form (which owns the Coder Models sub-tab)."""
+    """POST the poller/agent form (which owns the Model Selection sub-tab)."""
     data = {"coder_tier_backend_0": "ollama", "coder_tier_model_0": "",
             "coder_tier_attempts_0": ""}
     data.update(extra)
     return client.post("/admin/settings/poller", data=data, auth=AUTH,
                        follow_redirects=False)
+
+
+def test_model_selection_save_preserves_coder_model(client, db):
+    # The coder is the ladder now — there is no coder_model box, so a save must
+    # NOT blank the stored coder_model (it's the empty-ladder fallback).
+    cfg = db.get(SystemConfig, 1) or SystemConfig(id=1)
+    db.add(cfg)
+    cfg.coder_model = "qwen3-coder:30b"
+    db.flush()
+    r = _save_agent_settings(client, designer_model="gemma3:27b")
+    assert r.status_code == 303
+    db.refresh(cfg)
+    assert cfg.coder_model == "qwen3-coder:30b"   # preserved
+    assert cfg.designer_model == "gemma3:27b"     # other-persona field still saved
 
 
 def test_coder_ladder_saves_multi_tier(client, db):
@@ -1506,13 +1520,16 @@ def test_coder_ladder_daily_cap_saved(client, db):
     assert float(db.get(SystemConfig, 1).blocked_escalation_daily_usd_cap) == 7.50
 
 
-def test_admin_renders_coder_ladder_tab(client, db):
+def test_admin_renders_model_selection_tab(client, db):
     r = client.get("/admin", auth=AUTH)
     assert r.status_code == 200
     html = r.text
-    assert "🧠 Coder Models" in html
-    assert 'id="asub-coder"' in html
-    assert 'name="coder_tier_model_0"' in html          # First Attempt row
+    assert "🧠 Model Selection" in html
+    assert 'id="asub-models"' in html
+    assert 'name="coder_tier_model_0"' in html          # First Attempt row (coder ladder)
     assert 'name="coder_tier_enabled_3"' in html        # Escalation 3 row
-    assert 'name="blocked_escalation_daily_usd_cap"' in html  # cap moved here
+    assert 'name="blocked_escalation_daily_usd_cap"' in html  # cap
+    assert 'name="designer_model"' in html              # other-personas section moved here
+    assert 'name="ollama_chain_reviewer"' in html       # secondary persona field
     assert 'id="asub-escalation"' not in html           # legacy tab removed
+    assert 'id="asub-coder"' not in html                # renamed to asub-models
