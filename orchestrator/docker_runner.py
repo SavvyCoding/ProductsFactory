@@ -542,7 +542,19 @@ def _resolve_coder_ladder(sys_cfg: dict, persona: str | None,
         _thr = int(os.environ.get("ESCALATION_FIX_ATTEMPTS_THRESHOLD", "4"))
         eff = [{"backend": "ollama", "model": default_model,
                 "max_attempts": max(1, _thr), "enabled": True}]
-    step = max((int(f.get("escalation_step") or 0) for f in assigned_features), default=0)
+    # Tier index = max(escalation_step, fix_attempts) per feature, then max over
+    # the batch. escalation_step is the DEDICATED ladder counter, but it only
+    # started counting when the ladder was deployed and can lag fix_attempts (a
+    # feature that bounced N times pre-deploy has escalation_step<N). Without the
+    # fix_attempts floor, such a feature routes to tier 0 and cap-Blocks at
+    # fix_attempts>=max_fix_attempts BEFORE the ladder ever escalates it (the
+    # kill_recovery cap pre-empts the ladder — the R1 risk, observed live on
+    # NewtorkPnL #2271: fix_attempts=4, escalation_step=0). Taking the max means a
+    # genuinely-bounced feature escalates on its next session, while
+    # escalation_step still wins when the blocked re-processor resets fix_attempts=0
+    # on an already-climbed feature (preserving the R1 no-fallback intent).
+    step = max((max(int(f.get("escalation_step") or 0), int(f.get("fix_attempts") or 0))
+                for f in assigned_features), default=0)
     resolved = resolve_coder_tier(eff, step)
     try:
         tier0_budget = max(1, int(eff[0].get("max_attempts")))

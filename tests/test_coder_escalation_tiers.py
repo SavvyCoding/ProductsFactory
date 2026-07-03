@@ -207,6 +207,25 @@ def test_ladder_uses_max_step_across_batch():
     assert r["exhausted"] is False           # total=4; exhaustion only at step>=4
 
 
+def test_ladder_step_uses_fix_attempts_floor_when_escalation_step_lags():
+    # R1 fix: a feature that bounced (fix_attempts=4) but whose escalation_step
+    # lags (0, e.g. counted only post-deploy) must still route to the glm tier —
+    # otherwise the fix_attempts>=5 cap-Block pre-empts the ladder (NewtorkPnL #2271).
+    cfg = {"coder_tiers": [_t("ollama", "minimax", 2), _t("ollama", "glm-5.2", 3)]}
+    r = _ladder(cfg, [{"id": 2271, "escalation_step": 0, "fix_attempts": 4}])
+    assert r["step"] == 4                 # max(escalation_step=0, fix_attempts=4)
+    assert r["tier"]["model"] == "glm-5.2"  # step 4 → tier 1 (glm), not minimax
+
+
+def test_ladder_step_honors_escalation_step_when_fix_attempts_reset():
+    # Reprocessor reset case: fix_attempts=0 (reset) but escalation_step=3
+    # (already climbed) → stay on the escalation tier, don't fall back to tier 0.
+    cfg = {"coder_tiers": [_t("ollama", "minimax", 2), _t("ollama", "glm-5.2", 3)]}
+    r = _ladder(cfg, [{"id": 1, "escalation_step": 3, "fix_attempts": 0}])
+    assert r["step"] == 3
+    assert r["tier"]["model"] == "glm-5.2"
+
+
 def test_ladder_inactive_for_non_coder():
     assert _ladder({}, [_feat()], persona="designer")["active"] is False
 
