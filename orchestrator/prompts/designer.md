@@ -532,6 +532,18 @@ correctly, design it normally — don't recursively split.
          `async def flip(): async with engine.connect(): ...` jammed into one
          `-c` line won't compile, while the equivalent multi-line pytest test
          passes; those ACs should have been `Verify: see unit test`.
+   - [ ] **Asserting a property over a collection — use `assert all(...)`, NEVER
+         `for x in X: assert COND`.** A bare per-item assertion loop is still a
+         compound statement, so `...; for a in rows: assert a['x']>=0; ...` is a
+         hard SyntaxError inline — BUT it does not need `see unit test`. Rewrite it
+         as the SIMPLE statement `assert all(a['x']>=0 for a in rows)` (or
+         `assert any(...)`, or a comprehension). Same assertion, valid one-liner.
+         Only fall back to `Verify: see unit test` when the loop body has SIDE
+         EFFECTS or multiple statements (seeding rows, mutating state) — not for a
+         plain "every item satisfies COND" check. Canonical: NewtorkPnL #1692 —
+         AC1–AC4 each crammed `for a in d['allocations']: assert a['cells_allocated']>=0`
+         inline (SyntaxError at parse, ~18h of verify-check bounces + Blocked);
+         `assert all(a['cells_allocated']>=0 for a in d['allocations'])` fixes it.
    - [ ] **No AC or test depends on a live external service that isn't
          declared.** The agent/test containers provide language toolchains
          and client CLIs — but NO running services. What IS available:
