@@ -1434,3 +1434,85 @@ def test_delete_completed_phase_refused(client, db):
 def test_delete_missing_phase_404(client, db):
     r = client.delete("/api/phases/99999999", auth=AUTH)
     assert r.status_code == 404
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CODER MODEL LADDER — Admin save round-trip (migration 049 / Slice B)
+# ══════════════════════════════════════════════════════════════════════════════
+
+from website.models import SystemConfig
+
+
+def _save_agent_settings(client, **extra):
+    """POST the poller/agent form (which owns the Coder Models sub-tab)."""
+    data = {"coder_tier_backend_0": "ollama", "coder_tier_model_0": "",
+            "coder_tier_attempts_0": ""}
+    data.update(extra)
+    return client.post("/admin/settings/poller", data=data, auth=AUTH,
+                       follow_redirects=False)
+
+
+def test_coder_ladder_saves_multi_tier(client, db):
+    r = _save_agent_settings(
+        client,
+        coder_tier_backend_0="ollama",     coder_tier_model_0="minimax-m2",  coder_tier_attempts_0="2",
+        coder_tier_backend_1="ollama",     coder_tier_model_1="glm-4.6",     coder_tier_attempts_1="3", coder_tier_enabled_1="1",
+        coder_tier_backend_2="claude-api", coder_tier_model_2="claude-opus-4-8", coder_tier_attempts_2="2", coder_tier_enabled_2="1",
+    )
+    assert r.status_code == 303
+    cfg = db.get(SystemConfig, 1)
+    assert cfg.coder_tiers == [
+        {"backend": "ollama",     "model": "minimax-m2",      "max_attempts": 2, "enabled": True},
+        {"backend": "ollama",     "model": "glm-4.6",         "max_attempts": 3, "enabled": True},
+        {"backend": "claude-api", "model": "claude-opus-4-8", "max_attempts": 2, "enabled": True},
+    ]
+
+
+def test_coder_ladder_empty_stores_null(client, db):
+    # No tier models → NULL (runtime builds the default single tier).
+    r = _save_agent_settings(client)
+    assert r.status_code == 303
+    assert db.get(SystemConfig, 1).coder_tiers is None
+
+
+def test_coder_ladder_escalation_row_disabled_when_unchecked(client, db):
+    r = _save_agent_settings(
+        client,
+        coder_tier_backend_0="ollama", coder_tier_model_0="minimax-m2", coder_tier_attempts_0="2",
+        coder_tier_backend_1="ollama", coder_tier_model_1="glm-4.6",    coder_tier_attempts_1="3",
+        # no coder_tier_enabled_1 → stored disabled but preserved
+    )
+    assert r.status_code == 303
+    tiers = db.get(SystemConfig, 1).coder_tiers
+    assert tiers[1] == {"backend": "ollama", "model": "glm-4.6", "max_attempts": 3, "enabled": False}
+
+
+def test_coder_ladder_bad_backend_rejected(client, db):
+    r = _save_agent_settings(
+        client,
+        coder_tier_backend_0="mistral", coder_tier_model_0="x", coder_tier_attempts_0="2",
+    )
+    assert r.status_code == 422
+    assert "Coder ladder" in r.json()["detail"]
+
+
+def test_coder_ladder_daily_cap_saved(client, db):
+    r = _save_agent_settings(
+        client,
+        coder_tier_backend_0="ollama", coder_tier_model_0="minimax-m2", coder_tier_attempts_0="2",
+        blocked_escalation_daily_usd_cap="7.50",
+    )
+    assert r.status_code == 303
+    assert float(db.get(SystemConfig, 1).blocked_escalation_daily_usd_cap) == 7.50
+
+
+def test_admin_renders_coder_ladder_tab(client, db):
+    r = client.get("/admin", auth=AUTH)
+    assert r.status_code == 200
+    html = r.text
+    assert "🧠 Coder Models" in html
+    assert 'id="asub-coder"' in html
+    assert 'name="coder_tier_model_0"' in html          # First Attempt row
+    assert 'name="coder_tier_enabled_3"' in html        # Escalation 3 row
+    assert 'name="blocked_escalation_daily_usd_cap"' in html  # cap moved here
+    assert 'id="asub-escalation"' not in html           # legacy tab removed

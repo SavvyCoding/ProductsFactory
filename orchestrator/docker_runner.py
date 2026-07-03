@@ -478,6 +478,134 @@ def _has_escalation_diagnosis(assigned_features: list[dict]) -> bool:
     return False
 
 
+def _daily_paid_cap_ok(sys_cfg: dict) -> bool:
+    """True when a paid coder tier (claude-api/openai) may run today: the daily-USD
+    cap (blocked_escalation_daily_usd_cap) is set (>0) AND today's escalation spend
+    is under it. A blank/0 cap ⇒ paid tiers are DISABLED (a safety default — no
+    unbounded spend). Best-effort: a spend-lookup failure fails OPEN (the cost
+    tracker still records spend, so the next check catches an overrun)."""
+    try:
+        cap = float(sys_cfg.get("blocked_escalation_daily_usd_cap") or 0)
+    except (TypeError, ValueError):
+        cap = 0.0
+    if cap <= 0:
+        return False
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            r = client.get("/api/sessions/escalation-spend-today")
+            spend = float((r.json() or {}).get("spend_usd", 0)) if r.is_success else 0.0
+    except Exception:
+        return True  # metrics hiccup — don't stall coding; next check re-evaluates
+    return spend < cap
+
+
+def _cheapest_ollama_model(tiers: list, fallback: str) -> str:
+    """First Ollama tier's model in the ladder (the cheap fallback when a paid tier
+    is deferred by the daily cap), else the given fallback."""
+    for t in tiers or []:
+        if (t.get("backend") or "").strip().lower() == "ollama" and (t.get("model") or "").strip():
+            return t["model"].strip()
+    return fallback
+
+
+def _resolve_coder_ladder(sys_cfg: dict, persona: str | None,
+                          assigned_features: list[dict], default_model: str) -> dict:
+    """Resolve the coder model-ladder decision for this session (migration 049).
+
+    The ladder is the coder's SOLE routing path — the legacy migration-047 premium
+    tier is retired and there is no master on/off gate. When ``coder_tiers`` is
+    empty a single default tier is built from ``default_model`` (the effective
+    coder model) with the legacy diagnostician threshold as its attempt budget, so
+    an unconfigured environment behaves exactly as today.
+
+    Returns a dict (all keys always present):
+      active:       coder session with a resolvable ladder
+      step:         max escalation_step across assigned features (cumulative counter)
+      tier:         resolved tier dict for ``step`` (None when EXHAUSTED)
+      tier0:        first live tier — the diagnostician runs on THIS model
+      tier0_budget: first tier's max_attempts (diagnostician trigger point)
+      at_cap:       any assigned feature has step >= tier0_budget (tier-0 exhausted)
+      exhausted:    the ladder is fully climbed (→ Block once a diagnosis exists)
+      tiers:        the effective tier list (used by _advance_coder_ladder)
+    """
+    off = {"active": False, "step": 0, "tier": None, "tier0": None,
+           "tier0_budget": 0, "at_cap": False, "exhausted": False, "tiers": []}
+    if persona != "coder" or not assigned_features:
+        return off
+    from orchestrator.coder_tiers import resolve_coder_tier, effective_tiers, EXHAUSTED
+    tiers = sys_cfg.get("coder_tiers")
+    eff = effective_tiers(tiers)
+    if not eff:
+        # Behavior-preserving default: one Ollama tier = the current coder model,
+        # its budget = the legacy diagnostician threshold. Escalation is off until
+        # the operator adds tiers via the UI.
+        _thr = int(os.environ.get("ESCALATION_FIX_ATTEMPTS_THRESHOLD", "4"))
+        eff = [{"backend": "ollama", "model": default_model,
+                "max_attempts": max(1, _thr), "enabled": True}]
+    step = max((int(f.get("escalation_step") or 0) for f in assigned_features), default=0)
+    resolved = resolve_coder_tier(eff, step)
+    try:
+        tier0_budget = max(1, int(eff[0].get("max_attempts")))
+    except (TypeError, ValueError):
+        tier0_budget = 1
+    return {
+        "active": True,
+        "step": step,
+        "tier": None if resolved in (None, EXHAUSTED) else resolved,
+        "tier0": eff[0],
+        "tier0_budget": tier0_budget,
+        "at_cap": step >= tier0_budget,
+        "exhausted": resolved == EXHAUSTED,
+        "tiers": eff,
+    }
+
+
+def _advance_coder_ladder(product: dict, assigned_features: list[dict], tiers: list) -> None:
+    """After a coder session that pushed nothing, advance escalation_step for
+    features whose ``fix_attempts`` ROSE this session — a real coder-fault bounce,
+    not env_broken (which never bumps fix_attempts, so the ladder doesn't advance
+    on infra flakiness). On exhausting the ladder, Block the feature for PM triage,
+    but only once a diagnostician verdict exists so the wave-9 diagnose-first
+    checkpoint still runs (esp. for the single default tier). Best-effort; never raises.
+    """
+    from orchestrator.coder_tiers import resolve_coder_tier, EXHAUSTED
+    pname = product.get("name", "?")
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=15) as client:
+            for f in assigned_features or []:
+                fid = f.get("id")
+                if not isinstance(fid, int):
+                    continue
+                launch_fa = int(f.get("fix_attempts") or 0)
+                try:
+                    r = client.get(f"/api/features/{fid}")
+                    cur = r.json() if 200 <= r.status_code < 300 else {}
+                except Exception:
+                    continue
+                # Advance ONLY on a genuine coder-fault bounce (fix_attempts rose).
+                if int(cur.get("fix_attempts") or 0) <= launch_fa:
+                    continue
+                new_step = int(cur.get("escalation_step") or 0) + 1
+                patch = {"escalation_step": new_step, "changed_by": "coder-ladder"}
+                if resolve_coder_tier(tiers, new_step) == EXHAUSTED and _has_escalation_diagnosis([f]):
+                    # Fully climbed AND the diagnostician has already weighed in →
+                    # terminal. Use Blocked (the familiar PM holdpen), not a new state.
+                    patch["status"] = "Blocked"
+                    patch["blocked_reason"] = (
+                        "Coder escalation ladder exhausted — every configured model tier "
+                        "failed this feature. Needs human triage (spec / scope / env).")
+                    log.info(f"[coder-ladder] {pname}: #{fid} exhausted the ladder "
+                             f"(step={new_step}) with a diagnosis on file — Blocked for triage")
+                else:
+                    log.info(f"[coder-ladder] {pname}: #{fid} escalation_step -> {new_step}")
+                try:
+                    client.patch(f"/api/features/{fid}", json=patch)
+                except Exception:
+                    log.warning(f"[coder-ladder] {pname}: could not patch #{fid}")
+    except Exception:
+        log.exception(f"[coder-ladder] {pname}: ladder advancement failed (non-fatal)")
+
+
 def _route_escalation_diagnosis(product: dict, assigned_features: list[dict]) -> None:
     """Post-session router for escalated-session verdicts (wave-5).
 
@@ -795,10 +923,13 @@ def _fetch_assigned_features(product_id: int, persona: str | None, max_count: in
                 "review_outcome": f.get("review_outcome"),
                 "phase_id": f.get("phase_id"),
                 "parent_id": f.get("parent_id"),
-                # Premium-escalation routing (docs/blocked_escalation_plan.md):
-                # run_claude_in_docker derives premium_escalation from this flag,
-                # so it MUST survive the slim — omitting it silently routes every
-                # escalated feature onto the base model (is_escalation never set).
+                # Coder model ladder (migration 049): escalation_step picks the
+                # active model tier and fix_attempts (above) gates ladder
+                # advancement. Both MUST survive the slim — omitting escalation_step
+                # would peg every coder session to tier 0 (reads None → 0).
+                "escalation_step": f.get("escalation_step", 0),
+                # Legacy migration-047 flag — retained on the row but no longer
+                # drives routing (coder ladder superseded it); harmless to pass.
                 "escalation_active": f.get("escalation_active"),
                 "priority": f.get("priority"),
             }
@@ -1909,6 +2040,18 @@ def _finalize_session(
                 )
             except Exception:
                 log.exception(f"Post-coder pipeline failed for {product.get('name')}")
+            # Coder model ladder (migration 049): a session that pushed nothing is
+            # a failed ladder attempt — advance escalation_step for features whose
+            # fix_attempts rose (real bounce, not env_broken) and Block on ladder
+            # exhaustion. Runs only for normal coder sessions (the read-only
+            # diagnostician branch above skips this whole block), so the
+            # diagnostician never advances the ladder.
+            _ladder = product.get("_coder_ladder") or {}
+            if _ladder.get("active") and not post_coder_pushed:
+                _advance_coder_ladder(
+                    product, product.get("_assigned_features", []),
+                    _ladder.get("tiers", []),
+                )
             # Truthful-continuity trailer: stamp the pipeline's VERIFIED
             # outcome onto session_summary.md so the next session's
             # {prev_session_summary} carries ground truth alongside the
@@ -2252,66 +2395,69 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
     # the file and the next designer pass deletes it again — converges.
     if persona == "designer":
         _invalidate_stale_design_docs(working_dir, assigned_features)
-    # Diagnose-first escalation (wave-5): when an assigned feature is at or
-    # past ESCALATION_FIX_ATTEMPTS_THRESHOLD (default 4 — one before the
-    # cap-Block at 5), this session runs in escalated mode: optional
-    # stronger model (ESCALATION_MODEL / ESCALATION_CLAUDE_MODEL env) and a
-    # mandatory root-cause-diagnosis contract appended to the prompt. The
-    # 22-feature "fix_attempts=5, needs human triage" wall (2026-06-12
-    # audit) is mostly features that needed a DIAGNOSIS — spec defect or
-    # env-impossible — not a fifth blind code attempt.
-    escalation_threshold = int(os.environ.get("ESCALATION_FIX_ATTEMPTS_THRESHOLD", "4"))
-    _at_cap = (
-        persona == "coder"
-        and any((f.get("fix_attempts") or 0) >= escalation_threshold
-                for f in assigned_features)
-    )
-    # Run the read-only diagnostician ONCE — only if a verdict doesn't already
-    # exist. After a verdict, the next coder session is a NORMAL (writeable)
-    # one that applies the fix with the diagnosis in {reviewer_feedback}.
+    # Coder model ladder (migration 049) — the coder's SOLE model-routing path.
+    # A dedicated escalation_step counter picks the active tier (First Attempt →
+    # up to 3 escalation models); the diagnose-first diagnostician gates the
+    # first climb. Replaces the legacy migration-047 premium tier (retired).
+    coder_ladder = _resolve_coder_ladder(sys_cfg, persona, assigned_features,
+                                         effective_coder_model)
+    product["_coder_ladder"] = coder_ladder  # read by _advance_coder_ladder post-session
+
+    # Diagnose-first escalation (wave-5/9): when tier 0's attempt budget is
+    # exhausted (escalation_step >= tier0 max_attempts), run the read-only
+    # diagnostician ONCE. Its verdict routes the feature (spec_defect→designer,
+    # env_impossible→Blocked, fixable→keep climbing the ladder). The 22-feature
+    # "needs human triage" wall (2026-06-12) is mostly features that needed a
+    # DIAGNOSIS, not another blind code attempt.
+    _at_cap = coder_ladder["active"] and coder_ladder["at_cap"]
     escalated = _at_cap and not _has_escalation_diagnosis(assigned_features)
     if escalated:
         log.info(
             f"[escalation] {product.get('name', '?')}: read-only diagnostician session — "
-            f"feature(s) {[f['id'] for f in assigned_features if (f.get('fix_attempts') or 0) >= escalation_threshold]} "
-            f"at fix_attempts >= {escalation_threshold}; write_file blocked, diagnose-only"
+            f"feature(s) {[f['id'] for f in assigned_features]} at escalation_step "
+            f">= tier-0 budget ({coder_ladder['tier0_budget']}); write_file blocked, diagnose-only"
         )
     elif _at_cap:
         log.info(
             f"[escalation] {product.get('name', '?')}: post-diagnosis coder session — "
-            f"feature(s) at cap already have a diagnosis; applying the fix"
+            f"feature(s) at cap already have a diagnosis; climbing the ladder"
         )
-    # Premium-model escalation (docs/blocked_escalation_plan.md): distinct from
-    # the wave-5 diagnostician above. A feature the escalation reprocessor moved
-    # back to Approved carries escalation_active=true; this WRITEABLE coder
-    # session runs on the globally-configured frontier LLM (sets AGENT_API_*
-    # below + tags the session is_escalation for the daily-cost cap).
-    # Premium routing is gated on the GLOBAL blocked_escalation_enabled toggle,
-    # re-read from system_config EVERY session (sys_cfg is fetched fresh per
-    # run_claude_in_docker call) — NOT just the per-feature escalation_active
-    # flag. Without this, a feature still carrying escalation_active=true from
-    # an earlier pass (or a manual re-engage) routes to the premium model even
-    # after the operator turns the master switch OFF. Toggle off ⇒ no premium.
-    _esc_enabled = str(sys_cfg.get("blocked_escalation_enabled", "")).strip().lower() \
-        not in ("", "false", "0", "no", "off", "none")
-    _has_esc_feature = persona == "coder" and any(
-        f.get("escalation_active") for f in assigned_features)
-    premium_escalation = _esc_enabled and _has_esc_feature
-    if _has_esc_feature and not _esc_enabled:
-        log.info(
-            f"[escalation] {product.get('name', '?')}: escalation_active feature(s) "
-            f"{[f['id'] for f in assigned_features if f.get('escalation_active')]} "
-            f"present but blocked_escalation_enabled is OFF — running the base "
-            f"model, no premium routing."
-        )
-    if premium_escalation:
-        log.info(
-            f"[escalation] {product.get('name', '?')}: PREMIUM session — feature(s) "
-            f"{[f['id'] for f in assigned_features if f.get('escalation_active')]} "
-            f"on {sys_cfg.get('blocked_escalation_backend')}/"
-            f"{sys_cfg.get('blocked_escalation_model')}"
-        )
-    product["_premium_escalation"] = premium_escalation
+
+    # Resolve which model/backend THIS session runs on. The diagnostician runs on
+    # tier 0's (cheapest) model; a normal session runs the tier for its step.
+    # A paid tier (claude-api/openai) is routed via AGENT_API_* in the launch
+    # block below and tags the session is_escalation for the daily-USD cap.
+    coder_tier_api = None  # (backend, model, key) when the active tier is a paid API
+    if coder_ladder["active"]:
+        from orchestrator.coder_tiers import is_paid_backend as _is_paid_backend
+        _chosen = coder_ladder["tier0"] if escalated else coder_ladder["tier"]
+        if _chosen:
+            _tb = (_chosen.get("backend") or "").strip().lower()
+            _tm = (_chosen.get("model") or "").strip()
+            if _tb == "ollama" and _tm:
+                if _tm != effective_persona_model:
+                    log.info(f"[coder-ladder] {product.get('name','?')}: model (ollama) "
+                             f"{effective_persona_model} -> {_tm} (step={coder_ladder['step']})")
+                effective_persona_model = _tm
+            elif _is_paid_backend(_tb) and _tm:
+                _key = (sys_cfg.get("anthropic_api_key") if _tb == "claude-api"
+                        else sys_cfg.get("openai_api_key")) or ""
+                if not _key:
+                    log.warning(f"[coder-ladder] {product.get('name','?')}: paid tier "
+                                f"{_tb}/{_tm} but no API key configured — running base model")
+                elif not _daily_paid_cap_ok(sys_cfg):
+                    # Cap unset/0 or today's spend is over it → defer the paid tier
+                    # and run the cheapest Ollama tier instead (design: cap-trip
+                    # falls back to the lowest Ollama tier).
+                    _fb = _cheapest_ollama_model(coder_ladder["tiers"], effective_persona_model)
+                    log.warning(f"[coder-ladder] {product.get('name','?')}: paid tier "
+                                f"{_tb}/{_tm} deferred (daily USD cap reached/unset) — "
+                                f"running Ollama {_fb}")
+                    effective_persona_model = _fb
+                else:
+                    coder_tier_api = (_tb, _tm, _key)
+                    log.info(f"[coder-ladder] {product.get('name','?')}: tier -> paid "
+                             f"{_tb}/{_tm} (step={coder_ladder['step']})")
 
     # Threaded to _finalize_session (read via the product dict): an escalated
     # read-only session writes no code, so it must SKIP the post-coder
@@ -2432,19 +2578,14 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     prompt = build_prompt(product, session_uid, persona=persona, max_features=effective_max_features, backend=effective_backend)
 
-    # Escalated sessions (wave-5): append the diagnose-first contract and
-    # apply the optional model override. Ollama override here (the backend
-    # branch below builds OLLAMA_MODEL from effective_persona_model); the
-    # Claude override is applied where claude_model is resolved.
+    # Escalated (diagnose-first) sessions: append the diagnosis contract. The
+    # model is already set to tier 0's (cheapest) by the coder-ladder block
+    # above — no separate ESCALATION_MODEL override (the ladder governs models now).
     if escalated:
         prompt += _ESCALATION_ADDENDUM.replace(
             "{pm_api_url}",
             str(os.environ.get("PM_API_URL_CONTAINER", os.environ.get("PM_API_URL", ""))),
         )
-        _esc_model = os.environ.get("ESCALATION_MODEL", "").strip()
-        if _esc_model and effective_backend == "ollama":
-            log.info(f"[escalation] model override (ollama): {effective_persona_model} -> {_esc_model}")
-            effective_persona_model = _esc_model
 
     # Guard: check DB for an already-running session for this product.
     # Cross-check with docker ps — if the container is gone, auto-close the stale DB record.
@@ -2530,25 +2671,19 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
             "-e", f"MAX_TURNS={effective_max_turns}",
             "-e", f"BASH_TIMEOUT={effective_bash_timeout}",
         ]
-        # Premium escalation (docs/blocked_escalation_plan.md): route this session
-        # to the frontier API backend via the SAME ollama_agent.py entry, which
-        # builds the API backend when AGENT_API_BACKEND is set. Key chosen by
-        # backend. If anything is incomplete, fall through to the base model.
-        if premium_escalation:
-            _esc_backend = (sys_cfg.get("blocked_escalation_backend") or "").strip()
-            _esc_model = (sys_cfg.get("blocked_escalation_model") or "").strip()
-            _esc_key = ((sys_cfg.get("anthropic_api_key") if _esc_backend == "claude-api"
-                         else sys_cfg.get("openai_api_key")) or "")
-            if _esc_backend in ("claude-api", "openai") and _esc_model and _esc_key:
-                ollama_env += [
-                    "-e", f"AGENT_API_BACKEND={_esc_backend}",
-                    "-e", f"AGENT_API_MODEL={_esc_model}",
-                    "-e", f"AGENT_API_KEY={_esc_key}",
-                ]
-                log.info(f"[escalation] session routed to premium {_esc_backend}/{_esc_model}")
-            else:
-                log.warning("[escalation] premium requested but backend/model/key "
-                            "incomplete — running the base model for this session")
+        # Coder-ladder paid tier (migration 049): when the active tier is a paid
+        # API (claude-api/openai), route this session to the frontier backend via
+        # the SAME ollama_agent.py entry, which builds the API backend when
+        # AGENT_API_BACKEND is set. coder_tier_api = (backend, model, key), already
+        # validated (key present) in the ladder block above.
+        if coder_tier_api:
+            _tb, _tm, _tk = coder_tier_api
+            ollama_env += [
+                "-e", f"AGENT_API_BACKEND={_tb}",
+                "-e", f"AGENT_API_MODEL={_tm}",
+                "-e", f"AGENT_API_KEY={_tk}",
+            ]
+            log.info(f"[coder-ladder] session routed to paid tier {_tb}/{_tm}")
         # Context-window tuning passthrough: forward these from the orchestrator
         # env into the agent container when set, so num_ctx + AgentLoop windowing
         # can be tuned at runtime via .env without rebuilding the agent image.
@@ -2674,9 +2809,9 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 "persona":      persona,
                 "backend":      effective_backend,
                 "status":       "starting",
-                # Tag premium-escalation sessions so the daily-USD cap sums their
-                # cost_usd (docs/blocked_escalation_plan.md).
-                "is_escalation": bool(premium_escalation),
+                # Tag paid-tier (claude-api/openai) sessions so the daily-USD cap
+                # sums their cost_usd — any paid coder tier, not just escalations.
+                "is_escalation": bool(coder_tier_api),
             })
             resp.raise_for_status()
             session_id = resp.json()["id"]

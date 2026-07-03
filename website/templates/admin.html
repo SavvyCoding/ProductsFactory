@@ -275,7 +275,7 @@
         <button type="button" class="tab-btn active" onclick="agentSub('ollama',this)">⚡ Ollama</button>
         <button type="button" class="tab-btn" onclick="agentSub('anthropic',this)">✦ Anthropic</button>
         <button type="button" class="tab-btn" onclick="agentSub('openai',this)">◯ OpenAI</button>
-        <button type="button" class="tab-btn" onclick="agentSub('escalation',this)">🚀 Escalation</button>
+        <button type="button" class="tab-btn" onclick="agentSub('coder',this)">🧠 Coder Models</button>
       </div>
 
       <div id="asub-ollama" class="agent-subpanel admin-fields-grid">
@@ -384,49 +384,64 @@
         </div>
       </div><!-- /asub-openai -->
 
-      <div id="asub-escalation" class="agent-subpanel hidden">
-        <p class="field-hint" style="margin-top:0;margin-bottom:10px">
-          When a Blocked feature has exhausted the base model, automatically retry it once on a
-          stronger LLM for up to N attempts. If that also fails it goes to <strong>Stuck</strong>
-          (no further auto-retry). Bounded by a daily USD cap. <em>Cap blank/0 ⇒ disabled.</em>
-          API keys are set in the Anthropic / OpenAI tabs.
+      <div id="asub-coder" class="agent-subpanel hidden">
+        <p class="field-hint" style="margin-top:0;margin-bottom:12px">
+          The coder's <strong>model ladder</strong>. <strong>First Attempt</strong> runs first;
+          on repeated failure the diagnose-first check decides whether to climb to the next
+          model (spec/env defects route away instead — a stronger model won't fix those). Each
+          tier picks a backend · model · #attempts. <strong>Ollama</strong> tiers — including
+          MiniMax / GLM served through Ollama — are free; <code>claude-api</code> /
+          <code>openai</code> tiers are <em>paid</em> and bounded by the daily USD cap below.
+          Leave a tier's <em>Model</em> blank to omit it. Empty ladder ⇒ the coder runs your
+          Ollama <em>coder</em> model (Ollama tab) as a single tier. Exhausting the last tier
+          → the feature is <strong>Blocked</strong> for triage. API keys: Anthropic / OpenAI tabs.
         </p>
-        <div class="admin-fields-grid" style="grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px">
-          <div class="form-group" style="margin:0">
-            <label>
-              <input type="checkbox" name="blocked_escalation_enabled" value="1"
-                     {% if config.blocked_escalation_enabled %}checked{% endif %}>
-              Enable premium escalation
-            </label>
-          </div>
-          <div class="form-group" style="margin:0">
-            <label for="p-esc-cap">Daily USD cap</label>
-            <input type="number" id="p-esc-cap" name="blocked_escalation_daily_usd_cap" step="0.01" min="0"
-                   value="{{ config.blocked_escalation_daily_usd_cap or '' }}" placeholder="0 = disabled" class="field-narrow">
-            <p class="field-hint">Max premium spend per UTC day. 0/blank disables escalation.</p>
-          </div>
-          <div class="form-group" style="margin:0">
-            <label for="p-esc-backend">Backend</label>
-            <select id="p-esc-backend" name="blocked_escalation_backend">
-              <option value="claude-api" {% if config.blocked_escalation_backend == 'claude-api' %}selected{% endif %}>claude-api</option>
-              <option value="openai" {% if config.blocked_escalation_backend == 'openai' %}selected{% endif %}>openai</option>
+        {% set _ct = config.coder_tiers or [] %}
+        <div class="admin-fields-grid"
+             style="grid-template-columns:118px 130px minmax(0,1fr) 78px 62px;gap:7px 12px;align-items:center">
+          <div style="font-size:0.78em;color:var(--muted);font-weight:600">Tier</div>
+          <div style="font-size:0.78em;color:var(--muted);font-weight:600">Backend</div>
+          <div style="font-size:0.78em;color:var(--muted);font-weight:600">Model</div>
+          <div style="font-size:0.78em;color:var(--muted);font-weight:600">Attempts</div>
+          <div style="font-size:0.78em;color:var(--muted);font-weight:600;text-align:center">On</div>
+          {% for i in range(4) %}
+            {% set _tier = _ct[i] if _ct|length > i else None %}
+            {% set _bk = (_tier.backend if _tier else 'ollama') %}
+            <div style="font-size:0.85em"><strong>{% if i == 0 %}First Attempt{% else %}Escalation {{ i }}{% endif %}</strong></div>
+            <select name="coder_tier_backend_{{ i }}">
+              <option value="ollama"     {% if _bk == 'ollama' %}selected{% endif %}>ollama</option>
+              <option value="claude-api" {% if _bk == 'claude-api' %}selected{% endif %}>claude-api</option>
+              <option value="openai"     {% if _bk == 'openai' %}selected{% endif %}>openai</option>
             </select>
-          </div>
-          <div class="form-group" style="margin:0">
-            <label for="p-esc-model">Model</label>
-            <input type="text" id="p-esc-model" name="blocked_escalation_model"
-                   value="{{ config.blocked_escalation_model or '' }}" placeholder="claude-opus-4-8" autocomplete="off">
-          </div>
-          <div class="form-group" style="margin:0">
-            <label for="p-esc-attempts">Premium attempts</label>
-            <input type="number" id="p-esc-attempts" name="blocked_escalation_max_attempts" min="1" max="10"
-                   value="{{ config.blocked_escalation_max_attempts or 3 }}" placeholder="3" class="field-narrow">
-          </div>
+            <input type="text" name="coder_tier_model_{{ i }}"
+                   value="{{ _tier.model if _tier else '' }}"
+                   placeholder="{% if i == 0 %}{{ config.coder_model or 'qwen3-coder:30b' }}{% else %}(blank = omit tier){% endif %}"
+                   autocomplete="off">
+            <input type="number" name="coder_tier_attempts_{{ i }}" min="1" max="20"
+                   value="{{ _tier.max_attempts if _tier else '' }}"
+                   placeholder="{% if i == 0 %}4{% else %}2{% endif %}" class="field-narrow">
+            <div style="text-align:center">
+              {% if i == 0 %}
+                <input type="checkbox" checked disabled title="First Attempt is always on">
+              {% else %}
+                <input type="checkbox" name="coder_tier_enabled_{{ i }}" value="1"
+                       {% if _tier and _tier.enabled %}checked{% endif %}>
+              {% endif %}
+            </div>
+          {% endfor %}
         </div>
-      </div><!-- /asub-escalation -->
+        <div class="form-group" style="margin-top:16px;max-width:280px">
+          <label for="p-coder-cap">Daily USD cap <span class="field-unit">paid tiers</span></label>
+          <input type="number" id="p-coder-cap" name="blocked_escalation_daily_usd_cap" step="0.01" min="0"
+                 value="{{ config.blocked_escalation_daily_usd_cap or '' }}" placeholder="0 = no paid tiers" class="field-narrow">
+          <p class="field-hint">Caps spend across any paid (claude-api / openai) tier per UTC day.
+            <strong>0 or blank ⇒ paid tiers never run</strong> (the coder falls back to the cheapest
+            Ollama tier). Sums this UTC day's paid-session cost.</p>
+        </div>
+      </div><!-- /asub-coder -->
 
       <div class="form-actions">
-        <button type="submit">💾 Save Agent settings (models, backend, escalation)</button>
+        <button type="submit">💾 Save Agent settings (models, backend, coder ladder)</button>
       </div>
     </div><!-- /agent settings-card -->
   </div><!-- /atab-agent -->
@@ -497,7 +512,7 @@
 </div>
 
 {% block scripts %}
-<script src="/static/js/admin.js?v=2026-06-18-agent-tab"></script>
+<script src="/static/js/admin.js?v=2026-07-02-coder-ladder"></script>
 <script>
 // Restore last tab or auto-open the saved one
 (function() {

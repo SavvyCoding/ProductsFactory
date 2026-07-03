@@ -91,6 +91,12 @@ class Feature(Base):
     # escalation pass. Drives docker_runner model routing (use the global
     # escalation backend/model) and the re-block → 'Stuck' branch in post_coder.
     escalation_active: Mapped[bool]        = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # migration 049 — DEDICATED cumulative coder model-ladder counter (0 = start).
+    # Distinct from fix_attempts (which the blocked re-processor resets); only
+    # the ladder advances this, so an escalated feature never falls back to the
+    # cheapest tier on a re-processor retry. The active tier is derived by walking
+    # cumulative per-tier max_attempts (orchestrator/coder_tiers.resolve_coder_tier).
+    escalation_step: Mapped[int]           = mapped_column(Integer, nullable=False, default=0, server_default="0")
     source:         Mapped[str]            = mapped_column(Text, nullable=False, default="pm")
     feature_type:   Mapped[str]            = mapped_column(Text, nullable=False, default="feature")
     branch_name:    Mapped[Optional[str]]  = mapped_column(Text)
@@ -255,6 +261,16 @@ class SystemConfig(Base):
     blocked_escalation_daily_usd_cap: Mapped[Optional[float]] = mapped_column(Numeric(10, 2))  # blank/0 ⇒ disabled
     anthropic_api_key:                Mapped[Optional[str]]   = mapped_column(Text)     # Claude API key
     openai_api_key:                   Mapped[Optional[str]]   = mapped_column(Text)     # OpenAI API key
+
+    # ── Coder model ladder (migration 049) ────────────────────────────────────
+    # Diagnostician-gated per-tier model escalation — the coder's SOLE routing
+    # path (legacy migration-047 premium tier retired, no master gate). Empty ⇒
+    # runtime builds a single default tier from coder_model (behavior preserved).
+    # daily-USD cap reuses blocked_escalation_daily_usd_cap above (guards any paid tier).
+    # Ordered list, 1–4 entries; index 0 = First Attempt. Each entry:
+    #   {"backend": "ollama"|"claude-api"|"openai", "model": str,
+    #    "max_attempts": int>=1, "enabled": bool}
+    coder_tiers:              Mapped[Optional[list]] = mapped_column(JSONB)
 
     # ── Supervisor (Phase 1 — rule-based detectors) ──────────────────────────
     # Global kill switch + per-detector toggles. NULL means "use default".
