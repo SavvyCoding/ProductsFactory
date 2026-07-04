@@ -204,6 +204,12 @@
   {% set _t_in  = lifetime_tokens_in %}
   {% set _t_out = lifetime_tokens_out %}
   {% set _t_total = _t_in + _t_out %}
+  {# Cumulative agent wall-clock (seconds) → h/m, and the hypothetical frontier
+     spend for the same token volume (computed server-side in product_detail). #}
+  {% set _agent_min = (lifetime_agent_seconds // 60) %}
+  {% set _agent_h   = (_agent_min // 60) %}
+  {% set _agent_m   = (_agent_min % 60) %}
+  {% set _fc = lifetime_frontier_cost %}
   {# Sprint summary vars removed 2026-06-19 — sprints retired by migration 043;
      the summary cards that used them are replaced by the Stuck-features card. #}
 
@@ -318,6 +324,22 @@
         </div>
       </div>
       <div class="metric-card">
+        <div class="metric-icon">⏱</div>
+        <div class="metric-body">
+          <div class="metric-value">{% if _agent_h %}{{ _agent_h }}<span class="metric-suffix">h</span> {{ _agent_m }}<span class="metric-suffix">m</span>{% else %}{{ _agent_m }}<span class="metric-suffix">m</span>{% endif %}</div>
+          <div class="metric-label">Agent time</div>
+          <div class="metric-foot-text">Cumulative across {{ total_sessions }} sessions</div>
+        </div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-icon">$</div>
+        <div class="metric-body">
+          <div class="metric-value">{% if _fc >= 1000 %}${{ '{:,.1f}'.format(_fc / 1000) }}K{% else %}${{ '{:,.2f}'.format(_fc) }}{% endif %}</div>
+          <div class="metric-label">Frontier cost (est.)</div>
+          <div class="metric-foot-text">If 100% on {{ frontier_model_label }} · $0 actual (local)</div>
+        </div>
+      </div>
+      <div class="metric-card">
         <div class="metric-icon">✦</div>
         <div class="metric-body">
           <div class="metric-value">{{ type_counts.get('feature', 0) }}<span class="metric-suffix">/{{ type_counts.get('bug', 0) }}/{{ type_counts.get('chore', 0) }}</span></div>
@@ -347,34 +369,6 @@
     </div>
   </div>
 
-  {% if sessions %}
-  <div class="metric-section">
-    <div class="metric-section-title">Latest sessions</div>
-    <div class="metric-grid">
-      {% for s in sessions[:6] %}
-      {% set dur = ((s.ended_at - s.started_at).total_seconds() | int) if s.ended_at and s.started_at else None %}
-      <div class="metric-card metric-card--small {% if s.exit_code is not none and s.exit_code != 0 %}metric--alert{% elif s.exit_code is none %}metric--accent{% endif %}">
-        <div class="metric-icon">
-          {% if s.exit_code == 0 %}✓
-          {% elif s.exit_code is none %}▶
-          {% else %}✗{% endif %}
-        </div>
-        <div class="metric-body">
-          <div class="metric-value" style="font-size:18px">
-            {% if dur %}{{ (dur // 60) }}m{% else %}—{% endif %}
-          </div>
-          <div class="metric-label">{{ s.persona or 'agent' }}</div>
-          <div class="metric-foot-text">
-            {% if s.exit_code == 0 %}OK
-            {% elif s.exit_code is none %}running
-            {% else %}{{ s.status or 'killed' }}{% endif %}
-          </div>
-        </div>
-      </div>
-      {% endfor %}
-    </div>
-  </div>
-  {% endif %}
 </div><!-- /tab-summary -->
 
 

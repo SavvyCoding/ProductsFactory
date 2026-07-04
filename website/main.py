@@ -97,6 +97,16 @@ app = FastAPI(title="ProductFactory PM", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory="website/static"), name="static")
 templates = Jinja2Templates(directory="website/templates")
 
+# Frontier-model pricing for the "cost if run 100% on frontier models" estimate
+# on the product Summary dashboard. Production agent sessions run on local
+# Ollama (free); this prices the same lifetime token volume at Claude Opus 4.8
+# rates so PMs can see the spend the local stack is avoiding. Rates are USD per
+# 1M tokens (Opus 4.8: $5 input / $25 output). Single source of truth — update
+# here if the reference frontier model changes.
+FRONTIER_MODEL_LABEL = "Claude Opus 4.8"
+FRONTIER_INPUT_USD_PER_MTOK = 5.0
+FRONTIER_OUTPUT_USD_PER_MTOK = 25.0
+
 
 def _as_feature_name(name: str | None) -> str:
     """Render a sprint.name in the new domain vocabulary.
@@ -829,6 +839,20 @@ async def product_detail(
             func.coalesce(
                 func.sum(case((DBSession.ended_at == None, 1), else_=0)), 0
             ).label("n_running"),
+            # Cumulative wall-clock spent by agents across all finished sessions,
+            # in seconds. Only rows with both timestamps contribute (a running
+            # session has no ended_at yet). EXTRACT(EPOCH ...) yields the interval
+            # in seconds as a float; coalesce guards the all-NULL case.
+            func.coalesce(
+                func.sum(
+                    case(
+                        (and_(DBSession.ended_at != None,
+                              DBSession.started_at != None),
+                         func.extract("epoch", DBSession.ended_at - DBSession.started_at)),
+                        else_=0,
+                    )
+                ), 0
+            ).label("agent_seconds"),
         )
         .where(DBSession.product_id == product_id)
         .where(_ghost_filter)
@@ -916,6 +940,18 @@ async def product_detail(
         "lifetime_ok":         int(_life_row.n_ok or 0),
         "lifetime_killed":     int(_life_row.n_killed or 0),
         "lifetime_running":    int(_life_row.n_running or 0),
+        # Cumulative agent wall-clock (seconds), and a hypothetical "what would
+        # this have cost on a frontier model" figure. Production sessions run on
+        # local Ollama (free); this prices the SAME lifetime token volume at
+        # Claude Opus 4.8 rates ($5 / $25 per 1M in/out) so PMs can see the
+        # spend they're avoiding. Kept server-side so the rate lives in one place.
+        "lifetime_agent_seconds": int(_life_row.agent_seconds or 0),
+        "lifetime_frontier_cost": round(
+            (int(_life_row.t_in or 0) / 1_000_000) * FRONTIER_INPUT_USD_PER_MTOK
+            + (int(_life_row.t_out or 0) / 1_000_000) * FRONTIER_OUTPUT_USD_PER_MTOK,
+            2,
+        ),
+        "frontier_model_label": FRONTIER_MODEL_LABEL,
         "code_auditor_enabled_effective": _audit_effective("code_auditor", "CODE_AUDITOR_ENABLED"),
         "code_auditor_filing_effective":  _audit_effective("code_auditor_filing", "CODE_AUDITOR_FILING_ENABLED"),
     })

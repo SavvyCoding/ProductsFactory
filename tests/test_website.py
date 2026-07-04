@@ -299,6 +299,49 @@ class TestProductDetail:
         assert "Run Analysis" not in r.text
 
 
+class TestDashboardTelemetry:
+    """feat/dashboard-telemetry: cumulative agent time + frontier-cost cards,
+    and removal of the per-session 'Latest sessions' block from the Summary tab.
+    """
+
+    def _sess(self, db, product_id, *, uid, minutes, t_in=0, t_out=0):
+        # Explicit start/end well past the 10s ghost threshold so the duration
+        # counts toward the lifetime agent-seconds aggregate.
+        start = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+        db.add(DBSession(
+            product_id=product_id, session_uid=uid, persona="coder", exit_code=0,
+            started_at=start, ended_at=start + timedelta(minutes=minutes),
+            tokens_input=t_in, tokens_output=t_out,
+        ))
+
+    def test_agent_time_and_frontier_cost_render(self, client, db):
+        p = make_product(db)
+        # 30m + 90m = 120m = 2h total; 1M input + 2M output tokens.
+        self._sess(db, p.id, uid="a0", minutes=30, t_in=1_000_000, t_out=2_000_000)
+        self._sess(db, p.id, uid="a1", minutes=90)
+        db.flush()
+        r = client.get(f"/product/{p.id}?tab=summary", auth=AUTH)
+        assert r.status_code == 200
+        html = r.text
+        assert "Agent time" in html
+        assert "Cumulative across 2 sessions" in html
+        assert "Frontier cost" in html
+        assert "Claude Opus 4.8" in html
+        # 1M in × $5 + 2M out × $25 = $55.00, computed server-side.
+        assert "$55.00" in html
+        # 120 min → "2h" rendered in the metric value.
+        assert '2<span class="metric-suffix">h</span>' in html
+        # "Latest sessions" per-session block is removed from the Summary tab.
+        assert "Latest sessions" not in html
+
+    def test_zero_sessions_no_crash(self, client, db):
+        p = make_product(db)
+        r = client.get(f"/product/{p.id}?tab=summary", auth=AUTH)
+        assert r.status_code == 200
+        assert "Agent time" in r.text
+        assert "$0.00" in r.text  # frontier cost with no tokens
+
+
 class TestLifetimeAggregates:
     """Regression for the 2026-05-30 'Tokens lifetime' shrinking bug.
 
