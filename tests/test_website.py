@@ -314,34 +314,47 @@ class TestDashboardTelemetry:
             tokens_input=t_in, tokens_output=t_out,
         ))
 
-    def test_agent_time_and_frontier_cost_render(self, client, db):
+    def test_three_panel_consolidation_and_derived_metrics(self, client, db):
         p = make_product(db)
-        # 30m + 90m = 120m = 2h total; 1M input + 2M output tokens.
+        # 2 shipped features + 2 sessions (30m+90m = 2h; 1M in / 2M out tokens).
+        make_feature(db, p.id, name="f1", status="Pushed")
+        make_feature(db, p.id, name="f2", status="Pushed")
         self._sess(db, p.id, uid="a0", minutes=30, t_in=1_000_000, t_out=2_000_000)
         self._sess(db, p.id, uid="a1", minutes=90)
         db.flush()
         r = client.get(f"/product/{p.id}?tab=summary", auth=AUTH)
         assert r.status_code == 200
         html = r.text
-        assert "Agent time" in html
-        assert "Cumulative across 2 sessions" in html
-        assert "Frontier cost" in html
-        assert "Claude Opus 4.8" in html
-        # The "$0 actual (local)" note was removed (negligible actual spend).
-        assert "actual (local)" not in html
-        # 1M in × $5 + 2M out × $25 = $55.00, computed server-side.
+        # Consolidated into exactly three panels.
+        for title in ("Delivery", "Pipeline health", "Activity"):
+            assert title in html
+        assert html.count('class="sum-panel"') == 3
+        # Derived per-ship metrics present.
+        assert "Avg time / shipped feature" in html
+        assert "Avg cost / shipped feature" in html
+        assert "Avg sessions / shipped feature" in html
+        assert "Session success rate" in html
+        # Frontier: total = 1M×$5 + 2M×$25 = $55.00; per-ship = $55/2 = $27.50.
         assert "$55.00" in html
-        # 120 min → "2h" rendered in the metric value.
-        assert '2<span class="metric-suffix">h</span>' in html
-        # "Latest sessions" per-session block is removed from the Summary tab.
+        assert "$27.50" in html
+        # Avg sessions / ship = 2 sessions / 2 shipped = 1.0
+        assert "1.0" in html
+        assert "Claude Opus 4.8" in html
+        assert "actual (local)" not in html
+        # Agent-time hero: 120 min → "2h" in the new hero markup.
+        assert '2<span class="sum-hero-unit">h</span>' in html
+        # Old per-tile sections and the Latest-sessions block are gone.
         assert "Latest sessions" not in html
+        assert "metric-section-title" not in html
 
     def test_zero_sessions_no_crash(self, client, db):
         p = make_product(db)
         r = client.get(f"/product/{p.id}?tab=summary", auth=AUTH)
         assert r.status_code == 200
-        assert "Agent time" in r.text
-        assert "$0.00" in r.text  # frontier cost with no tokens
+        html = r.text
+        assert html.count('class="sum-panel"') == 3
+        assert "$0.00" in html          # frontier cost with no tokens
+        assert "—" in html              # per-ship metrics fall back to em-dash
 
 
 class TestLifetimeAggregates:
@@ -395,14 +408,13 @@ class TestLifetimeAggregates:
             self._make_session(db, p.id, uid=f"u{i:03d}")
         r = client.get(f"/product/{p.id}", auth=AUTH)
         assert r.status_code == 200
-        # Full lifetime input total: 60 × 100,000 = 6,000,000
-        assert "6,000,000 in" in r.text, (
-            "tokens_input lifetime total must include all 60 sessions, "
-            "not just the LIMIT(50) display slice. Look for the 'X in' "
-            "foot text on the Tokens lifetime card."
+        # New Activity panel shows the lifetime TOKEN TOTAL (in+out), rounded:
+        # 60 × (100k + 10k) = 6.6M. The LIMIT(50) slice would be 5.5M, so the
+        # 6.6M value proves all 60 sessions were summed.
+        assert '6.6<span class="u">M</span>' in r.text, (
+            "tokens total must include all 60 sessions, not just the "
+            "LIMIT(50) slice — expected 6.6M on the Activity panel."
         )
-        # Full lifetime output: 60 × 10,000 = 600,000
-        assert "600,000 out" in r.text
 
     def test_sessions_lifetime_count_includes_past_limit_50(self, client, db):
         p = make_product(db)
@@ -410,12 +422,10 @@ class TestLifetimeAggregates:
             self._make_session(db, p.id, uid=f"u{i:03d}")
         r = client.get(f"/product/{p.id}", auth=AUTH)
         assert r.status_code == 200
-        # The "Sessions lifetime" metric card renders the count as the
-        # metric value. With 75 sessions, the page must contain "75",
-        # not "50" (the LIMIT cap).
-        # Use the foot text format which is unique: "X OK · Y killed"
-        # to anchor the assertion away from incidental numbers.
-        assert "75 OK · 0 killed" in r.text
+        # The Activity panel's Sessions row shows the lifetime count with a
+        # "N ok · N killed" breakdown. 75 (not the LIMIT-50 cap) proves the
+        # unbounded query is used.
+        assert "75 ok · 0 killed" in r.text
 
     def test_session_success_rate_uses_lifetime_not_slice(self, client, db):
         # 60 OK sessions + 40 killed sessions → 100 total, 60% success.
@@ -430,13 +440,11 @@ class TestLifetimeAggregates:
             self._make_session(db, p.id, uid=f"kill-{i:03d}", exit_code=137)
         r = client.get(f"/product/{p.id}", auth=AUTH)
         assert r.status_code == 200
-        # The metric card renders the percentage as the value and the
-        # supporting count in foot text "across N runs". 60/100 = 60.
-        assert "across 100 runs" in r.text
-        # And the percentage must appear — guard against ratio computed
-        # off the slice. Format from the template: {{ ok_pct }}<suffix>%
-        # so look for ">60<" inside the metric-value span.
-        assert ">60<" in r.text
+        # Pipeline-health "Session success rate" row = 60/100 = 60%, and the
+        # Activity Sessions row confirms the 100-session denominator via its
+        # "60 ok · 40 killed" breakdown (would differ if computed off the slice).
+        assert '60<span class="u">%</span>' in r.text
+        assert "60 ok · 40 killed" in r.text
 
     def test_ghost_sessions_excluded_from_lifetime(self, client, db):
         # Ghost sessions (failed AND ended within 10s of start) are
@@ -460,8 +468,8 @@ class TestLifetimeAggregates:
         db.flush()
         r = client.get(f"/product/{p.id}", auth=AUTH)
         assert r.status_code == 200
-        # 5 real, all OK
-        assert "5 OK · 0 killed" in r.text
+        # 5 real sessions, all ok; the 3 ghosts are excluded from the aggregate.
+        assert "5 ok · 0 killed" in r.text
 
 
 # ══════════════════════════════════════════════════════════════════════════════

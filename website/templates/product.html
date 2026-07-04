@@ -210,163 +210,119 @@
   {% set _agent_h   = (_agent_min // 60) %}
   {% set _agent_m   = (_agent_min % 60) %}
   {% set _fc = lifetime_frontier_cost %}
-  {# Sprint summary vars removed 2026-06-19 — sprints retired by migration 043;
-     the summary cards that used them are replaced by the Stuck-features card. #}
+  {# ── Derived per-ship efficiency metrics. Denominator is `pushed` (features
+     that reached main); guard div-by-zero on new products → rendered as "—".
+     These divide TOTAL product effort (all personas + failed attempts) by
+     shipped features, i.e. the true cost-to-ship, not per-feature-isolated. #}
+  {% set _apf_min = ((lifetime_agent_seconds / pushed) / 60) | int if pushed else 0 %}
+  {% set _apf_h   = (_apf_min // 60) %}
+  {% set _apf_m   = (_apf_min % 60) %}
+  {% set _cost_per_ship = (lifetime_frontier_cost / pushed) if pushed else 0 %}
+  {% set _sess_per_ship = (total_sessions / pushed) if pushed else 0 %}
+  {% set stuck_count = features | selectattr('status','equalto','Stuck') | list | length %}
 
-  <!-- METRIC CARDS — primary KPIs grouped by section -->
+  <!-- SUMMARY — three consolidated panels: throughput · risk · effort/cost -->
+  <style>
+    .sum3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:4px;align-items:start}
+    @media (max-width:1000px){.sum3{grid-template-columns:1fr}}
+    .sum-panel{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-lg);
+      box-shadow:var(--shadow-sm);padding:18px 18px 16px;display:flex;flex-direction:column;gap:14px}
+    .sum-panel-title{font-size:var(--text-xs);font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+    .sum-hero{display:flex;flex-direction:column;gap:7px}
+    .sum-hero-val{font-size:34px;line-height:1;font-weight:700;color:var(--color-fg-default);
+      font-variant-numeric:tabular-nums;display:flex;align-items:baseline;gap:5px}
+    .sum-hero-unit{font-size:13px;font-weight:600;color:var(--muted)}
+    .sum-hero-sub{font-size:var(--text-sm);color:var(--muted)}
+    .sum-hero--good .sum-hero-val{color:var(--green)}
+    .sum-hero--alert .sum-hero-val{color:var(--red)}
+    .sum-bar{height:6px;border-radius:var(--radius-full);background:var(--light);overflow:hidden}
+    .sum-bar-fill{height:100%;border-radius:var(--radius-full);background:var(--green)}
+    .sum-rows{display:flex;flex-direction:column;margin:0}
+    .sum-row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;
+      padding:9px 0;border-top:1px solid var(--border)}
+    .sum-row:first-child{border-top:0}
+    .sum-row dt{font-size:var(--text-md);color:var(--muted)}
+    .sum-row dd{margin:0;font-size:var(--text-base);font-weight:600;color:var(--color-fg-default);
+      font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+    .sum-row dd .u{font-size:11px;font-weight:500;color:var(--muted);margin-left:3px}
+    .sum-row--warn dd{color:var(--amber)}
+    .sum-statusbar{display:flex;height:8px;border-radius:var(--radius-full);overflow:hidden;background:var(--light)}
+    .sum-seg{min-width:2px}
+    .sum-seg--pushed{background:var(--green)}
+    .sum-seg--blocked,.sum-seg--reverted{background:var(--red)}
+    .sum-seg--reviewing,.sum-seg--reviewed{background:var(--amber)}
+    .sum-seg--implementing,.sum-seg--designing,.sum-seg--designed{background:var(--blue)}
+    .sum-seg--approved,.sum-seg--pending{background:var(--slate)}
+    .sum-seg--deferred,.sum-seg--rejected{background:var(--border)}
+    .sum-note{font-size:var(--text-xs);color:var(--muted);margin-top:6px}
+  </style>
 
-  <div class="metric-section">
-    <div class="metric-section-title">Delivery</div>
-    <div class="metric-grid">
-      <div class="metric-card metric--accent">
-        <div class="metric-icon">✓</div>
-        <div class="metric-body">
-          <div class="metric-value">{{ pushed }}</div>
-          <div class="metric-label">Features shipped</div>
-          <div class="metric-foot">
-            <div class="metric-bar"><div class="metric-bar-fill" style="width:{{ ship_pct }}%"></div></div>
-            <span class="metric-foot-text">{{ ship_pct }}% of {{ total_features }}</span>
-          </div>
-        </div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-icon">▶</div>
-        <div class="metric-body">
-          <div class="metric-value">{{ in_flight }}</div>
-          <div class="metric-label">In flight</div>
-          <div class="metric-foot-text">{{ status_counts.get('Implementing',0) }} coding · {{ status_counts.get('Reviewing',0) }} reviewing</div>
-        </div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-icon">⌛</div>
-        <div class="metric-body">
-          <div class="metric-value">{{ unsigned_approved }}</div>
-          <div class="metric-label">Approved backlog</div>
-          <div class="metric-foot-text">Waiting for designer / coder</div>
-        </div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-icon">📋</div>
-        <div class="metric-body">
-          <div class="metric-value">{{ pending_count }}</div>
-          <div class="metric-label">Pending review</div>
-          <div class="metric-foot-text">PM hasn't approved yet</div>
-        </div>
-      </div>
-    </div>
-  </div>
+  <div class="sum3">
 
-  <div class="metric-section">
-    <div class="metric-section-title">Pipeline health</div>
-    <div class="metric-grid">
-      <div class="metric-card {% if blocked > 0 %}metric--alert{% endif %}">
-        <div class="metric-icon">🚫</div>
-        <div class="metric-body">
-          <div class="metric-value">{{ blocked }}</div>
-          <div class="metric-label">Blocked</div>
-          <div class="metric-foot-text">{% if blocked %}needs triage{% else %}clear{% endif %}</div>
-        </div>
+    {# ── DELIVERY — throughput & backlog ── #}
+    <section class="sum-panel">
+      <div class="sum-panel-title">Delivery</div>
+      <div class="sum-hero sum-hero--good">
+        <div class="sum-hero-val">{{ pushed }}<span class="sum-hero-unit">shipped</span></div>
+        <div class="sum-bar"><div class="sum-bar-fill" style="width:{{ ship_pct }}%"></div></div>
+        <div class="sum-hero-sub">{{ ship_pct }}% of {{ total_features }} planned features</div>
       </div>
-      <div class="metric-card {% if open_prs and open_prs >= 3 %}metric--warn{% endif %}">
-        <div class="metric-icon">⇄</div>
-        <div class="metric-body">
-          <div class="metric-value">{{ open_prs or 0 }}</div>
-          <div class="metric-label">Open PRs</div>
-          <div class="metric-foot-text">{% if open_prs and open_prs >= 3 %}⚠ at PR-gate{% else %}healthy{% endif %}</div>
+      <dl class="sum-rows">
+        <div class="sum-row"><dt>Avg time / shipped feature</dt>
+          <dd>{% if pushed %}{% if _apf_h %}{{ _apf_h }}<span class="u">h</span> {{ _apf_m }}<span class="u">m</span>{% else %}{{ _apf_m }}<span class="u">m</span>{% endif %}{% else %}—{% endif %}</dd></div>
+        <div class="sum-row"><dt>In flight</dt>
+          <dd>{{ in_flight }}<span class="u">{{ status_counts.get('Implementing',0) }} cod · {{ status_counts.get('Reviewing',0) }} rev</span></dd></div>
+        <div class="sum-row"><dt>Approved backlog</dt><dd>{{ unsigned_approved }}</dd></div>
+        <div class="sum-row"><dt>Pending review</dt><dd>{{ pending_count }}</dd></div>
+      </dl>
+      <div>
+        <div class="sum-statusbar">
+          {% for st in _STATUS_BUCKETS %}{% if status_counts.get(st,0) %}<span class="sum-seg sum-seg--{{ st|lower }}" style="flex:{{ status_counts.get(st,0) }}" title="{{ st }}: {{ status_counts.get(st,0) }}"></span>{% endif %}{% endfor %}
         </div>
+        <div class="sum-note">Status mix across {{ features|length }} features</div>
       </div>
-      {# Sprints were retired by migration 043 — the old "active/lifetime
-         sprint" cards here were dead (always empty). Replaced with a
-         needs-attention card surfacing Stuck (terminal: base AND premium
-         models failed) and Blocked features so PMs see triage debt at a
-         glance. #}
-      {% set stuck_count = features | selectattr('status', 'equalto', 'Stuck') | list | length %}
-      {% set blocked_count = features | selectattr('status', 'equalto', 'Blocked') | list | length %}
-      <div class="metric-card{% if stuck_count %} metric--warn{% endif %}">
-        <div class="metric-icon">🛑</div>
-        <div class="metric-body">
-          <div class="metric-value{% if not stuck_count %} metric-value--muted{% endif %}">{{ stuck_count }}</div>
-          <div class="metric-label">Stuck features</div>
-          <div class="metric-foot-text">{% if stuck_count %}needs human triage{% else %}none stuck{% endif %}{% if blocked_count %} · {{ blocked_count }} blocked{% endif %}</div>
-        </div>
-      </div>
-    </div>
-  </div>
+    </section>
 
-  <div class="metric-section">
-    <div class="metric-section-title">Activity</div>
-    <div class="metric-grid">
-      <div class="metric-card">
-        <div class="metric-icon">⚡</div>
-        <div class="metric-body">
-          <div class="metric-value">{{ total_sessions }}</div>
-          <div class="metric-label">Sessions lifetime</div>
-          <div class="metric-foot-text">{{ ok_sessions }} OK · {{ killed_sessions }} killed{% if running_sessions %} · {{ running_sessions }} running{% endif %}</div>
-        </div>
+    {# ── PIPELINE HEALTH — risk / attention ── #}
+    <section class="sum-panel">
+      <div class="sum-panel-title">Pipeline health</div>
+      <div class="sum-hero {% if blocked or stuck_count %}sum-hero--alert{% else %}sum-hero--good{% endif %}">
+        <div class="sum-hero-val">{{ blocked }}<span class="sum-hero-unit">blocked</span></div>
+        <div class="sum-hero-sub">{% if blocked %}needs triage{% else %}queue is clear{% endif %}</div>
       </div>
-      <div class="metric-card {% if total_sessions and ok_pct < 60 %}metric--warn{% endif %}">
-        <div class="metric-icon">📊</div>
-        <div class="metric-body">
-          <div class="metric-value">{{ ok_pct }}<span class="metric-suffix">%</span></div>
-          <div class="metric-label">Session success rate</div>
-          <div class="metric-foot">
-            <div class="metric-bar"><div class="metric-bar-fill {% if ok_pct < 60 %}metric-bar-fill--warn{% else %}metric-bar-fill--green{% endif %}" style="width:{{ ok_pct }}%"></div></div>
-            <span class="metric-foot-text">across {{ total_sessions }} runs</span>
-          </div>
-        </div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-icon">≡</div>
-        <div class="metric-body">
-          <div class="metric-value">{% if _t_total >= 1000000 %}{{ (_t_total / 1000000) | round(1) }}M{% elif _t_total >= 1000 %}{{ (_t_total / 1000) | round(0) | int }}K{% else %}{{ _t_total }}{% endif %}</div>
-          <div class="metric-label">Tokens lifetime</div>
-          <div class="metric-foot-text">{{ '{:,}'.format(_t_in) }} in · {{ '{:,}'.format(_t_out) }} out</div>
-        </div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-icon">⏱</div>
-        <div class="metric-body">
-          <div class="metric-value">{% if _agent_h %}{{ _agent_h }}<span class="metric-suffix">h</span> {{ _agent_m }}<span class="metric-suffix">m</span>{% else %}{{ _agent_m }}<span class="metric-suffix">m</span>{% endif %}</div>
-          <div class="metric-label">Agent time</div>
-          <div class="metric-foot-text">Cumulative across {{ total_sessions }} sessions</div>
-        </div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-icon">$</div>
-        <div class="metric-body">
-          <div class="metric-value">{% if _fc >= 1000 %}${{ '{:,.1f}'.format(_fc / 1000) }}K{% else %}${{ '{:,.2f}'.format(_fc) }}{% endif %}</div>
-          <div class="metric-label">Frontier cost (est.)</div>
-          <div class="metric-foot-text">If 100% on {{ frontier_model_label }}</div>
-        </div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-icon">✦</div>
-        <div class="metric-body">
-          <div class="metric-value">{{ type_counts.get('feature', 0) }}<span class="metric-suffix">/{{ type_counts.get('bug', 0) }}/{{ type_counts.get('chore', 0) }}</span></div>
-          <div class="metric-label">Features / Bugs / Chores</div>
-          <div class="metric-foot-text">Mix across all states</div>
-        </div>
-      </div>
-    </div>
-  </div>
+      <dl class="sum-rows">
+        <div class="sum-row {% if stuck_count %}sum-row--warn{% endif %}"><dt>Stuck features</dt><dd>{{ stuck_count }}</dd></div>
+        <div class="sum-row {% if open_prs and open_prs >= 3 %}sum-row--warn{% endif %}"><dt>Open PRs</dt>
+          <dd>{{ open_prs or 0 }}{% if open_prs and open_prs >= 3 %}<span class="u">at gate</span>{% endif %}</dd></div>
+        <div class="sum-row {% if total_sessions and ok_pct < 60 %}sum-row--warn{% endif %}"><dt>Session success rate</dt>
+          <dd>{{ ok_pct }}<span class="u">%</span></dd></div>
+        <div class="sum-row"><dt>Avg sessions / shipped feature</dt>
+          <dd>{% if pushed %}{{ '%.1f'|format(_sess_per_ship) }}{% else %}—{% endif %}</dd></div>
+      </dl>
+    </section>
 
-  <div class="metric-section">
-    <div class="metric-section-title">Status mix</div>
-    <div class="metric-grid">
-      {% for st in _STATUS_BUCKETS %}{% if status_counts.get(st, 0) %}
-      <div class="metric-card metric-card--small">
-        <div class="metric-icon">
-          {% if st == 'Pushed' %}✓{% elif st == 'Blocked' %}🚫{% elif st in ['Implementing','Designing'] %}⚙{% elif st == 'Reviewing' %}🔍{% elif st == 'Reviewed' %}✓{% elif st in ['Approved','Pending'] %}📋{% elif st == 'Designed' %}✏{% else %}·{% endif %}
-        </div>
-        <div class="metric-body">
-          <div class="metric-value">{{ status_counts.get(st, 0) }}</div>
-          <div class="metric-label">
-            <span class="badge badge-status-{{ st | lower }}" style="font-size:10px">{{ st }}</span>
-          </div>
-        </div>
+    {# ── ACTIVITY — effort & cost ── #}
+    <section class="sum-panel">
+      <div class="sum-panel-title">Activity</div>
+      <div class="sum-hero">
+        <div class="sum-hero-val">{% if _agent_h %}{{ _agent_h }}<span class="sum-hero-unit">h</span> {{ _agent_m }}<span class="sum-hero-unit">m</span>{% else %}{{ _agent_m }}<span class="sum-hero-unit">m</span>{% endif %}</div>
+        <div class="sum-hero-sub">agent time across {{ total_sessions }} sessions</div>
       </div>
-      {% endif %}{% endfor %}
-    </div>
+      <dl class="sum-rows">
+        <div class="sum-row"><dt>Frontier cost (est.)</dt>
+          <dd>{% if _fc >= 1000 %}${{ '{:,.1f}'.format(_fc / 1000) }}<span class="u">K</span>{% else %}${{ '{:,.2f}'.format(_fc) }}{% endif %}</dd></div>
+        <div class="sum-row"><dt>Avg cost / shipped feature</dt>
+          <dd>{% if pushed %}{% if _cost_per_ship >= 100 %}${{ '{:,.0f}'.format(_cost_per_ship) }}{% else %}${{ '{:,.2f}'.format(_cost_per_ship) }}{% endif %}{% else %}—{% endif %}</dd></div>
+        <div class="sum-row"><dt>Sessions</dt>
+          <dd>{{ total_sessions }}<span class="u">{{ ok_sessions }} ok · {{ killed_sessions }} killed</span></dd></div>
+        <div class="sum-row"><dt>Tokens</dt>
+          <dd>{% if _t_total >= 1000000 %}{{ (_t_total / 1000000) | round(1) }}<span class="u">M</span>{% elif _t_total >= 1000 %}{{ (_t_total / 1000) | round(0) | int }}<span class="u">K</span>{% else %}{{ _t_total }}{% endif %}</dd></div>
+        <div class="sum-row"><dt>Feature / Bug / Chore</dt>
+          <dd>{{ type_counts.get('feature',0) }} / {{ type_counts.get('bug',0) }} / {{ type_counts.get('chore',0) }}</dd></div>
+      </dl>
+      <div class="sum-note">Frontier figures priced at {{ frontier_model_label }} · production runs local ($0)</div>
+    </section>
+
   </div>
 
 </div><!-- /tab-summary -->
