@@ -550,23 +550,39 @@ def _screenshot_slides(tmp_path: Path) -> list[Path]:
 
 
 def _synth_audio(narrations: list[str], tmp_path: Path) -> list[Path]:
+    """Synthesize narration with Edge TTS (MP3) then decode to sample-accurate
+    WAV. edge-tts only emits MP3; the lossy MP3 decode delay + imprecise MP3
+    duration estimate are a source of A/V drift, so we transcode to PCM WAV
+    once up front and assemble the video from the WAVs."""
     import edge_tts
+    from moviepy import AudioFileClip
 
     async def _run_all():
-        paths = []
+        mp3_paths = []
         for i, text in enumerate(narrations):
             log.info(f"  TTS slide {i+1}/{len(narrations)}")
             out = tmp_path / f"audio_{i:02d}.mp3"
             comm = edge_tts.Communicate(text, voice="en-US-AriaNeural")
             await comm.save(str(out))
-            paths.append(out)
-        return paths
+            mp3_paths.append(out)
+        return mp3_paths
 
     loop = asyncio.new_event_loop()
     try:
-        return loop.run_until_complete(_run_all())
+        mp3_paths = loop.run_until_complete(_run_all())
     finally:
         loop.close()
+
+    wav_paths = []
+    for i, mp3 in enumerate(mp3_paths):
+        wav = tmp_path / f"audio_{i:02d}.wav"
+        clip = AudioFileClip(str(mp3))
+        try:
+            clip.write_audiofile(str(wav), fps=44100, codec="pcm_s16le", logger=None)
+        finally:
+            clip.close()
+        wav_paths.append(wav)
+    return wav_paths
 
 
 def build(output_dir: Path) -> Path:
@@ -595,19 +611,27 @@ def build(output_dir: Path) -> Path:
         audio_paths = _synth_audio(NARRATIONS, tmp_path)
 
         log.info("Phase 3: Assembling video…")
+        FPS = 24
+        FRAME = 1.0 / FPS
         clips = []
         for i, (slide, audio) in enumerate(zip(slide_paths, audio_paths)):
             pause = 1.5 if i == len(slide_paths) - 1 else 0.4
             a = AudioFileClip(str(audio))
-            c = ImageClip(str(slide)).with_duration(a.duration + pause).with_audio(a)
+            # Snap each slide's video length to a whole-frame boundary so the
+            # video and its audio agree per-slide; otherwise the sub-frame
+            # remainder accumulates across slides into progressive A/V drift.
+            dur = round((a.duration + pause) / FRAME) * FRAME
+            c = ImageClip(str(slide)).with_duration(dur).with_audio(a)
             clips.append(c)
 
         final = None
         try:
-            final = concatenate_videoclips(clips, method="compose")
+            final = concatenate_videoclips(clips, method="chain")
             final.write_videofile(
-                str(video_path), fps=24,
+                str(video_path), fps=FPS,
                 codec="libx264", audio_codec="aac",
+                audio_fps=44100, audio_bitrate="192k",
+                ffmpeg_params=["-async", "1", "-vsync", "cfr"],
                 logger=None,
             )
             log.info(f"Done! → {video_path}  ({video_path.stat().st_size // 1024 // 1024} MB)")
