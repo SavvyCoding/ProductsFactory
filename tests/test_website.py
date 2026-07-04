@@ -327,6 +327,8 @@ class TestDashboardTelemetry:
         assert "Cumulative across 2 sessions" in html
         assert "Frontier cost" in html
         assert "Claude Opus 4.8" in html
+        # The "$0 actual (local)" note was removed (negligible actual spend).
+        assert "actual (local)" not in html
         # 1M in × $5 + 2M out × $25 = $55.00, computed server-side.
         assert "$55.00" in html
         # 120 min → "2h" rendered in the metric value.
