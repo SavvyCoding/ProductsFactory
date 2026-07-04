@@ -562,6 +562,11 @@ _CFG_DEFAULTS = {
     "ollama_api_key":   "",   # required for Ollama Cloud, ignored for local
     "designer_model":   "gemma3:27b",
     "coder_model":      "qwen3-coder:30b",
+    # Coder model ladder (migration 049) — MUST be exposed here or the
+    # orchestrator's /api/system-config read never sees the configured ladder and
+    # the coder silently falls back to coder_model (the curated-dict-drops-fields
+    # footgun). None ⇒ runtime builds a single default tier from coder_model.
+    "coder_tiers":      None,
     "ollama_model_map": {},
     "ollama_timeout":   300,
     "bash_timeout":     180,
@@ -1348,7 +1353,10 @@ async def admin_save_poller_settings(
     if _new_ollama_key:
         config.ollama_api_key = _new_ollama_key
     config.designer_model              = _str("designer_model")
-    config.coder_model                 = _str("coder_model")
+    # NOTE: the coder is governed by the coder_tiers ladder ("🧠 Model Selection"
+    # tab), NOT a coder_model box — so we do NOT read/blank coder_model here.
+    # config.coder_model is preserved untouched as the empty-ladder fallback
+    # (docker_runner._resolve_coder_ladder builds a default tier from it).
     # Per-persona overrides for the orchestrator's runtime model resolver
     # (orchestrator/docker_runner.py reads ollama_model_map[persona] BEFORE
     # falling back to designer_model/coder_model). Form fields are named
@@ -1356,21 +1364,18 @@ async def admin_save_poller_settings(
     # → drop the override for that persona. Personas not in this list are
     # left untouched in the JSONB so manual DB edits or future additions
     # survive a save through the UI.
-    # The grid below covers the secondary personas (named ollama_chain_<persona>).
-    # coder/designer have dedicated fields (coder_model / designer_model), but the
-    # orchestrator's resolver reads ollama_model_map[persona] BEFORE those fields
-    # — so a stale map["coder"]/["designer"] would silently shadow the UI box
-    # (the glm-5.2 footgun). Mirror the dedicated fields into the map so the box
-    # is always authoritative: ("coder", "coder_model") / ("designer", ...).
+    # The grid covers the secondary personas (named ollama_chain_<persona>);
+    # designer has a dedicated field mirrored into the map so the box is always
+    # authoritative (the glm-5.2 shadowing footgun). map["coder"] is left alone.
     _personas_for_override = ("reviewer", "code_auditor", "planner",
                               "documenter", "analytics", "recommender",
                               "devops", "refactorer", "product_trainer")
     _new_map = dict(config.ollama_model_map or {})
     # Secondary personas: read from their ollama_chain_<persona> field.
-    # coder/designer: read from their dedicated coder_model/designer_model field.
+    # designer: read from its dedicated designer_model field.
     _chain_sources = (
         [(p, f"ollama_chain_{p}") for p in _personas_for_override]
-        + [("coder", "coder_model"), ("designer", "designer_model")]
+        + [("designer", "designer_model")]
     )
     for _p, _field in _chain_sources:
         _raw = form.get(_field, "").strip()
@@ -1386,14 +1391,34 @@ async def admin_save_poller_settings(
     config.claude_model                = _str("claude_model")
     config.claude_credentials_dir      = _str("claude_credentials_dir")
     config.ssh_keys_dir = _str("ssh_keys_dir")
-    # Blocked-feature premium escalation (migration 047).
-    config.blocked_escalation_enabled       = form.get("blocked_escalation_enabled") == "1"
-    config.blocked_escalation_backend       = _str("blocked_escalation_backend")
-    config.blocked_escalation_model         = _str("blocked_escalation_model")
-    config.blocked_escalation_max_attempts  = _int("blocked_escalation_max_attempts")
-    config.blocked_escalation_daily_usd_cap = _float("blocked_escalation_daily_usd_cap")
     config.anthropic_api_key                = _str("anthropic_api_key")
     config.openai_api_key                   = _str("openai_api_key")
+    # Coder model ladder (migration 049) — the "🧠 Coder Models" sub-tab. Up to 4
+    # tier rows (First Attempt + 3 escalations); a row is included when its Model
+    # is non-empty. First Attempt (row 0) is always enabled; escalation rows carry
+    # their own checkbox. Empty ladder → NULL (runtime builds a default tier from
+    # coder_model). The daily-USD cap (below) reuses the migration-047 column and
+    # now guards any paid tier. The other legacy blocked_escalation_* fields are
+    # retired (no UI, no routing) — left untouched in the DB.
+    _tiers: list[dict] = []
+    for _i in range(4):
+        _tmodel = form.get(f"coder_tier_model_{_i}", "").strip()
+        if not _tmodel:
+            continue
+        _tbackend = (form.get(f"coder_tier_backend_{_i}", "ollama").strip() or "ollama")
+        try:
+            _tatt = max(1, int(form.get(f"coder_tier_attempts_{_i}", "").strip() or (4 if _i == 0 else 2)))
+        except ValueError:
+            _tatt = 4 if _i == 0 else 2
+        _tenabled = (_i == 0) or (form.get(f"coder_tier_enabled_{_i}") == "1")
+        _tiers.append({"backend": _tbackend, "model": _tmodel,
+                       "max_attempts": _tatt, "enabled": _tenabled})
+    from orchestrator.coder_tiers import validate_coder_tiers as _validate_tiers
+    _tier_errs = _validate_tiers(_tiers or None)
+    if _tier_errs:
+        raise HTTPException(status_code=422, detail="Coder ladder: " + "; ".join(_tier_errs))
+    config.coder_tiers = _tiers or None
+    config.blocked_escalation_daily_usd_cap = _float("blocked_escalation_daily_usd_cap")
     await db.flush()
     return RedirectResponse("/admin?saved=true", status_code=303)
 
@@ -3647,6 +3672,56 @@ async def api_start_session(body: schemas.SessionCreate, db: AsyncSession = Depe
         "INSERT INTO session_events (session_id, event, detail) VALUES (:sid, 'launched', :detail)"
     ), {"sid": session.id, "detail": f"persona={session.persona} backend={session.backend}"})
     return session
+
+
+@app.get("/api/escalation-stats")
+async def api_escalation_stats(product_id: Optional[int] = None, db: AsyncSession = Depends(get_db)):
+    """Durable coder-ladder telemetry (migration 050). Answers, cleanly and
+    countably: how many features stayed on First Attempt vs escalated, how many
+    of each shipped, and how many coder sessions ran on each model.
+
+    Optional ``product_id`` scopes to one product; omitted = all products.
+    """
+    fwhere = "WHERE product_id = :pid" if product_id else ""
+    swhere = "WHERE persona = 'coder' AND ladder_model IS NOT NULL"
+    if product_id:
+        swhere += " AND product_id = :pid"
+    params = {"pid": product_id} if product_id else {}
+
+    # Feature cohort by highest tier ever reached (0 = First Attempt only), with
+    # ship outcome. max_ladder_tier is monotonic (never reset), so this is exact.
+    feat_rows = (await db.execute(text(f"""
+        SELECT max_ladder_tier AS tier,
+               count(*)                                    AS total,
+               count(*) FILTER (WHERE status = 'Pushed')   AS pushed,
+               count(*) FILTER (WHERE status = 'Blocked')  AS blocked
+        FROM features {fwhere}
+        GROUP BY max_ladder_tier ORDER BY max_ladder_tier
+    """), params)).mappings().all()
+
+    # Per-session model counts (which model each coder session actually ran).
+    sess_rows = (await db.execute(text(f"""
+        SELECT ladder_model AS model, count(*) AS sessions
+        FROM sessions {swhere}
+        GROUP BY ladder_model ORDER BY count(*) DESC
+    """), params)).mappings().all()
+
+    first_attempt = next((r for r in feat_rows if r["tier"] == 0), None)
+    escalated = [r for r in feat_rows if r["tier"] >= 1]
+    return {
+        "product_id": product_id,
+        "features": {
+            "first_attempt_only": dict(first_attempt) if first_attempt else {"total": 0, "pushed": 0, "blocked": 0},
+            "escalated": {
+                "total":   sum(r["total"] for r in escalated),
+                "pushed":  sum(r["pushed"] for r in escalated),
+                "blocked": sum(r["blocked"] for r in escalated),
+                "by_tier": [dict(r) for r in escalated],
+            },
+            "by_tier": [dict(r) for r in feat_rows],
+        },
+        "coder_sessions_by_model": [dict(r) for r in sess_rows],
+    }
 
 
 @app.post("/api/sessions/{session_id}/heartbeat")

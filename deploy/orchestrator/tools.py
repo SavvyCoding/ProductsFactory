@@ -1480,7 +1480,15 @@ def _escalate_blocked_features(product: dict, features: list | None = None,
     OFF unless configured: requires blocked_escalation_enabled + a backend/model +
     a non-zero daily cap (blank/0 ⇒ disabled, a safety default). Returns the number
     escalated. Best-effort; never raises into the cycle.
+
+    RETIRED (migration 049): the coder model ladder supersedes this whole path —
+    escalation now happens INLINE per coder session (First Attempt → escalation
+    tiers), driven by features.escalation_step, not by unblocking to a separate
+    premium pass. Early-return 0 so no feature is routed through the legacy
+    escalation_active mechanism. Kept as a no-op (rather than deleted) to avoid
+    ripping out the call site + markers mid-change; safe to remove in a follow-up.
     """
+    return 0
     pid = product.get("id")
     if not pid:
         return 0
@@ -1643,6 +1651,14 @@ def _reprocess_blocked_features(product: dict, features: list | None = None,
                 if not isinstance(fid, int):
                     continue
                 reason = (f.get("blocked_reason") or "").lower()
+
+                # Coder model ladder (migration 049): a feature Blocked because it
+                # climbed the ENTIRE model ladder and still failed has already had
+                # every configured tier. escalation_step stays maxed (the reprocessor
+                # never resets it), so an auto-retry would just re-run the base model
+                # and re-Block. Leave it Blocked for human triage.
+                if "escalation ladder exhausted" in reason:
+                    continue
 
                 # Dedupe: one auto-retry per feature, ever.
                 try:

@@ -210,7 +210,9 @@ class FeatureUpdate(BaseModel):
                                             # off a Rejected/Replaced target onto its live
                                             # replacement child) goes through the audited API
                                             # instead of a raw DB write.
-    escalation_active: Optional[bool] = None  # premium-escalation flag (migration 047)
+    escalation_active: Optional[bool] = None  # premium-escalation flag (migration 047, legacy)
+    escalation_step:   Optional[int]  = None  # coder model-ladder counter (migration 049)
+    max_ladder_tier:   Optional[int]  = None  # durable escalation telemetry (migration 050)
     merge_notes:     Optional[str]  = None  # per-feature release-notes draft
     expected_version: Optional[int] = None  # optimistic lock — if provided, update is rejected on mismatch
     # Caller-supplied attribution: who/what is making this change. Read by
@@ -294,6 +296,8 @@ class SessionCreate(BaseModel):
     backend:      Optional[str] = None   # "claude" | "ollama" | "claude-api" | "openai"
     status:       Optional[str] = None   # FSM default handled server-side
     is_escalation: Optional[bool] = None # premium escalation pass (migration 047)
+    ladder_tier:  Optional[int] = None   # coder-ladder tier index (migration 050)
+    ladder_model: Optional[str] = None   # coder-ladder model this session ran (migration 050)
 
 
 class SessionEnd(BaseModel):

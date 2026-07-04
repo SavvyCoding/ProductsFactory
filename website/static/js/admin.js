@@ -11,8 +11,8 @@ function adminTab(name, btn) {
   localStorage.setItem('pf-admin-tab', name);
 }
 
-// Agent sub-tabs (Ollama / Anthropic / OpenAI / Escalation)
-const AGENT_SUBS = ['ollama','anthropic','openai','escalation'];
+// Agent sub-tabs (Ollama / Anthropic / OpenAI / Model Selection)
+const AGENT_SUBS = ['ollama','anthropic','openai','models'];
 function agentSub(name, btn) {
   AGENT_SUBS.forEach(s => {
     const el = document.getElementById('asub-' + s);

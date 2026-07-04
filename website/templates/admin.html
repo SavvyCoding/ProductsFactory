@@ -210,10 +210,10 @@
         </div>
 
         <div class="form-group">
-          <label for="p-max-sprint">Max stories per feature</label>
+          <label for="p-max-sprint">Stories per coder session</label>
           <input type="number" id="p-max-sprint" name="max_features_per_run"
-                 value="{{ config.max_features_per_run or 5 }}" placeholder="5" min="1" max="20" class="field-narrow">
-          <p class="field-hint">A Feature is decomposed into stories at planning time; each story fits one coder session. This caps the number of stories a Feature can hold (DB column: <code>max_features_per_run</code>).</p>
+                 value="{{ config.max_features_per_run or 1 }}" placeholder="1" min="1" max="20" class="field-narrow">
+          <p class="field-hint">How many stories a single coder session claims and bundles into <strong>one</strong> session PR (a dispatch-time batch size, <em>not</em> a per-Feature decomposition cap). <strong>1 = one story per session → one PR</strong> that merges or blocks independently (recommended). Higher values batch multiple stories into one PR, so a single failing story blocks the whole batch and stalls the mergeable ones. (DB column: <code>max_features_per_run</code>.)</p>
         </div>
 
         <div class="form-group">
@@ -275,7 +275,7 @@
         <button type="button" class="tab-btn active" onclick="agentSub('ollama',this)">⚡ Ollama</button>
         <button type="button" class="tab-btn" onclick="agentSub('anthropic',this)">✦ Anthropic</button>
         <button type="button" class="tab-btn" onclick="agentSub('openai',this)">◯ OpenAI</button>
-        <button type="button" class="tab-btn" onclick="agentSub('escalation',this)">🚀 Escalation</button>
+        <button type="button" class="tab-btn" onclick="agentSub('models',this)">🧠 Model Selection</button>
       </div>
 
       <div id="asub-ollama" class="agent-subpanel admin-fields-grid">
@@ -293,36 +293,10 @@
                  placeholder="{% if config.ollama_api_key %}set ({{ config.ollama_api_key|length }} chars, starts with {{ config.ollama_api_key[:8] }}…; leave blank to keep){% else %}required for Ollama Cloud; ignored for local{% endif %}">
           <p class="field-hint">Required for Ollama Cloud (<code>https://ollama.com</code>). Ignored when host is a local Ollama. Leave blank on save to keep the existing key — only non-empty submissions overwrite. After a save, the placeholder updates to reflect the new key's prefix (visible confirmation of rotation).</p>
         </div>
-        <div class="form-group form-group-wide">
-          <label>Per-persona models</label>
-          <p class="field-hint" style="margin-top:0;margin-bottom:8px">
-            Ollama model (chain) for each persona. Comma-separated for a fallback chain — primary first; the agent tries each up to 5× before falling through on transient errors. <strong>Coder</strong> and <strong>Designer</strong> are the base chains; every other persona falls back to them when left blank.
-            <br><strong>⚠ After editing, click “💾 Save Agent settings” at the bottom of this panel</strong> — the System-tab save button does NOT save models. (Coder/Designer become the orchestrator's authoritative chain on save.)
-          </p>
-          {% set _model_map = config.ollama_model_map or {} %}
-          <div class="admin-fields-grid" style="grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 16px">
-            <div class="form-group" style="margin:0">
-              <label for="p-coder" style="font-size:0.85em"><strong>coder</strong></label>
-              <input type="text" id="p-coder" name="coder_model"
-                     value="{{ config.coder_model or '' }}"
-                     placeholder="qwen3-coder:480b, deepseek-v4-flash" autocomplete="off">
-            </div>
-            <div class="form-group" style="margin:0">
-              <label for="p-designer" style="font-size:0.85em"><strong>designer</strong></label>
-              <input type="text" id="p-designer" name="designer_model"
-                     value="{{ config.designer_model or '' }}"
-                     placeholder="gemma3:27b, qwen3-coder:480b" autocomplete="off">
-            </div>
-            {% for _p in ['reviewer', 'code_auditor', 'planner', 'documenter', 'analytics', 'recommender', 'devops', 'refactorer', 'product_trainer'] %}
-            <div class="form-group" style="margin:0">
-              <label for="p-mc-{{ _p }}" style="font-size:0.85em">{{ _p }}</label>
-              <input type="text" id="p-mc-{{ _p }}" name="ollama_chain_{{ _p }}"
-                     value="{% if _model_map.get(_p) %}{{ _model_map[_p] | join(', ') }}{% endif %}"
-                     placeholder="(falls back to coder/designer)" autocomplete="off">
-            </div>
-            {% endfor %}
-          </div>
-        </div>
+        <p class="field-hint" style="margin:0 0 4px">
+          Connection + runtime limits for the Ollama backend. <strong>Model choice</strong>
+          (coder ladder + per-persona models) now lives in the <strong>🧠 Model Selection</strong> tab.
+        </p>
         <div class="form-group">
           <label for="p-ollama-to">Ollama timeout <span class="field-unit">seconds</span></label>
           <input type="number" id="p-ollama-to" name="ollama_timeout"
@@ -384,49 +358,92 @@
         </div>
       </div><!-- /asub-openai -->
 
-      <div id="asub-escalation" class="agent-subpanel hidden">
-        <p class="field-hint" style="margin-top:0;margin-bottom:10px">
-          When a Blocked feature has exhausted the base model, automatically retry it once on a
-          stronger LLM for up to N attempts. If that also fails it goes to <strong>Stuck</strong>
-          (no further auto-retry). Bounded by a daily USD cap. <em>Cap blank/0 ⇒ disabled.</em>
-          API keys are set in the Anthropic / OpenAI tabs.
+      <div id="asub-models" class="agent-subpanel hidden">
+        <div style="font-weight:600;margin-bottom:6px">Coder — model ladder</div>
+        <p class="field-hint" style="margin-top:0;margin-bottom:12px">
+          The coder's <strong>model ladder</strong>. <strong>First Attempt</strong> runs first;
+          on repeated failure the diagnose-first check decides whether to climb to the next
+          model (spec/env defects route away instead — a stronger model won't fix those). Each
+          tier picks a backend · model · #attempts. <strong>Ollama</strong> tiers — including
+          MiniMax / GLM served through Ollama — are free; <code>claude-api</code> /
+          <code>openai</code> tiers are <em>paid</em> and bounded by the daily USD cap below.
+          Leave a tier's <em>Model</em> blank to omit it. Empty ladder ⇒ the coder runs your
+          Ollama <em>coder</em> model (Ollama tab) as a single tier. Exhausting the last tier
+          → the feature is <strong>Blocked</strong> for triage. API keys: Anthropic / OpenAI tabs.
         </p>
-        <div class="admin-fields-grid" style="grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px">
-          <div class="form-group" style="margin:0">
-            <label>
-              <input type="checkbox" name="blocked_escalation_enabled" value="1"
-                     {% if config.blocked_escalation_enabled %}checked{% endif %}>
-              Enable premium escalation
-            </label>
-          </div>
-          <div class="form-group" style="margin:0">
-            <label for="p-esc-cap">Daily USD cap</label>
-            <input type="number" id="p-esc-cap" name="blocked_escalation_daily_usd_cap" step="0.01" min="0"
-                   value="{{ config.blocked_escalation_daily_usd_cap or '' }}" placeholder="0 = disabled" class="field-narrow">
-            <p class="field-hint">Max premium spend per UTC day. 0/blank disables escalation.</p>
-          </div>
-          <div class="form-group" style="margin:0">
-            <label for="p-esc-backend">Backend</label>
-            <select id="p-esc-backend" name="blocked_escalation_backend">
-              <option value="claude-api" {% if config.blocked_escalation_backend == 'claude-api' %}selected{% endif %}>claude-api</option>
-              <option value="openai" {% if config.blocked_escalation_backend == 'openai' %}selected{% endif %}>openai</option>
+        {% set _ct = config.coder_tiers or [] %}
+        <div class="admin-fields-grid"
+             style="grid-template-columns:118px 130px minmax(0,1fr) 78px 62px;gap:7px 12px;align-items:center">
+          <div style="font-size:0.78em;color:var(--muted);font-weight:600">Tier</div>
+          <div style="font-size:0.78em;color:var(--muted);font-weight:600">Backend</div>
+          <div style="font-size:0.78em;color:var(--muted);font-weight:600">Model</div>
+          <div style="font-size:0.78em;color:var(--muted);font-weight:600">Attempts</div>
+          <div style="font-size:0.78em;color:var(--muted);font-weight:600;text-align:center">On</div>
+          {% for i in range(4) %}
+            {% set _tier = _ct[i] if _ct|length > i else None %}
+            {% set _bk = (_tier.backend if _tier else 'ollama') %}
+            <div style="font-size:0.85em"><strong>{% if i == 0 %}First Attempt{% else %}Escalation {{ i }}{% endif %}</strong></div>
+            <select name="coder_tier_backend_{{ i }}">
+              <option value="ollama"     {% if _bk == 'ollama' %}selected{% endif %}>ollama</option>
+              <option value="claude-api" {% if _bk == 'claude-api' %}selected{% endif %}>claude-api</option>
+              <option value="openai"     {% if _bk == 'openai' %}selected{% endif %}>openai</option>
             </select>
-          </div>
-          <div class="form-group" style="margin:0">
-            <label for="p-esc-model">Model</label>
-            <input type="text" id="p-esc-model" name="blocked_escalation_model"
-                   value="{{ config.blocked_escalation_model or '' }}" placeholder="claude-opus-4-8" autocomplete="off">
-          </div>
-          <div class="form-group" style="margin:0">
-            <label for="p-esc-attempts">Premium attempts</label>
-            <input type="number" id="p-esc-attempts" name="blocked_escalation_max_attempts" min="1" max="10"
-                   value="{{ config.blocked_escalation_max_attempts or 3 }}" placeholder="3" class="field-narrow">
-          </div>
+            <input type="text" name="coder_tier_model_{{ i }}"
+                   value="{{ _tier.model if _tier else '' }}"
+                   placeholder="{% if i == 0 %}{{ config.coder_model or 'qwen3-coder:30b' }}{% else %}(blank = omit tier){% endif %}"
+                   autocomplete="off">
+            <input type="number" name="coder_tier_attempts_{{ i }}" min="1" max="20"
+                   value="{{ _tier.max_attempts if _tier else '' }}"
+                   placeholder="{% if i == 0 %}4{% else %}2{% endif %}" class="field-narrow">
+            <div style="text-align:center">
+              {% if i == 0 %}
+                <input type="checkbox" checked disabled title="First Attempt is always on">
+              {% else %}
+                <input type="checkbox" name="coder_tier_enabled_{{ i }}" value="1"
+                       {% if _tier and _tier.enabled %}checked{% endif %}>
+              {% endif %}
+            </div>
+          {% endfor %}
         </div>
-      </div><!-- /asub-escalation -->
+        <div class="form-group" style="margin-top:16px;max-width:280px">
+          <label for="p-coder-cap">Daily USD cap <span class="field-unit">paid tiers</span></label>
+          <input type="number" id="p-coder-cap" name="blocked_escalation_daily_usd_cap" step="0.01" min="0"
+                 value="{{ config.blocked_escalation_daily_usd_cap or '' }}" placeholder="0 = no paid tiers" class="field-narrow">
+          <p class="field-hint">Caps spend across any paid (claude-api / openai) tier per UTC day.
+            <strong>0 or blank ⇒ paid tiers never run</strong> (the coder falls back to the cheapest
+            Ollama tier). Sums this UTC day's paid-session cost.</p>
+        </div>
+
+        <hr style="margin:20px 0;border:none;border-top:1px solid var(--border, #333)">
+        <div style="font-weight:600;margin-bottom:6px">Other personas — Ollama models</div>
+        <p class="field-hint" style="margin-top:0;margin-bottom:10px">
+          Ollama model (chain) for each non-coder persona. Comma-separated for a fallback chain —
+          primary first; the agent tries each up to 5× before falling through on transient errors.
+          <strong>Designer</strong> is the base chain for <strong>reviewer</strong> and the other
+          maintenance personas — they fall back to it (and it to coder) when left blank. The coder
+          uses the ladder above, not this section.
+        </p>
+        {% set _model_map = config.ollama_model_map or {} %}
+        <div class="admin-fields-grid" style="grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 16px">
+          <div class="form-group" style="margin:0">
+            <label for="p-designer" style="font-size:0.85em"><strong>designer</strong></label>
+            <input type="text" id="p-designer" name="designer_model"
+                   value="{{ config.designer_model or '' }}"
+                   placeholder="gemma3:27b, qwen3-coder:480b" autocomplete="off">
+          </div>
+          {% for _p in ['reviewer', 'code_auditor', 'planner', 'documenter', 'analytics', 'recommender', 'devops', 'refactorer', 'product_trainer'] %}
+          <div class="form-group" style="margin:0">
+            <label for="p-mc-{{ _p }}" style="font-size:0.85em">{{ _p }}</label>
+            <input type="text" id="p-mc-{{ _p }}" name="ollama_chain_{{ _p }}"
+                   value="{% if _model_map.get(_p) %}{{ _model_map[_p] | join(', ') }}{% endif %}"
+                   placeholder="(falls back to designer/coder)" autocomplete="off">
+          </div>
+          {% endfor %}
+        </div>
+      </div><!-- /asub-models -->
 
       <div class="form-actions">
-        <button type="submit">💾 Save Agent settings (models, backend, escalation)</button>
+        <button type="submit">💾 Save Agent settings (models, backend, coder ladder)</button>
       </div>
     </div><!-- /agent settings-card -->
   </div><!-- /atab-agent -->
@@ -497,7 +514,7 @@
 </div>
 
 {% block scripts %}
-<script src="/static/js/admin.js?v=2026-06-18-agent-tab"></script>
+<script src="/static/js/admin.js?v=2026-07-02-model-selection"></script>
 <script>
 // Restore last tab or auto-open the saved one
 (function() {
