@@ -223,104 +223,146 @@
 
   <!-- SUMMARY — three consolidated panels: throughput · risk · effort/cost -->
   <style>
-    .sum3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:4px;align-items:start}
+    .sum3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:4px}
     @media (max-width:1000px){.sum3{grid-template-columns:1fr}}
+    /* equal height: grid stretches rows; panel is a flex column; body flexes,
+       footer is pinned to the bottom so all three columns line up. */
     .sum-panel{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-lg);
-      box-shadow:var(--shadow-sm);padding:18px 18px 16px;display:flex;flex-direction:column;gap:14px}
-    .sum-panel-title{font-size:var(--text-xs);font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
-    .sum-hero{display:flex;flex-direction:column;gap:7px}
-    .sum-hero-val{font-size:34px;line-height:1;font-weight:700;color:var(--color-fg-default);
+      box-shadow:var(--shadow-sm);display:flex;flex-direction:column;overflow:hidden}
+    .sum-head{display:flex;align-items:center;gap:8px;padding:13px 18px;border-bottom:1px solid var(--border)}
+    .sum-head-dot{width:7px;height:7px;border-radius:var(--radius-full);background:var(--muted);flex:none}
+    .sum-head--good .sum-head-dot{background:var(--green)}
+    .sum-head--risk .sum-head-dot{background:var(--amber)}
+    .sum-head-title{font-size:var(--text-xs);font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--color-fg-default)}
+    .sum-head-note{margin-left:auto;font-size:var(--text-xs);color:var(--muted)}
+    .sum-body{flex:1;display:flex;flex-direction:column;gap:14px;padding:16px 18px}
+    .sum-hero{display:flex;flex-direction:column;gap:5px}
+    .sum-hero-val{font-size:32px;line-height:1.04;font-weight:700;color:var(--color-fg-default);
       font-variant-numeric:tabular-nums;display:flex;align-items:baseline;gap:5px}
     .sum-hero-unit{font-size:13px;font-weight:600;color:var(--muted)}
     .sum-hero-sub{font-size:var(--text-sm);color:var(--muted)}
     .sum-hero--good .sum-hero-val{color:var(--green)}
     .sum-hero--alert .sum-hero-val{color:var(--red)}
-    .sum-bar{height:6px;border-radius:var(--radius-full);background:var(--light);overflow:hidden}
-    .sum-bar-fill{height:100%;border-radius:var(--radius-full);background:var(--green)}
+    .sum-hero-bar{height:6px;border-radius:var(--radius-full);background:var(--border);overflow:hidden;margin:1px 0 2px}
+    .sum-hero-bar>span{display:block;height:100%;background:var(--green);border-radius:var(--radius-full)}
     .sum-rows{display:flex;flex-direction:column;margin:0}
     .sum-row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;
-      padding:9px 0;border-top:1px solid var(--border)}
+      padding:8px 0;border-top:1px solid var(--border)}
     .sum-row:first-child{border-top:0}
     .sum-row dt{font-size:var(--text-md);color:var(--muted)}
     .sum-row dd{margin:0;font-size:var(--text-base);font-weight:600;color:var(--color-fg-default);
       font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
     .sum-row dd .u{font-size:11px;font-weight:500;color:var(--muted);margin-left:3px}
     .sum-row--warn dd{color:var(--amber)}
-    .sum-statusbar{display:flex;height:8px;border-radius:var(--radius-full);overflow:hidden;background:var(--light)}
-    .sum-seg{min-width:2px}
+    /* uniform footer band on every panel */
+    .sum-foot{padding:12px 18px 14px;border-top:1px solid var(--border);background:var(--light)}
+    .sum-bar{display:flex;height:8px;border-radius:var(--radius-full);overflow:hidden;background:var(--border)}
+    .sum-bar>span{min-width:2px}
+    .sum-fill--good{background:var(--green)}
+    .sum-fill--warn{background:var(--amber)}
     .sum-seg--pushed{background:var(--green)}
     .sum-seg--blocked,.sum-seg--reverted{background:var(--red)}
     .sum-seg--reviewing,.sum-seg--reviewed{background:var(--amber)}
     .sum-seg--implementing,.sum-seg--designing,.sum-seg--designed{background:var(--blue)}
     .sum-seg--approved,.sum-seg--pending{background:var(--slate)}
-    .sum-seg--deferred,.sum-seg--rejected{background:var(--border)}
-    .sum-note{font-size:var(--text-xs);color:var(--muted);margin-top:6px}
+    .sum-seg--deferred,.sum-seg--rejected{background:var(--border2,var(--border))}
+    .sum-seg--in{background:var(--blue)}
+    .sum-seg--out{background:var(--green-mid)}
+    .sum-note{font-size:var(--text-xs);color:var(--muted);margin-top:7px}
   </style>
 
   <div class="sum3">
 
     {# ── DELIVERY — throughput & backlog ── #}
     <section class="sum-panel">
-      <div class="sum-panel-title">Delivery</div>
-      <div class="sum-hero sum-hero--good">
-        <div class="sum-hero-val">{{ pushed }}<span class="sum-hero-unit">shipped</span></div>
-        <div class="sum-bar"><div class="sum-bar-fill" style="width:{{ ship_pct }}%"></div></div>
-        <div class="sum-hero-sub">{{ ship_pct }}% of {{ total_features }} planned features</div>
+      <div class="sum-head sum-head--good">
+        <span class="sum-head-dot"></span><span class="sum-head-title">Delivery</span>
+        <span class="sum-head-note">throughput</span>
       </div>
-      <dl class="sum-rows">
-        <div class="sum-row"><dt>Avg time / shipped feature</dt>
-          <dd>{% if pushed %}{% if _apf_h %}{{ _apf_h }}<span class="u">h</span> {{ _apf_m }}<span class="u">m</span>{% else %}{{ _apf_m }}<span class="u">m</span>{% endif %}{% else %}—{% endif %}</dd></div>
-        <div class="sum-row"><dt>In flight</dt>
-          <dd>{{ in_flight }}<span class="u">{{ status_counts.get('Implementing',0) }} cod · {{ status_counts.get('Reviewing',0) }} rev</span></dd></div>
-        <div class="sum-row"><dt>Approved backlog</dt><dd>{{ unsigned_approved }}</dd></div>
-        <div class="sum-row"><dt>Pending review</dt><dd>{{ pending_count }}</dd></div>
-      </dl>
-      <div>
-        <div class="sum-statusbar">
-          {% for st in _STATUS_BUCKETS %}{% if status_counts.get(st,0) %}<span class="sum-seg sum-seg--{{ st|lower }}" style="flex:{{ status_counts.get(st,0) }}" title="{{ st }}: {{ status_counts.get(st,0) }}"></span>{% endif %}{% endfor %}
+      <div class="sum-body">
+        <div class="sum-hero sum-hero--good">
+          <div class="sum-hero-val">{{ pushed }}<span class="sum-hero-unit">shipped</span></div>
+          <div class="sum-hero-bar"><span style="width:{{ ship_pct }}%"></span></div>
+          <div class="sum-hero-sub">{{ ship_pct }}% of {{ total_features }} planned features</div>
         </div>
-        <div class="sum-note">Status mix across {{ features|length }} features</div>
+        <dl class="sum-rows">
+          <div class="sum-row"><dt>Avg time / shipped feature</dt>
+            <dd>{% if pushed %}{% if _apf_h %}{{ _apf_h }}<span class="u">h</span> {{ _apf_m }}<span class="u">m</span>{% else %}{{ _apf_m }}<span class="u">m</span>{% endif %}{% else %}—{% endif %}</dd></div>
+          <div class="sum-row"><dt>In flight</dt>
+            <dd>{{ in_flight }}<span class="u">{{ status_counts.get('Implementing',0) }} cod · {{ status_counts.get('Reviewing',0) }} rev</span></dd></div>
+          <div class="sum-row"><dt>Approved backlog</dt><dd>{{ unsigned_approved }}</dd></div>
+          <div class="sum-row"><dt>Pending review</dt><dd>{{ pending_count }}</dd></div>
+        </dl>
+      </div>
+      <div class="sum-foot">
+        <div class="sum-bar">
+          {% for st in _STATUS_BUCKETS %}{% if status_counts.get(st,0) %}<span class="sum-seg--{{ st|lower }}" style="flex:{{ status_counts.get(st,0) }}" title="{{ st }}: {{ status_counts.get(st,0) }}"></span>{% endif %}{% endfor %}
+        </div>
+        <div class="sum-note">Status mix · {{ features|length }} features</div>
       </div>
     </section>
 
     {# ── PIPELINE HEALTH — risk / attention ── #}
     <section class="sum-panel">
-      <div class="sum-panel-title">Pipeline health</div>
-      <div class="sum-hero {% if blocked or stuck_count %}sum-hero--alert{% else %}sum-hero--good{% endif %}">
-        <div class="sum-hero-val">{{ blocked }}<span class="sum-hero-unit">blocked</span></div>
-        <div class="sum-hero-sub">{% if blocked %}needs triage{% else %}queue is clear{% endif %}</div>
+      <div class="sum-head {% if blocked or stuck_count %}sum-head--risk{% else %}sum-head--good{% endif %}">
+        <span class="sum-head-dot"></span><span class="sum-head-title">Pipeline Health</span>
+        <span class="sum-head-note">risk</span>
       </div>
-      <dl class="sum-rows">
-        <div class="sum-row {% if stuck_count %}sum-row--warn{% endif %}"><dt>Stuck features</dt><dd>{{ stuck_count }}</dd></div>
-        <div class="sum-row {% if open_prs and open_prs >= 3 %}sum-row--warn{% endif %}"><dt>Open PRs</dt>
-          <dd>{{ open_prs or 0 }}{% if open_prs and open_prs >= 3 %}<span class="u">at gate</span>{% endif %}</dd></div>
-        <div class="sum-row {% if total_sessions and ok_pct < 60 %}sum-row--warn{% endif %}"><dt>Session success rate</dt>
-          <dd>{{ ok_pct }}<span class="u">%</span></dd></div>
-        <div class="sum-row"><dt>Avg sessions / shipped feature</dt>
-          <dd>{% if pushed %}{{ '%.1f'|format(_sess_per_ship) }}{% else %}—{% endif %}</dd></div>
-      </dl>
+      <div class="sum-body">
+        <div class="sum-hero {% if blocked or stuck_count %}sum-hero--alert{% else %}sum-hero--good{% endif %}">
+          <div class="sum-hero-val">{{ blocked }}<span class="sum-hero-unit">blocked</span></div>
+          <div class="sum-hero-sub">{% if blocked %}needs triage{% else %}queue is clear{% endif %}</div>
+        </div>
+        <dl class="sum-rows">
+          <div class="sum-row {% if stuck_count %}sum-row--warn{% endif %}"><dt>Stuck features</dt><dd>{{ stuck_count }}</dd></div>
+          <div class="sum-row {% if open_prs and open_prs >= 3 %}sum-row--warn{% endif %}"><dt>Open PRs</dt>
+            <dd>{{ open_prs or 0 }}{% if open_prs and open_prs >= 3 %}<span class="u">at gate</span>{% endif %}</dd></div>
+          <div class="sum-row {% if total_sessions and ok_pct < 60 %}sum-row--warn{% endif %}"><dt>Session success rate</dt>
+            <dd>{{ ok_pct }}<span class="u">%</span></dd></div>
+          <div class="sum-row"><dt>Avg sessions / shipped feature</dt>
+            <dd>{% if pushed %}{{ '%.1f'|format(_sess_per_ship) }}{% else %}—{% endif %}</dd></div>
+        </dl>
+      </div>
+      <div class="sum-foot">
+        <div class="sum-bar">
+          <span class="{% if total_sessions and ok_pct < 60 %}sum-fill--warn{% else %}sum-fill--good{% endif %}" style="flex:{{ ok_pct }}" title="{{ ok_pct }}% succeeded"></span>
+          <span style="flex:{{ 100 - ok_pct }}"></span>
+        </div>
+        <div class="sum-note">{{ ok_pct }}% of {{ total_sessions }} sessions succeeded</div>
+      </div>
     </section>
 
     {# ── ACTIVITY — effort & cost ── #}
     <section class="sum-panel">
-      <div class="sum-panel-title">Activity</div>
-      <div class="sum-hero">
-        <div class="sum-hero-val">{% if _agent_h %}{{ _agent_h }}<span class="sum-hero-unit">h</span> {{ _agent_m }}<span class="sum-hero-unit">m</span>{% else %}{{ _agent_m }}<span class="sum-hero-unit">m</span>{% endif %}</div>
-        <div class="sum-hero-sub">agent time across {{ total_sessions }} sessions</div>
+      <div class="sum-head">
+        <span class="sum-head-dot"></span><span class="sum-head-title">Activity</span>
+        <span class="sum-head-note">effort &amp; cost</span>
       </div>
-      <dl class="sum-rows">
-        <div class="sum-row"><dt>Frontier cost (est.)</dt>
-          <dd>{% if _fc >= 1000 %}${{ '{:,.1f}'.format(_fc / 1000) }}<span class="u">K</span>{% else %}${{ '{:,.2f}'.format(_fc) }}{% endif %}</dd></div>
-        <div class="sum-row"><dt>Avg cost / shipped feature</dt>
-          <dd>{% if pushed %}{% if _cost_per_ship >= 100 %}${{ '{:,.0f}'.format(_cost_per_ship) }}{% else %}${{ '{:,.2f}'.format(_cost_per_ship) }}{% endif %}{% else %}—{% endif %}</dd></div>
-        <div class="sum-row"><dt>Sessions</dt>
-          <dd>{{ total_sessions }}<span class="u">{{ ok_sessions }} ok · {{ killed_sessions }} killed</span></dd></div>
-        <div class="sum-row"><dt>Tokens</dt>
-          <dd>{% if _t_total >= 1000000 %}{{ (_t_total / 1000000) | round(1) }}<span class="u">M</span>{% elif _t_total >= 1000 %}{{ (_t_total / 1000) | round(0) | int }}<span class="u">K</span>{% else %}{{ _t_total }}{% endif %}</dd></div>
-        <div class="sum-row"><dt>Feature / Bug / Chore</dt>
-          <dd>{{ type_counts.get('feature',0) }} / {{ type_counts.get('bug',0) }} / {{ type_counts.get('chore',0) }}</dd></div>
-      </dl>
-      <div class="sum-note">Frontier figures priced at {{ frontier_model_label }} · production runs local ($0)</div>
+      <div class="sum-body">
+        <div class="sum-hero">
+          <div class="sum-hero-val">{% if _agent_h %}{{ _agent_h }}<span class="sum-hero-unit">h</span> {{ _agent_m }}<span class="sum-hero-unit">m</span>{% else %}{{ _agent_m }}<span class="sum-hero-unit">m</span>{% endif %}</div>
+          <div class="sum-hero-sub">agent time across {{ total_sessions }} sessions</div>
+        </div>
+        <dl class="sum-rows">
+          <div class="sum-row"><dt>Frontier cost (est.)</dt>
+            <dd>{% if _fc >= 1000 %}${{ '{:,.1f}'.format(_fc / 1000) }}<span class="u">K</span>{% else %}${{ '{:,.2f}'.format(_fc) }}{% endif %}</dd></div>
+          <div class="sum-row"><dt>Avg cost / shipped feature</dt>
+            <dd>{% if pushed %}{% if _cost_per_ship >= 100 %}${{ '{:,.0f}'.format(_cost_per_ship) }}{% else %}${{ '{:,.2f}'.format(_cost_per_ship) }}{% endif %}{% else %}—{% endif %}</dd></div>
+          <div class="sum-row"><dt>Sessions</dt>
+            <dd>{{ total_sessions }}<span class="u">{{ ok_sessions }} ok · {{ killed_sessions }} killed</span></dd></div>
+          <div class="sum-row"><dt>Tokens</dt>
+            <dd>{% if _t_total >= 1000000 %}{{ (_t_total / 1000000) | round(1) }}<span class="u">M</span>{% elif _t_total >= 1000 %}{{ (_t_total / 1000) | round(0) | int }}<span class="u">K</span>{% else %}{{ _t_total }}{% endif %}</dd></div>
+          <div class="sum-row"><dt>Feature / Bug / Chore</dt>
+            <dd>{{ type_counts.get('feature',0) }} / {{ type_counts.get('bug',0) }} / {{ type_counts.get('chore',0) }}</dd></div>
+        </dl>
+      </div>
+      <div class="sum-foot">
+        <div class="sum-bar">
+          <span class="sum-seg--in" style="flex:{{ _t_in }}" title="input"></span>
+          <span class="sum-seg--out" style="flex:{{ _t_out }}" title="output"></span>
+        </div>
+        <div class="sum-note">{{ '{:,}'.format(_t_in) }} in · {{ '{:,}'.format(_t_out) }} out · priced at {{ frontier_model_label }}</div>
+      </div>
     </section>
 
   </div>

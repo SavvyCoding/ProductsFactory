@@ -325,10 +325,11 @@ class TestDashboardTelemetry:
         r = client.get(f"/product/{p.id}?tab=summary", auth=AUTH)
         assert r.status_code == 200
         html = r.text
-        # Consolidated into exactly three panels.
-        for title in ("Delivery", "Pipeline health", "Activity"):
+        # Consolidated into exactly three panels with uniform headers.
+        for title in ("Delivery", "Pipeline Health", "Activity"):
             assert title in html
         assert html.count('class="sum-panel"') == 3
+        assert html.count('class="sum-foot"') == 3  # every panel has a footer band
         # Derived per-ship metrics present.
         assert "Avg time / shipped feature" in html
         assert "Avg cost / shipped feature" in html
