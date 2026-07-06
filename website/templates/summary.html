@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+{% block title %}Products Summary — ProductFactory{% endblock %}
+{% block content %}
+
+{% macro hm(seconds) -%}
+  {%- set m = (seconds // 60) -%}{%- set h = (m // 60) -%}{%- set mm = (m % 60) -%}
+  {%- if h -%}{{ h }}<span class="ps-u">h</span> {{ mm }}<span class="ps-u">m</span>{%- else -%}{{ mm }}<span class="ps-u">m</span>{%- endif -%}
+{%- endmacro %}
+
+{% macro toks(n) -%}
+  {%- if n >= 1000000 -%}{{ (n / 1000000) | round(1) }}<span class="ps-u">M</span>
+  {%- elif n >= 1000 -%}{{ (n / 1000) | round(0) | int }}<span class="ps-u">K</span>
+  {%- else -%}{{ n }}{%- endif -%}
+{%- endmacro %}
+
+{% macro money(v) -%}
+  {%- if v >= 1000 -%}${{ '{:,.1f}'.format(v / 1000) }}<span class="ps-u">K</span>
+  {%- else -%}${{ '{:,.2f}'.format(v) }}{%- endif -%}
+{%- endmacro %}
+
+<style>
+  .ps-wrap{max-width:1400px;margin:0 auto;padding:8px 4px 40px}
+  .ps-head h1{margin:0 0 3px}
+  .ps-head p{margin:0 0 18px}
+  .ps-u{font-size:11px;font-weight:500;color:var(--muted);margin-left:2px}
+  /* headline stat cards */
+  .ps-cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px}
+  @media (max-width:1100px){.ps-cards{grid-template-columns:repeat(2,1fr)}}
+  @media (max-width:560px){.ps-cards{grid-template-columns:1fr}}
+  .ps-card{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-lg);
+    box-shadow:var(--shadow-sm);padding:15px 18px;display:flex;flex-direction:column;gap:5px}
+  .ps-card-lbl{font-size:var(--text-xs);font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+  .ps-card-val{font-size:29px;line-height:1.05;font-weight:700;color:var(--color-fg-default);font-variant-numeric:tabular-nums}
+  .ps-card-val--good{color:var(--green)}
+  .ps-card-val--alert{color:var(--red)}
+  .ps-card-sub{font-size:var(--text-sm);color:var(--muted)}
+  /* section shell (reused for both tables) */
+  .ps-sec{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-lg);
+    box-shadow:var(--shadow-sm);margin-bottom:22px;overflow:hidden}
+  .ps-sec-head{display:flex;align-items:center;gap:8px;padding:13px 18px;border-bottom:1px solid var(--border)}
+  .ps-sec-dot{width:7px;height:7px;border-radius:var(--radius-full);background:var(--muted);flex:none}
+  .ps-sec-title{font-size:var(--text-xs);font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--color-fg-default)}
+  .ps-sec-note{margin-left:auto;font-size:var(--text-xs);color:var(--muted)}
+  .ps-scroll{overflow-x:auto}
+  .ps-table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;min-width:900px}
+  .ps-table th{font-size:var(--text-xs);font-weight:600;letter-spacing:.04em;text-transform:uppercase;
+    color:var(--muted);text-align:right;padding:10px 14px;border-bottom:1px solid var(--border);white-space:nowrap}
+  .ps-table th.ps-l{text-align:left}
+  .ps-table td{font-size:var(--text-base);color:var(--color-fg-default);text-align:right;
+    padding:11px 14px;border-top:1px solid var(--border);white-space:nowrap}
+  .ps-table td.ps-l{text-align:left}
+  .ps-table tbody tr:hover{background:var(--light)}
+  .ps-name{font-weight:600;color:var(--color-fg-default);text-decoration:none}
+  .ps-name:hover{text-decoration:underline}
+  .ps-badge{font-size:10px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;
+    padding:2px 7px;border-radius:var(--radius-full);background:var(--light);color:var(--muted);border:1px solid var(--border)}
+  .ps-badge--running{background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green);border-color:transparent}
+  .ps-badge--paused{background:color-mix(in srgb,var(--amber) 15%,transparent);color:var(--amber);border-color:transparent}
+  .ps-ship{display:flex;align-items:center;gap:8px;justify-content:flex-end}
+  .ps-ship-bar{width:52px;height:5px;border-radius:var(--radius-full);background:var(--border);overflow:hidden;flex:none}
+  .ps-ship-bar>span{display:block;height:100%;background:var(--green);border-radius:var(--radius-full)}
+  .ps-warn{color:var(--amber);font-weight:600}
+  .ps-alert{color:var(--red);font-weight:600}
+  .ps-muted{color:var(--muted)}
+  .ps-total td{border-top:2px solid var(--border);font-weight:700;background:var(--light)}
+  /* model badges (mirror product.html mu-badge) */
+  .ps-mb{font-size:10px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;padding:2px 7px;border-radius:var(--radius-full)}
+  .ps-mb--paid{background:color-mix(in srgb,var(--amber) 16%,transparent);color:var(--amber)}
+  .ps-mb--local{background:color-mix(in srgb,var(--green) 14%,transparent);color:var(--green-mid,var(--green))}
+  .ps-empty{padding:22px 18px;font-size:var(--text-md);color:var(--muted);text-align:center}
+</style>
+
+<div class="ps-wrap">
+  <div class="ps-head">
+    <h1>Products Summary</h1>
+    <p class="muted">Fleet-wide run stats across all {{ totals.products }} products</p>
+  </div>
+
+  <!-- Headline totals -->
+  <div class="ps-cards">
+    <div class="ps-card">
+      <span class="ps-card-lbl">Shipped features</span>
+      <span class="ps-card-val ps-card-val--good">{{ totals.pushed }}</span>
+      <span class="ps-card-sub">{{ totals.ship_pct }}% of {{ totals.planned }} planned · {{ totals.active }} in flight</span>
+    </div>
+    <div class="ps-card">
+      <span class="ps-card-lbl">Blocked</span>
+      <span class="ps-card-val {% if totals.blocked %}ps-card-val--alert{% endif %}">{{ totals.blocked }}</span>
+      <span class="ps-card-sub">{{ totals.running }} product{{ '' if totals.running == 1 else 's' }} running now</span>
+    </div>
+    <div class="ps-card">
+      <span class="ps-card-lbl">Agent time</span>
+      <span class="ps-card-val">{{ hm(totals.agent_seconds) }}</span>
+      <span class="ps-card-sub">{{ totals.sessions }} sessions · {{ totals.ok }} ok · {{ totals.killed }} killed</span>
+    </div>
+    <div class="ps-card">
+      <span class="ps-card-lbl">Cost</span>
+      <span class="ps-card-val">{{ money(totals.actual_cost) }}<span class="ps-u">actual</span></span>
+      <span class="ps-card-sub">{{ money(totals.frontier_cost) }} est. at {{ frontier_model_label }} · {{ toks(totals.tokens) }} tokens</span>
+    </div>
+  </div>
+
+  <!-- Per-product table -->
+  <section class="ps-sec">
+    <div class="ps-sec-head">
+      <span class="ps-sec-dot"></span><span class="ps-sec-title">By Product</span>
+      <span class="ps-sec-note">sorted by shipped</span>
+    </div>
+    <div class="ps-scroll">
+      <table class="ps-table">
+        <thead>
+          <tr>
+            <th class="ps-l">Product</th>
+            <th>Status</th>
+            <th>Shipped</th>
+            <th>In flight</th>
+            <th>Blocked</th>
+            <th>Sessions</th>
+            <th>Tokens</th>
+            <th>Agent time</th>
+            <th>Actual cost</th>
+            <th>Frontier est.</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in rows %}
+          <tr>
+            <td class="ps-l"><a class="ps-name" href="/product/{{ r.product.id }}?tab=summary">{{ r.product.name }}</a></td>
+            <td>
+              {% if r.product.status == 'running' %}<span class="ps-badge ps-badge--running">running</span>
+              {% elif r.product.status == 'paused' %}<span class="ps-badge ps-badge--paused">paused</span>
+              {% else %}<span class="ps-badge">{{ r.product.status }}</span>{% endif %}
+            </td>
+            <td>
+              <div class="ps-ship">
+                <span class="ps-muted">{{ r.f.pushed }}/{{ r.f.planned }}</span>
+                <span class="ps-ship-bar"><span style="width:{{ r.ship_pct }}%"></span></span>
+              </div>
+            </td>
+            <td>{{ r.f.active or '—' }}</td>
+            <td class="{% if r.f.blocked %}ps-alert{% endif %}">{{ r.f.blocked or '—' }}</td>
+            <td>{{ r.s.sessions }}{% if r.s.killed %} <span class="ps-u">{{ r.s.killed }} killed</span>{% endif %}</td>
+            <td>{{ toks(r.s.tokens) }}</td>
+            <td>{{ hm(r.s.agent_seconds) }}</td>
+            <td class="{% if r.s.actual_cost > 0 %}ps-warn{% else %}ps-muted{% endif %}">{% if r.s.actual_cost > 0 %}{{ money(r.s.actual_cost) }}{% else %}$0{% endif %}</td>
+            <td class="ps-muted">{{ money(r.s.frontier_cost) }}</td>
+          </tr>
+          {% endfor %}
+          <tr class="ps-total">
+            <td class="ps-l">All products</td>
+            <td></td>
+            <td><div class="ps-ship"><span>{{ totals.pushed }}/{{ totals.planned }}</span></div></td>
+            <td>{{ totals.active }}</td>
+            <td class="{% if totals.blocked %}ps-alert{% endif %}">{{ totals.blocked }}</td>
+            <td>{{ totals.sessions }}</td>
+            <td>{{ toks(totals.tokens) }}</td>
+            <td>{{ hm(totals.agent_seconds) }}</td>
+            <td class="{% if totals.actual_cost > 0 %}ps-warn{% endif %}">{{ money(totals.actual_cost) }}</td>
+            <td>{{ money(totals.frontier_cost) }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Fleet-wide model usage -->
+  <section class="ps-sec">
+    <div class="ps-sec-head">
+      <span class="ps-sec-dot"></span><span class="ps-sec-title">Model Usage</span>
+      <span class="ps-sec-note">
+        {% if totals.actual_cost > 0 %}${{ '{:,.2f}'.format(totals.actual_cost) }} actual paid spend{% else %}Ollama Cloud API subscription cost{% endif %}
+      </span>
+    </div>
+    {% if model_usage %}
+    <div class="ps-scroll">
+      <table class="ps-table">
+        <thead>
+          <tr>
+            <th class="ps-l">Model</th>
+            <th>Sessions</th>
+            <th>Tokens</th>
+            <th>Escalations</th>
+            <th>Actual cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for m in model_usage %}
+          <tr>
+            <td class="ps-l">
+              <span class="ps-name" style="text-decoration:none">{{ m.model }}</span>
+              {% if m.paid %}<span class="ps-mb ps-mb--paid" style="margin-left:8px">{{ m.backend }}</span>{% else %}<span class="ps-mb ps-mb--local" style="margin-left:8px">{{ m.backend }}</span>{% endif %}
+            </td>
+            <td>{{ m.sessions }}</td>
+            <td>{{ toks(m.tokens) }}</td>
+            <td>{% if m.escalations %}<span class="ps-warn">{{ m.escalations }}</span>{% else %}—{% endif %}</td>
+            <td class="{% if m.paid and m.cost_usd > 0 %}ps-warn{% else %}ps-muted{% endif %}">{% if m.cost_usd > 0 %}${{ '{:,.2f}'.format(m.cost_usd) }}{% else %}$0{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="ps-empty">No sessions recorded yet.</div>
+    {% endif %}
+  </section>
+
+</div>
+{% endblock %}

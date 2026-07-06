@@ -367,6 +367,84 @@
 
   </div>
 
+  {# ── MODEL USAGE — per-LLM telemetry ──────────────────────────────────────
+     One row per model that ran sessions (grouped by coder ladder_model, else
+     backend), sorted by token volume. `model_usage` + `lifetime_actual_cost`
+     are computed server-side in product_detail (website/main.py). Actual cost
+     is real paid spend (paid escalation tiers only); the frontier figure in the
+     Activity panel above is the hypothetical all-Ollama-priced-as-Opus number. #}
+  {% set _mu_max = (model_usage | map(attribute='tokens') | max) if model_usage else 0 %}
+  <style>
+    .mu-wrap{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-lg);
+      box-shadow:var(--shadow-sm);margin-top:16px;overflow:hidden}
+    .mu-head{display:flex;align-items:center;gap:8px;padding:13px 18px;border-bottom:1px solid var(--border)}
+    .mu-head-dot{width:7px;height:7px;border-radius:var(--radius-full);background:var(--muted);flex:none}
+    .mu-head-title{font-size:var(--text-xs);font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--color-fg-default)}
+    .mu-head-note{margin-left:auto;font-size:var(--text-xs);color:var(--muted)}
+    .mu-table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+    .mu-table th{font-size:var(--text-xs);font-weight:600;letter-spacing:.04em;text-transform:uppercase;
+      color:var(--muted);text-align:right;padding:10px 18px;border-bottom:1px solid var(--border)}
+    .mu-table th.mu-l{text-align:left}
+    .mu-table td{font-size:var(--text-base);color:var(--color-fg-default);text-align:right;
+      padding:11px 18px;border-top:1px solid var(--border)}
+    .mu-table td.mu-l{text-align:left}
+    .mu-table tr:first-child td{border-top:0}
+    .mu-model{display:flex;align-items:center;gap:9px}
+    .mu-name{font-weight:600}
+    .mu-badge{font-size:10px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;
+      padding:2px 7px;border-radius:var(--radius-full);background:var(--light);color:var(--muted);border:1px solid var(--border)}
+    .mu-badge--paid{background:color-mix(in srgb,var(--amber) 16%,transparent);color:var(--amber);border-color:transparent}
+    .mu-badge--local{background:color-mix(in srgb,var(--green) 14%,transparent);color:var(--green-mid,var(--green));border-color:transparent}
+    .mu-bar{height:5px;border-radius:var(--radius-full);background:var(--border);overflow:hidden;margin-top:5px;max-width:220px}
+    .mu-bar>span{display:block;height:100%;background:var(--blue);border-radius:var(--radius-full)}
+    .mu-cost--paid{color:var(--amber);font-weight:600}
+    .mu-cost--zero{color:var(--muted)}
+    .mu-esc{color:var(--amber);font-weight:600}
+    .mu-empty{padding:22px 18px;font-size:var(--text-md);color:var(--muted);text-align:center}
+  </style>
+  <section class="mu-wrap">
+    <div class="mu-head">
+      <span class="mu-head-dot"></span><span class="mu-head-title">Model Usage</span>
+      <span class="mu-head-note">
+        {% if lifetime_actual_cost > 0 %}${{ '{:,.2f}'.format(lifetime_actual_cost) }} actual paid spend{% else %}Ollama Cloud API subscription cost{% endif %}
+      </span>
+    </div>
+    {% if model_usage %}
+    <table class="mu-table">
+      <thead>
+        <tr>
+          <th class="mu-l">Model</th>
+          <th>Sessions</th>
+          <th>Tokens</th>
+          <th>Escalations</th>
+          <th>Actual cost</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in model_usage %}
+        <tr>
+          <td class="mu-l">
+            <div class="mu-model">
+              <span class="mu-name">{{ m.model }}</span>
+              {% if m.paid %}<span class="mu-badge mu-badge--paid">{{ m.backend }}</span>{% else %}<span class="mu-badge mu-badge--local">{{ m.backend }}</span>{% endif %}
+            </div>
+            <div class="mu-bar"><span style="width:{{ ((m.tokens / _mu_max) * 100) | round(1) if _mu_max else 0 }}%"></span></div>
+          </td>
+          <td>{{ m.sessions }}</td>
+          <td>{% if m.tokens >= 1000000 %}{{ (m.tokens / 1000000) | round(1) }}<span class="u" style="color:var(--muted);font-size:11px">M</span>{% elif m.tokens >= 1000 %}{{ (m.tokens / 1000) | round(0) | int }}<span class="u" style="color:var(--muted);font-size:11px">K</span>{% else %}{{ m.tokens }}{% endif %}</td>
+          <td>{% if m.escalations %}<span class="mu-esc">{{ m.escalations }}</span>{% else %}—{% endif %}</td>
+          <td class="{% if m.paid and m.cost_usd > 0 %}mu-cost--paid{% else %}mu-cost--zero{% endif %}">
+            {% if m.cost_usd > 0 %}${{ '{:,.2f}'.format(m.cost_usd) }}{% else %}$0{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="mu-empty">No sessions recorded yet.</div>
+    {% endif %}
+  </section>
+
 </div><!-- /tab-summary -->
 
 

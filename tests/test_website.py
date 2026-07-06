@@ -356,6 +356,135 @@ class TestDashboardTelemetry:
         assert html.count('class="sum-panel"') == 3
         assert "$0.00" in html          # frontier cost with no tokens
         assert "—" in html              # per-ship metrics fall back to em-dash
+        # Model-usage table renders its empty state, not a crash.
+        assert "Model Usage" in html
+        assert "No sessions recorded yet." in html
+
+    def _model_sess(self, db, product_id, *, uid, model, backend,
+                    t_in=0, t_out=0, cost=0.0, escalation=False):
+        start = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+        db.add(DBSession(
+            product_id=product_id, session_uid=uid, persona="coder", exit_code=0,
+            started_at=start, ended_at=start + timedelta(minutes=5),
+            tokens_input=t_in, tokens_output=t_out,
+            ladder_model=model, backend=backend,
+            cost_usd=cost, is_escalation=escalation,
+        ))
+
+    def test_model_usage_breakdown(self, client, db):
+        """Per-model telemetry: one row per LLM, paid tiers show real spend +
+        an escalation count, local Ollama rows show $0."""
+        p = make_product(db)
+        # Local base tier: 3 sessions, no cost.
+        self._model_sess(db, p.id, uid="m0", model="qwen3-coder:30b",
+                         backend="ollama", t_in=2_000_000, t_out=1_000_000)
+        self._model_sess(db, p.id, uid="m1", model="qwen3-coder:30b",
+                         backend="ollama", t_in=1_000_000, t_out=500_000)
+        # Paid escalation tier: 1 session, real cost + escalation flag.
+        self._model_sess(db, p.id, uid="m2", model="claude-opus-4-8",
+                         backend="claude-api", t_in=200_000, t_out=100_000,
+                         cost=1.50, escalation=True)
+        # Non-ladder session (designer): NULL ladder_model → buckets under backend.
+        db.add(DBSession(
+            product_id=p.id, session_uid="m3", persona="designer", exit_code=0,
+            started_at=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+            ended_at=datetime(2026, 6, 1, 12, 5, tzinfo=timezone.utc),
+            tokens_input=50_000, tokens_output=10_000, backend="ollama",
+        ))
+        db.flush()
+        r = client.get(f"/product/{p.id}?tab=summary", auth=AUTH)
+        assert r.status_code == 200
+        html = r.text
+        assert "Model Usage" in html
+        # Each distinct model is its own row.
+        assert "qwen3-coder:30b" in html
+        assert "claude-opus-4-8" in html
+        # Paid backend badge + real spend surface; escalation counted.
+        assert "claude-api" in html
+        assert "$1.50" in html
+        # Header note reflects total actual paid spend (only the paid tier).
+        assert "actual paid spend" in html
+
+    def test_model_usage_all_local_zero_spend(self, client, db):
+        p = make_product(db)
+        self._model_sess(db, p.id, uid="m0", model="qwen3-coder:30b",
+                         backend="ollama", t_in=1_000_000, t_out=500_000)
+        db.flush()
+        r = client.get(f"/product/{p.id}?tab=summary", auth=AUTH)
+        assert r.status_code == 200
+        # No paid tiers → header note shows the Ollama Cloud subscription label.
+        assert "Ollama Cloud API subscription cost" in r.text
+
+
+class TestProductsSummary:
+    """/summary — fleet-wide cross-product run-stats rollup."""
+
+    def _sess(self, db, product_id, *, uid, t_in=0, t_out=0, minutes=5,
+              model=None, backend="ollama", cost=0.0, escalation=False, exit_code=0):
+        start = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+        db.add(DBSession(
+            product_id=product_id, session_uid=uid, persona="coder", exit_code=exit_code,
+            started_at=start, ended_at=start + timedelta(minutes=minutes),
+            tokens_input=t_in, tokens_output=t_out,
+            ladder_model=model, backend=backend, cost_usd=cost, is_escalation=escalation,
+        ))
+
+    def test_nav_tab_present(self, client, db):
+        r = client.get("/summary", auth=AUTH)
+        assert r.status_code == 200
+        # Nav tab rendered between Products and Admin.
+        assert 'href="/summary"' in r.text
+        assert "Products Summary" in r.text
+
+    def test_requires_auth(self, client):
+        assert client.get("/summary").status_code == 401
+
+    def test_rollup_across_products(self, client, db):
+        pa = make_product(db, name="Alpha", working_dir="/projects/alpha")
+        pb = make_product(db, name="Beta", working_dir="/projects/beta")
+        # Alpha: 2 shipped, 1 blocked; two sessions (one local, one paid escalation).
+        make_feature(db, pa.id, name="a1", status="Pushed")
+        make_feature(db, pa.id, name="a2", status="Pushed")
+        make_feature(db, pa.id, name="a3", status="Blocked")
+        self._sess(db, pa.id, uid="a0", t_in=1_000_000, t_out=2_000_000,
+                   model="qwen3-coder:30b", backend="ollama")
+        self._sess(db, pa.id, uid="a1", t_in=200_000, t_out=100_000,
+                   model="claude-opus-4-8", backend="claude-api", cost=1.50, escalation=True)
+        # Beta: 1 shipped; one local session.
+        make_feature(db, pb.id, name="b1", status="Pushed")
+        self._sess(db, pb.id, uid="b0", t_in=500_000, t_out=250_000,
+                   model="glm-5.2", backend="ollama")
+        db.flush()
+
+        r = client.get("/summary", auth=AUTH)
+        assert r.status_code == 200
+        html = r.text
+        # Both products listed, linking to their detail pages.
+        assert "Alpha" in html and "Beta" in html
+        assert f'/product/{pa.id}?tab=summary' in html
+        # Fleet totals: 3 shipped, 1 blocked, 3 sessions.
+        assert "All products" in html
+        # Fleet model-usage rows across products.
+        assert "qwen3-coder:30b" in html
+        assert "glm-5.2" in html
+        assert "claude-opus-4-8" in html
+        # Paid tier surfaces the real spend in the header note + row.
+        assert "$1.50" in html
+        assert "actual paid spend" in html
+
+    def test_all_local_note(self, client, db):
+        p = make_product(db, name="Gamma")
+        make_feature(db, p.id, name="g1", status="Pushed")
+        self._sess(db, p.id, uid="g0", t_in=100_000, t_out=50_000, backend="ollama")
+        db.flush()
+        r = client.get("/summary", auth=AUTH)
+        assert r.status_code == 200
+        assert "Ollama Cloud API subscription cost" in r.text
+
+    def test_empty_fleet_no_crash(self, client, db):
+        r = client.get("/summary", auth=AUTH)
+        assert r.status_code == 200
+        assert "Products Summary" in r.text
 
 
 class TestLifetimeAggregates:

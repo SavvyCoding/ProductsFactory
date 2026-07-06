@@ -749,6 +749,144 @@ async def dashboard(
     })
 
 
+@app.get("/summary", response_class=HTMLResponse)
+async def products_summary(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_pm: str = Depends(require_auth),
+):
+    """Fleet-wide run stats — a cross-product rollup of the per-product Summary
+    tab. Aggregates are computed with GROUP BY queries (one per dimension), NOT
+    a per-product loop, so cost is flat in product count. Reuses the exact
+    ghost-session filter and frontier-cost math from product_detail so a
+    product's row here matches its own Summary tab."""
+    products = (await db.execute(select(Product).order_by(Product.name))).scalars().all()
+    alert_count = await _unread_alert_count(db)
+
+    # ── Feature status counts per product (same buckets as the dashboard). ──
+    _ACTIVE = {"Approved", "Designing", "Designed", "Implementing", "Reviewing", "Reviewed"}
+    fc_rows = await db.execute(
+        select(Feature.product_id, Feature.status, func.count().label("cnt"))
+        .group_by(Feature.product_id, Feature.status)
+    )
+    feat: dict[int, dict] = {}
+    for r in fc_rows:
+        d = feat.setdefault(r.product_id, {"pushed": 0, "active": 0, "blocked": 0,
+                                           "pending": 0, "planned": 0, "total": 0})
+        d["total"] += r.cnt
+        if r.status == "Pushed":
+            d["pushed"] += r.cnt
+        elif r.status == "Blocked":
+            d["blocked"] += r.cnt
+        elif r.status == "Pending":
+            d["pending"] += r.cnt
+        elif r.status in _ACTIVE:
+            d["active"] += r.cnt
+        # "planned" = shippable denominator (excludes Rejected/Reverted/Pending),
+        # matching the per-product ship_pct convention.
+        if r.status not in ("Rejected", "Reverted", "Pending"):
+            d["planned"] += r.cnt
+
+    # ── Session aggregates per product (ghost-filtered, same as product_detail). ──
+    _ghost = ~(
+        (DBSession.exit_code != 0) &
+        (DBSession.ended_at != None) &
+        (func.extract("epoch", DBSession.ended_at - DBSession.started_at) < 10)
+    )
+    _agent_sec = func.coalesce(func.sum(case(
+        (and_(DBSession.ended_at != None, DBSession.started_at != None),
+         func.extract("epoch", DBSession.ended_at - DBSession.started_at)), else_=0)), 0)
+    sess_rows = await db.execute(
+        select(
+            DBSession.product_id,
+            func.count(DBSession.id).label("n"),
+            func.coalesce(func.sum(DBSession.tokens_input), 0).label("t_in"),
+            func.coalesce(func.sum(DBSession.tokens_output), 0).label("t_out"),
+            func.coalesce(func.sum(case((DBSession.exit_code == 0, 1), else_=0)), 0).label("n_ok"),
+            func.coalesce(func.sum(case((and_(DBSession.exit_code != 0,
+                          DBSession.exit_code != None), 1), else_=0)), 0).label("n_killed"),
+            func.coalesce(func.sum(DBSession.cost_usd), 0).label("usd"),
+            _agent_sec.label("agent_seconds"),
+        )
+        .where(_ghost)
+        .group_by(DBSession.product_id)
+    )
+    sess: dict[int, dict] = {}
+    for r in sess_rows:
+        sess[r.product_id] = {
+            "sessions": int(r.n or 0),
+            "ok": int(r.n_ok or 0),
+            "killed": int(r.n_killed or 0),
+            "tokens_in": int(r.t_in or 0),
+            "tokens_out": int(r.t_out or 0),
+            "tokens": int(r.t_in or 0) + int(r.t_out or 0),
+            "agent_seconds": int(r.agent_seconds or 0),
+            "actual_cost": float(r.usd or 0),
+            "frontier_cost": round(
+                (int(r.t_in or 0) / 1_000_000) * FRONTIER_INPUT_USD_PER_MTOK
+                + (int(r.t_out or 0) / 1_000_000) * FRONTIER_OUTPUT_USD_PER_MTOK, 2),
+        }
+
+    # ── Per-product rows + fleet totals. ──
+    rows = []
+    tot = {"products": len(products), "pushed": 0, "active": 0, "blocked": 0,
+           "planned": 0, "sessions": 0, "ok": 0, "killed": 0, "tokens": 0,
+           "agent_seconds": 0, "frontier_cost": 0.0, "actual_cost": 0.0, "running": 0}
+    for p in products:
+        f = feat.get(p.id, {"pushed": 0, "active": 0, "blocked": 0, "pending": 0, "planned": 0, "total": 0})
+        s = sess.get(p.id, {"sessions": 0, "ok": 0, "killed": 0, "tokens_in": 0, "tokens_out": 0,
+                            "tokens": 0, "agent_seconds": 0, "actual_cost": 0.0, "frontier_cost": 0.0})
+        ship_pct = int((f["pushed"] / f["planned"]) * 100) if f["planned"] else 0
+        rows.append({"product": p, "f": f, "s": s, "ship_pct": ship_pct})
+        for k in ("pushed", "active", "blocked", "planned"):
+            tot[k] += f[k]
+        for k in ("sessions", "ok", "killed", "tokens", "agent_seconds"):
+            tot[k] += s[k]
+        tot["frontier_cost"] += s["frontier_cost"]
+        tot["actual_cost"] += s["actual_cost"]
+        if p.status == "running":
+            tot["running"] += 1
+    tot["frontier_cost"] = round(tot["frontier_cost"], 2)
+    tot["actual_cost"] = round(tot["actual_cost"], 2)
+    tot["ship_pct"] = int((tot["pushed"] / tot["planned"]) * 100) if tot["planned"] else 0
+    # Sort rows by shipped desc so the most-productive products lead.
+    rows.sort(key=lambda r: (r["f"]["pushed"], r["s"]["sessions"]), reverse=True)
+
+    # ── Fleet-wide model usage (GROUP BY resolved model, all products). ──
+    _mk = func.coalesce(DBSession.model, DBSession.ladder_model, DBSession.backend, "ollama")
+    mu_rows = await db.execute(
+        select(
+            _mk.label("model"),
+            func.max(DBSession.backend).label("backend"),
+            func.count(DBSession.id).label("n"),
+            func.coalesce(func.sum(DBSession.tokens_input), 0).label("t_in"),
+            func.coalesce(func.sum(DBSession.tokens_output), 0).label("t_out"),
+            func.coalesce(func.sum(DBSession.cost_usd), 0).label("usd"),
+            func.coalesce(func.sum(case((DBSession.is_escalation == True, 1), else_=0)), 0).label("n_esc"),
+        )
+        .where(_ghost)
+        .group_by(_mk)
+    )
+    model_usage = sorted(
+        ({"model": r.model or "ollama", "backend": r.backend or "ollama",
+          "sessions": int(r.n or 0), "tokens": int(r.t_in or 0) + int(r.t_out or 0),
+          "cost_usd": float(r.usd or 0), "escalations": int(r.n_esc or 0),
+          "paid": (r.backend or "") in ("claude-api", "openai", "claude")}
+         for r in mu_rows),
+        key=lambda m: m["tokens"], reverse=True,
+    )
+
+    return templates.TemplateResponse("summary.html", {
+        "request": request,
+        "current_pm": current_pm,
+        "alert_count": alert_count,
+        "rows": rows,
+        "totals": tot,
+        "model_usage": model_usage,
+        "frontier_model_label": FRONTIER_MODEL_LABEL,
+    })
+
+
 @app.get("/api/products/running-count")
 async def running_count(db: AsyncSession = Depends(get_db)):
     """Count products currently running — used by nav live indicator."""
@@ -857,6 +995,57 @@ async def product_detail(
         .where(DBSession.product_id == product_id)
         .where(_ghost_filter)
     )).one()
+
+    # ── Per-model telemetry ──────────────────────────────────────────────────
+    # Which LLM did the work, and what did the PAID tiers actually cost. `model`
+    # (migration 051) is the resolved LLM for EVERY persona — designer/reviewer/
+    # architect/etc., not just the coder ladder — so deepseek/kimi/glm review &
+    # design work shows as its own row. Grouping key COALESCE(model, ladder_model,
+    # backend): `model` wins; `ladder_model` covers any pre-051 coder rows the
+    # backfill missed; `backend` (then the 'ollama' literal) catches the rest so
+    # nothing vanishes. `cost_usd` is REAL spend (nonzero only for paid claude-api/
+    # openai tiers); local Ollama rows sum to ~$0 — the frontier_cost card above
+    # is the hypothetical instead.
+    _model_key = func.coalesce(DBSession.model, DBSession.ladder_model, DBSession.backend, "ollama")
+    _model_rows = (await db.execute(
+        select(
+            _model_key.label("model"),
+            func.max(DBSession.backend).label("backend"),
+            func.count(DBSession.id).label("n"),
+            func.coalesce(func.sum(DBSession.tokens_input),  0).label("t_in"),
+            func.coalesce(func.sum(DBSession.tokens_output), 0).label("t_out"),
+            func.coalesce(func.sum(DBSession.cost_usd), 0).label("usd"),
+            func.coalesce(
+                func.sum(case((DBSession.is_escalation == True, 1), else_=0)), 0
+            ).label("n_esc"),
+        )
+        .where(DBSession.product_id == product_id)
+        .where(_ghost_filter)
+        .group_by(_model_key)
+    )).all()
+    # Sort by token volume desc in Python (avoids NULL-arithmetic in ORDER BY);
+    # cast Decimal→int/float so the template's numeric filters behave.
+    model_usage = sorted(
+        (
+            {
+                "model": r.model or "ollama",
+                "backend": r.backend or "ollama",
+                "sessions": int(r.n or 0),
+                "tokens_in": int(r.t_in or 0),
+                "tokens_out": int(r.t_out or 0),
+                "tokens": int(r.t_in or 0) + int(r.t_out or 0),
+                "cost_usd": float(r.usd or 0),
+                "escalations": int(r.n_esc or 0),
+                # A paid backend is the only place cost_usd is real spend.
+                "paid": (r.backend or "") in ("claude-api", "openai", "claude"),
+            }
+            for r in _model_rows
+        ),
+        key=lambda m: m["tokens"],
+        reverse=True,
+    )
+    lifetime_actual_cost = round(sum(m["cost_usd"] for m in model_usage), 2)
+
     alert_count = await _unread_alert_count(db)
     _sys_cfg = await _get_system_config(db)
     _gh_pat = _github_token_from_config(_sys_cfg)
@@ -952,6 +1141,11 @@ async def product_detail(
             2,
         ),
         "frontier_model_label": FRONTIER_MODEL_LABEL,
+        # Per-model telemetry (see _model_rows above): one row per LLM that ran
+        # sessions for this product, sorted by token volume. `lifetime_actual_cost`
+        # is the REAL paid spend (paid escalation tiers only; ~$0 on all-Ollama).
+        "model_usage": model_usage,
+        "lifetime_actual_cost": lifetime_actual_cost,
         "code_auditor_enabled_effective": _audit_effective("code_auditor", "CODE_AUDITOR_ENABLED"),
         "code_auditor_filing_effective":  _audit_effective("code_auditor_filing", "CODE_AUDITOR_FILING_ENABLED"),
     })
