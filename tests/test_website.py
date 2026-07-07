@@ -299,6 +299,229 @@ class TestProductDetail:
         assert "Run Analysis" not in r.text
 
 
+class TestDashboardTelemetry:
+    """feat/dashboard-telemetry: cumulative agent time + frontier-cost cards,
+    and removal of the per-session 'Latest sessions' block from the Summary tab.
+    """
+
+    def _sess(self, db, product_id, *, uid, minutes, t_in=0, t_out=0):
+        # Explicit start/end well past the 10s ghost threshold so the duration
+        # counts toward the lifetime agent-seconds aggregate.
+        start = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+        db.add(DBSession(
+            product_id=product_id, session_uid=uid, persona="coder", exit_code=0,
+            started_at=start, ended_at=start + timedelta(minutes=minutes),
+            tokens_input=t_in, tokens_output=t_out,
+        ))
+
+    def test_three_panel_consolidation_and_derived_metrics(self, client, db):
+        p = make_product(db)
+        # 2 shipped features + 2 sessions (30m+90m = 2h; 1M in / 2M out tokens).
+        make_feature(db, p.id, name="f1", status="Pushed")
+        make_feature(db, p.id, name="f2", status="Pushed")
+        self._sess(db, p.id, uid="a0", minutes=30, t_in=1_000_000, t_out=2_000_000)
+        self._sess(db, p.id, uid="a1", minutes=90)
+        db.flush()
+        r = client.get(f"/product/{p.id}?tab=summary", auth=AUTH)
+        assert r.status_code == 200
+        html = r.text
+        # Consolidated into exactly three panels with uniform headers.
+        for title in ("Delivery", "Pipeline Health", "Activity"):
+            assert title in html
+        assert html.count('class="sum-panel"') == 3
+        assert html.count('class="sum-foot"') == 3  # every panel has a footer band
+        # Derived per-ship metrics present.
+        assert "Avg time / shipped feature" in html
+        assert "Avg cost / shipped feature" in html
+        assert "Avg sessions / shipped feature" in html
+        assert "Session success rate" in html
+        # Frontier: total = 1M×$5 + 2M×$25 = $55.00; per-ship = $55/2 = $27.50.
+        assert "$55.00" in html
+        assert "$27.50" in html
+        # Avg sessions / ship = 2 sessions / 2 shipped = 1.0
+        assert "1.0" in html
+        assert "Claude Opus 4.8" in html
+        assert "actual (local)" not in html
+        # Agent-time hero: 120 min → "2h" in the new hero markup.
+        assert '2<span class="sum-hero-unit">h</span>' in html
+        # Old per-tile sections and the Latest-sessions block are gone.
+        assert "Latest sessions" not in html
+        assert "metric-section-title" not in html
+
+    def test_zero_sessions_no_crash(self, client, db):
+        p = make_product(db)
+        r = client.get(f"/product/{p.id}?tab=summary", auth=AUTH)
+        assert r.status_code == 200
+        html = r.text
+        assert html.count('class="sum-panel"') == 3
+        assert "$0.00" in html          # frontier cost with no tokens
+        assert "—" in html              # per-ship metrics fall back to em-dash
+        # Model-usage table renders its empty state, not a crash.
+        assert "Model Usage" in html
+        assert "No sessions recorded yet." in html
+
+    def _model_sess(self, db, product_id, *, uid, model, backend,
+                    t_in=0, t_out=0, cost=0.0, escalation=False):
+        start = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+        db.add(DBSession(
+            product_id=product_id, session_uid=uid, persona="coder", exit_code=0,
+            started_at=start, ended_at=start + timedelta(minutes=5),
+            tokens_input=t_in, tokens_output=t_out,
+            ladder_model=model, backend=backend,
+            cost_usd=cost, is_escalation=escalation,
+        ))
+
+    def test_model_usage_breakdown(self, client, db):
+        """Per-model telemetry: one row per LLM, paid tiers show real spend +
+        an escalation count, local Ollama rows show $0."""
+        p = make_product(db)
+        # Local base tier: 3 sessions, no cost.
+        self._model_sess(db, p.id, uid="m0", model="qwen3-coder:30b",
+                         backend="ollama", t_in=2_000_000, t_out=1_000_000)
+        self._model_sess(db, p.id, uid="m1", model="qwen3-coder:30b",
+                         backend="ollama", t_in=1_000_000, t_out=500_000)
+        # Paid escalation tier: 1 session, real cost + escalation flag.
+        self._model_sess(db, p.id, uid="m2", model="claude-opus-4-8",
+                         backend="claude-api", t_in=200_000, t_out=100_000,
+                         cost=1.50, escalation=True)
+        # Non-ladder session (designer): NULL ladder_model → buckets under backend.
+        db.add(DBSession(
+            product_id=p.id, session_uid="m3", persona="designer", exit_code=0,
+            started_at=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+            ended_at=datetime(2026, 6, 1, 12, 5, tzinfo=timezone.utc),
+            tokens_input=50_000, tokens_output=10_000, backend="ollama",
+        ))
+        db.flush()
+        r = client.get(f"/product/{p.id}?tab=summary", auth=AUTH)
+        assert r.status_code == 200
+        html = r.text
+        assert "Model Usage" in html
+        # Each distinct model is its own row.
+        assert "qwen3-coder:30b" in html
+        assert "claude-opus-4-8" in html
+        # New columns + grand-total row on the per-product Model Usage panel.
+        assert "% sessions" in html
+        assert "Agent time" in html
+        assert "All models" in html
+        # Paid backend badge + real spend surface; escalation counted.
+        assert "claude-api" in html
+        assert "$1.50" in html
+        # Header note reflects total actual paid spend (only the paid tier).
+        assert "actual paid spend" in html
+
+    def test_model_usage_request_counts_and_fallback_row(self, client, db):
+        """model_requests (migration 052): the Requests column sums actual per-model
+        API calls, and a model that only ever served as a FALLBACK (never a session
+        primary) gets its own row flagged 'fallback'."""
+        p = make_product(db)
+        start = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+        # One architect session: primary deepseek served 40 requests, but 2 fell
+        # back to glm-5.1 (deepseek's 2nd choice) — glm-5.1 is never a primary.
+        db.add(DBSession(
+            product_id=p.id, session_uid="r0", persona="architect", exit_code=0,
+            started_at=start, ended_at=start + timedelta(minutes=10),
+            tokens_input=500_000, tokens_output=100_000,
+            model="deepseek-v4-pro", backend="ollama",
+            model_requests={"deepseek-v4-pro": 40, "glm-5.1": 2},
+        ))
+        db.flush()
+        r = client.get(f"/product/{p.id}?tab=summary", auth=AUTH)
+        assert r.status_code == 200
+        html = r.text
+        assert "Requests" in html           # new column header
+        # deepseek is a session primary; glm-5.1 only ever a fallback → own row.
+        assert "deepseek-v4-pro" in html
+        assert "glm-5.1" in html
+        assert "fallback" in html           # fallback-only badge
+        # Request counts surface (40 and 2), and totals sum to 42.
+        assert "40" in html and "42" in html
+
+    def test_model_usage_all_local_zero_spend(self, client, db):
+        p = make_product(db)
+        self._model_sess(db, p.id, uid="m0", model="qwen3-coder:30b",
+                         backend="ollama", t_in=1_000_000, t_out=500_000)
+        db.flush()
+        r = client.get(f"/product/{p.id}?tab=summary", auth=AUTH)
+        assert r.status_code == 200
+        # No paid tiers → header note shows the Ollama Cloud subscription label.
+        assert "Ollama Cloud API subscription cost" in r.text
+
+
+class TestProductsSummary:
+    """/summary — fleet-wide cross-product run-stats rollup."""
+
+    def _sess(self, db, product_id, *, uid, t_in=0, t_out=0, minutes=5,
+              model=None, backend="ollama", cost=0.0, escalation=False, exit_code=0):
+        start = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+        db.add(DBSession(
+            product_id=product_id, session_uid=uid, persona="coder", exit_code=exit_code,
+            started_at=start, ended_at=start + timedelta(minutes=minutes),
+            tokens_input=t_in, tokens_output=t_out,
+            ladder_model=model, backend=backend, cost_usd=cost, is_escalation=escalation,
+        ))
+
+    def test_nav_tab_present(self, client, db):
+        r = client.get("/summary", auth=AUTH)
+        assert r.status_code == 200
+        # Nav tab rendered between Products and Admin.
+        assert 'href="/summary"' in r.text
+        assert "Products Summary" in r.text
+
+    def test_requires_auth(self, client):
+        assert client.get("/summary").status_code == 401
+
+    def test_rollup_across_products(self, client, db):
+        pa = make_product(db, name="Alpha", working_dir="/projects/alpha")
+        pb = make_product(db, name="Beta", working_dir="/projects/beta")
+        # Alpha: 2 shipped, 1 blocked; two sessions (one local, one paid escalation).
+        make_feature(db, pa.id, name="a1", status="Pushed")
+        make_feature(db, pa.id, name="a2", status="Pushed")
+        make_feature(db, pa.id, name="a3", status="Blocked")
+        self._sess(db, pa.id, uid="a0", t_in=1_000_000, t_out=2_000_000,
+                   model="qwen3-coder:30b", backend="ollama")
+        self._sess(db, pa.id, uid="a1", t_in=200_000, t_out=100_000,
+                   model="claude-opus-4-8", backend="claude-api", cost=1.50, escalation=True)
+        # Beta: 1 shipped; one local session.
+        make_feature(db, pb.id, name="b1", status="Pushed")
+        self._sess(db, pb.id, uid="b0", t_in=500_000, t_out=250_000,
+                   model="glm-5.2", backend="ollama")
+        db.flush()
+
+        r = client.get("/summary", auth=AUTH)
+        assert r.status_code == 200
+        html = r.text
+        # Both products listed, linking to their detail pages.
+        assert "Alpha" in html and "Beta" in html
+        assert f'/product/{pa.id}?tab=summary' in html
+        # Fleet totals: 3 shipped, 1 blocked, 3 sessions.
+        assert "All products" in html
+        # Fleet model-usage rows across products.
+        assert "qwen3-coder:30b" in html
+        assert "glm-5.2" in html
+        assert "claude-opus-4-8" in html
+        # Paid tier surfaces the real spend in the header note + row.
+        assert "$1.50" in html
+        assert "actual paid spend" in html
+        # New columns + grand-total row on the fleet Model Usage table.
+        assert "% sessions" in html
+        assert "Agent time" in html
+        assert "All models" in html
+
+    def test_all_local_note(self, client, db):
+        p = make_product(db, name="Gamma")
+        make_feature(db, p.id, name="g1", status="Pushed")
+        self._sess(db, p.id, uid="g0", t_in=100_000, t_out=50_000, backend="ollama")
+        db.flush()
+        r = client.get("/summary", auth=AUTH)
+        assert r.status_code == 200
+        assert "Ollama Cloud API subscription cost" in r.text
+
+    def test_empty_fleet_no_crash(self, client, db):
+        r = client.get("/summary", auth=AUTH)
+        assert r.status_code == 200
+        assert "Products Summary" in r.text
+
+
 class TestLifetimeAggregates:
     """Regression for the 2026-05-30 'Tokens lifetime' shrinking bug.
 
@@ -350,14 +573,13 @@ class TestLifetimeAggregates:
             self._make_session(db, p.id, uid=f"u{i:03d}")
         r = client.get(f"/product/{p.id}", auth=AUTH)
         assert r.status_code == 200
-        # Full lifetime input total: 60 × 100,000 = 6,000,000
-        assert "6,000,000 in" in r.text, (
-            "tokens_input lifetime total must include all 60 sessions, "
-            "not just the LIMIT(50) display slice. Look for the 'X in' "
-            "foot text on the Tokens lifetime card."
+        # New Activity panel shows the lifetime TOKEN TOTAL (in+out), rounded:
+        # 60 × (100k + 10k) = 6.6M. The LIMIT(50) slice would be 5.5M, so the
+        # 6.6M value proves all 60 sessions were summed.
+        assert '6.6<span class="u">M</span>' in r.text, (
+            "tokens total must include all 60 sessions, not just the "
+            "LIMIT(50) slice — expected 6.6M on the Activity panel."
         )
-        # Full lifetime output: 60 × 10,000 = 600,000
-        assert "600,000 out" in r.text
 
     def test_sessions_lifetime_count_includes_past_limit_50(self, client, db):
         p = make_product(db)
@@ -365,12 +587,10 @@ class TestLifetimeAggregates:
             self._make_session(db, p.id, uid=f"u{i:03d}")
         r = client.get(f"/product/{p.id}", auth=AUTH)
         assert r.status_code == 200
-        # The "Sessions lifetime" metric card renders the count as the
-        # metric value. With 75 sessions, the page must contain "75",
-        # not "50" (the LIMIT cap).
-        # Use the foot text format which is unique: "X OK · Y killed"
-        # to anchor the assertion away from incidental numbers.
-        assert "75 OK · 0 killed" in r.text
+        # The Activity panel's Sessions row shows the lifetime count with a
+        # "N ok · N killed" breakdown. 75 (not the LIMIT-50 cap) proves the
+        # unbounded query is used.
+        assert "75 ok · 0 killed" in r.text
 
     def test_session_success_rate_uses_lifetime_not_slice(self, client, db):
         # 60 OK sessions + 40 killed sessions → 100 total, 60% success.
@@ -385,13 +605,11 @@ class TestLifetimeAggregates:
             self._make_session(db, p.id, uid=f"kill-{i:03d}", exit_code=137)
         r = client.get(f"/product/{p.id}", auth=AUTH)
         assert r.status_code == 200
-        # The metric card renders the percentage as the value and the
-        # supporting count in foot text "across N runs". 60/100 = 60.
-        assert "across 100 runs" in r.text
-        # And the percentage must appear — guard against ratio computed
-        # off the slice. Format from the template: {{ ok_pct }}<suffix>%
-        # so look for ">60<" inside the metric-value span.
-        assert ">60<" in r.text
+        # Pipeline-health "Session success rate" row = 60/100 = 60%, and the
+        # Activity Sessions row confirms the 100-session denominator via its
+        # "60 ok · 40 killed" breakdown (would differ if computed off the slice).
+        assert '60<span class="u">%</span>' in r.text
+        assert "60 ok · 40 killed" in r.text
 
     def test_ghost_sessions_excluded_from_lifetime(self, client, db):
         # Ghost sessions (failed AND ended within 10s of start) are
@@ -415,8 +633,8 @@ class TestLifetimeAggregates:
         db.flush()
         r = client.get(f"/product/{p.id}", auth=AUTH)
         assert r.status_code == 200
-        # 5 real, all OK
-        assert "5 OK · 0 killed" in r.text
+        # 5 real sessions, all ok; the 3 ghosts are excluded from the aggregate.
+        assert "5 ok · 0 killed" in r.text
 
 
 # ══════════════════════════════════════════════════════════════════════════════

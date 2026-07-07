@@ -20,6 +20,7 @@
 
     <div class="pf-nav-tabs">
       <a href="/" class="pf-nav-tab {{ 'is-active' if request.url.path == '/' else '' }}">Products</a>
+      <a href="/summary" class="pf-nav-tab {{ 'is-active' if request.url.path == '/summary' else '' }}">Products Summary</a>
       <a href="/admin" class="pf-nav-tab {{ 'is-active' if request.url.path.startswith('/admin') else '' }}">Admin</a>
     </div>
 

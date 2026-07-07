@@ -2830,6 +2830,16 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
 
     log.info(f"docker run: session={session_uid} product={product['name']}")
 
+    # The LLM this session actually runs on (migration 051), for ALL personas —
+    # not just the coder ladder. The agent runs MODELS[0] (primary of the chain)
+    # with fallback, so the primary is the model in the common no-failover case.
+    # Coder ladder sessions override with their exact tier model (_ladder_model
+    # is set for both ollama and paid tiers), so it takes precedence.
+    _session_model = (
+        _ladder_model
+        or ((effective_persona_model or "").split(",")[0].strip() or None)
+    )
+
     # Record session start with FSM status=starting. PM API sets expected_deadline
     # based on SESSION_TIMEOUT_MINUTES so watchdog can authoritatively time it out.
     session_id: int | None = None
@@ -2849,6 +2859,8 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
                 # Coder-ladder telemetry (migration 050): which tier/model this session ran.
                 "ladder_tier":  _ladder_tier,
                 "ladder_model": _ladder_model,
+                # Resolved LLM for ANY persona (migration 051) — the panel groups on this.
+                "model":        _session_model,
             })
             resp.raise_for_status()
             session_id = resp.json()["id"]

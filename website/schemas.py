@@ -298,6 +298,11 @@ class SessionCreate(BaseModel):
     is_escalation: Optional[bool] = None # premium escalation pass (migration 047)
     ladder_tier:  Optional[int] = None   # coder-ladder tier index (migration 050)
     ladder_model: Optional[str] = None   # coder-ladder model this session ran (migration 050)
+    model:        Optional[str] = None   # resolved LLM this session ran, any persona (migration 051)
+
+    # `model` is a plain data field here, not a pydantic model attr — opt out of
+    # the protected `model_` namespace so pydantic doesn't warn/reserve it.
+    model_config = {"protected_namespaces": ()}
 
 
 class SessionEnd(BaseModel):
@@ -314,6 +319,7 @@ class SessionEnd(BaseModel):
     status:             Optional[str]      = None   # FSM transition on close
     kill_reason:        Optional[str]      = None
     is_escalation:      Optional[bool]     = None   # premium escalation pass (migration 047)
+    model_requests:     Optional[dict]     = None   # {model: request_count} (migration 052)
 
 
 class SessionOut(BaseModel):
@@ -331,9 +337,10 @@ class SessionOut(BaseModel):
     cost_usd:           Optional[float]
     persona:            Optional[str]
     backend:            Optional[str]
+    model:              Optional[str] = None   # resolved LLM (migration 051)
     notes:              Optional[str]
 
-    model_config = {"from_attributes": True}
+    model_config = {"from_attributes": True, "protected_namespaces": ()}
 
 
 # ── Poller Distributed Lock ──────────────────────────────────────────────────

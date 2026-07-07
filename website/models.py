@@ -185,6 +185,15 @@ class Session(Base):
     # model (e.g. "minimax-m3" / "glm-5.2"). NULL for non-coder / no-ladder sessions.
     ladder_tier:         Mapped[Optional[int]]  = mapped_column(Integer)
     ladder_model:        Mapped[Optional[str]]  = mapped_column(Text)
+    # migration 051 — the resolved LLM this session ran, for ALL personas (the
+    # primary model of the resolved chain, or the coder ladder's tier model).
+    # Populated at launch; ladder_model stays coder-ladder-specific. The Model
+    # Usage panels group by COALESCE(model, ladder_model, backend).
+    model:               Mapped[Optional[str]]  = mapped_column(Text)
+    # migration 052 — {model: request_count} of the ACTUAL model that served
+    # each request (fallback-aware). PATCHed at session end by ollama_agent;
+    # summed for the request-level "Requests" column that matches Ollama.
+    model_requests:      Mapped[Optional[dict]] = mapped_column(JSONB)
 
     # FSM — canonical lifecycle state. Watchdog/reconciler/harvester drive
     # transitions. Never parse docker output or file mtimes; consult these.
