@@ -400,6 +400,8 @@
     .mu-cost--paid{color:var(--amber);font-weight:600}
     .mu-cost--zero{color:var(--muted)}
     .mu-esc{color:var(--amber);font-weight:600}
+    .mu-muted{color:var(--muted)}
+    .mu-total td{border-top:2px solid var(--border);font-weight:700;background:var(--light)}
     .mu-empty{padding:22px 18px;font-size:var(--text-md);color:var(--muted);text-align:center}
   </style>
   <section class="mu-wrap">
@@ -415,6 +417,9 @@
         <tr>
           <th class="mu-l">Model</th>
           <th>Sessions</th>
+          <th>% sessions</th>
+          <th>Requests</th>
+          <th>Agent time</th>
           <th>Tokens</th>
           <th>Escalations</th>
           <th>Actual cost</th>
@@ -422,15 +427,20 @@
       </thead>
       <tbody>
         {% for m in model_usage %}
+        {% set _mmin = m.agent_seconds // 60 %}{% set _mh = _mmin // 60 %}{% set _mm = _mmin % 60 %}
         <tr>
           <td class="mu-l">
             <div class="mu-model">
               <span class="mu-name">{{ m.model }}</span>
               {% if m.paid %}<span class="mu-badge mu-badge--paid">{{ m.backend }}</span>{% else %}<span class="mu-badge mu-badge--local">{{ m.backend }}</span>{% endif %}
+              {% if m.get('fallback_only') %}<span class="mu-badge" title="Only ever served requests as a fallback — never a session's primary model">fallback</span>{% endif %}
             </div>
             <div class="mu-bar"><span style="width:{{ ((m.tokens / _mu_max) * 100) | round(1) if _mu_max else 0 }}%"></span></div>
           </td>
           <td>{{ m.sessions }}</td>
+          <td class="mu-muted">{{ '%.1f'|format(m.pct_sessions) }}<span class="u" style="color:var(--muted);font-size:11px">%</span></td>
+          <td>{% if m.requests %}{{ '{:,}'.format(m.requests) }}{% else %}—{% endif %}</td>
+          <td>{% if _mh %}{{ _mh }}<span class="u" style="color:var(--muted);font-size:11px">h</span> {{ _mm }}<span class="u" style="color:var(--muted);font-size:11px">m</span>{% else %}{{ _mm }}<span class="u" style="color:var(--muted);font-size:11px">m</span>{% endif %}</td>
           <td>{% if m.tokens >= 1000000 %}{{ (m.tokens / 1000000) | round(1) }}<span class="u" style="color:var(--muted);font-size:11px">M</span>{% elif m.tokens >= 1000 %}{{ (m.tokens / 1000) | round(0) | int }}<span class="u" style="color:var(--muted);font-size:11px">K</span>{% else %}{{ m.tokens }}{% endif %}</td>
           <td>{% if m.escalations %}<span class="mu-esc">{{ m.escalations }}</span>{% else %}—{% endif %}</td>
           <td class="{% if m.paid and m.cost_usd > 0 %}mu-cost--paid{% else %}mu-cost--zero{% endif %}">
@@ -438,6 +448,18 @@
           </td>
         </tr>
         {% endfor %}
+        {% set _tsec = model_usage_totals.agent_seconds %}{% set _tmin = _tsec // 60 %}{% set _th = _tmin // 60 %}{% set _tm = _tmin % 60 %}
+        {% set _ttok = model_usage_totals.tokens %}
+        <tr class="mu-total">
+          <td class="mu-l">All models</td>
+          <td>{{ model_usage_totals.sessions }}</td>
+          <td>100<span class="u" style="color:var(--muted);font-size:11px">%</span></td>
+          <td>{% if model_usage_totals.requests %}{{ '{:,}'.format(model_usage_totals.requests) }}{% else %}—{% endif %}</td>
+          <td>{% if _th %}{{ _th }}<span class="u" style="color:var(--muted);font-size:11px">h</span> {{ _tm }}<span class="u" style="color:var(--muted);font-size:11px">m</span>{% else %}{{ _tm }}<span class="u" style="color:var(--muted);font-size:11px">m</span>{% endif %}</td>
+          <td>{% if _ttok >= 1000000 %}{{ (_ttok / 1000000) | round(1) }}<span class="u" style="color:var(--muted);font-size:11px">M</span>{% elif _ttok >= 1000 %}{{ (_ttok / 1000) | round(0) | int }}<span class="u" style="color:var(--muted);font-size:11px">K</span>{% else %}{{ _ttok }}{% endif %}</td>
+          <td>{{ model_usage_totals.escalations or '—' }}</td>
+          <td class="{% if model_usage_totals.cost_usd > 0 %}mu-cost--paid{% endif %}">{% if model_usage_totals.cost_usd > 0 %}${{ '{:,.2f}'.format(model_usage_totals.cost_usd) }}{% else %}$0{% endif %}</td>
+        </tr>
       </tbody>
     </table>
     {% else %}

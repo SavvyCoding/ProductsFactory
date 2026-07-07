@@ -817,6 +817,11 @@ class _OllamaBackend:
         self.call_count          = 0
         # Ordered set of model fallbacks fired this session, for diagnostics.
         self.fallback_log: list[str] = []
+        # Per-model request counts — the ACTUAL model that served each request,
+        # including silent fallbacks (e.g. primary busy → glm-5.1 2nd choice).
+        # PATCHed to sessions.model_requests at end so the dashboard reflects
+        # real per-model API usage and reconciles with the Ollama dashboard.
+        self.model_requests: dict[str, int] = {}
 
     @property
     def model(self) -> str:
@@ -855,6 +860,8 @@ class _OllamaBackend:
                     resp.raise_for_status()
                     data = resp.json()
                     used_model = model
+                    # Count the actual model that served this request (fallback-aware).
+                    self.model_requests[model] = self.model_requests.get(model, 0) + 1
                     if model_idx > 0:
                         # Sticky: promote the survivor so the next turn doesn't
                         # waste budget on the failing primary.
@@ -1070,12 +1077,14 @@ def run_agent(initial_prompt: str) -> int:
         output_tokens=backend.total_output_tokens,
         call_count=backend.call_count,
         cost_usd=getattr(backend, "total_cost_usd", None),
+        model_requests=getattr(backend, "model_requests", None),
     )
     return rc
 
 
 def _patch_session_metrics(input_tokens: int, output_tokens: int, call_count: int,
-                           cost_usd: float | None = None) -> None:
+                           cost_usd: float | None = None,
+                           model_requests: dict | None = None) -> None:
     """End-of-run PATCH /api/sessions/{id} with accumulated token totals (+ USD
     cost for premium API backends; the daily escalation cap sums cost_usd)."""
     if not PM_API_URL or SESSION_UID == "local":
@@ -1099,6 +1108,8 @@ def _patch_session_metrics(input_tokens: int, output_tokens: int, call_count: in
         _patch_body = {"tokens_input": input_tokens, "tokens_output": output_tokens}
         if cost_usd is not None:
             _patch_body["cost_usd"] = round(float(cost_usd), 6)
+        if model_requests:
+            _patch_body["model_requests"] = model_requests
         httpx.patch(
             f"{PM_API_URL}/api/sessions/{session_id}",
             json=_patch_body,

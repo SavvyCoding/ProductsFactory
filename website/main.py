@@ -108,6 +108,29 @@ FRONTIER_INPUT_USD_PER_MTOK = 5.0
 FRONTIER_OUTPUT_USD_PER_MTOK = 25.0
 
 
+def _merge_request_counts(model_usage: list[dict], req_by_model: dict) -> list[dict]:
+    """Attach per-model ACTUAL request counts (migration 052) to the session-level
+    Model Usage rows, and append fallback-only rows for models that served requests
+    but were never a session's primary — e.g. glm-5.1 firing as a 2nd-choice
+    fallback when deepseek-v4-pro is busy. Re-sorts by token volume (dominant-work
+    models lead); request-only rows (0 session tokens) fall to the bottom ordered
+    by request count. Used by both the per-product and the fleet Summary panels."""
+    seen = set()
+    for m in model_usage:
+        m["requests"] = req_by_model.get(m["model"], 0)
+        seen.add(m["model"])
+    for mdl, cnt in req_by_model.items():
+        if mdl not in seen and cnt:
+            model_usage.append({
+                "model": mdl, "backend": "ollama", "sessions": 0,
+                "tokens_in": 0, "tokens_out": 0, "tokens": 0, "cost_usd": 0.0,
+                "escalations": 0, "agent_seconds": 0, "requests": cnt,
+                "paid": False, "fallback_only": True,
+            })
+    model_usage.sort(key=lambda m: (m["tokens"], m["requests"]), reverse=True)
+    return model_usage
+
+
 def _as_feature_name(name: str | None) -> str:
     """Render a sprint.name in the new domain vocabulary.
 
@@ -863,6 +886,7 @@ async def products_summary(
             func.coalesce(func.sum(DBSession.tokens_output), 0).label("t_out"),
             func.coalesce(func.sum(DBSession.cost_usd), 0).label("usd"),
             func.coalesce(func.sum(case((DBSession.is_escalation == True, 1), else_=0)), 0).label("n_esc"),
+            _agent_sec.label("agent_seconds"),
         )
         .where(_ghost)
         .group_by(_mk)
@@ -871,10 +895,33 @@ async def products_summary(
         ({"model": r.model or "ollama", "backend": r.backend or "ollama",
           "sessions": int(r.n or 0), "tokens": int(r.t_in or 0) + int(r.t_out or 0),
           "cost_usd": float(r.usd or 0), "escalations": int(r.n_esc or 0),
+          "agent_seconds": int(r.agent_seconds or 0),
           "paid": (r.backend or "") in ("claude-api", "openai", "claude")}
          for r in mu_rows),
         key=lambda m: m["tokens"], reverse=True,
     )
+    # Fleet-wide ACTUAL request counts (migration 052; fallback-aware, matches Ollama).
+    _req_rows = (await db.execute(text(
+        "SELECT key AS model, SUM(value::int) AS requests "
+        "FROM sessions s, jsonb_each_text(s.model_requests) "
+        "WHERE s.model_requests IS NOT NULL "
+        "  AND NOT (s.exit_code <> 0 AND s.ended_at IS NOT NULL "
+        "           AND EXTRACT(EPOCH FROM (s.ended_at - s.started_at)) < 10) "
+        "GROUP BY key"
+    ))).all()
+    req_by_model = {r.model: int(r.requests or 0) for r in _req_rows}
+    model_usage = _merge_request_counts(model_usage, req_by_model)
+    _mu_sess_total = sum(m["sessions"] for m in model_usage)
+    for m in model_usage:
+        m["pct_sessions"] = round(100 * m["sessions"] / _mu_sess_total, 1) if _mu_sess_total else 0.0
+    model_usage_totals = {
+        "sessions": _mu_sess_total,
+        "agent_seconds": sum(m["agent_seconds"] for m in model_usage),
+        "tokens": sum(m["tokens"] for m in model_usage),
+        "escalations": sum(m["escalations"] for m in model_usage),
+        "cost_usd": round(sum(m["cost_usd"] for m in model_usage), 2),
+        "requests": sum(m["requests"] for m in model_usage),
+    }
 
     return templates.TemplateResponse("summary.html", {
         "request": request,
@@ -883,6 +930,7 @@ async def products_summary(
         "rows": rows,
         "totals": tot,
         "model_usage": model_usage,
+        "model_usage_totals": model_usage_totals,
         "frontier_model_label": FRONTIER_MODEL_LABEL,
     })
 
@@ -1018,6 +1066,10 @@ async def product_detail(
             func.coalesce(
                 func.sum(case((DBSession.is_escalation == True, 1), else_=0)), 0
             ).label("n_esc"),
+            func.coalesce(func.sum(case(
+                (and_(DBSession.ended_at != None, DBSession.started_at != None),
+                 func.extract("epoch", DBSession.ended_at - DBSession.started_at)),
+                else_=0)), 0).label("agent_seconds"),
         )
         .where(DBSession.product_id == product_id)
         .where(_ghost_filter)
@@ -1036,6 +1088,7 @@ async def product_detail(
                 "tokens": int(r.t_in or 0) + int(r.t_out or 0),
                 "cost_usd": float(r.usd or 0),
                 "escalations": int(r.n_esc or 0),
+                "agent_seconds": int(r.agent_seconds or 0),
                 # A paid backend is the only place cost_usd is real spend.
                 "paid": (r.backend or "") in ("claude-api", "openai", "claude"),
             }
@@ -1044,7 +1097,35 @@ async def product_detail(
         key=lambda m: m["tokens"],
         reverse=True,
     )
-    lifetime_actual_cost = round(sum(m["cost_usd"] for m in model_usage), 2)
+    # Per-model ACTUAL request counts (migration 052) — fallback-aware, from the
+    # sessions.model_requests JSONB. This is the Ollama-matching number: it counts
+    # the model that truly served each request, including silent fallbacks a
+    # session-level `model` (the intended primary) can't show. NULL for pre-052
+    # history. Ghost filter inlined to match the session-level aggregate.
+    _req_rows = (await db.execute(text(
+        "SELECT key AS model, SUM(value::int) AS requests "
+        "FROM sessions s, jsonb_each_text(s.model_requests) "
+        "WHERE s.product_id = :pid AND s.model_requests IS NOT NULL "
+        "  AND NOT (s.exit_code <> 0 AND s.ended_at IS NOT NULL "
+        "           AND EXTRACT(EPOCH FROM (s.ended_at - s.started_at)) < 10) "
+        "GROUP BY key"
+    ), {"pid": product_id})).all()
+    req_by_model = {r.model: int(r.requests or 0) for r in _req_rows}
+    model_usage = _merge_request_counts(model_usage, req_by_model)
+
+    # Per-model share of sessions + a grand-total row for the panel footer.
+    _mu_sess_total = sum(m["sessions"] for m in model_usage)
+    for m in model_usage:
+        m["pct_sessions"] = round(100 * m["sessions"] / _mu_sess_total, 1) if _mu_sess_total else 0.0
+    model_usage_totals = {
+        "sessions": _mu_sess_total,
+        "agent_seconds": sum(m["agent_seconds"] for m in model_usage),
+        "tokens": sum(m["tokens"] for m in model_usage),
+        "escalations": sum(m["escalations"] for m in model_usage),
+        "cost_usd": round(sum(m["cost_usd"] for m in model_usage), 2),
+        "requests": sum(m["requests"] for m in model_usage),
+    }
+    lifetime_actual_cost = model_usage_totals["cost_usd"]
 
     alert_count = await _unread_alert_count(db)
     _sys_cfg = await _get_system_config(db)
@@ -1145,6 +1226,7 @@ async def product_detail(
         # sessions for this product, sorted by token volume. `lifetime_actual_cost`
         # is the REAL paid spend (paid escalation tiers only; ~$0 on all-Ollama).
         "model_usage": model_usage,
+        "model_usage_totals": model_usage_totals,
         "lifetime_actual_cost": lifetime_actual_cost,
         "code_auditor_enabled_effective": _audit_effective("code_auditor", "CODE_AUDITOR_ENABLED"),
         "code_auditor_filing_effective":  _audit_effective("code_auditor_filing", "CODE_AUDITOR_FILING_ENABLED"),

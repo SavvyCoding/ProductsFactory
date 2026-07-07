@@ -319,6 +319,7 @@ class SessionEnd(BaseModel):
     status:             Optional[str]      = None   # FSM transition on close
     kill_reason:        Optional[str]      = None
     is_escalation:      Optional[bool]     = None   # premium escalation pass (migration 047)
+    model_requests:     Optional[dict]     = None   # {model: request_count} (migration 052)
 
 
 class SessionOut(BaseModel):

@@ -190,6 +190,10 @@ class Session(Base):
     # Populated at launch; ladder_model stays coder-ladder-specific. The Model
     # Usage panels group by COALESCE(model, ladder_model, backend).
     model:               Mapped[Optional[str]]  = mapped_column(Text)
+    # migration 052 — {model: request_count} of the ACTUAL model that served
+    # each request (fallback-aware). PATCHed at session end by ollama_agent;
+    # summed for the request-level "Requests" column that matches Ollama.
+    model_requests:      Mapped[Optional[dict]] = mapped_column(JSONB)
 
     # FSM — canonical lifecycle state. Watchdog/reconciler/harvester drive
     # transitions. Never parse docker output or file mtimes; consult these.

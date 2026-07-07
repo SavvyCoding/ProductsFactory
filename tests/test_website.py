@@ -399,11 +399,42 @@ class TestDashboardTelemetry:
         # Each distinct model is its own row.
         assert "qwen3-coder:30b" in html
         assert "claude-opus-4-8" in html
+        # New columns + grand-total row on the per-product Model Usage panel.
+        assert "% sessions" in html
+        assert "Agent time" in html
+        assert "All models" in html
         # Paid backend badge + real spend surface; escalation counted.
         assert "claude-api" in html
         assert "$1.50" in html
         # Header note reflects total actual paid spend (only the paid tier).
         assert "actual paid spend" in html
+
+    def test_model_usage_request_counts_and_fallback_row(self, client, db):
+        """model_requests (migration 052): the Requests column sums actual per-model
+        API calls, and a model that only ever served as a FALLBACK (never a session
+        primary) gets its own row flagged 'fallback'."""
+        p = make_product(db)
+        start = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+        # One architect session: primary deepseek served 40 requests, but 2 fell
+        # back to glm-5.1 (deepseek's 2nd choice) — glm-5.1 is never a primary.
+        db.add(DBSession(
+            product_id=p.id, session_uid="r0", persona="architect", exit_code=0,
+            started_at=start, ended_at=start + timedelta(minutes=10),
+            tokens_input=500_000, tokens_output=100_000,
+            model="deepseek-v4-pro", backend="ollama",
+            model_requests={"deepseek-v4-pro": 40, "glm-5.1": 2},
+        ))
+        db.flush()
+        r = client.get(f"/product/{p.id}?tab=summary", auth=AUTH)
+        assert r.status_code == 200
+        html = r.text
+        assert "Requests" in html           # new column header
+        # deepseek is a session primary; glm-5.1 only ever a fallback → own row.
+        assert "deepseek-v4-pro" in html
+        assert "glm-5.1" in html
+        assert "fallback" in html           # fallback-only badge
+        # Request counts surface (40 and 2), and totals sum to 42.
+        assert "40" in html and "42" in html
 
     def test_model_usage_all_local_zero_spend(self, client, db):
         p = make_product(db)
@@ -471,6 +502,10 @@ class TestProductsSummary:
         # Paid tier surfaces the real spend in the header note + row.
         assert "$1.50" in html
         assert "actual paid spend" in html
+        # New columns + grand-total row on the fleet Model Usage table.
+        assert "% sessions" in html
+        assert "Agent time" in html
+        assert "All models" in html
 
     def test_all_local_note(self, client, db):
         p = make_product(db, name="Gamma")

@@ -178,6 +178,9 @@
           <tr>
             <th class="ps-l">Model</th>
             <th>Sessions</th>
+            <th>% sessions</th>
+            <th>Requests</th>
+            <th>Agent time</th>
             <th>Tokens</th>
             <th>Escalations</th>
             <th>Actual cost</th>
@@ -189,13 +192,27 @@
             <td class="ps-l">
               <span class="ps-name" style="text-decoration:none">{{ m.model }}</span>
               {% if m.paid %}<span class="ps-mb ps-mb--paid" style="margin-left:8px">{{ m.backend }}</span>{% else %}<span class="ps-mb ps-mb--local" style="margin-left:8px">{{ m.backend }}</span>{% endif %}
+              {% if m.get('fallback_only') %}<span class="ps-mb" style="margin-left:6px;background:var(--light);color:var(--muted)" title="Only ever served requests as a fallback — never a session's primary model">fallback</span>{% endif %}
             </td>
             <td>{{ m.sessions }}</td>
+            <td class="ps-muted">{{ '%.1f'|format(m.pct_sessions) }}<span class="ps-u">%</span></td>
+            <td>{% if m.requests %}{{ '{:,}'.format(m.requests) }}{% else %}—{% endif %}</td>
+            <td>{{ hm(m.agent_seconds) }}</td>
             <td>{{ toks(m.tokens) }}</td>
             <td>{% if m.escalations %}<span class="ps-warn">{{ m.escalations }}</span>{% else %}—{% endif %}</td>
             <td class="{% if m.paid and m.cost_usd > 0 %}ps-warn{% else %}ps-muted{% endif %}">{% if m.cost_usd > 0 %}${{ '{:,.2f}'.format(m.cost_usd) }}{% else %}$0{% endif %}</td>
           </tr>
           {% endfor %}
+          <tr class="ps-total">
+            <td class="ps-l">All models</td>
+            <td>{{ model_usage_totals.sessions }}</td>
+            <td>100<span class="ps-u">%</span></td>
+            <td>{% if model_usage_totals.requests %}{{ '{:,}'.format(model_usage_totals.requests) }}{% else %}—{% endif %}</td>
+            <td>{{ hm(model_usage_totals.agent_seconds) }}</td>
+            <td>{{ toks(model_usage_totals.tokens) }}</td>
+            <td>{{ model_usage_totals.escalations or '—' }}</td>
+            <td class="{% if model_usage_totals.cost_usd > 0 %}ps-warn{% endif %}">{% if model_usage_totals.cost_usd > 0 %}${{ '{:,.2f}'.format(model_usage_totals.cost_usd) }}{% else %}$0{% endif %}</td>
+          </tr>
         </tbody>
       </table>
     </div>
