@@ -346,18 +346,26 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
             return {"action": "exit",
                     "reason": f"{len(in_agent_stuck)} features stuck in agent state; reset_stuck will handle"}
 
-        # 5. Recommender / planner — generate features if backlog is light.
-        all_approved = [f for f in features if f.get("status") == "Approved"]
+        # 5. Recommender / planner — generate features only if the UN-BUILT
+        #    backlog is light. Count BOTH Pending and Approved: the planner files
+        #    stories as Pending (planner.md), so gating on Approved alone let
+        #    Pending pile up unbounded while Approved stayed ~0 and the planner
+        #    re-launched every round-robin visit (DogTinder #31: ~437 stories /
+        #    1,127 planner sessions over 3 days). Pending+Approved is the total
+        #    un-built backlog and matches the planner prompt's own throttle rule
+        #    ("plenty of unimplemented Pending/Approved features → exit 0").
+        backlog = [f for f in features
+                   if f.get("status") in ("Pending", "Approved")]
         max_pending = (sys_cfg.get("max_pending_approved")
                        or int(os.environ.get("MAX_PENDING_APPROVED", "10")))
-        if len(all_approved) >= max_pending:
+        if len(backlog) >= max_pending:
             return {"action": "exit",
-                    "reason": f"Planner gated: {len(all_approved)} Approved features already pending (cap {max_pending})"}
+                    "reason": f"Planner gated: {len(backlog)} Pending+Approved features in backlog (cap {max_pending})"}
 
-        if not all_approved:
+        if not backlog:
             return {"action": "launch_session", "persona": "planner",
                     "product_id": product_id,
-                    "reason": "No Approved features — planner generates backlog"}
+                    "reason": "No Pending/Approved backlog — planner generates features"}
 
         return {"action": "exit", "reason": "No actionable work found"}
 

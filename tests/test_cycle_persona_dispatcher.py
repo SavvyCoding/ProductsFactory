@@ -245,3 +245,47 @@ class TestDispatcherBalance:
         client = _client_for_features(features)
         result = _decide_action(product_id=25, client=client)
         assert result["persona"] == "reviewer"
+
+
+class TestPlannerBacklogGate:
+    """Step-5 planner gate counts the UN-BUILT backlog (Pending + Approved),
+    not just Approved. Regression (DogTinder #31, 2026-07): the planner files
+    stories as Pending, but the gate counted only Approved — so Pending piled
+    up unbounded while Approved stayed ~0 and the planner re-launched every
+    round-robin visit (~437 stories / 1,127 sessions over 3 days). Only Pending
+    features survive to step 5 (Approved triggers designer/coder first), so
+    counting Pending is what makes the gate actually fire."""
+
+    def test_pending_backlog_gates_planner(self):
+        # 15 Pending stories, nothing else. OLD code saw Approved==0 and
+        # launched the planner every cycle; NEW code counts Pending →
+        # backlog(15) >= cap(10) → gated, no planner launch.
+        features = [_feature(1000 + i, "Pending") for i in range(15)]
+        client = _client_for_features(features)  # default max_pending=10
+        result = _decide_action(product_id=25, client=client)
+        assert result["action"] == "exit", f"should gate, got {result}"
+        assert "gated" in result["reason"].lower() and "15" in result["reason"]
+
+    def test_empty_backlog_launches_planner(self):
+        # No un-built work at all → planner generates the initial backlog.
+        client = _client_for_features([])
+        result = _decide_action(product_id=25, client=client)
+        assert result["action"] == "launch_session"
+        assert result["persona"] == "planner"
+
+    def test_pending_below_cap_does_not_spam(self):
+        # 5 Pending (below cap, non-empty): planner must NOT launch (there's
+        # un-built work) but is NOT at the gate either — no spam, no launch.
+        features = [_feature(1000 + i, "Pending") for i in range(5)]
+        client = _client_for_features(features)
+        result = _decide_action(product_id=25, client=client)
+        assert result["action"] == "exit"
+        assert result.get("persona") != "planner"
+
+    def test_cap_respects_config_override(self):
+        # 4 Pending with a max_pending_approved=3 override → gated.
+        features = [_feature(1000 + i, "Pending") for i in range(4)]
+        client = _client_for_features(features, sys_cfg={"max_pending_approved": 3})
+        result = _decide_action(product_id=25, client=client)
+        assert result["action"] == "exit"
+        assert "gated" in result["reason"].lower()
