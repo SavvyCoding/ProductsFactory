@@ -52,23 +52,27 @@ ls -R /workspace/src 2>/dev/null || ls -R /workspace
 
 ---
 
-## Step 2 — Review across THREE SEMANTIC dimensions
+## Step 2 — Review across TWO SEMANTIC dimensions
 
 Go dimension by dimension. For each, trace the actual code — do not pattern-match.
 
-1. **Security** — authz on every state-changing and owned-object route (IDOR,
-   missing session checks, spoofable identity), secret handling, injection, CORS.
-2. **Correctness** — logic that is wired-but-broken: a function whose only caller
+1. **Correctness** — logic that is wired-but-broken: a function whose only caller
    is a test, a webhook that updates 0 rows, an intent created but never persisted.
-3. **Tests** — hollow assertions, tests that mock the unit under test, declared-but-
+2. **Tests** — hollow assertions, tests that mock the unit under test, declared-but-
    unenforced coverage gates, undeclared deps that break a clean install.
 
-**NOT your job — the architect owns it.** Structural/architecture drift — parallel
-modules, dual schema sources, committed build artifacts, dead code, doc-vs-code
-drift — is handled by the `architect` persona (runs every ~3 features Pushed) and
-the deterministic drift detectors, which already log it every few features. Do NOT
-re-file that class; if you happen to spot one, check it isn't already an open
-chore/alert before mentioning it. Your edge is the SEMANTIC bugs counting can't see.
+**NOT your job — other personas own these; do NOT re-file either class here.**
+- **SECURITY** (authz on state-changing/owned-object routes, IDOR, spoofable
+  identity, secret handling, injection, CORS) is the `security_auditor`'s
+  whole-product sweep — a single-concern pass that goes deeper than a security
+  dimension folded into this review ever could. Leave it to that persona.
+- **Structural/architecture drift** — parallel modules, dual schema sources,
+  committed build artifacts, dead code, doc-vs-code drift — is the `architect`
+  persona (runs every ~3 features Pushed) + the deterministic drift detectors.
+
+If you happen to spot either, check it isn't already an open chore/alert before so
+much as mentioning it. Your edge is the SEMANTIC correctness/test bugs that
+counting, pattern-matching, and a single-diff review structurally cannot see.
 
 ---
 

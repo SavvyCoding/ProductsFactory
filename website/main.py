@@ -1230,6 +1230,8 @@ async def product_detail(
         "lifetime_actual_cost": lifetime_actual_cost,
         "code_auditor_enabled_effective": _audit_effective("code_auditor", "CODE_AUDITOR_ENABLED"),
         "code_auditor_filing_effective":  _audit_effective("code_auditor_filing", "CODE_AUDITOR_FILING_ENABLED"),
+        "security_auditor_scheduled_effective": _audit_effective(
+            "security_auditor_scheduled", "SECURITY_AUDITOR_SCHEDULED_ENABLED"),
     })
     # Force browsers to re-fetch the HTML on every navigation. Without this,
     # the cached HTML keeps pointing at older CSS/JS hashes and the user

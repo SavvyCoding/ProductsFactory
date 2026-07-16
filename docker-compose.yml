@@ -62,6 +62,7 @@ services:
       # running soak on save. Values must match the orchestrator service.
       CODE_AUDITOR_ENABLED: ${CODE_AUDITOR_ENABLED:-}
       CODE_AUDITOR_FILING_ENABLED: ${CODE_AUDITOR_FILING_ENABLED:-}
+      SECURITY_AUDITOR_SCHEDULED_ENABLED: ${SECURITY_AUDITOR_SCHEDULED_ENABLED:-}
     volumes:
       # Mount products root read-only so the PM dashboard can serve output/ videos
       # Set PRODUCTS_BASE_DIR in your .env, e.g. PRODUCTS_BASE_DIR=C:/Users/you/Products
@@ -152,6 +153,12 @@ services:
       # / Low 40). No stop-the-line yet (Increment 2 adds the verifier session +
       # blocker gate). Default off; per-product override product.config.code_auditor_filing.
       CODE_AUDITOR_FILING_ENABLED: ${CODE_AUDITOR_FILING_ENABLED:-}
+      # security_auditor scheduling (2026-07-16): promotes the whole-product security
+      # sweep from PM-button-only to the same architect-run cadence as code_auditor
+      # (its own counter, serialized via run_persona_now). Pairs with dropping the
+      # security dimension from code_auditor. Always files bugs. Default off; per-
+      # product override product.config.security_auditor_scheduled.
+      SECURITY_AUDITOR_SCHEDULED_ENABLED: ${SECURITY_AUDITOR_SCHEDULED_ENABLED:-}
       # Agent backend — `ollama` for local/offline/TOS-compliant, `claude` for API
       AGENT_BACKEND:      ${AGENT_BACKEND:-ollama}
       # OLLAMA_HOST: leave overridable via .env so we can switch between local

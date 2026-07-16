@@ -74,6 +74,27 @@ class TestCodeAuditorEnabled:
         assert tools._code_auditor_enabled({"id": 1, "config": {"code_auditor": True}}) is True
 
 
+# ── security_auditor SCHEDULING flag (OPT-IN, default OFF) ────────────────────
+class TestSecurityAuditorScheduledEnabled:
+    def test_off_by_default(self, tools, monkeypatch):
+        monkeypatch.delenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", raising=False)
+        assert tools._security_auditor_scheduled_enabled({"id": 1, "config": {}}) is False
+
+    def test_env_truthy_enables(self, tools, monkeypatch):
+        monkeypatch.setenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", "1")
+        assert tools._security_auditor_scheduled_enabled({"id": 1, "config": {}}) is True
+
+    def test_per_product_optout_wins_over_env_on(self, tools, monkeypatch):
+        monkeypatch.setenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", "1")
+        assert tools._security_auditor_scheduled_enabled(
+            {"id": 1, "config": {"security_auditor_scheduled": False}}) is False
+
+    def test_per_product_optin_wins_over_env_unset(self, tools, monkeypatch):
+        monkeypatch.delenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", raising=False)
+        assert tools._security_auditor_scheduled_enabled(
+            {"id": 1, "config": {"security_auditor_scheduled": True}}) is True
+
+
 # ── settled-phase checkpoint (pure) ──────────────────────────────────────────
 class TestSelectPhaseForReview:
     def test_picks_lowest_order_settled(self, tools):
@@ -151,6 +172,58 @@ class TestPhaseReviewGateCadence:
         monkeypatch.setattr(tools, "_pm_client", lambda: fake)
         product = {"id": 1, "config": {"architect_run_count": N + 99}}
         tools._run_phase_review_gate(product, features=feats)
+        assert product.get("run_persona_now") is None
+        assert fake.patched is None
+
+
+# ── two disjoint auditors ride the same gate (security + code) ───────────────
+class TestPhaseReviewGateBothAuditors:
+    def _setup(self, tools, monkeypatch, config):
+        phases = [_ph(10, 0)]
+        feats = [_ft(i, 10, "Pushed") for i in range(2)]
+        fake = _FakeClient(phases, feats)
+        monkeypatch.setattr(tools, "_pm_client", lambda: fake)
+        product = {"id": 1, "config": config}
+        tools._run_phase_review_gate(product, features=feats)
+        return product, fake
+
+    def test_security_alone_fires_security(self, tools, monkeypatch):
+        monkeypatch.delenv("CODE_AUDITOR_ENABLED", raising=False)
+        monkeypatch.setenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", "1")
+        N = tools._CODE_AUDIT_ARCHITECT_RUNS
+        product, fake = self._setup(tools, monkeypatch, {"architect_run_count": N})
+        assert product["run_persona_now"] == "security_auditor"
+        assert fake.patched["config"]["architect_runs_at_last_security_audit"] == N
+        # code_auditor counter untouched
+        assert "architect_runs_at_last_audit" not in fake.patched["config"]
+
+    def test_both_due_security_wins_this_cycle(self, tools, monkeypatch):
+        monkeypatch.setenv("CODE_AUDITOR_ENABLED", "1")
+        monkeypatch.setenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", "1")
+        N = tools._CODE_AUDIT_ARCHITECT_RUNS
+        product, fake = self._setup(tools, monkeypatch, {"architect_run_count": N})
+        # serialized: security fires now, code_auditor counter left due for next cycle
+        assert product["run_persona_now"] == "security_auditor"
+        assert fake.patched["config"]["architect_runs_at_last_security_audit"] == N
+        assert "architect_runs_at_last_audit" not in fake.patched["config"]
+
+    def test_security_current_falls_through_to_code(self, tools, monkeypatch):
+        monkeypatch.setenv("CODE_AUDITOR_ENABLED", "1")
+        monkeypatch.setenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", "1")
+        N = tools._CODE_AUDIT_ARCHITECT_RUNS
+        # security already audited at the current architect run → not due; code is
+        product, fake = self._setup(tools, monkeypatch, {
+            "architect_run_count": N,
+            "architect_runs_at_last_security_audit": N,
+        })
+        assert product["run_persona_now"] == "code_auditor"
+        assert fake.patched["config"]["architect_runs_at_last_audit"] == N
+
+    def test_both_below_cadence_waits(self, tools, monkeypatch):
+        monkeypatch.setenv("CODE_AUDITOR_ENABLED", "1")
+        monkeypatch.setenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", "1")
+        N = tools._CODE_AUDIT_ARCHITECT_RUNS
+        product, fake = self._setup(tools, monkeypatch, {"architect_run_count": N - 1})
         assert product.get("run_persona_now") is None
         assert fake.patched is None
 

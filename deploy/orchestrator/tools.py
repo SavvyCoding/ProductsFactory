@@ -1245,6 +1245,25 @@ def _code_auditor_filing_enabled(product: dict) -> bool:
         "1", "true", "yes", "on")
 
 
+def _security_auditor_scheduled_enabled(product: dict) -> bool:
+    """Resolve the security-auditor SCHEDULING flag. security_auditor has always
+    been PM-triggered (on-demand, "🔒 Security audit" button) — this promotes it
+    to ALSO ride the phase-review gate on the architect-run cadence, so a product
+    still gets a periodic whole-product security sweep without a human clicking.
+    Pairs with narrowing code_auditor to correctness+tests: security ownership
+    moves fully to this focused single-concern pass. OPT-IN, default OFF (soak
+    like code_auditor did). Resolution mirrors _code_auditor_enabled:
+      1. product.config["security_auditor_scheduled"] explicit bool wins.
+      2. else SECURITY_AUDITOR_SCHEDULED_ENABLED env — ON only if truthy.
+    The on-demand PM button is unaffected either way.
+    """
+    cfg = (product.get("config") or {}).get("security_auditor_scheduled")
+    if isinstance(cfg, bool):
+        return cfg
+    return os.environ.get("SECURITY_AUDITOR_SCHEDULED_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
 def _select_phase_for_review(phases: list, features: list) -> dict | None:
     """Pure: the lowest-order SETTLED phase with a real outcome — the "phase
     boundary" checkpoint (is there reviewable shipped work at all?). Settled =
@@ -1276,25 +1295,29 @@ def _select_phase_for_review(phases: list, features: list) -> dict | None:
 
 
 def _run_phase_review_gate(product: dict, features: list | None = None) -> None:
-    """Phase-boundary code-review trigger (2026-06-24). When a phase settles and
-    hasn't been code-reviewed, queue the read-only ``code_auditor`` persona for the
-    product (run_persona_now → Priority-0 launch). Comment-only soak: the auditor
-    raises dashboard alerts and files nothing.
+    """Phase-boundary semantic-review trigger (2026-06-24; security split out
+    2026-07-16). When a phase settles, queue a read-only whole-product auditor for
+    the product (run_persona_now → Priority-0 launch). TWO disjoint auditors ride
+    this same gate:
+      - ``security_auditor`` — the security sweep (authz/IDOR, secrets, injection,
+        CORS). Promoted here from PM-button-only so it runs on a cadence. Gated by
+        _security_auditor_scheduled_enabled; always files bugs.
+      - ``code_auditor`` — correctness + tests (security dimension removed). Gated
+        by _code_auditor_enabled; comment-only soak or filing per its own flag.
 
-    OPT-IN: no-op unless CODE_AUDITOR_ENABLED / config.code_auditor is on. Runs for
-    ALL products (autonomous included), like reap_empty_phases — NOT gated behind
-    human_gate_phases.
+    OPT-IN: no-op unless at least one of the two flags is on. Runs for ALL products
+    (autonomous included), like reap_empty_phases — NOT gated behind human_gate_phases.
 
     Cadence: a phase boundary is the CHECKPOINT (>=1 settled phase with a ship);
-    the GATE is architect-run count — fire after _CODE_AUDIT_ARCHITECT_RUNS (2)
-    architect runs since the last audit. Architect runs every ~3 features Pushed,
-    refreshing ARCHITECTURE.md and filing drift chores each time; riding 1-per-2
-    means the semantic audit always follows a FRESH architect pass and dedups
-    against its just-filed chores. Small phases naturally batch (2 runs ≈ ~6
-    features). Tracks config['architect_runs_at_last_audit'] vs the architect's
-    config['architect_run_count'] (no migration for the soak). The two personas
-    are deliberately tightly coupled: if the architect were disabled the audit
-    would not fire — architect owns structural drift, this owns the semantic pass.
+    the GATE is architect-run count — fire after _CODE_AUDIT_ARCHITECT_RUNS architect
+    runs since that auditor's last run. Architect runs every ~3 features Pushed,
+    refreshing ARCHITECTURE.md and filing drift chores each time, so each semantic
+    audit follows a FRESH architect pass. Each auditor keeps its OWN counter
+    (code_auditor → config['architect_runs_at_last_audit']; security_auditor →
+    config['architect_runs_at_last_security_audit']) vs the architect's
+    config['architect_run_count'] (no migration for the soak). run_persona_now
+    SERIALIZES them: if both are due the same cycle, the first fires now and the
+    second the next eligible cycle (its counter is untouched, so it stays due).
     Best-effort; never raises.
 
     MUST be called AFTER the architect scheduler in run_cycle: a cycle that queues
@@ -1302,7 +1325,11 @@ def _run_phase_review_gate(product: dict, features: list | None = None) -> None:
     follows in a later cycle — never preempting the architect run it rides behind.
     """
     pid = product.get("id")
-    if not pid or not _code_auditor_enabled(product):
+    if not pid:
+        return
+    code_on = _code_auditor_enabled(product)
+    sec_on = _security_auditor_scheduled_enabled(product)
+    if not (code_on or sec_on):
         return
     if product.get("run_persona_now"):                       # don't stomp a queued session
         return
@@ -1318,22 +1345,34 @@ def _run_phase_review_gate(product: dict, features: list | None = None) -> None:
             cfg = product.get("config") or {}
             arch_runs = cfg.get("architect_run_count")
             arch_runs = arch_runs if isinstance(arch_runs, int) else 0
-            last_audit = cfg.get("architect_runs_at_last_audit")
-            last_audit = last_audit if isinstance(last_audit, int) else 0
-            if arch_runs - last_audit < _CODE_AUDIT_ARCHITECT_RUNS:
-                return                                       # wait for N architect runs since the
-                                                             # last audit (each refreshes
-                                                             # ARCHITECTURE.md + files drift chores)
-            new_cfg = dict(cfg)
-            new_cfg["architect_runs_at_last_audit"] = arch_runs
-            client.patch(f"/api/products/{pid}",
-                         json={"run_persona_now": "code_auditor", "config": new_cfg})
-            product["run_persona_now"] = "code_auditor"       # reflect for this cycle's Priority-0
-            product["config"] = new_cfg
-            _mode = "filing" if _code_auditor_filing_enabled(product) else "comment-only"
-            log.info(f"[code-audit] product={pid}: {arch_runs - last_audit} architect run(s) "
-                     f"since last audit (>= {_CODE_AUDIT_ARCHITECT_RUNS}) — queued "
-                     f"code_auditor ({_mode})")
+            # Security first (deeper, single-concern), then code_auditor. Each is a
+            # (persona, counter_key) that fires when N architect runs have elapsed
+            # since its own last run; one persona per cycle (return after queuing).
+            candidates = []
+            if sec_on:
+                candidates.append(("security_auditor", "architect_runs_at_last_security_audit"))
+            if code_on:
+                candidates.append(("code_auditor", "architect_runs_at_last_audit"))
+            for persona, key in candidates:
+                last_audit = cfg.get(key)
+                last_audit = last_audit if isinstance(last_audit, int) else 0
+                if arch_runs - last_audit < _CODE_AUDIT_ARCHITECT_RUNS:
+                    continue                                 # wait for N architect runs since this
+                                                             # auditor's last run
+                new_cfg = dict(cfg)
+                new_cfg[key] = arch_runs
+                client.patch(f"/api/products/{pid}",
+                             json={"run_persona_now": persona, "config": new_cfg})
+                product["run_persona_now"] = persona          # reflect for this cycle's Priority-0
+                product["config"] = new_cfg
+                if persona == "code_auditor":
+                    detail = "filing" if _code_auditor_filing_enabled(product) else "comment-only"
+                else:
+                    detail = "files bugs"
+                log.info(f"[phase-review] product={pid}: {arch_runs - last_audit} architect "
+                         f"run(s) since last {persona} audit (>= {_CODE_AUDIT_ARCHITECT_RUNS}) "
+                         f"— queued {persona} ({detail})")
+                return                                        # one persona per cycle
     except Exception:
         log.exception(f"phase-review gate failed for product {pid}")
 
