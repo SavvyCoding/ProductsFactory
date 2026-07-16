@@ -60,9 +60,9 @@ services:
       # state (per-product config override OR global env). Without this the web
       # container sees them empty and an unchecked box could silently disable the
       # running soak on save. Values must match the orchestrator service.
-      CODE_AUDITOR_ENABLED: ${CODE_AUDITOR_ENABLED:-}
+      CODE_AUDITOR_ENABLED: ${CODE_AUDITOR_ENABLED:-1}
       CODE_AUDITOR_FILING_ENABLED: ${CODE_AUDITOR_FILING_ENABLED:-}
-      SECURITY_AUDITOR_SCHEDULED_ENABLED: ${SECURITY_AUDITOR_SCHEDULED_ENABLED:-}
+      SECURITY_AUDITOR_SCHEDULED_ENABLED: ${SECURITY_AUDITOR_SCHEDULED_ENABLED:-1}
     volumes:
       # Mount products root read-only so the PM dashboard can serve output/ videos
       # Set PRODUCTS_BASE_DIR in your .env, e.g. PRODUCTS_BASE_DIR=C:/Users/you/Products
@@ -122,12 +122,13 @@ services:
       SESSION_TIMEOUT_MINUTES: ${SESSION_TIMEOUT_MINUTES:-90}
       MAX_FEATURES_PER_RUN: ${MAX_FEATURES_PER_RUN:-1}
       ORCHESTRATION_CYCLE_SECONDS: ${ORCHESTRATION_CYCLE_SECONDS:-60}
-      # Corrective-chore reconciler: when truthy, high-severity drift findings
-      # (e.g. duplicate DDL) are filed as Approved priority=1 chore features for
-      # the coder pipeline to fix. Default off; set RECONCILER_CHORES_ENABLED=1
-      # in .env to trial. Orchestrator-global (applies to whatever product's
-      # coder session just ran).
-      RECONCILER_CHORES_ENABLED: ${RECONCILER_CHORES_ENABLED:-}
+      # Corrective-chore reconciler: high-severity drift findings (e.g. duplicate
+      # DDL) are filed as Approved priority=1 chore features for the coder pipeline
+      # to fix. ALWAYS ON per product (the per-product opt-out + UI checkbox were
+      # removed 2026-07-16); this global env flag is the only kill switch — default
+      # ON, set to a falsy value to disable the whole environment. Orchestrator-
+      # global (applies to whatever product's coder session just ran).
+      RECONCILER_CHORES_ENABLED: ${RECONCILER_CHORES_ENABLED:-1}
       # Verify-check gate (2026-05-30): runs the per-AC `Verify:` recipes from
       # docs/story_<id>.md and bounces features whose actual output diverges
       # from `Expected:`. Catches the coder-self-reporting gaming pattern
@@ -136,12 +137,13 @@ services:
       # because the post-coder pipeline doesn't currently spin up the app —
       # adding uvicorn-bg startup for FastAPI products is a follow-up.
       POST_CODER_VERIFY_CHECK_ENABLED: ${POST_CODER_VERIFY_CHECK_ENABLED:-}
-      # Code-auditor soak (2026-06-24): read-only whole-product semantic review
-      # (security/correctness/tests) fired after every 2 architect runs. Comment-
-      # only — raises dashboard alerts, files no bugs. Default off; set
-      # CODE_AUDITOR_ENABLED=1 in .env to trial. Per-product opt-out via
-      # product.config.code_auditor.
-      CODE_AUDITOR_ENABLED: ${CODE_AUDITOR_ENABLED:-}
+      # Whole-product semantic audit (2026-06-24; single-checkbox + default-ON
+      # 2026-07-16): read-only review fired on the architect-run cadence. This ONE
+      # flag now enables BOTH code_auditor (correctness/tests) and security_auditor
+      # (security) — see SECURITY_AUDITOR_SCHEDULED_ENABLED below, defaulted ON to
+      # match. Default ON (`:-1`); set CODE_AUDITOR_ENABLED=0 in .env to kill
+      # globally, or opt a product out via product.config.code_auditor=false.
+      CODE_AUDITOR_ENABLED: ${CODE_AUDITOR_ENABLED:-1}
       # code_auditor cadence: audit after this many architect runs since the last
       # audit. Default 1 during the soak (one audit per architect pass = max
       # precision-sample density); steady-state target 2. Recreate (no rebuild)
@@ -158,7 +160,7 @@ services:
       # (its own counter, serialized via run_persona_now). Pairs with dropping the
       # security dimension from code_auditor. Always files bugs. Default off; per-
       # product override product.config.security_auditor_scheduled.
-      SECURITY_AUDITOR_SCHEDULED_ENABLED: ${SECURITY_AUDITOR_SCHEDULED_ENABLED:-}
+      SECURITY_AUDITOR_SCHEDULED_ENABLED: ${SECURITY_AUDITOR_SCHEDULED_ENABLED:-1}
       # Agent backend — `ollama` for local/offline/TOS-compliant, `claude` for API
       AGENT_BACKEND:      ${AGENT_BACKEND:-ollama}
       # OLLAMA_HOST: leave overridable via .env so we can switch between local

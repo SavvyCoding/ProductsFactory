@@ -1353,28 +1353,16 @@
             settled phase from its card on the board.</p>
         </div>
         <div class="form-group">
-          <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
-            <input type="checkbox" name="reconciler_chores" value="on" style="width:auto"
-                   {% if (product.config or {}).get('reconciler_chores', True) %}checked{% endif %}>
-            Auto-file corrective chores from drift findings
-          </label>
-          <p class="field-hint">ON by default for all products. High-severity findings from the
-            drift scanner (duplicate schema, god-files, insecure CORS, schema/migration drift, etc.)
-            are filed automatically as Approved chore features for the coder to fix (capped at 3 per
-            cycle, deduped against open chores). Uncheck to opt this product OUT. Findings are still
-            posted as feature comments either way.</p>
-        </div>
-        <div class="form-group">
-          <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
-            <input type="checkbox" name="code_auditor" value="on" style="width:auto"
-                   {% if code_auditor_enabled_effective %}checked{% endif %}>
-            Run periodic whole-product code audit
-          </label>
-          <p class="field-hint">Read-only semantic review (security · correctness · tests) that runs
-            at phase boundaries, riding a fresh architect pass. It catches cross-cutting bugs the
-            per-PR reviewer (one diff) and drift detectors (pattern matchers) can't — IDOR,
-            payment-never-persisted, hollow tests. Reflects the effective state (this toggle overrides
-            the global default).</p>
+          <p class="field-hint" style="margin-top:0"><strong>Always-on quality gates.</strong> Two
+            checks now run for every product with no per-product toggle:
+            <strong>corrective chores from drift findings</strong> (high-severity drift — duplicate
+            schema, god-files, insecure CORS, schema/migration drift — filed automatically as chore
+            features, capped 3/cycle, deduped) and the <strong>periodic whole-product audit</strong>
+            (read-only phase-boundary review: <em>code_auditor</em> for correctness &amp; tests +
+            <em>security_auditor</em> for authz/IDOR/secrets/injection/CORS). Both catch cross-cutting
+            bugs the per-PR reviewer and drift detectors can't. Disable only environment-wide via ops
+            env flags (<code>RECONCILER_CHORES_ENABLED</code> / <code>CODE_AUDITOR_ENABLED</code> /
+            <code>SECURITY_AUDITOR_SCHEDULED_ENABLED</code>).</p>
         </div>
         <div class="form-group">
           <label style="display:flex; align-items:center; gap:8px; cursor:pointer">
@@ -1382,11 +1370,12 @@
                    {% if code_auditor_filing_effective %}checked{% endif %}>
             File code-audit findings as bugs
           </label>
-          <p class="field-hint">Only takes effect when the audit above is on. When checked, each
-            finding is filed as a <code>bug</code> feature (status <em>Pending</em> → you triage it)
-            instead of only a dashboard alert, severity-routed by priority (Critical → 1 … Low → 40).
-            When unchecked (default), the audit is comment-only. No stop-the-line yet — a Critical
-            simply sorts to the front of the queue.</p>
+          <p class="field-hint">The whole-product audit runs for every product. When this is checked,
+            <em>code_auditor</em> findings are filed as <code>bug</code> features (status
+            <em>Pending</em> → you triage it) severity-routed by priority (Critical → 1 … Low → 40)
+            instead of only a dashboard alert; <em>security_auditor</em> always files. When unchecked
+            (default), code_auditor is comment-only. No stop-the-line yet — a Critical simply sorts to
+            the front of the queue.</p>
         </div>
         <div class="form-group">
           <label>Test-gate timeout override (seconds)</label>

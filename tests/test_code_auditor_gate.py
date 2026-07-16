@@ -51,48 +51,39 @@ class _FakeClient:
         return _FakeResp({})
 
 
-# ── flag resolution (OPT-IN, default OFF) ────────────────────────────────────
+# ── flag resolution (ALWAYS ON per product; global env kill switch only) ──────
 class TestCodeAuditorEnabled:
-    def test_off_by_default(self, tools, monkeypatch):
+    def test_on_by_default_when_env_unset(self, tools, monkeypatch):
         monkeypatch.delenv("CODE_AUDITOR_ENABLED", raising=False)
-        assert tools._code_auditor_enabled({"id": 1, "config": {}}) is False
-
-    def test_env_truthy_enables(self, tools, monkeypatch):
-        monkeypatch.setenv("CODE_AUDITOR_ENABLED", "1")
         assert tools._code_auditor_enabled({"id": 1, "config": {}}) is True
 
-    def test_env_falsy_stays_off(self, tools, monkeypatch):
+    def test_env_falsy_kills_globally(self, tools, monkeypatch):
         monkeypatch.setenv("CODE_AUDITOR_ENABLED", "off")
         assert tools._code_auditor_enabled({"id": 1, "config": {}}) is False
+        monkeypatch.setenv("CODE_AUDITOR_ENABLED", "0")
+        assert tools._code_auditor_enabled({"id": 1, "config": {}}) is False
 
-    def test_per_product_optout_wins_over_env_on(self, tools, monkeypatch):
-        monkeypatch.setenv("CODE_AUDITOR_ENABLED", "1")
-        assert tools._code_auditor_enabled({"id": 1, "config": {"code_auditor": False}}) is False
-
-    def test_per_product_optin_wins_over_env_unset(self, tools, monkeypatch):
+    def test_per_product_config_optout_is_ignored(self, tools, monkeypatch):
+        # The per-product opt-out was removed 2026-07-16 — a stale config bool
+        # must NOT disable the always-on audit.
         monkeypatch.delenv("CODE_AUDITOR_ENABLED", raising=False)
-        assert tools._code_auditor_enabled({"id": 1, "config": {"code_auditor": True}}) is True
+        assert tools._code_auditor_enabled({"id": 1, "config": {"code_auditor": False}}) is True
 
 
-# ── security_auditor SCHEDULING flag (OPT-IN, default OFF) ────────────────────
+# ── security_auditor SCHEDULING flag (ALWAYS ON; global env kill switch only) ──
 class TestSecurityAuditorScheduledEnabled:
-    def test_off_by_default(self, tools, monkeypatch):
+    def test_on_by_default_when_env_unset(self, tools, monkeypatch):
         monkeypatch.delenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", raising=False)
-        assert tools._security_auditor_scheduled_enabled({"id": 1, "config": {}}) is False
-
-    def test_env_truthy_enables(self, tools, monkeypatch):
-        monkeypatch.setenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", "1")
         assert tools._security_auditor_scheduled_enabled({"id": 1, "config": {}}) is True
 
-    def test_per_product_optout_wins_over_env_on(self, tools, monkeypatch):
-        monkeypatch.setenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", "1")
-        assert tools._security_auditor_scheduled_enabled(
-            {"id": 1, "config": {"security_auditor_scheduled": False}}) is False
+    def test_env_falsy_kills_globally(self, tools, monkeypatch):
+        monkeypatch.setenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", "off")
+        assert tools._security_auditor_scheduled_enabled({"id": 1, "config": {}}) is False
 
-    def test_per_product_optin_wins_over_env_unset(self, tools, monkeypatch):
+    def test_per_product_config_optout_is_ignored(self, tools, monkeypatch):
         monkeypatch.delenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", raising=False)
         assert tools._security_auditor_scheduled_enabled(
-            {"id": 1, "config": {"security_auditor_scheduled": True}}) is True
+            {"id": 1, "config": {"security_auditor_scheduled": False}}) is True
 
 
 # ── settled-phase checkpoint (pure) ──────────────────────────────────────────
@@ -126,6 +117,7 @@ class TestSelectPhaseForReview:
 class TestPhaseReviewGateCadence:
     def test_fires_at_cadence(self, tools, monkeypatch):
         monkeypatch.setenv("CODE_AUDITOR_ENABLED", "1")
+        monkeypatch.setenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", "0")  # isolate code_auditor
         N = tools._CODE_AUDIT_ARCHITECT_RUNS
         phases = [_ph(10, 0)]
         feats = [_ft(i, 10, "Pushed") for i in range(2)]      # settled phase exists
@@ -139,6 +131,7 @@ class TestPhaseReviewGateCadence:
 
     def test_waits_below_cadence(self, tools, monkeypatch):
         monkeypatch.setenv("CODE_AUDITOR_ENABLED", "1")
+        monkeypatch.setenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", "0")  # isolate code_auditor
         N = tools._CODE_AUDIT_ARCHITECT_RUNS
         phases = [_ph(10, 0)]
         feats = [_ft(i, 10, "Pushed") for i in range(2)]
@@ -151,6 +144,7 @@ class TestPhaseReviewGateCadence:
 
     def test_counts_runs_since_last_audit(self, tools, monkeypatch):
         monkeypatch.setenv("CODE_AUDITOR_ENABLED", "1")
+        monkeypatch.setenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", "0")  # isolate code_auditor
         N = tools._CODE_AUDIT_ARCHITECT_RUNS
         phases = [_ph(10, 0)]
         feats = [_ft(i, 10, "Pushed") for i in range(2)]
@@ -165,6 +159,7 @@ class TestPhaseReviewGateCadence:
 
     def test_no_settled_phase_never_fires(self, tools, monkeypatch):
         monkeypatch.setenv("CODE_AUDITOR_ENABLED", "1")
+        monkeypatch.setenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", "0")  # isolate code_auditor
         N = tools._CODE_AUDIT_ARCHITECT_RUNS
         phases = [_ph(10, 0)]
         feats = [_ft(i, 10, "Implementing") for i in range(8)]  # plenty, but not settled
@@ -188,7 +183,7 @@ class TestPhaseReviewGateBothAuditors:
         return product, fake
 
     def test_security_alone_fires_security(self, tools, monkeypatch):
-        monkeypatch.delenv("CODE_AUDITOR_ENABLED", raising=False)
+        monkeypatch.setenv("CODE_AUDITOR_ENABLED", "0")  # only security enabled
         monkeypatch.setenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", "1")
         N = tools._CODE_AUDIT_ARCHITECT_RUNS
         product, fake = self._setup(tools, monkeypatch, {"architect_run_count": N})
@@ -231,7 +226,10 @@ class TestPhaseReviewGateBothAuditors:
 # ── disabled → no-op (never queues, never calls the API) ─────────────────────
 class TestPhaseReviewGateNoopWhenDisabled:
     def test_disabled_does_not_call_api(self, tools, monkeypatch):
-        monkeypatch.delenv("CODE_AUDITOR_ENABLED", raising=False)
+        # Both auditors are always-on by default now, so "disabled" means BOTH
+        # global env kill switches are set falsy.
+        monkeypatch.setenv("CODE_AUDITOR_ENABLED", "0")
+        monkeypatch.setenv("SECURITY_AUDITOR_SCHEDULED_ENABLED", "0")
         monkeypatch.setattr(tools, "_pm_client", lambda: (_ for _ in ()).throw(
             AssertionError("_pm_client must not be called when disabled")))
         product = {"id": 1, "config": {}}

@@ -1228,10 +1228,9 @@ async def product_detail(
         "model_usage": model_usage,
         "model_usage_totals": model_usage_totals,
         "lifetime_actual_cost": lifetime_actual_cost,
-        "code_auditor_enabled_effective": _audit_effective("code_auditor", "CODE_AUDITOR_ENABLED"),
+        # Audit-enable + reconciler-chores checkboxes were removed (both always-on
+        # per product, 2026-07-16); only the code_auditor FILING toggle remains.
         "code_auditor_filing_effective":  _audit_effective("code_auditor_filing", "CODE_AUDITOR_FILING_ENABLED"),
-        "security_auditor_scheduled_effective": _audit_effective(
-            "security_auditor_scheduled", "SECURITY_AUDITOR_SCHEDULED_ENABLED"),
     })
     # Force browsers to re-fetch the HTML on every navigation. Without this,
     # the cached HTML keeps pointing at older CSS/JS hashes and the user
@@ -1877,34 +1876,32 @@ async def save_custom_prompt(
 async def save_workflow_settings(
     product_id: int,
     human_gate_phases: str = Form(""),
-    reconciler_chores: str = Form(""),
-    code_auditor: str = Form(""),
     code_auditor_filing: str = Form(""),
     test_gate_timeout: str = Form(""),
     db: AsyncSession = Depends(get_db), _: str = Depends(require_auth),
 ):
     """Save per-product workflow settings — the human-in-loop phase gate
-    (migration 045) and the reconciler corrective-chores controller. MERGES
-    into the config JSONB (reassigns a new dict so SQLAlchemy flags the
+    (migration 045), the code-audit FILING toggle, and the test-gate timeout.
+    MERGES into the config JSONB (reassigns a new dict so SQLAlchemy flags the
     change) so sibling keys — scheduling, last_*_at maintenance timestamps —
     are preserved. An unchecked checkbox submits no field → falsey → gate off.
 
-    reconciler_chores is ON by default for all products (2026-06-13). The
-    checkbox is an explicit opt-OUT: checked → config True; unchecked →
-    config False (disable for this product). The orchestrator reads config
-    first, then the RECONCILER_CHORES_ENABLED env var as a global kill
-    switch (post_coder.py drift block).
+    NOTE (2026-07-16): the reconciler corrective-chores and whole-product-audit
+    checkboxes were REMOVED — both are always-on per product now (disable only
+    via the RECONCILER_CHORES_ENABLED / CODE_AUDITOR_ENABLED /
+    SECURITY_AUDITOR_SCHEDULED_ENABLED ops env kill switches). This handler no
+    longer reads or writes those config keys.
     """
     product = await _get_product_or_404(product_id, db)
     cfg = dict(product.config or {})
     cfg["human_gate_phases"] = human_gate_phases.strip().lower() in ("on", "true", "1", "yes")
-    cfg["reconciler_chores"] = reconciler_chores.strip().lower() in ("on", "true", "1", "yes")
-    # code_auditor enable + filing are opt-in overrides on the global env flags.
-    # The form's checkboxes are pre-rendered from the EFFECTIVE state (config OR
-    # env), so saving persists an explicit per-product bool: checked → True,
-    # unchecked → False (opt-out). Resolution at read time is config-bool-wins-
-    # else-env (orchestrator _code_auditor_enabled / builder _code_auditor_filing_on).
-    cfg["code_auditor"] = code_auditor.strip().lower() in ("on", "true", "1", "yes")
+    # Corrective chores + the whole-product audit (code_auditor + security_auditor)
+    # are ALWAYS ON per product as of 2026-07-16 — their per-product checkboxes and
+    # config opt-outs were removed (disable only via the ops env kill switches). Any
+    # stale config["reconciler_chores"]/["code_auditor"]/["security_auditor_scheduled"]
+    # keys are now ignored by the orchestrator, so we don't write them here.
+    # Filing stays a real per-product axis (comment-only vs file bugs; security
+    # always files regardless).
     cfg["code_auditor_filing"] = code_auditor_filing.strip().lower() in ("on", "true", "1", "yes")
     # Test-gate timeout override (seconds). Blank / non-positive / out-of-range
     # → drop the key so the orchestrator's self-calibrating budget takes over

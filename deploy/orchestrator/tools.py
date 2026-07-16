@@ -1215,17 +1215,17 @@ except (TypeError, ValueError):
 
 
 def _code_auditor_enabled(product: dict) -> bool:
-    """Resolve the code-auditor flag. OPT-IN (default OFF) — the comment-only
-    soak must be deliberately enabled. Resolution:
-      1. product.config["code_auditor"] explicit bool wins (per-product override).
-      2. else CODE_AUDITOR_ENABLED env — ON only if truthy (1/true/yes/on);
-         anything else (incl. unset) is OFF.
+    """The whole-product semantic audit is ALWAYS ON for every product
+    (2026-07-16): the per-product opt-out and its UI checkbox were removed — the
+    audit (code_auditor for correctness/tests + security_auditor for security) is
+    a non-negotiable quality gate, not an opt-in. `product` is kept in the
+    signature for call-site compatibility but is no longer consulted. The ONLY
+    remaining off-ramp is the global CODE_AUDITOR_ENABLED kill switch (ops-level,
+    default ON) — set it to a falsy value (0/false/no/off) to disable the whole
+    environment.
     """
-    cfg = (product.get("config") or {}).get("code_auditor")
-    if isinstance(cfg, bool):
-        return cfg
-    return os.environ.get("CODE_AUDITOR_ENABLED", "").strip().lower() in (
-        "1", "true", "yes", "on")
+    return os.environ.get("CODE_AUDITOR_ENABLED", "1").strip().lower() not in (
+        "0", "false", "no", "off")
 
 
 def _code_auditor_filing_enabled(product: dict) -> bool:
@@ -1251,17 +1251,16 @@ def _security_auditor_scheduled_enabled(product: dict) -> bool:
     to ALSO ride the phase-review gate on the architect-run cadence, so a product
     still gets a periodic whole-product security sweep without a human clicking.
     Pairs with narrowing code_auditor to correctness+tests: security ownership
-    moves fully to this focused single-concern pass. OPT-IN, default OFF (soak
-    like code_auditor did). Resolution mirrors _code_auditor_enabled:
-      1. product.config["security_auditor_scheduled"] explicit bool wins.
-      2. else SECURITY_AUDITOR_SCHEDULED_ENABLED env — ON only if truthy.
-    The on-demand PM button is unaffected either way.
+    moves fully to this focused single-concern pass. ALWAYS ON per product
+    (2026-07-16): like _code_auditor_enabled, the per-product opt-out and UI
+    checkbox were removed — this rides the phase-review gate for every product.
+    `product` is kept for signature compatibility but not consulted. The ONLY
+    off-ramp is the global SECURITY_AUDITOR_SCHEDULED_ENABLED kill switch
+    (ops-level, default ON) — set it falsy to disable the whole environment.
+    The on-demand PM "🔒 Security audit" button is unaffected either way.
     """
-    cfg = (product.get("config") or {}).get("security_auditor_scheduled")
-    if isinstance(cfg, bool):
-        return cfg
-    return os.environ.get("SECURITY_AUDITOR_SCHEDULED_ENABLED", "").strip().lower() in (
-        "1", "true", "yes", "on")
+    return os.environ.get("SECURITY_AUDITOR_SCHEDULED_ENABLED", "1").strip().lower() not in (
+        "0", "false", "no", "off")
 
 
 def _select_phase_for_review(phases: list, features: list) -> dict | None:

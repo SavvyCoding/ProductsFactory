@@ -4271,21 +4271,17 @@ def _run_post_coder_pipeline(product: dict, session_uid: str, working_dir: str,
             # as any feature. file_corrective_chores caps at 3/product/cycle
             # and dedupes open chores, so steady-state filing is bounded.
             #
-            # Default ON for ALL products (2026-06-13) — the DogTinder
-            # re-review confirmed comment-path findings get read but never
-            # repaired; chores give every finding an owner. Resolution:
-            #   1. product.config["reconciler_chores"] explicit bool wins
-            #      (per-product opt-OUT: set False to disable for a product).
-            #   2. else RECONCILER_CHORES_ENABLED env var as a global kill
-            #      switch — ON unless explicitly set to a falsy value.
+            # ALWAYS ON for ALL products — the DogTinder re-review confirmed
+            # comment-path findings get read but never repaired; chores give every
+            # finding an owner. The per-product opt-out (config["reconciler_chores"])
+            # and its UI checkbox were removed 2026-07-16: corrective chores are a
+            # non-negotiable quality guarantee. The ONLY off-ramp is the global
+            # RECONCILER_CHORES_ENABLED kill switch (ops-level, default ON) — set
+            # it to a falsy value to disable the whole environment.
             # Best-effort: failure here never bounces the feature.
-            _chores_cfg = (product.get("config") or {}).get("reconciler_chores")
-            if isinstance(_chores_cfg, bool):
-                _chores_on = _chores_cfg
-            else:
-                _chores_on = os.environ.get(
-                    "RECONCILER_CHORES_ENABLED", "").strip().lower() \
-                    not in ("0", "false", "no", "off")
+            _chores_on = os.environ.get(
+                "RECONCILER_CHORES_ENABLED", "").strip().lower() \
+                not in ("0", "false", "no", "off")
             if _chores_on:
                 _chore_findings = _drift.run_chore_detectors(working_dir, _all_features)
                 if _chore_findings:
