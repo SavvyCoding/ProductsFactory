@@ -74,6 +74,11 @@ def test_filing_mode_renders_feature_filing(monkeypatch):
     assert '"feature_type": "bug"' in prompt
     assert "Code-review:" in prompt
     assert "Critical → 1" in prompt and "Low → 40" in prompt
+    # severity-routed auto-approve (2026-07-16): Critical/High skip triage,
+    # Medium/Low stay Pending.
+    assert '"status": "<STATUS>"' in prompt
+    assert "Critical and High → `Approved`" in prompt
+    assert "Medium and Low →" in prompt and "`Pending`" in prompt
     # nested placeholders inside the injected block were resolved
     assert "{code_auditor_output_steps}" not in prompt
     assert "{pm_api_url}" not in prompt and "{product_id}" not in prompt

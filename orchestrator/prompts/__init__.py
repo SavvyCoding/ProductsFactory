@@ -138,10 +138,12 @@ HOW to do it on this backend specifically:
 #
 #   comment-only (default)  -> raise dashboard alerts, file nothing (soak)
 #   filing (CODE_AUDITOR_FILING_ENABLED) -> file each finding as a `bug`
-#       feature. Findings land status=Pending (FeatureCreate default), so the
-#       PM triages before any coder session runs — a false positive costs one
-#       rejection, never a wasted session. That's why filing is safe here even
-#       before the Increment-2 verifier session / stop-the-line blocker gate.
+#       feature, status routed by severity (2026-07-16): Critical/High land
+#       `Approved` (auto-triaged straight into the coder queue for fast repair);
+#       Medium/Low land `Pending` (PM triages first — a false positive there
+#       costs one rejection, not a session). Auto-approving the top two tiers
+#       trades the human gate for speed on the findings that matter most; the
+#       Increment-2 verifier session is the eventual compensating control.
 # ---------------------------------------------------------------------------
 _CODE_AUDITOR_ALERT_STEPS = """## Step 4 — Raise each surviving finding as a dashboard alert
 
@@ -185,16 +187,21 @@ POST {pm_api_url}/api/features
   "description": "[<dimension>] <what + where: the defect and the file:line>\\n- <AC1: the observable correct behavior the fix must produce>\\n- <AC2: a Verify-able check — an HTTP status, a persisted row, a real assertion>\\n- <AC3 if needed>",
   "feature_type": "bug",
   "source": "ai",
-  "priority": <PRIORITY>
+  "priority": <PRIORITY>,
+  "status": "<STATUS>"
 }
 ```
 
 Set `priority` by severity (LOWER number = more urgent): **Critical → 1,
-High → 5, Medium → 20, Low → 40.** Every finding MUST quote the actual code
-(`file:line`) and carry at least two checkable ACs — no speculative findings.
-Filed bugs land as `Pending` for the PM to approve, so a false positive costs
-one rejection, never a wasted coder session. If you already saw this issue as
-an open bug or unread alert in Step 0, do NOT re-file it.
+High → 5, Medium → 20, Low → 40.**
+Set `status` by severity: **Critical and High → `Approved`** — they skip PM
+triage and the coder pipeline fixes them immediately; **Medium and Low →
+`Pending`** — the PM triages those before any coder session. Every finding MUST
+quote the actual code (`file:line`) and carry at least two checkable ACs — no
+speculative findings. A Critical/High false positive now costs a real coder
+session (no human triage catches it), so do NOT file one you could not refute
+in Step 3. If you already saw this issue as an open bug or unread alert in
+Step 0, do NOT re-file it.
 
 ---
 

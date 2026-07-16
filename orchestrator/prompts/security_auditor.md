@@ -84,7 +84,8 @@ POST {pm_api_url}/api/features
   "description": "<what + where: the vulnerability class and the file:line>\n- <AC 1: the observable secure behavior the fix must produce>\n- <AC 2: a Verify-able check, e.g. an HTTP 403 / a constant-time compare / a 422 on out-of-range input>\n- <AC 3 if needed>",
   "feature_type": "bug",
   "source": "ai",
-  "priority": 10
+  "priority": 10,
+  "status": "<STATUS>"
 }}
 ```
 **Description is a CONTRACT** (the designer Blocks specs with no ACs): a
@@ -93,6 +94,16 @@ one-line "what + file:line", then 2-4 `- ` acceptance criteria, each an
 pinned CORS origin) — not "make it secure". Quote the file:line in the
 summary so the coder goes straight to it. `priority: 10` (security bugs
 outrank standard features).
+
+**Set `status` by severity.** First classify each finding
+`Critical` / `High` / `Medium` / `Low` by real exploitability and impact
+(an unauth account-takeover or IDOR on owned data is Critical/High; a
+defense-in-depth hardening or info-leak with no direct impact is Medium/Low).
+Then: **Critical and High → `Approved`** (they skip PM triage and the coder
+pipeline fixes them immediately); **Medium and Low → `Pending`** (the PM
+triages first). An auto-approved false positive costs a real coder session, so
+only mark Critical/High what you traced end-to-end from request to sink — when
+in doubt, file it `Pending`.
 
 ---
 
