@@ -1620,6 +1620,68 @@ def _escalate_blocked_features(product: dict, features: list | None = None,
         return 0
 
 
+# Seconds figures like "300s" / "1800 s" cited in a diagnosis. Bounded (2-4
+# digits) and range-checked at the callsite so we don't pick up "335-test".
+_GATE_BUDGET_SECONDS_RE = _re.compile(r"(\d{2,4})\s*s\b")
+
+
+def _stale_test_gate_env_block(reason: str, comments: list,
+                               product: dict) -> tuple[int, int] | None:
+    """Detect a Blocked feature whose env block is a post-coder TEST-GATE
+    TIMEOUT that is now STALE — the cited gate budget is below the product's
+    *current* resolved budget, because the gate self-calibrates up as green-run
+    samples accumulate. Returns ``(current_budget, cited_budget)`` when a
+    one-shot re-test is warranted, else ``None``.
+
+    Why this exists: env_impossible blocks are otherwise skipped forever ("a
+    coder re-run won't help") — correct for service/tool/spec, but WRONG for a
+    gate-timeout, because the *environment itself changed* (the budget grew).
+    A transient low-budget window (a product that inflated its suite before
+    accumulating green-run samples, so the budget was floored) then becomes a
+    PERMANENT block even after the budget auto-calibrates up. Canonical:
+    DogTinder product 31 (2026-07), six features blocked citing a 300s gate that
+    had since grown to the 1800s ceiling; a manual re-test cleared them.
+
+    Only the timeout class qualifies. Service-missing, tool-missing,
+    verify-recipe, and read-only-file env blocks are NOT gate-timeouts and stay
+    skipped. Best-effort: any resolution failure returns None (preserve skip).
+    """
+    blob = (reason or "") + " " + " ".join(
+        str(c.get("body", "")) for c in (comments or []) if isinstance(c, dict))
+    low = blob.lower()
+    # Signal 1 — a post-coder TEST gate/suite/check context.
+    gate_ctx = (("post-coder" in low or "post coder" in low)
+                and "test" in low
+                and any(k in low for k in ("gate", "suite", "check")))
+    # Signal 2 — the failure is a TIMEOUT / budget-exceed (not a missing dep).
+    timeout_ctx = any(k in low for k in (
+        "timeout", "budget", "exceed", "cannot be met", "cannot accommodate",
+        "unachievable", "too short", "structurally", "300s"))
+    # Signal 3 — exclude OTHER env classes that may mention the gate in passing.
+    other_env = any(k in low for k in (
+        "service", "connection refused", "tool-missing", "read-only",
+        "read only", "erofs", "verify-check", "verify recipe", "cannot execute"))
+    if not (gate_ctx and timeout_ctx) or other_env:
+        return None
+    try:
+        from orchestrator.pipelines.post_coder import (
+            _resolve_test_gate_timeout, TEST_GATE_TIMEOUT_FLOOR)
+        current = int(_resolve_test_gate_timeout(product))
+    except Exception:
+        return None
+    # Cited budget = the smallest plausible seconds figure in the diagnosis (the
+    # actual constraint that was hit). Default to the FLOOR when none is quoted —
+    # historical env_impossible gate blocks were almost always floored.
+    cited = None
+    for m in _GATE_BUDGET_SECONDS_RE.finditer(blob):
+        v = int(m.group(1))
+        if 60 <= v <= 3600:
+            cited = v if cited is None else min(cited, v)
+    if cited is None:
+        cited = TEST_GATE_TIMEOUT_FLOOR
+    return (current, cited) if current > cited else None
+
+
 def _reprocess_blocked_features(product: dict, features: list | None = None,
                                 max_per_cycle: int = 2) -> int:
     """Wave-8: give a Blocked feature ONE automatic retry through the
@@ -1646,8 +1708,12 @@ def _reprocess_blocked_features(product: dict, features: list | None = None,
         flap-preempts-escalation gap: rapid_flap blocks on transition count
         at fix_attempts=3, before the escalation trigger (>=4) fires — the
         reprocessor sets the trigger condition explicitly.
-      - env/service/tool/spec blocks → SKIP (a coder re-run won't help; the
-        service/tool-missing + spec_defect paths own those).
+      - STALE test-gate timeout env block (cited gate budget < the product's
+        current resolved budget) → unblock to Approved, fix_attempts=0. The
+        environment CHANGED (the gate self-calibrated up), so unlike other env
+        blocks a re-run CAN now pass. See _stale_test_gate_env_block.
+      - other env/service/tool/spec blocks → SKIP (a coder re-run won't help;
+        the service/tool-missing + spec_defect paths own those).
 
     Returns the number reprocessed. Best-effort; never raises into the cycle.
     """
@@ -1717,8 +1783,11 @@ def _reprocess_blocked_features(product: dict, features: list | None = None,
                                   or "fix_attempts" in reason or "max_fix_attempts" in reason)
                 is_code_quality = any(a in reason or a in authors_blob
                                       for a in _CODE_QUALITY_AUTHORS)
+                # Stale test-gate timeout: env changed (budget grew), so a
+                # re-test CAN pass — the one exception to the env skip below.
+                stale_gate = _stale_test_gate_env_block(reason, comments, product)
 
-                if is_env_spec and not is_divergent:
+                if is_env_spec and not is_divergent and stale_gate is None:
                     continue  # coder re-run won't help — owned by other paths
 
                 if is_divergent:
@@ -1745,6 +1814,20 @@ def _reprocess_blocked_features(product: dict, features: list | None = None,
                             f"fix_attempts={esc_threshold} so the next coder "
                             f"session runs the diagnose-first escalation instead "
                             f"of another blind attempt. One-shot.")
+                elif stale_gate is not None:
+                    # → Approved with a clean fix_attempts slate: the prior
+                    # attempts were spent against an impossible gate, not the
+                    # feature's code. Keep the design doc (design was fine; the
+                    # env was the blocker), so a doc-bearing feature goes
+                    # straight back to the coder.
+                    cur_budget, cited_budget = stale_gate
+                    patch = {"status": "Approved", "changed_by": _REPROCESS_CHANGED_BY,
+                             "fix_attempts": 0}
+                    note = (f"Auto-retry (blocked-reprocessor): stale test-gate env "
+                            f"block — the post-coder test-gate budget is now "
+                            f"{cur_budget}s, above the {cited_budget}s cited when it "
+                            f"blocked, so the suite now fits. Re-testing under the "
+                            f"current budget. One-shot.")
                 else:
                     continue  # unclassified — leave for human triage
 

@@ -362,6 +362,52 @@ class TestBlockedReprocessor:
         assert n == 0
         assert fake.patches == []
 
+    # ---- stale test-gate timeout env block (2026-07-20) -------------------- #
+    _STALE_GATE_REASON = ("Escalated-session diagnosis: ESCALATION-DIAGNOSIS: "
+                          "env_impossible — The 300s post-coder test-check gate "
+                          "cannot be met: the full suite takes ~19 minutes.")
+
+    def test_stale_test_gate_unblocked_when_budget_grew(self):
+        # Cited 300s; product's green-run history now resolves the budget well
+        # above 300 (p95 x2.5 clamped to the 1800 ceiling), so the suite fits.
+        fake = _ReprocFake()
+        feats = [_blocked(1, self._STALE_GATE_REASON)]
+        prod = self._product(blocked_reprocessor=True,
+                             test_gate_runtimes=[1100, 1120, 1137, 1090, 1105])
+        with patch.object(orch_tools, "_pm_client", return_value=fake):
+            n = orch_tools._reprocess_blocked_features(prod, feats)
+        assert n == 1
+        _, body = fake.patches[0]
+        assert body["status"] == "Approved"
+        assert body["fix_attempts"] == 0
+        assert "design_doc_path" not in body          # doc kept — design was fine
+        assert "stale test-gate" in fake.posts[0][1]["body"]
+
+    def test_stale_test_gate_skipped_when_budget_unchanged(self):
+        # No green-run history → budget stays at the 300s floor == cited → NOT
+        # stale, so the env skip still applies.
+        fake = _ReprocFake()
+        feats = [_blocked(1, self._STALE_GATE_REASON)]
+        with patch.object(orch_tools, "_pm_client", return_value=fake):
+            n = orch_tools._reprocess_blocked_features(
+                self._product(blocked_reprocessor=True), feats)
+        assert n == 0
+        assert fake.patches == []
+
+    def test_non_timeout_env_block_not_treated_as_stale_gate(self):
+        # A read-only-file env block mentions the gate but is NOT a timeout —
+        # must stay skipped even with a grown budget.
+        fake = _ReprocFake()
+        feats = [_blocked(1, "ESCALATION-DIAGNOSIS: env_impossible — ARCHITECTURE.md "
+                             "is mounted read-only in this coder session; the "
+                             "post-coder test gate cannot register the endpoint.")]
+        prod = self._product(blocked_reprocessor=True,
+                             test_gate_runtimes=[1100, 1137, 1090])
+        with patch.object(orch_tools, "_pm_client", return_value=fake):
+            n = orch_tools._reprocess_blocked_features(prod, feats)
+        assert n == 0
+        assert fake.patches == []
+
     def test_dedup_one_shot(self):
         fake = _ReprocFake(comments_by_fid={
             1: [{"author": "blocked-reprocessor-v2", "body": "already retried"}]})
