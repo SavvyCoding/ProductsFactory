@@ -394,6 +394,34 @@ class TestBlockedReprocessor:
         assert n == 0
         assert fake.patches == []
 
+    def test_stale_gate_at_ceiling_not_retested(self):
+        # Diagnosis cites the gate budget ALREADY at the 1800s ceiling (suite
+        # 1298s but killed at exit 124 in-container). Budget can't have grown →
+        # current == max(cited) → skip. Guards the min-vs-max bug (P31 #2728).
+        fake = _ReprocFake()
+        feats = [_blocked(1, "ESCALATION-DIAGNOSIS: env_impossible — the 567-test "
+                             "full suite takes 1298s locally (gate budget 1800s); the "
+                             "post-coder test-check gate killed it at exit 124 mid-run.")]
+        prod = self._product(blocked_reprocessor=True,
+                             test_gate_runtimes=[1100, 1137, 1090, 1120, 1105])
+        with patch.object(orch_tools, "_pm_client", return_value=fake):
+            n = orch_tools._reprocess_blocked_features(prod, feats)
+        assert n == 0
+        assert fake.patches == []
+
+    def test_stale_gate_no_budget_cited_skipped(self):
+        # A test-gate timeout with NO seconds figure quoted — cannot confirm the
+        # budget grew, so skip (conservative).
+        fake = _ReprocFake()
+        feats = [_blocked(1, "ESCALATION-DIAGNOSIS: env_impossible — the post-coder "
+                             "test-check gate timed out running the full suite.")]
+        prod = self._product(blocked_reprocessor=True,
+                             test_gate_runtimes=[1100, 1137, 1090])
+        with patch.object(orch_tools, "_pm_client", return_value=fake):
+            n = orch_tools._reprocess_blocked_features(prod, feats)
+        assert n == 0
+        assert fake.patches == []
+
     def test_non_timeout_env_block_not_treated_as_stale_gate(self):
         # A read-only-file env block mentions the gate but is NOT a timeout —
         # must stay skipped even with a grown budget.

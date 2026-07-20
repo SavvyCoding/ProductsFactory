@@ -1664,21 +1664,25 @@ def _stale_test_gate_env_block(reason: str, comments: list,
     if not (gate_ctx and timeout_ctx) or other_env:
         return None
     try:
-        from orchestrator.pipelines.post_coder import (
-            _resolve_test_gate_timeout, TEST_GATE_TIMEOUT_FLOOR)
+        from orchestrator.pipelines.post_coder import _resolve_test_gate_timeout
         current = int(_resolve_test_gate_timeout(product))
     except Exception:
         return None
-    # Cited budget = the smallest plausible seconds figure in the diagnosis (the
-    # actual constraint that was hit). Default to the FLOOR when none is quoted —
-    # historical env_impossible gate blocks were almost always floored.
+    # Cited budget = the LARGEST plausible seconds figure in the diagnosis. Max
+    # (not min) is the conservative choice: a diagnosis often quotes BOTH the gate
+    # budget and the suite runtime (e.g. "suite takes 1298s (gate budget 1800s)"),
+    # so we only unblock when the current budget exceeds EVERY figure — i.e. the
+    # budget grew past the old gate AND the suite would fit. A block that already
+    # cites the current ceiling (nothing grew, the suite genuinely doesn't fit)
+    # gives current == max → skip, which is correct. Require an explicit citation:
+    # with no seconds figure we can't confirm the budget grew, so skip.
     cited = None
     for m in _GATE_BUDGET_SECONDS_RE.finditer(blob):
         v = int(m.group(1))
         if 60 <= v <= 3600:
-            cited = v if cited is None else min(cited, v)
+            cited = v if cited is None else max(cited, v)
     if cited is None:
-        cited = TEST_GATE_TIMEOUT_FLOOR
+        return None
     return (current, cited) if current > cited else None
 
 
