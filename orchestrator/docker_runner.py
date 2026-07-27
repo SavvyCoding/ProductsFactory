@@ -2353,7 +2353,16 @@ def run_claude_in_docker(product: dict, persona: str | None = None) -> int:
         _ollama_map.get(persona)
         if isinstance(_ollama_map, dict) and persona else None
     )
-    if persona in ("designer", "reviewer"):
+    if persona == "audit_verifier":
+        # The independent audit verifier (2026-07-27) runs on a DIFFERENT model
+        # than the auditor that produced the finding, so it doesn't share the
+        # same blind spot (a single local model's self-critique lets false
+        # positives through — the reason this verifier exists). AUDIT_VERIFIER_MODEL
+        # env wins, else fall back to the designer model (typically distinct from
+        # the coder/auditor model). An ollama_model_map override still trumps both.
+        _legacy_default = (os.environ.get("AUDIT_VERIFIER_MODEL", "").strip()
+                           or sys_cfg.get("designer_model") or DESIGNER_MODEL or "gemma3:27b")
+    elif persona in ("designer", "reviewer"):
         _legacy_default = sys_cfg.get("designer_model") or DESIGNER_MODEL or "qwen3-coder:30b"
     else:
         _legacy_default = sys_cfg.get("coder_model") or CODER_MODEL or "qwen3-coder:30b"

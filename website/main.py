@@ -2228,6 +2228,52 @@ async def _ensure_code_review_phase(product_id: int, db: AsyncSession) -> int:
     return phase.id
 
 
+_FILELINE_RE = re.compile(r"[\w./\-]+\.\w+:\d+")
+_AUDIT_PREFIX_RE = re.compile(r"^(?:code-review|security)\s*:\s*", re.I)
+# Statuses that DON'T count as an existing/shipped occurrence for dedup — a
+# finding whose only prior copy was Rejected/Reverted/Deferred may legitimately
+# be re-filed.
+_DEDUP_EXCLUDE_STATUSES = ("Rejected", "Reverted", "Deferred")
+
+
+def _audit_signature(name: str, description: str) -> tuple[frozenset, tuple]:
+    """Cheap dedup signature for an audit finding: the set of `file:line` tokens
+    it references, plus the significant words of its (prefix-stripped) title."""
+    text = f"{name or ''} {description or ''}"
+    filelines = frozenset(_FILELINE_RE.findall(text))
+    nt = _AUDIT_PREFIX_RE.sub("", (name or "").strip().lower())
+    nt = re.sub(r"[^a-z0-9 ]", " ", nt)
+    words = tuple(w for w in nt.split() if len(w) > 2)
+    return filelines, words
+
+
+async def _find_duplicate_audit_bug(db, product_id: int, name: str, description: str):
+    """Return an existing non-terminal-rejected `bug` for this product that the
+    new audit finding duplicates, else None. Dedup (2026-07-27) catches the
+    class where the audit re-files something an open feature already tracks OR a
+    shipped fix already resolved (canonical: MyGroceryApp #3179 re-filed a bulk-
+    array cap that #3110 had already merged; #3195/#3196 re-filed already-fixed
+    bugs that sat Blocked). Strong, low-false-positive signals only: a shared
+    `file:line` token, or an identical significant title."""
+    new_fl, new_words = _audit_signature(name, description)
+    if not new_fl and not new_words:
+        return None
+    rows = (await db.execute(
+        select(Feature).where(
+            Feature.product_id == product_id,
+            Feature.feature_type == "bug",
+            Feature.status.notin_(_DEDUP_EXCLUDE_STATUSES),
+        )
+    )).scalars().all()
+    for f in rows:
+        fl, words = _audit_signature(f.name, f.description or "")
+        if new_fl and fl and (new_fl & fl):
+            return f
+        if new_words and words and new_words == words:
+            return f
+    return None
+
+
 @app.post("/api/features", response_model=schemas.FeatureOut, status_code=201)
 async def api_create_feature(body: schemas.FeatureCreate, db: AsyncSession = Depends(get_db)):
     """PM or Claude (AI-recommended) creates a new feature."""
@@ -2249,6 +2295,20 @@ async def api_create_feature(body: schemas.FeatureCreate, db: AsyncSession = Dep
         violation = _validate_story_size(body.description)
         if violation:
             raise HTTPException(status_code=422, detail=violation)
+    # Audit-finding dedup (2026-07-27): before creating an AI-filed bug, skip it
+    # if it duplicates an existing open/shipped finding. AUDIT_DEDUP_ENABLED
+    # (default ON) kill switch. Returns the existing feature so the caller sees a
+    # success (idempotent) instead of a second row that will churn a coder.
+    if (body.source or "").lower() == "ai" and (body.feature_type or "").lower() == "bug" \
+            and os.environ.get("AUDIT_DEDUP_ENABLED", "1").strip().lower() \
+            not in ("0", "false", "no", "off"):
+        dup = await _find_duplicate_audit_bug(db, body.product_id, body.name, body.description)
+        if dup is not None:
+            log.info(
+                f"[audit-dedup] product {body.product_id}: skipped duplicate audit bug "
+                f"'{(body.name or '')[:50]}' — matches existing #{dup.id} ({dup.status})"
+            )
+            return dup
     feature_data = body.model_dump()
     # Increment 1.5 (2026-06-25): auto-route AI-filed audit findings to the
     # standing 'Code-Review Hardening' phase so they don't sit un-phased after

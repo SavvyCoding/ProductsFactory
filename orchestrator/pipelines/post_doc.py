@@ -339,6 +339,29 @@ def _run_post_doc_pipeline(product: dict, session_uid: str, working_dir: str,
         )
         return
 
+    # AC-recipe self-check (2026-07-27) — statically validate every `Verify:`
+    # recipe in the staged design docs (shell syntax + Expected well-formedness)
+    # so a syntactically-broken recipe never reaches a coder session (canonical:
+    # MyGroceryApp #3196). Gated by DESIGNER_AC_LINT_ENABLED (default ON). Runs
+    # ADVISORY by default during the soak (comment, ship the doc);
+    # DESIGNER_AC_LINT_ENFORCE=1 promotes it to a hard bounce like the other
+    # post-doc guards. Best-effort; a failure here must not block the commit.
+    if os.environ.get("DESIGNER_AC_LINT_ENABLED", "1").strip().lower() \
+            not in ("0", "false", "no", "off"):
+        try:
+            ac_recipe_violations = _post_doc_ac_recipe_check(
+                working_dir, _run, assigned_features, pname)
+        except Exception:
+            log.exception(f"[post-{persona}] {pname}: AC-recipe check failed (non-fatal)")
+            ac_recipe_violations = []
+        if ac_recipe_violations:
+            enforce = os.environ.get("DESIGNER_AC_LINT_ENFORCE", "").strip().lower() \
+                in ("1", "true", "yes", "on")
+            _handle_doc_ac_recipe_violations(
+                product, assigned_features, persona, ac_recipe_violations, enforce)
+            if enforce:
+                return
+
     # Over-coupling advisory (wave-10 Layer 1.2) — SOAK mode: posts a
     # sizing-advisor comment on oversized design docs recommending a vertical
     # split, but never bounces. Runs after the hard guards pass so it only
@@ -782,6 +805,147 @@ def _post_doc_oversize_advisory(
         log.info(f"[post-doc] {pname}: sizing-advisor posted {posted} "
                  f"over-coupling advisory(ies) (soak — no bounce)")
     return posted
+
+
+def _post_doc_ac_recipe_check(
+    working_dir: str,
+    _run,
+    assigned_features: list[dict],
+    product_name: str = "?",
+) -> list[str]:
+    """Designer-side AC self-check (2026-07-27): statically validate every
+    ``Verify:`` recipe in a staged design doc BEFORE it ships, so a
+    syntactically-broken recipe never reaches a coder session.
+
+    At design time the feature isn't built, so we cannot run a recipe
+    end-to-end. We CAN catch the failures that actually blocked features:
+      - **Shell syntax** — `bash -n -c <cmd>` parses the recipe without
+        executing it; an unclosed bracket/quote/paren (canonical: MyGroceryApp
+        #3196, AC3 recipe "unclosed brackets", flapped the coder to
+        fix_attempts=7) fails to parse and is flagged.
+      - **Expected well-formedness** — a JSON-shaped ``Expected:`` block that
+        doesn't `json.loads` is a malformed contract the verify-check can
+        never match.
+
+    Returns a list of human-readable violation strings (empty = clean).
+    Idempotent, side-effect-free, best-effort — any failure returns [] so the
+    pipeline proceeds (this must never itself block a good design).
+    """
+    from pathlib import Path as _PPath
+    import json as _json
+
+    violations: list[str] = []
+    try:
+        diff_r = _run(["git", "diff", "--cached", "--name-only"], timeout=15)
+    except Exception:
+        return violations
+    if diff_r.returncode != 0:
+        return violations
+    staged_docs = [
+        ln.strip() for ln in (diff_r.stdout or "").splitlines()
+        if ln.strip().startswith("docs/story_") and ln.strip().endswith(".md")
+    ]
+    if not staged_docs:
+        return violations
+
+    # Reuse the post-coder verify-check's recipe parser (single source of
+    # truth for how Verify:/Expected: pairs are extracted).
+    try:
+        from orchestrator.pipelines.post_coder import _parse_ac_verifies
+    except Exception:
+        return violations
+
+    wd = _PPath(working_dir)
+    for doc_path in staged_docs:
+        try:
+            content = (wd / doc_path).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        stem = doc_path.rsplit("/", 1)[-1]
+        try:
+            triples = _parse_ac_verifies(content)
+        except Exception:
+            continue
+        for ac_num, cmd, exp in triples:
+            # 1) Shell syntax — parse-only, never executes the recipe.
+            try:
+                syn = _run(["bash", "-n", "-c", cmd], timeout=15)
+                if syn.returncode != 0:
+                    detail = (syn.stderr or "").strip().splitlines()
+                    msg = detail[-1] if detail else "shell syntax error"
+                    violations.append(
+                        f"{stem} AC{ac_num}: Verify recipe has invalid shell "
+                        f"syntax ({msg[:120]}) — fix the recipe before it reaches a coder."
+                    )
+                    continue
+            except Exception:
+                pass  # bash unavailable / timeout — skip the syntax check, not a violation
+            # 2) Expected well-formedness — only when it's clearly JSON-shaped.
+            stripped = exp.strip()
+            if stripped[:1] in ("{", "["):
+                try:
+                    _json.loads(stripped)
+                except Exception:
+                    violations.append(
+                        f"{stem} AC{ac_num}: Expected block looks like JSON but "
+                        f"does not parse — the verify-check can never match it."
+                    )
+    if violations:
+        log.info(
+            f"[post-doc] {product_name}: AC-recipe check found "
+            f"{len(violations)} malformed recipe(s) across "
+            f"{len(staged_docs)} staged doc(s)"
+        )
+    return violations
+
+
+def _handle_doc_ac_recipe_violations(
+    product: dict,
+    assigned_features: list[dict],
+    persona: str,
+    violations: list[str],
+    enforce: bool,
+) -> None:
+    """Feedback channel for the AC-recipe self-check. Always posts the malformed
+    recipes as a `lint-guard` comment so the next designer cycle sees them; when
+    ``enforce`` is set, also rolls the feature back to Approved with the doc
+    cleared (a hard bounce, like the other post-doc guards). During the soak
+    ``enforce`` is off — advisory only, so we can measure the false-positive
+    rate before it starts bouncing real designs. Best-effort."""
+    pname = product.get("name", "?")
+    verb = "auto-reject" if enforce else "advisory"
+    body = (
+        f"⚠️ post-doc AC-recipe self-check {verb} "
+        f"({len(violations)} malformed Verify recipe(s)):\n"
+        + "\n".join(f"- {v}" for v in violations)
+        + "\n\nA Verify recipe that is syntactically broken (unclosed brackets) "
+          "or has a malformed Expected block can NEVER be satisfied — a coder "
+          "session would flap on it until it blocks. "
+        + ("This design is back to Approved; the next designer cycle must fix "
+           "the recipe(s) in the story doc."
+           if enforce else
+           "Advisory only (soak): the design still shipped, but fix the "
+           "recipe(s) in the next revision.")
+    )
+    try:
+        with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+            for f in assigned_features:
+                fid = f["id"]
+                try:
+                    client.post(f"/api/features/{fid}/comments",
+                                json={"author": "lint-guard", "body": body})
+                except Exception as e:
+                    log.warning(f"[post-{persona}] {pname}: AC-recipe comment #{fid} failed: {e}")
+                if enforce:
+                    try:
+                        client.patch(f"/api/features/{fid}", json={
+                            "status": "Approved", "design_doc_path": None,
+                            "changed_by": "post-doc:rollback"})
+                        log.info(f"[post-{persona}] {pname}: #{fid} bounced by AC-recipe guard")
+                    except Exception as e:
+                        log.warning(f"[post-{persona}] {pname}: AC-recipe PATCH #{fid} failed: {e}")
+    except Exception as e:
+        log.warning(f"[post-{persona}] {pname}: AC-recipe PM client error: {e}")
 
 
 def _post_doc_clarification_check(

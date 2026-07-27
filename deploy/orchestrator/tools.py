@@ -185,7 +185,12 @@ _ONDEMAND_PERSONAS = ("documenter", "analytics", "refactorer", "devops", "recomm
                       # 2026-06-24: read-only whole-product code review fired at
                       # phase boundaries by _run_phase_review_gate (or PM click).
                       # Comment-only soak: raises dashboard alerts, files no bugs.
-                      "code_auditor")
+                      "code_auditor",
+                      # 2026-07-27: independent audit verifier — read-only pass
+                      # that re-checks newly-filed audit bugs against the code on
+                      # a DIFFERENT model and Rejects false positives. Queued by
+                      # _run_audit_verifier_gate when unverified audit bugs exist.
+                      "audit_verifier")
 _FEATURE_KEEP = {"id", "product_id", "phase_id", "parent_id", "name", "status",
                  "feature_type", "design_doc_path", "pr_number", "pr_url",
                  "fix_attempts", "merge_notes"}
@@ -697,6 +702,14 @@ def run_cycle(args: dict, **kwargs) -> str:
                 _run_phase_review_gate(p, features=features_by_pid.get(p["id"]))
             except Exception:
                 log.exception(f"phase-review gate failed for product {p.get('id')}")
+            # Independent audit-verifier (Fix 2b, 2026-07-27): re-check newly-filed
+            # audit findings and Reject false positives before a coder runs. Runs
+            # AFTER the phase-review gate so it doesn't stomp a just-queued auditor
+            # (the gate sets run_persona_now, which this then defers on).
+            try:
+                _run_audit_verifier_gate(p, features=features_by_pid.get(p["id"]))
+            except Exception:
+                log.exception(f"audit-verifier gate failed for product {p.get('id')}")
         # and the determine_next_action decision tree — the PM clicked a
         # button, run that persona for that product. Flag is cleared up
         # front so a crashing launch doesn't re-fire on every cycle.
@@ -1291,6 +1304,62 @@ def _select_phase_for_review(phases: list, features: list) -> dict | None:
         return None
     candidates.sort(key=lambda p: (p.get("order", 0), p.get("id", 0)))
     return candidates[0]
+
+
+def _audit_verifier_enabled(product: dict) -> bool:
+    """Independent audit-verifier gate (2026-07-27). Default ON; per-product
+    opt-out via config.audit_verifier=False, else AUDIT_VERIFIER_ENABLED env
+    (ON unless explicitly falsy)."""
+    cfg = (product.get("config") or {}).get("audit_verifier")
+    if isinstance(cfg, bool):
+        return cfg
+    return os.environ.get("AUDIT_VERIFIER_ENABLED", "1").strip().lower() \
+        not in ("0", "false", "no", "off")
+
+
+def _run_audit_verifier_gate(product: dict, features: list | None = None) -> None:
+    """Queue the independent `audit_verifier` persona when a product has audit
+    findings (code_auditor / security_auditor bugs) that haven't been verified
+    yet. The verifier re-checks each against the code on a DIFFERENT model and
+    Rejects false positives before they reach a coder (Fix 2b, 2026-07-27).
+
+    Cheap trigger: if there are open (Pending/Approved) audit bugs and the NEWEST
+    one has no `audit-verifier` verdict comment, queue a verifier pass. Once the
+    newest is verified, the gate goes quiet until a fresh batch is filed. Never
+    stomps an already-queued persona. Best-effort; never raises into the cycle.
+    """
+    pid = product.get("id")
+    if not pid or not _audit_verifier_enabled(product):
+        return
+    if product.get("run_persona_now"):
+        return
+    try:
+        with _pm_client() as client:
+            if features is None:
+                fr = client.get(f"/api/products/{pid}/features")
+                features = fr.json() if fr.is_success else []
+            if not isinstance(features, list):
+                return
+            audit_bugs = [
+                f for f in features
+                if f.get("feature_type") == "bug"
+                and (f.get("source") or "").lower() == "ai"
+                and str(f.get("name", "")).lower().startswith(("code-review:", "security:"))
+                and f.get("status") in ("Pending", "Approved")
+            ]
+            if not audit_bugs:
+                return
+            newest = max(audit_bugs, key=lambda f: f.get("id", 0))
+            cr = client.get(f"/api/features/{newest['id']}/comments", params={"limit": 50})
+            comments = cr.json() if cr.is_success else []
+            if any(isinstance(c, dict) and c.get("author") == "audit-verifier" for c in comments):
+                return  # newest batch already verified — stay quiet
+            client.patch(f"/api/products/{pid}", json={"run_persona_now": "audit_verifier"})
+            product["run_persona_now"] = "audit_verifier"
+            log.info(f"[audit-verifier] product={pid}: {len(audit_bugs)} open audit bug(s), "
+                     f"newest #{newest['id']} unverified — queued audit_verifier")
+    except Exception:
+        log.exception(f"audit-verifier gate failed for product {pid}")
 
 
 def _run_phase_review_gate(product: dict, features: list | None = None) -> None:

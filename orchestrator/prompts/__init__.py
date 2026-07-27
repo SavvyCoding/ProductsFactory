@@ -276,6 +276,12 @@ def build_prompt(product: dict, session_uid: str, persona: str | None = None, ma
         # bugs. Distinct from per-PR reviewer (one diff) and drift detectors
         # (pattern matchers) — this is the cross-cutting semantic pass.
         template_name = "code_auditor"
+    elif persona == "audit_verifier":
+        # Fix 2b (2026-07-27): independent, read-only verifier that re-checks
+        # newly-filed audit findings against the code on a DIFFERENT model and
+        # Rejects the false positives before they reach a coder. Queued by
+        # tools._run_audit_verifier_gate when unverified audit bugs exist.
+        template_name = "audit_verifier"
     elif persona == "documenter":
         template_name = "documenter"
     elif persona == "refactorer":

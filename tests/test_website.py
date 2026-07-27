@@ -1751,3 +1751,53 @@ def test_admin_renders_model_selection_tab(client, db):
     assert 'name="ollama_chain_reviewer"' in html       # secondary persona field
     assert 'id="asub-escalation"' not in html           # legacy tab removed
     assert 'id="asub-coder"' not in html                # renamed to asub-models
+
+
+class TestAuditFindingDedup:
+    """Fix 2a (2026-07-27): server-side dedup of AI-filed audit bugs."""
+
+    def _file_bug(self, client, pid, name, desc):
+        return client.post("/api/features", json={
+            "product_id": pid, "name": name, "description": desc,
+            "source": "ai", "feature_type": "bug"})
+
+    def test_dedup_by_shared_fileline(self, client, db):
+        p = make_product(db)
+        r1 = self._file_bug(client, p.id, "Security: foo IDOR",
+                            "IDOR in src/foo.ts:42 — missing ownership check.")
+        assert r1.status_code == 201
+        id1 = r1.json()["id"]
+        # A second finding on the SAME file:line is deduped → returns the existing row.
+        r2 = self._file_bug(client, p.id, "Security: foo different angle",
+                            "Another look at src/foo.ts:42 authz.")
+        assert r2.json()["id"] == id1
+        # No second row created.
+        rows = client.get(f"/api/products/{p.id}/features").json()
+        assert len([f for f in rows if f["feature_type"] == "bug"]) == 1
+
+    def test_dedup_by_identical_title(self, client, db):
+        p = make_product(db)
+        r1 = self._file_bug(client, p.id, "Code-review: catalog whitespace not trimmed",
+                            "Trim issue somewhere in catalog.")
+        r2 = self._file_bug(client, p.id, "Code-review: catalog whitespace not trimmed",
+                            "Restated with different body text entirely.")
+        assert r2.json()["id"] == r1.json()["id"]
+
+    def test_distinct_finding_still_creates(self, client, db):
+        p = make_product(db)
+        r1 = self._file_bug(client, p.id, "Security: foo IDOR",
+                            "IDOR in src/foo.ts:42.")
+        r2 = self._file_bug(client, p.id, "Security: bar injection",
+                            "SQL injection in src/bar.ts:9.")
+        assert r2.status_code == 201
+        assert r2.json()["id"] != r1.json()["id"]
+
+    def test_rejected_prior_does_not_block_refile(self, client, db):
+        p = make_product(db)
+        f = make_feature(db, p.id, name="Security: foo IDOR", feature_type="bug",
+                         status="Rejected", description="IDOR in src/foo.ts:42.")
+        # A Rejected prior copy is excluded from dedup → the new one is created.
+        r = self._file_bug(client, p.id, "Security: foo IDOR",
+                           "IDOR in src/foo.ts:42.")
+        assert r.status_code == 201
+        assert r.json()["id"] != f.id
