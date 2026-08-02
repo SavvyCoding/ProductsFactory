@@ -322,6 +322,37 @@ def _get_system_config_sync() -> dict:
         return {}
 
 
+_CONTROL_BYTES_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _strip_control_bytes(text: str) -> str:
+    """Remove NUL and other C0 control chars (keeping tab \\x09, newline \\x0a,
+    carriage-return \\x0d) from a string. A NUL in any arg passed to
+    ``subprocess`` raises ``ValueError: embedded null byte``; this makes agent-
+    authored text (session summaries, prompts) safe to hand to ``docker run``."""
+    if not text or "\x00" not in text and not _CONTROL_BYTES_RE.search(text):
+        return text
+    return _CONTROL_BYTES_RE.sub("", text)
+
+
+def _sanitize_cmd_args(cmd: list) -> list:
+    """Belt-and-suspenders: strip control bytes from every arg in a docker/
+    subprocess command list so no agent-sourced content (prompt, feature text,
+    env values) can crash the launch with `embedded null byte`. Logs a warning
+    when it actually strips something so the corrupt source can be traced."""
+    out = []
+    stripped = False
+    for a in cmd:
+        if isinstance(a, str) and ("\x00" in a or _CONTROL_BYTES_RE.search(a)):
+            a = _CONTROL_BYTES_RE.sub("", a)
+            stripped = True
+        out.append(a)
+    if stripped:
+        log.warning("docker cmd contained control/NUL bytes in an argument — "
+                    "stripped before launch (a continuity file or feature text is corrupt)")
+    return out
+
+
 def _read_session_summary(working_dir: str) -> str:
     """
     Read context from the previous agent session via session_summary.md
@@ -336,7 +367,18 @@ def _read_session_summary(working_dir: str) -> str:
     if not summary_file.exists():
         return ""
     try:
-        content = summary_file.read_text(encoding="utf-8").strip()
+        content = summary_file.read_text(encoding="utf-8", errors="replace")
+        # Strip NUL and non-tab/newline C0 control bytes. A single NUL written by
+        # a buggy agent (canonical: SupplyChainOptimizerApp #36, 2026-08-01 —
+        # "89.50\x00overage") makes it into {prev_session_summary}, then into the
+        # docker-run arg list, where subprocess raises `ValueError: embedded null
+        # byte` and EVERY session on the product crashes exit=1 before the agent
+        # runs — wedging the whole pipeline into an endless designer_bounce loop
+        # (38 features Blocked). One corrupt continuity byte must never brick a
+        # product; sanitize at the source. (docker_runner also sanitizes the full
+        # cmd list as belt-and-suspenders.)
+        content = _strip_control_bytes(content)
+        content = content.strip()
         max_chars = 2000
         if len(content) > max_chars:
             # Tail-keep: agents append the most recent / closing notes (per-feature
@@ -1675,6 +1717,10 @@ def _stream_session(
     # that vanished mid-turn but happened to record exit_code=0 — see the
     # status-selection block lower in this function.
     session_meta: dict = {"terminal_marker_seen": False}
+    # Final guard: no agent-sourced content (prompt / feature text / env value)
+    # may crash the launch with `ValueError: embedded null byte`. Sanitized at the
+    # source too (_read_session_summary), but this catches any other vector.
+    cmd = _sanitize_cmd_args(cmd)
     try:
         process = subprocess.Popen(
             cmd,
