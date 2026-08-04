@@ -70,15 +70,49 @@ class TestAuditVerifierGate:
         assert product["run_persona_now"] == "audit_verifier"
         assert fake.patched["run_persona_now"] == "audit_verifier"
 
-    def test_quiet_when_newest_already_verified(self, tools, monkeypatch):
+    def test_quiet_when_ALL_verified(self, tools, monkeypatch):
         feats = [_bug(10), _bug(12)]
-        fake = _FakeClient(feats, comments_by_fid={
-            12: [{"author": "audit-verifier", "body": "VERDICT: KEEP"}]})
+        vd = [{"author": "audit-verifier", "body": "VERDICT: KEEP"}]
+        fake = _FakeClient(feats, comments_by_fid={10: vd, 12: vd})
         monkeypatch.setattr(tools, "_pm_client", lambda: fake)
         product = {"id": 1, "config": {}}
         tools._run_audit_verifier_gate(product, features=feats)
         assert product.get("run_persona_now") is None
         assert fake.patched is None
+
+    def test_queues_when_older_unverified_even_if_newest_verified(self, tools, monkeypatch):
+        # Loop-fix core: the verifier processes oldest-first, so the NEWEST may be
+        # verified while an OLDER one is not. The gate must still queue (checks
+        # ANY unverified, not just the newest).
+        feats = [_bug(10), _bug(12)]
+        fake = _FakeClient(feats, comments_by_fid={
+            10: [],  # older, unverified
+            12: [{"author": "audit-verifier", "body": "VERDICT: KEEP"}]})  # newest, verified
+        monkeypatch.setattr(tools, "_pm_client", lambda: fake)
+        product = {"id": 1, "config": {}}
+        tools._run_audit_verifier_gate(product, features=feats)
+        assert product["run_persona_now"] == "audit_verifier"
+
+    def test_no_requeue_loop_when_newest_unverified_but_gate_converges(self, tools, monkeypatch):
+        # The 2026-08-04 bug: >8 open bugs, verifier did the 8 OLDEST, newest still
+        # unverified. Old gate (checked newest) re-queued forever. New gate queues
+        # while ANY is unverified (correct — there IS work), and goes quiet only
+        # once the whole set is verified.
+        ids = list(range(10, 21))  # 11 bugs
+        feats = [_bug(i) for i in ids]
+        vd = [{"author": "audit-verifier", "body": "KEEP"}]
+        # All verified EXCEPT the newest (#20) — verifier hasn't reached it yet.
+        fake = _FakeClient(feats, comments_by_fid={i: (vd if i < 20 else []) for i in ids})
+        monkeypatch.setattr(tools, "_pm_client", lambda: fake)
+        product = {"id": 1, "config": {}}
+        tools._run_audit_verifier_gate(product, features=feats)
+        assert product["run_persona_now"] == "audit_verifier"  # queues (real work)
+        # Now the whole set is verified → quiet (convergence).
+        fake2 = _FakeClient(feats, comments_by_fid={i: vd for i in ids})
+        monkeypatch.setattr(tools, "_pm_client", lambda: fake2)
+        product2 = {"id": 1, "config": {}}
+        tools._run_audit_verifier_gate(product2, features=feats)
+        assert product2.get("run_persona_now") is None
 
     def test_no_audit_bugs_no_queue(self, tools, monkeypatch):
         feats = [{"id": 3, "feature_type": "feature", "status": "Approved"},

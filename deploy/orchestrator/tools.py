@@ -1323,10 +1323,16 @@ def _run_audit_verifier_gate(product: dict, features: list | None = None) -> Non
     yet. The verifier re-checks each against the code on a DIFFERENT model and
     Rejects false positives before they reach a coder (Fix 2b, 2026-07-27).
 
-    Cheap trigger: if there are open (Pending/Approved) audit bugs and the NEWEST
-    one has no `audit-verifier` verdict comment, queue a verifier pass. Once the
-    newest is verified, the gate goes quiet until a fresh batch is filed. Never
-    stomps an already-queued persona. Best-effort; never raises into the cycle.
+    Trigger: queue iff there exists an open (Pending/Approved) audit bug that has
+    NO `audit-verifier` verdict comment yet. The gate scans OLDEST-first, matching
+    the verifier prompt ("verify at most 8 this session, oldest first"), and
+    short-circuits on the first unverified bug found. This is the fix for the
+    2026-08-04 re-queue loop: the old gate checked only the NEWEST bug, but the
+    verifier processes oldest-first capped at 8 — so with >8 open bugs the newest
+    was NEVER reached in one pass, the gate saw it perpetually unverified, and
+    re-queued the verifier every cycle. Checking "any unverified" converges: each
+    run marks up to 8, so the unverified set monotonically drains to empty, then
+    the gate goes quiet. Never stomps an already-queued persona. Best-effort.
     """
     pid = product.get("id")
     if not pid or not _audit_verifier_enabled(product):
@@ -1349,15 +1355,25 @@ def _run_audit_verifier_gate(product: dict, features: list | None = None) -> Non
             ]
             if not audit_bugs:
                 return
-            newest = max(audit_bugs, key=lambda f: f.get("id", 0))
-            cr = client.get(f"/api/features/{newest['id']}/comments", params={"limit": 50})
-            comments = cr.json() if cr.is_success else []
-            if any(isinstance(c, dict) and c.get("author") == "audit-verifier" for c in comments):
-                return  # newest batch already verified — stay quiet
+            # Scan NEWEST-first, short-circuit on the first unverified. The verifier
+            # marks OLDEST-first, so verified bugs form the oldest prefix and any
+            # unverified ones are the newest — newest-first finds work in ~1 call
+            # (only the fully-verified quiet state scans the whole set).
+            audit_bugs.sort(key=lambda f: f.get("id", 0), reverse=True)
+            unverified = None
+            for f in audit_bugs:
+                cr = client.get(f"/api/features/{f['id']}/comments", params={"limit": 50})
+                comments = cr.json() if cr.is_success else []
+                if not any(isinstance(c, dict) and c.get("author") == "audit-verifier"
+                           for c in comments):
+                    unverified = f
+                    break
+            if unverified is None:
+                return  # every open audit bug already verified — stay quiet
             client.patch(f"/api/products/{pid}", json={"run_persona_now": "audit_verifier"})
             product["run_persona_now"] = "audit_verifier"
             log.info(f"[audit-verifier] product={pid}: {len(audit_bugs)} open audit bug(s), "
-                     f"newest #{newest['id']} unverified — queued audit_verifier")
+                     f"#{unverified['id']} unverified — queued audit_verifier")
     except Exception:
         log.exception(f"audit-verifier gate failed for product {pid}")
 
