@@ -42,7 +42,14 @@ log = logging.getLogger("poller.github_app")
 
 PM_API_URL = os.environ.get("PM_API_URL", "")
 
-_JWT_LIFETIME_SECONDS  = 10 * 60   # GitHub max is 10 min
+# GitHub rejects a JWT whose `exp` is more than 10 min ahead of GitHub's OWN
+# clock. Using the exact 600s max leaves ZERO margin, so any forward clock skew
+# (Docker Desktop on Windows drifts ahead, esp. after a host sleep/resume) makes
+# `exp` exceed the limit → 401 "'exp' claim is too far in the future" on EVERY
+# mint, taking down all git auth (2026-08-08 incident: 859 consecutive 401s, all
+# git ops blocked). Sign for 9 min so there's 60s of skew tolerance, matching the
+# 60s back-date on `iat` (line ~93) that already absorbs skew on the lower bound.
+_JWT_LIFETIME_SECONDS  = 9 * 60    # 540s — 60s under GitHub's 10-min cap for skew
 _REFRESH_BUFFER_SECONDS = 5 * 60   # mint a new token when < 5 min left
 
 
