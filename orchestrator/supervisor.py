@@ -14,6 +14,7 @@ orchestrator's regular config-fetch picks it up next cycle, no restart.
 Detectors:
   - false_success     — coder session lied about completing
   - dirty_pr_close    — PR with merge conflicts, idle, ≥1h old → close + reset
+  - orphan_pr_close   — PR whose features are all dependency-frozen → close + unpin
   - auto_plan         — active sprint dead, ≥N unsprinted Approved → call plan
   - merge_stall_alert — sprint all-Reviewed but PR not merging for ≥1h → alert
   - overlap_pr        — multiple open PRs cover the same feature IDs → close older
@@ -113,6 +114,7 @@ _DEFAULTS = {
     "supervisor_dirty_pr_enabled":              True,
     "supervisor_dirty_pr_min_age_min":          60,
     "supervisor_dirty_pr_idle_min":             30,
+    "supervisor_orphan_pr_enabled":             True,
     "supervisor_auto_plan_enabled":             True,
     # 1 = plan whenever any Approved feature is unphased. Was 3 — too
     # high a bar; products with a fresh backlog never reached the auto-
@@ -1847,6 +1849,142 @@ def detect_dirty_prs(
                     })
         except Exception:
             log.exception(f"dirty_pr_close: failed to reset features for PR #{pr_n}")
+    return closed
+
+
+# ── Detector B2: orphaned-PR close ───────────────────────────────────────────
+# An open session PR whose every tracking feature is dependency-frozen in a
+# coder-owned state is ORPHANED: the coder can't claim it (dependency gate),
+# the reviewer won't see it (nothing in Reviewing), rework can't reach it,
+# and dirty_pr_close ignores it (mergeable_state is clean). Left alone it
+# deadlocks the PR-serialization gate against the dependency gate — the open
+# PR defers the very sibling whose Push would unfreeze its feature.
+# Canonical: MyGroceryApp #3457 / PR #171 (2026-08-14→20): supervisor
+# rollback + redesign added depends_on=#3456 while the PR stayed open;
+# #3456 was then deferred by the serialization gate → 6-day product stall.
+#
+# The persona-gate side of the fix stops the COUNT (frozen features no
+# longer serialize the gate); this detector converges GitHub state by
+# closing the PR and clearing the stale pr_number pointers. Feature status
+# is NOT touched — the feature is legitimately waiting on its dependency;
+# when that Pushes, the normal first-pass path re-codes it on a fresh PR.
+
+def detect_orphaned_prs(
+    *,
+    product_id: int,
+    github_repo: str,
+    open_prs_with_state: list[dict],
+    features: list[dict],
+    github_token: str | None,
+) -> int:
+    """Close open session PRs whose tracking features are all dependency-
+    frozen in coder-owned states. Same pre-fetched inputs as
+    detect_dirty_prs. Returns PRs closed (or would-close in dry-run)."""
+    cfg = _get_supervisor_config()
+    if not cfg["supervisor_orphan_pr_enabled"]:
+        return 0
+    dry_run = cfg["supervisor_dry_run_only"]
+    # Reuse the dirty-PR age/idle thresholds: an orphan younger than the
+    # dirty bar may still be mid-rollback (supervisor → designer redesign
+    # takes a few cycles to settle); don't close a PR the reconciler or
+    # rework path might still legitimately pick up this hour.
+    min_age = cfg["supervisor_dirty_pr_min_age_min"] * 60
+    idle    = cfg["supervisor_dirty_pr_idle_min"] * 60
+    now = datetime.now(timezone.utc).timestamp()
+
+    try:
+        from orchestrator.cycle.dependencies import dependency_blocked_feature_ids
+        dep_blocked_ids = set(dependency_blocked_feature_ids(features))
+    except Exception:
+        log.exception("orphan_pr_close: dependency read failed; skipping cycle")
+        return 0
+    if not dep_blocked_ids:
+        return 0
+
+    def _ts(s: str | None) -> float:
+        if not s:
+            return 0
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+        except (ValueError, AttributeError):
+            return 0
+
+    _TERMINAL = ("Pushed", "Rejected", "Reverted", "Deferred")
+    _REVIEWER_OWNED = ("Reviewing", "Reviewed")
+    closed = 0
+    for pr in open_prs_with_state:
+        if closed >= _DIRTY_PR_MAX_PER_CYCLE:
+            break
+        pr_n = pr.get("number")
+        if not pr_n:
+            continue
+        age = now - _ts(pr.get("created_at"))
+        idle_for = now - _ts(pr.get("last_commit_at") or pr.get("created_at"))
+        if age < min_age or idle_for < idle:
+            continue
+        tracking = [f for f in features if f.get("pr_number") == pr_n
+                    and f.get("status") not in _TERMINAL]
+        # Orphan iff every non-terminal tracking feature is dependency-
+        # frozen in a coder-owned state. No tracking features at all is
+        # NOT our case (overlap_pr / reconciler own untracked PRs), and
+        # any reviewer-owned or unfrozen tracker means the PR can move.
+        if not tracking or not all(
+            f.get("id") in dep_blocked_ids
+            and f.get("status") not in _REVIEWER_OWNED
+            for f in tracking
+        ):
+            continue
+        if _recent_action(product_id=product_id, detector="orphan_pr_close",
+                          target_type="pr", target_id=pr_n, within_hours=24):
+            continue
+        fids = [f["id"] for f in tracking]
+        reason = (
+            f"PR #{pr_n} orphaned: all tracking feature(s) {fids} are "
+            f"dependency-frozen in coder-owned states — no persona can ever "
+            f"process this PR. Closing and clearing pr_number pointers "
+            f"(statuses untouched; features re-code after their deps Push)."
+        )
+        _record_action(detector="orphan_pr_close", product_id=product_id,
+                       target_type="pr", target_id=pr_n,
+                       action="close_and_unpin", reason=reason, dry_run=dry_run)
+        closed += 1
+        if dry_run:
+            continue
+        if github_token and github_repo:
+            try:
+                m = re.search(r"[:/]([^/]+/[^/]+?)(?:\.git)?$", github_repo)
+                if m:
+                    slug = m.group(1)
+                    headers = {
+                        "Authorization": f"Bearer {github_token}",
+                        "Accept":        "application/vnd.github+json",
+                    }
+                    httpx.post(
+                        f"https://api.github.com/repos/{slug}/issues/{pr_n}/comments",
+                        headers={**headers, "Content-Type": "application/json"},
+                        json={"body": f"[supervisor] Auto-closing orphaned session PR — "
+                                      f"tracking feature(s) {fids} are dependency-frozen "
+                                      f"and no persona can process this PR. Features will "
+                                      f"re-code on a fresh PR once their dependencies ship."},
+                        timeout=10,
+                    )
+                    httpx.patch(
+                        f"https://api.github.com/repos/{slug}/pulls/{pr_n}",
+                        headers=headers, json={"state": "closed"}, timeout=10,
+                    )
+            except Exception:
+                log.exception(f"orphan_pr_close: failed to close PR #{pr_n}")
+        try:
+            with httpx.Client(base_url=PM_API_URL, timeout=10) as client:
+                for f in tracking:
+                    client.patch(f"/api/features/{f['id']}", json={
+                        "pr_number":   None,
+                        "pr_url":      None,
+                        "branch_name": None,
+                        "changed_by":  "supervisor",
+                    })
+        except Exception:
+            log.exception(f"orphan_pr_close: failed to clear pointers for PR #{pr_n}")
     return closed
 
 

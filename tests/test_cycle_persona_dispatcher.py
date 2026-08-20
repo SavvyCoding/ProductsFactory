@@ -289,3 +289,57 @@ class TestPlannerBacklogGate:
         result = _decide_action(product_id=25, client=client)
         assert result["action"] == "exit"
         assert "gated" in result["reason"].lower()
+
+
+class TestOrphanedPRGate:
+    """Orphaned-PR exclusion (2026-08-20): a pr_number-carrying feature that
+    is dependency-frozen in a coder-owned state must NOT serialize the IU
+    gate — it can never be claimed, so counting it deadlocks the gate against
+    the dependency gate. Canonical: MyGroceryApp #3457 / PR #171 (6-day stall:
+    the open PR deferred #3456, the very dependency whose Push would have
+    unfrozen #3457)."""
+
+    def test_frozen_pr_feature_does_not_serialize_gate(self):
+        # #3457 carries PR 171 but depends_on #3456 (not Pushed) → frozen.
+        # #3456 is fresh first-pass. Before the fix: PR 171 counted, no
+        # rework candidate (3457 is frozen out of first_pass_codeable) →
+        # "PR-serialization gate" exit forever. After: coder launches.
+        features = [
+            _feature(3456, "Designed"),
+            _feature(3457, "Designed", pr_number=171, depends_on=3456),
+        ]
+        client = _client_for_features(features)
+        result = _decide_action(product_id=35, client=client)
+        assert result["action"] == "launch_session", f"deadlocked: {result}"
+        assert result["persona"] == "coder", (
+            f"frozen PR-carrier must not gate the dispatcher, got {result}"
+        )
+
+    def test_reviewer_owned_frozen_pr_still_serializes(self):
+        # A frozen feature in a reviewer-owned state (Reviewed) still counts:
+        # the reviewer/auto-merge are not dependency-gated and WILL move its
+        # PR — opening a 2nd PR here would recreate the stale-branch cascade.
+        features = [
+            _feature(3456, "Designed"),
+            _feature(3457, "Reviewed", pr_number=171, depends_on=3456),
+        ]
+        client = _client_for_features(features)
+        result = _decide_action(product_id=35, client=client)
+        assert not (
+            result.get("persona") == "coder"
+            and "first-pass" in result.get("reason", "")
+        ), f"Reviewed PR-carrier must still gate first-pass claims: {result}"
+
+    def test_unfrozen_pr_feature_still_serializes_gate(self):
+        # Control: a NON-frozen Designed feature with pr_number is the normal
+        # rework case — gate behavior unchanged (coder may claim it as rework,
+        # fresh sibling stays deferred; both route through the coder).
+        features = [
+            _feature(3456, "Designed"),
+            _feature(3457, "Designed", pr_number=171),  # no depends_on
+        ]
+        client = _client_for_features(features)
+        result = _decide_action(product_id=35, client=client)
+        # 3457 is rework-eligible (pr_number set, in first_pass_codeable) →
+        # gate permits the coder via the rework path.
+        assert result["persona"] == "coder", f"got {result}"

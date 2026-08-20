@@ -263,9 +263,24 @@ def _decide_action(product_id: int, client: httpx.Client) -> dict:
         # its momentary status. Exclude Blocked defensively (the
         # terminal-PR-closer should have cleared pr_number on Block,
         # but a stale row would otherwise gate the dispatcher forever).
+        #
+        # Orphaned-PR exclusion (2026-08-20): a pr_number-carrying
+        # feature that is FROZEN (dependency/phase gate) while in a
+        # coder-owned state can never be claimed — not first-pass, not
+        # rework — so its PR can never move. Counting it deadlocks this
+        # gate against the dependency gate: the frozen PR defers the
+        # very sibling whose Push would unfreeze it. Canonical:
+        # MyGroceryApp #3457 / PR #171 (supervisor rollback + redesign
+        # added depends_on=3456 while its PR stayed open; #3456 was then
+        # deferred by this gate → permanent stall, 2026-08-14→20).
+        # Reviewer-owned states (Reviewing/Reviewed) stay counted: the
+        # reviewer/auto-merge are NOT dep-gated and WILL move that PR.
+        # detect_orphaned_prs (supervisor) closes the PR itself.
         open_session_pr_count = sum(
             1 for f in non_terminal
             if f.get("pr_number") and f.get("status") != "Blocked"
+            and not (f.get("id") in frozen_ids
+                     and f.get("status") not in ("Reviewing", "Reviewed"))
         )
 
         # Cycle KD-KH (2026-06-03): Fix E correctly closed the stale-

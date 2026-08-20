@@ -2330,7 +2330,9 @@ def _run_supervisor_pr_detectors(product: dict) -> None:
     """Pull open PRs + features once, run dirty-PR + overlap-PR detectors."""
     import re as _re
     import httpx as _httpx
-    from orchestrator.supervisor import detect_dirty_prs, detect_overlapping_prs  # type: ignore
+    from orchestrator.supervisor import (  # type: ignore
+        detect_dirty_prs, detect_orphaned_prs, detect_overlapping_prs,
+    )
 
     repo_url = product.get("github_repo") or ""
     if not repo_url:
@@ -2404,6 +2406,10 @@ def _run_supervisor_pr_detectors(product: dict) -> None:
     detect_overlapping_prs(
         product_id=product["id"], github_repo=repo_url,
         open_prs=enriched, github_token=pat,
+    )
+    detect_orphaned_prs(
+        product_id=product["id"], github_repo=repo_url,
+        open_prs_with_state=enriched, features=features, github_token=pat,
     )
 
 
